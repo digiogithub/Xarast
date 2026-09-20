@@ -1,0 +1,17 @@
+[package]
+name = "xarast-render"
+description = "The Xarast render engine: scene, display list and CPU/GPU backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+xarast-image = { path = "../xarast-image" }

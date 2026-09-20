@@ -1,0 +1,20 @@
+[package]
+name = "xarast-app"
+description = "Application core for Xarast: tools, selection, viewport and the command bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-doc = { path = "../xarast-doc" }
+xarast-render = { path = "../xarast-render" }
+xarast-xar = { path = "../xarast-xar" }
+xarast-format = { path = "../xarast-format" }
+xarast-io = { path = "../xarast-io" }
+xarast-text = { path = "../xarast-text" }

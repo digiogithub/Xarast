@@ -1,0 +1,17 @@
+[package]
+name = "xarast-xar"
+description = "Read-only importer for the legacy Xara .xar file format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-doc = { path = "../xarast-doc" }
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }

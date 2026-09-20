@@ -1,0 +1,23 @@
+[package]
+name = "xarast-cli"
+description = "Headless command line tools for Xarast: convert, render and inspect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-app = { path = "../xarast-app" }
+xarast-xar = { path = "../xarast-xar" }
+xarast-format = { path = "../xarast-format" }
+xarast-io = { path = "../xarast-io" }
+xarast-render = { path = "../xarast-render" }
+
+[[bin]]
+name = "xarast-cli"
+path = "src/main.rs"

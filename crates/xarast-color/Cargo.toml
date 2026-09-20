@@ -1,0 +1,14 @@
+[package]
+name = "xarast-color"
+description = "Colour models, conversions and palettes for Xarast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

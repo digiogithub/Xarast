@@ -1,0 +1,20 @@
+[package]
+name = "xarast-shell"
+description = "Windowing, GPU surface and platform integration for Xarast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-app = { path = "../xarast-app" }
+xarast-render = { path = "../xarast-render" }
+
+[[bin]]
+name = "xarast"
+path = "src/main.rs"
