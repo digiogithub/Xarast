@@ -11,7 +11,29 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The GPU backend. Off by default: CI has no adapter, and the CPU backend is
+# the deterministic reference that export and the golden tests go through.
+gpu = ["dep:vello", "dep:wgpu"]
+
 [dependencies]
 xarast-geom = { path = "../xarast-geom" }
 xarast-color = { path = "../xarast-color" }
-xarast-image = { path = "../xarast-image" }
+kurbo = { workspace = true }
+vello_cpu = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+png = { workspace = true }
+sha2 = { workspace = true }
+vello = { workspace = true, optional = true }
+wgpu = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tiny-skia = { workspace = true }
+
+[[bench]]
+name = "render"
+harness = false
