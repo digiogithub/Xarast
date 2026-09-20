@@ -152,6 +152,11 @@ behaviour change and must be recorded in `docs/memory/ui.md`.
 | D8 | Screen-reader smoke test procedure with Orca on GNOME/Wayland, recorded as a checklist with results | docs | M | D2, D3 |
 | D9 | Configurable UI scale independent of the compositor's fractional scale | `xarast-ui` | M | — |
 
+This workstream assumes Phase 5's go/no-go confirmed **egui** (its W1 spike, with `iced` as the
+documented fallback). If the fallback was taken, D1–D3 change substantially — `iced` had no
+AccessKit integration at the time of that decision — and the first task of this workstream
+becomes re-establishing the transport, which must be re-scoped before the rest of D starts.
+
 `research/05 §2.6` already flags that AccessKit on Linux is incomplete for exotic widgets and
 mitigates it by keeping critical controls on standard egui widgets. This phase makes that a
 rule with teeth: **a custom-painted widget that carries information or accepts input must
@@ -253,7 +258,7 @@ free correctness check: a command with no keyboard binding shows up as a blank c
 | H2 | Changelog policy: Keep a Changelog format, `CHANGELOG.md` updated in the same PR as the change, `Unreleased` section enforced by a CI check on user-visible changes | CI, docs | M | H1 |
 | H3 | Release checklist as an executable script where possible (`cargo xtask release --dry-run`) and a markdown checklist where not | `xtask`, docs | M | H1 |
 | H4 | GPG signing of the AppImage (`appimagetool --sign`), public key published, verification documented | CI | M | — |
-| H5 | `UPDATE_INFORMATION=gh-releases-zsync|...|Xarast-*-x86_64.AppImage.zsync`, `.zsync` uploaded with the release | CI | S | — |
+| H5 | Confirm and complete Phase 0's zsync setup (`UPDATE_INFORMATION=gh-releases-zsync\|…\|Xarast-*-x86_64.AppImage.zsync`): the `.zsync` is uploaded to the **same** release as the AppImage, and an actual delta update is exercised end to end | CI | S | — |
 | H6 | In-app update check: read the ELF `.upd_info` section, query the release, offer to run `appimageupdatetool` when present, otherwise open the download page. Opt-out preference, off by default on first run until the user answers | `xarast-app`, `xarast-ui` | M | H5 |
 | H7 | Delta-size measurement: build N and N+1, measure the actual zsync transfer, record it | CI | S | H5 |
 | H8 | Release notes generated from the changelog into the GitHub release **and** the AppStream metainfo | `xtask` | S | H2, G5 |

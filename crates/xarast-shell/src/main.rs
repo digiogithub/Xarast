@@ -1,5 +1,94 @@
 //! Entry point for the Xarast desktop application.
 
-fn main() {
-    println!("xarast {}", env!("CARGO_PKG_VERSION"));
+use std::process::ExitCode;
+
+use xarast_shell::{APP_ID, ShellConfig, cold_start_ms, init_tracing, mark_process_start};
+
+const USAGE: &str = "\
+Xarast — a vector illustration and photo editor
+
+USAGE:
+    xarast [OPTIONS]
+
+OPTIONS:
+    -h, --help              Print this help and exit
+    -V, --version           Print the version and exit
+        --selftest          Check that the build is internally consistent, without
+                            opening a window, and exit
+        --selftest-window   Open a window, present one frame, report the graphics
+                            adapter and exit. This is the liveness check; run it
+                            first when reporting a rendering problem.
+        --frames <N>        Exit after presenting N frames
+
+ENVIRONMENT:
+    XARAST_LOG              Log filter, e.g. `info`, `xarast_shell=debug`
+    WGPU_BACKEND            Force a wgpu backend, e.g. `vulkan`, `gl`
+";
+
+fn main() -> ExitCode {
+    mark_process_start();
+    init_tracing();
+
+    let mut config = ShellConfig::default();
+    let mut selftest = false;
+    let mut selftest_window = false;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => {
+                print!("{USAGE}");
+                return ExitCode::SUCCESS;
+            }
+            "-V" | "--version" => {
+                println!("xarast {}", env!("CARGO_PKG_VERSION"));
+                return ExitCode::SUCCESS;
+            }
+            "--selftest" => selftest = true,
+            "--selftest-window" => selftest_window = true,
+            "--frames" => match args.next().and_then(|v| v.parse().ok()) {
+                Some(n) => config.exit_after_frames = Some(n),
+                None => {
+                    eprintln!("--frames needs a number");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                eprintln!("unknown argument: {other}\n\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    if selftest {
+        println!("xarast {}", env!("CARGO_PKG_VERSION"));
+        println!("app id: {APP_ID}");
+        println!("selftest: ok");
+        return ExitCode::SUCCESS;
+    }
+
+    if selftest_window {
+        return match xarast_shell::selftest_window(&config) {
+            Ok(report) => {
+                println!("adapter: {report}");
+                if let Some(ms) = cold_start_ms() {
+                    println!("cold start: {ms:.1} ms");
+                }
+                println!("selftest-window: ok");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("selftest-window: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    match xarast_shell::run(config) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("xarast: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }

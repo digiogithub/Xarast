@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Xarast
+GenericName=Vector Graphics Editor
+Comment=Vector illustration and photo editing
+Exec=xarast %F
+Icon=xarast
+Terminal=false
+Categories=Graphics;VectorGraphics;2DGraphics;RasterGraphics;Publishing;
+Keywords=vector;illustration;drawing;svg;graphics;design;photo;
+MimeType=image/x-xarast;application/vnd.xarast+zip;image/x-xar;application/vnd.xara;image/svg+xml;
+StartupNotify=true
+StartupWMClass=xarast

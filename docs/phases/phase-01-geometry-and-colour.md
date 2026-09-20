@@ -57,7 +57,7 @@ build on a machine with no display.
 | Glyph outlines (they arrive as `kurbo::BezPath` from `skrifa` and convert through this crate's existing API) | Phase 9 |
 | Mesh, three- and four-point gradient *evaluation* (their control points are Phase 2 data; interpolating them is Phase 4) | Phase 2 / Phase 4 |
 | Arc and elliptical-arc segments as a first-class `Segment` variant | Deferred; see "Risks", item 5 |
-| The arena-vs-persistent-store benchmark that `10-architecture.md §3.1` and `§7` assign to "Phase 1" | **Phase 2** — it needs `xarast-doc`, which does not exist yet. Recorded as a correction |
+| The arena-vs-persistent-store benchmark, which the prose of `10-architecture.md §3.1` still attributes to "Phase 1" | **Phase 2**, as `10-architecture.md §7` question 1 now states: it measures the document model, which does not exist yet |
 
 ## Prerequisites
 

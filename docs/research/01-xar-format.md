@@ -2180,3 +2180,300 @@ Add, in order of return on effort:
 
 Location: `scratchpad/xarparse.py` + `scratchpad/dump.py`
 (the session's working directory). Core of the parser:
+
+```python
+import struct, zlib
+
+MAGIC = b'XARA\xa3\xa3\x0d\x0a'
+
+def records(path):
+    data = open(path, 'rb').read()
+    assert data[:8] == MAGIC
+    pos, dec, buf, bpos, crc, total = 8, None, b'', 0, 0, 0
+    def read(n):
+        nonlocal pos, buf, bpos, crc, total
+        if dec is None:
+            d = data[pos:pos+n]; pos += len(d); return d
+        while len(buf) - bpos < n and not dec.eof:
+            chunk = data[pos:pos+4096]; pos += len(chunk)
+            buf += dec.decompress(dec.unconsumed_tail + chunk)
+            if not chunk: break
+        d = buf[bpos:bpos+n]; bpos += len(d)
+        crc = zlib.crc32(d, crc); total += len(d)
+        return d
+    while True:
+        h = read(8)
+        if len(h) < 8: return
+        tag, size = struct.unpack('<II', h)
+        if tag == 30:                       # STARTCOMPRESSION
+            ver = struct.unpack('<I', read(size))[0]
+            dec = zlib.decompressobj(-15)   # RAW deflate
+            buf, bpos, crc, total = b'', 0, 0, 0
+            yield tag, size, b''; continue
+        if tag == 31:                       # ENDCOMPRESSION
+            crc_calc, len_calc = crc & 0xffffffff, total
+            unused = dec.unused_data; dec = None
+            pos -= (len(unused) - 8)        # the trailer is UNCOMPRESSED
+            crc_f, len_f = struct.unpack('<II', data[pos-8:pos])
+            assert (crc_f, len_f) == (crc_calc, len_calc)
+            yield tag, size, b''; continue
+        payload = read(size) if size else b''
+        yield tag, size, payload
+        if tag == 3: return                 # ENDOFFILE
+```
+
+Result over the 59 files: **0 errors**, correct CRC and length in all 103 compressed
+blocks, 0 trailing bytes left over in every file.
+
+### 12.2. Results of the corpus analysis
+
+**Files analysed** (59): `testfiles/*.xar` (18), `Designs/*.xar` (19),
+`Templates/*.xar` (8), `TextDesigns/*.xar` (14).
+
+* All of them are of type **`CXN`** (native).
+* All of them use **compression** with `compression_version = 99` (zlib 0.99, type 0 =
+  deflate).
+* All of them have a GIF preview except one.
+* Producers observed (the `producer` / `producer_version` / `producer_build` fields):
+
+| times | producer | version | build |
+|---:|---|---|---|
+| 17 | `Xara Xtreme` | 3.0 | `0.4366 (Xara)` |
+| 14 | `Xara Xtreme` | 3.0 | `0.4480 (Xara)` |
+| 8 | `Xara Xtreme` | 3.0 | `0.4224 (Gerry)` |
+| 6 | `Xara X` | 3.0 | `0.2704 (MarkG)` |
+| 6 | `Xara Xtreme` | 3.0 | `0.4308 (SimonM)` |
+| 3 | `Xara Xtreme` | 3.0 | `0.3993 (Gavin)` |
+| 3 | `Xara Xtreme` | 3.0 | `0.4372 (Xara)` |
+| 1 | `Xara Xtreme` | 3.0 | `0.4293 (SimonM)` |
+| 1 | `X` | *(empty)* | *(empty)* |
+
+  ⚠️ The last case (`Templates/animation.xar`, a header of only 36 bytes) shows that the
+  three strings may be empty or truncated: **the reader must not require them**.
+* Maximum tree depth: 4 (templates) … 13 (`ProbeX16.xar`).
+* Total: 1 390 282 records, 157 distinct tags.
+
+**Observed vs. declared payload sizes**: they match for 100 % of the fixed-size tags.
+A sample:
+
+| tag | declared | observed |
+|---|---|---|
+| 45 `SPREADINFORMATION` | 17 | 17 |
+| 51 `DEFINECOMPLEXCOLOUR` | 29 + name | 31, 37, 41, 43, 49, 51, 53, 55, 57, 63, 65 |
+| 105 `BLEND` | 3 | 3 |
+| 106 `BLENDER` | 8 | 8 |
+| 153 `LINEARFILL` | 40 | 40 |
+| 155 `ELLIPTICALFILL` | 48 | 48 |
+| 159 `FRACTALFILL` | 69 | 69 |
+| 166 `FLATTRANSPARENTFILL` | 2 | 2 |
+| 167 `LINEARTRANSPARENTFILL` | 35 | 35 |
+| 1901 `REGULAR_SHAPE_PHASE_2` | var | 119 (35 178×), 155 (28×) |
+| 2000 `FONT_DEF_TRUETYPE` | var | 34, 36, 54, 74, 78 |
+| 4050 `SHADOWCONTROLLER` | 29 | 29 |
+| 4051 `SHADOW` | 24 | 24 |
+| 4052 `BEVEL` | (24, not declared) | 24 |
+| 4073 `BLENDERADDITIONAL` | 17 | 17 |
+| 4086 `FEATHER` | 20 | 20 |
+| 4115 `BITMAP_PROPERTIES` | 12 | 12 |
+
+**A complete example — `testfiles/OneLine.xar`** (2 261 bytes, 88 records, depth 5):
+
+```
+#1   TAG_FILEHEADER              41   CXN / 3996 / "Xara X" "3.0" "0.2704 (MarkG)"
+#2   TAG_PREVIEWBITMAP_GIF     1196   GIF87a...
+#3   TAG_DOCUMENT                 0
+#4   TAG_DOWN                     0
+#5   TAG_DOCUMENTNUDGE            4
+#6   TAG_DOCUMENTBITMAPSMOOTHING  5
+#7   TAG_STARTCOMPRESSION         4   version=99  -> from here on, deflate
+#8   TAG_VIEWPORT                16
+#9..17 TAG_ATOMICTAGS             4   (9 records, one tag each)
+#18  TAG_CHAPTER                  0
+#19  TAG_DOWN / #20 TAG_SPREAD / #21 TAG_DOWN
+#22  TAG_SPREADINFORMATION       17   600000 x 450000 mp, margin 576000, bleed 0, flags 2
+#23  TAG_SPREADSCALING_INACTIVE  24
+#24  TAG_SPREAD_ANIMPROPS        28
+#25  TAG_LAYER 0 / #26 TAG_DOWN
+#27  TAG_LAYERDETAILS            17   flags=0x0D, "Layer 1"
+#28  TAG_PATH_RELATIVE_STROKED   18   MoveTo(112101,178899) LineTo(283101,321399)
+#29  TAG_DOWN
+#30  TAG_PATH_FLAGS               2   0x05, 0x05  (smooth|endpoint)
+#31  TAG_DEFINECOMPLEXCOLOUR     41   CMYK "Black"
+#32  TAG_LINECOLOUR               4   -> record 31
+#33  TAG_LINEWIDTH                4   500 mp
+#34  TAG_FLATFILL                 4   -> record 31
+#35  TAG_UP / #36 TAG_UP
+#37  TAG_GRIDRULERSETTINGS       17
+#38  TAG_GRIDRULERORIGIN          8
+#39  TAG_UP
+#40  TAG_SETSENTINEL / TAG_BARPROPERTY / units / dates / flags / printing / view
+#87  TAG_ENDCOMPRESSION           8   CRC32 + uncompressed size (both verified OK)
+#88  TAG_ENDOFFILE                0
+```
+
+### 12.3. Index of relevant C++ source files
+
+| File | Content |
+|---|---|
+| `Kernel/cxftags.h` | **Complete list of tags** (300) |
+| `Kernel/cxfdefs.h` | Magic, record sizes, cap/join/winding/transparency enums, layer/path/blend flags |
+| `Kernel/cxfile.h/.cpp` | `CXaraFile` class: opening, magic, reading/writing records, compression, dispatch to handlers |
+| `Kernel/cxfrec.h/.cpp` | `CXaraFileRecord` class: **serialisation of every primitive type**, coords, paths, matrices, strings |
+| `Kernel/cxfrech.h/.cpp` | Base class of the *record handlers* + tag → readable name table |
+| `Kernel/cxfmap.cpp` | Tag → handler map |
+| `Kernel/cxftree.h/.cpp` | Debug dialog for the record tree (classification of tags by category) |
+| `Kernel/camfiltr.h/.cpp` | `BaseCamelotFilter`: header, insertion tree, atomic/essential tags, coordinate origin |
+| `Kernel/native.cpp`, `Kernel/webfiltr.cpp` | `CXN` / `CXW` / `CXM` filters |
+| `Kernel/zstream.cpp`, `Kernel/ccfile.cpp` | zlib layer: raw deflate, CRC, trailer |
+| `Kernel/cxfcols.h`, `cxfarrow.h`, `cxfdash.h`, `cxfunits.h` | Tables of predefined negative references |
+| `Kernel/colcomp.cpp`, `rechcol.cpp`, `colmodel.h` | Colours |
+| `Kernel/nodepath.cpp`, `GDraw/gconsts.h` | Paths and verbs |
+| `Kernel/cxfellp/cxfrect/cxfpoly/cxfrgshp.cpp`, `rech*.cpp` | Regular shapes |
+| `Kernel/fillattr.cpp` (23 k lines) | **All** the fills and transparencies |
+| `Kernel/lineattr.cpp` | Line attributes, dashes, arrowheads |
+| `Kernel/rechtext.cpp`, `cxftext.cpp`, `nodetxts.cpp`, `fontcomp.cpp` | Text and fonts |
+| `Kernel/bmpcomp.cpp`, `rechbmp.cpp`, `cxfnbmp.cpp` | Bitmaps |
+| `Kernel/rechdoc.cpp`, `spread.cpp`, `layer.cpp`, `viewcomp.cpp`, `unitcomp.cpp`, `infocomp.cpp` | Document, spreads, layers, views, units |
+| `Kernel/nodeblnd.cpp`, `nodebldr.cpp`, `nodemold.cpp`, `nodeshad.cpp`, `nodecont.cpp`, `nbevcont.cpp`, `ncntrcnt.cpp`, `nodeclip.cpp`, `fthrattr.cpp`, `nodeliveeffect.cpp` | Effects and composite nodes |
+| `Kernel/princomp.cpp`, `prnmkcom.cpp`, `isetattr.cpp` | Printing and imagesetting |
+| `Kernel/cxftfile.h/.cpp` | **Text** format for Flare templates (out of scope) |
+
+### 12.4. Skeleton of a Rust importer
+
+```rust
+//! Reader for .xar (CXF) files. Everything is little-endian.
+//! Suggested dependencies: flate2 (raw inflate), thiserror.
+
+pub const TAG_UP: u32 = 0;
+pub const TAG_DOWN: u32 = 1;
+pub const TAG_FILEHEADER: u32 = 2;
+pub const TAG_ENDOFFILE: u32 = 3;
+pub const TAG_ATOMICTAGS: u32 = 10;
+pub const TAG_ESSENTIALTAGS: u32 = 11;
+pub const TAG_STARTCOMPRESSION: u32 = 30;
+pub const TAG_ENDCOMPRESSION: u32 = 31;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind { Native, Web, MinimalWeb }   // CXN / CXW / CXM
+
+#[derive(Debug, Clone)]
+pub struct FileHeader {
+    pub kind: FileKind,
+    pub uncompressed_size: u32,
+    pub link_id: u32,
+    pub precompression: u32,     // must be 0
+    pub producer: String,
+    pub producer_version: String,
+    pub producer_build: String,
+}
+
+pub fn parse_file_header(data: &[u8]) -> Result<FileHeader, Err> {
+    let mut c = Cur::new(data);
+    let ty = c.take(3)?;
+    let kind = match ty {
+        b"CXN" => FileKind::Native,
+        b"CXW" => FileKind::Web,
+        b"CXM" => FileKind::MinimalWeb,
+        _ => return Err(Err::BadFileType),
+    };
+    let uncompressed_size = c.u32()?;
+    let link_id = c.u32()?;
+    let precompression = c.u32()?;
+    // The strings may be missing in old files: tolerate EOF.
+    let producer = c.ascii_z().unwrap_or_default();
+    let producer_version = c.ascii_z().unwrap_or_default();
+    let producer_build = c.ascii_z().unwrap_or_default();
+    Ok(FileHeader { kind, uncompressed_size, link_id, precompression,
+                    producer, producer_version, producer_build })
+}
+
+/// Global state of the importer during a single pass.
+pub struct Importer {
+    pub header: Option<FileHeader>,
+    pub origin: Coord,                          // CoordOrigin (set at SPREADINFORMATION)
+    pub colours: HashMap<u32, ColourDef>,       // record -> colour
+    pub bitmaps: HashMap<u32, BitmapDef>,
+    pub fonts:   HashMap<u32, FontDef>,
+    pub paths:   HashMap<u32, Vec<PathPoint>>,  // for TAG_PATHREF_*
+    pub atomic:  HashSet<u32>,
+    pub essential: HashSet<u32>,
+    pub attr_stack: Vec<AttrCtx>,
+    pub ctx: AttrCtx,
+    skip_subtree_depth: Option<usize>,          // discarding of an atomic subtree
+    depth: usize,
+}
+
+impl Importer {
+    pub fn handle(&mut self, rec: &Record) -> Result<(), Err> {
+        // 1) Handling the discarding of unknown atomic subtrees
+        if let Some(d) = self.skip_subtree_depth {
+            match rec.tag {
+                TAG_DOWN => { self.depth += 1; return Ok(()); }
+                TAG_UP => {
+                    self.depth -= 1;
+                    if self.depth <= d { self.skip_subtree_depth = None; }
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+
+        let mut c = Cur::new(&rec.data);
+        match rec.tag {
+            TAG_FILEHEADER => { self.header = Some(parse_file_header(&rec.data)?); }
+            TAG_DOWN => { self.depth += 1; self.attr_stack.push(self.ctx.clone()); }
+            TAG_UP   => { self.depth -= 1; if let Some(p) = self.attr_stack.pop() { self.ctx = p; } }
+            TAG_ATOMICTAGS    => while c.remaining() >= 4 { self.atomic.insert(c.u32()?); },
+            TAG_ESSENTIALTAGS => while c.remaining() >= 4 { self.essential.insert(c.u32()?); },
+
+            45 => { /* SPREADINFORMATION: sets the page size and CoordOrigin */ }
+            51 => { self.colours.insert(rec.number, parse_complex_colour(&mut c)?); }
+            111 => { /* PATH_FLAGS: apply to the last path */ }
+            113..=116 => {
+                let pts = read_path_relative(&mut c, self.origin)?;
+                self.paths.insert(rec.number, pts.clone());
+                self.emit_path(pts, rec.tag);
+            }
+            100..=103 => {
+                let pts = read_path_absolute(&mut c, self.origin)?;
+                self.paths.insert(rec.number, pts.clone());
+                self.emit_path(pts, rec.tag);
+            }
+            150 => { self.ctx.fill = Some(Fill::Flat(Ref::parse(c.i32()?))); }
+            190 => { self.ctx.fill = Some(Fill::Flat(Ref::Builtin(-1))); }   // none
+            191 => { self.ctx.fill = Some(Fill::Flat(Ref::Builtin(-2))); }   // black
+            192 => { self.ctx.fill = Some(Fill::Flat(Ref::Builtin(-3))); }   // white
+            151 => { self.ctx.line_colour = Some(Ref::parse(c.i32()?)); }
+            193 => { self.ctx.line_colour = Some(Ref::Builtin(-1)); }
+            152 => { self.ctx.line_width = c.i32()?; }
+            174 => { self.ctx.start_cap = CapStyle::from(c.u8()?); }
+            176 => { self.ctx.join = JoinStyle::from(c.u8()?); }
+            166 => { let t = c.u8()?; let k = c.u8()?; self.ctx.fill_transp = Some(Transparency::flat(t, k)); }
+            // ... the remaining tags ...
+            TAG_ENDOFFILE => { /* end */ }
+            unknown => {
+                if self.essential.contains(&unknown) { return Err(Err::UnsupportedEssential(unknown)); }
+                if self.atomic.contains(&unknown) { self.skip_subtree_depth = Some(self.depth); }
+                // in any other case: the record is simply ignored
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+**Design notes:**
+
+* `#[repr(C, packed)]` is **not** applicable to most payloads (unaligned fields and
+  variable-length strings). It only makes sense for homogeneous blocks such as the four
+  `FIXED24`s of a colour or the four `DocCoord`s of `TAG_NODE_BITMAP`, and even then the
+  endianness has to be converted explicitly (`u32::from_le_bytes`), so the field-by-field
+  reader shown in §2.5 is preferable.
+* The importer must be **tolerant by default**: any record that is not understood is
+  skipped using its `size`; only essential tags justify aborting.
+* It is worth exposing a low-level API (`Iterator<Item = Record>`) independent of the
+  document model, so that dump tools and round-trip tests can be written.
+
+---
+
+*End of document.*

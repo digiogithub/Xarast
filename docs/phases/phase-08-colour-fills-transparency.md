@@ -28,17 +28,18 @@ user can **author** them.
 
 ### In scope
 
-**Colour model (`xarast-color`)**
+**Colour model (`xarast-color`, extending what phase 1 delivered)**
 
 - The five editable colour models: **RGB**, **HSV**, **greyscale**, **CMYK**,
   plus the web-safe RGB restriction used by the palette. (`research/02 §5.10`,
   `colmodel.h:199-215`.)
-- **Named document colours**: a palette owned by `DocumentResources`, with
-  create / rename / delete / redefine, and a live-reference colour
-  (`Colour::Indexed`) so that redefining a palette entry repaints every use.
-- **Derived colours**: `tint` (towards white), `shade` (towards black) and
-  `linked` (HSV delta), each with a parent reference, forming a DAG that must
-  be acyclic and must resolve in one pass.
+- **Named document colours**: phase 1's `ColourTable`, owned by
+  `DocumentResources`, gains create / rename / delete / redefine, and the
+  live-reference colour `Colour::Indexed` starts repainting every use when the
+  entry it points at changes.
+- **Derived colours**: phase 1's `ColourKind::{Tint, Shade, Linked}` with
+  `parent: Option<ColourId>`, now guaranteed to form an acyclic graph that
+  resolves in one pass in a cached parent-before-child order.
 - **"No colour"** as a first-class palette entry and a first-class fill value.
 - Conversion between models through an explicit conversion context, with sRGB
   as the canonical resolved value. Every named colour carries a resolved sRGB
@@ -171,8 +172,8 @@ phase does not close until all ten are selectable.
 | ID | Task | Crate | Size | Depends on |
 |---|---|---|---|---|
 | T8.1.1 | `ColourValue` conversions: RGB↔HSV↔grey↔CMYK↔sRGB, with round-trip property tests | `xarast-color` | M | — |
-| T8.1.2 | `NamedColour` + `ColourDerivation` (tint / shade / linked) and the resolver | `xarast-color` | M | T8.1.1 |
-| T8.1.3 | `Palette`: slotmap of named colours, cycle detection, topological resolve, dirty propagation | `xarast-color` | M | T8.1.2 |
+| T8.1.2 | Editing on phase 1's `ColourTable`: `redefine`, `rename`, `reparent`, `remove`, `refresh_from` | `xarast-color` | M | T8.1.1 |
+| T8.1.3 | Cycle detection on `reparent`, cached `resolve_order`, `PaletteEpoch`, dirty propagation | `xarast-color` | M | T8.1.2 |
 | T8.1.4 | `Colour::Indexed` resolution through the palette at render/scene-build time | `xarast-doc` | S | T8.1.3 |
 | T8.1.5 | "No colour" as a distinct value, separate from transparent black | `xarast-color` | S | T8.1.1 |
 | T8.1.6 | Commands: `CreateColour`, `RedefineColour`, `RenameColour`, `DeleteColour` (with "replace uses with" policy), `ReparentColour` | `xarast-doc` | M | T8.1.3 |
@@ -196,7 +197,7 @@ of objects. Do not walk the tree. `Colour::Indexed` resolves through the palette
 at scene-build time, so a palette change invalidates the render cache by bumping
 a `palette_epoch` that is part of every `CacheKey`, and the dirty region is the
 union of the bounds of nodes whose resolved colour changed. Computing that union
-needs a reverse index `PaletteId -> SmallVec<NodeId>` maintained by the
+needs the reverse index `ColourUses` (`ColourId -> [NodeId]`) maintained by the
 attribute-set commands; that index is the one piece of denormalised state phase 8
 introduces, and it is rebuilt from scratch on load.
 
@@ -393,69 +394,104 @@ it, every save/load cycle re-bakes a baked curve and the error accumulates.
 ```rust
 // ─────────────────────────────── xarast-color ───────────────────────────────
 
-/// How a named colour derives its value from another named colour.
-/// == the tint / shade / link relationships of `IndexedColour` (doccolor.h).
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum ColourDerivation {
-    /// Independent value.
-    Direct,
-    /// Blend `amount` of the way from the parent towards white. `amount` in [0, 1].
-    Tint  { parent: PaletteId, amount: f32 },
-    /// Blend `amount` of the way from the parent towards black. `amount` in [0, 1].
-    Shade { parent: PaletteId, amount: f32 },
-    /// Parent's colour displaced in HSV. `h` in turns, `s`/`v` additive in [-1, 1].
-    Linked { parent: PaletteId, dh: f32, ds: f32, dv: f32 },
-}
+/// Phase 1 already owns the colour value types and the palette table:
+/// `ColourValue`, `ColourModel`, `ColourId`, `ColourKind`, `ColourDef`,
+/// `ColourTable` and `Colour::{Direct, Indexed}` all come from
+/// `xarast-color` as delivered by phase 1, which built them to read `.xar`.
+/// Phase 8 does NOT introduce a parallel palette type. It adds **editing** to
+/// the table phase 1 already resolves, plus the invariants that editing needs.
 
-/// An entry in the document palette. == IndexedColour in Xara's ColourList.
-#[derive(Clone, PartialEq, Debug)]
-pub struct NamedColour {
-    pub name: Arc<str>,
-    pub value: ColourValue,
-    pub derivation: ColourDerivation,
-    /// Always present: the resolved sRGB value. Mandatory in `.xarast` (research/06 §6.12.1).
-    pub resolved_srgb: Srgb8,
-}
+/// Phase 1's `ColourKind` already carries `Normal | Spot | Tint { factor } |
+/// Linked | Shade { x, y }` with a separate `parent: Option<ColourId>`.
+/// Phase 8 adds no variant. What it adds is the guarantee that `parent`
+/// forms a DAG and that every entry's `cached_rgb` is current.
 
-/// The document palette. Lives in `DocumentResources`, not in the node tree.
-pub struct Palette { /* SlotMap<PaletteId, NamedColour> + derivation index */ }
+/// Editing operations on phase 1's table. Cycle-safe by construction:
+/// `reparent` is the only way to change `parent`, and it refuses a cycle.
+impl ColourTable {
+    /// Change an entry's own components. Returns every id whose resolved
+    /// value changed, itself included — that is what the repaint needs.
+    pub fn redefine(&mut self, id: ColourId, components: [Option<f32>; 4],
+                    model: ColourModel)
+        -> Result<SmallVec<[ColourId; 8]>, ColourEditError>;
 
-impl Palette {
-    pub fn insert(&mut self, c: NamedColour) -> Result<PaletteId, PaletteError>;
-    pub fn get(&self, id: PaletteId) -> Option<&NamedColour>;
-    /// Recomputes `resolved_srgb` for `id` and everything derived from it.
-    /// Returns the ids whose resolved value actually changed.
-    pub fn redefine(&mut self, id: PaletteId, value: ColourValue)
-        -> Result<SmallVec<[PaletteId; 8]>, PaletteError>;
-    pub fn reparent(&mut self, id: PaletteId, d: ColourDerivation)
-        -> Result<(), PaletteError>;   // Err(Cycle) if it would close a loop
-    pub fn remove(&mut self, id: PaletteId, policy: OnDelete) -> Result<(), PaletteError>;
-    /// Children first: a valid order for recomputing the whole palette.
-    pub fn resolve_order(&self) -> &[PaletteId];
+    /// Rename. Fails on a duplicate name, because names are how `.xarast`
+    /// and the UI refer to entries.
+    pub fn rename(&mut self, id: ColourId, name: Arc<str>)
+        -> Result<(), ColourEditError>;
+
+    /// The only way to change `kind`/`parent`. `Err(Cycle)` if it would close
+    /// a loop; `Err(TooDeep)` past `MAX_PARENT_DEPTH`.
+    pub fn reparent(&mut self, id: ColourId, kind: ColourKind,
+                    parent: Option<ColourId>) -> Result<(), ColourEditError>;
+
+    pub fn remove(&mut self, id: ColourId, policy: OnDelete)
+        -> Result<(), ColourEditError>;
+
+    /// Parents before children: a valid order for a full recompute.
+    /// Cached; invalidated by `reparent` and by `insert`.
+    pub fn resolve_order(&self) -> &[ColourId];
+
+    /// Bumped by every mutation. A component of the render `CacheKey`.
     pub fn epoch(&self) -> PaletteEpoch;
+
+    /// Recompute `cached_rgb` for `id` and everything derived from it.
+    /// Called by `redefine`/`reparent`; exposed for loaders.
+    pub fn refresh_from(&mut self, id: ColourId) -> SmallVec<[ColourId; 8]>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OnDelete { /// Derived colours and uses keep their current resolved value.
-                    Detach,
-                    /// Fail if anything still refers to it.
-                    Reject }
+pub enum OnDelete {
+    /// Derived entries and object uses keep their currently resolved value:
+    /// children become `ColourKind::Normal` with `parent: None`, and
+    /// `Colour::Indexed` uses become `Colour::Direct`.
+    Detach,
+    /// Fail if anything still refers to it.
+    Reject,
+}
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PaletteError { Cycle, NotFound, StillReferenced, NameInUse }
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum ColourEditError {
+    #[error("would create a cycle in the derivation graph")]
+    Cycle,
+    #[error("parent chain would exceed ColourTable::MAX_PARENT_DEPTH")]
+    TooDeep,
+    #[error("no such colour")]
+    NotFound,
+    #[error("still referenced; use OnDelete::Detach")]
+    StillReferenced,
+    #[error("a colour with that name already exists")]
+    NameInUse,
+}
+
+/// Monotonic. Part of every render `CacheKey`, so one palette edit
+/// invalidates exactly the caches that depend on the palette.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+pub struct PaletteEpoch(pub u64);
+
+/// Reverse index maintained by the attribute-set commands, so a palette edit
+/// can compute its dirty region without walking the tree. Denormalised state:
+/// rebuilt from scratch on load, never serialised.
+pub struct ColourUses { /* HashMap<ColourId, SmallVec<[NodeId; 4]>> */ }
+
+impl ColourUses {
+    pub fn users(&self, id: ColourId) -> &[NodeId];
+    pub fn rebuild(&mut self, doc: &Document);
+}
 
 /// Conversion between colour models. Document-scoped because it will later
 /// carry ICC profiles (phase 15) — do not replace it with free functions.
 pub struct ColourContext { /* … */ }
 
 impl ColourContext {
-    pub fn srgb_of(&self, v: ColourValue) -> Srgb8;
+    pub fn srgb_of(&self, v: ColourValue) -> Rgba8;
     pub fn convert(&self, v: ColourValue, to: ColourModel) -> ColourValue;
-    pub fn resolve(&self, c: &Colour, palette: &Palette) -> Srgb8;
+    pub fn resolve(&self, c: &Colour, table: &ColourTable) -> Rgba8;
 }
 
-/// The sentinel for "no colour". Distinct from a fully transparent colour:
-/// an object with `None` fill is not hit-testable in its interior.
+/// The sentinel for "no colour" — phase 1's `BuiltinColour::None` promoted to
+/// a first-class fill value. Distinct from a fully transparent colour: an
+/// object with a `NONE` fill is not hit-testable in its interior.
 impl Colour { pub const NONE: Colour; pub fn is_none(&self) -> bool; }
 
 // ──────────────────────────────── xarast-doc ────────────────────────────────
@@ -549,7 +585,7 @@ pub enum ColourDropTarget {
     ObjectStroke(NodeId),
     Stop { node: NodeId, slot: PaintSlot, target: StopTarget },
     InsertStop { node: NodeId, slot: PaintSlot, pos_on_arm: OrderedF32 },
-    PaletteSlot(PaletteId),
+    PaletteSlot(ColourId),
     None,
 }
 
@@ -560,8 +596,8 @@ pub fn resolve_colour_drop(app: &AppState, p: DevicePoint, mods: Modifiers)
 
 /// THE ramp evaluator. One implementation, used by both backends and by the UI
 /// preview. Do not reimplement the bias/gain curve anywhere else.
-pub fn build_ramp(from: Srgb8, to: Srgb8, stops: &[RampStop<Colour>],
-                  profile: BiasGain, space: RampSpace, len: usize) -> Arc<[Srgb8]>;
+pub fn build_ramp(from: Rgba8, to: Rgba8, stops: &[RampStop<Colour>],
+                  profile: BiasGain, space: RampSpace, len: usize) -> Arc<[Rgba8]>;
 
 pub fn build_transparency_ramp(from: u8, to: u8, stops: &[RampStop<Transparency>],
                                profile: BiasGain, len: usize) -> Arc<[u8]>;
@@ -584,7 +620,7 @@ Each is a command that can be run or a number that can be measured.
    `convert(convert(v, m), v.model())` round-trips within 1/255 per channel for
    RGB↔HSV↔grey and within 2/255 for anything through CMYK (the naive CMYK
    conversion of `research/03 §2.10` is not invertible to better than that).
-2. `cargo test -p xarast-color palette::cycles` proves `reparent` rejects every
+2. `cargo test -p xarast-color table::cycles` proves `reparent` rejects every
    cycle: a randomised test building 1,000 random derivation graphs finds no
    accepted cycle and no rejected acyclic edge.
 3. `xarast-cli inspect --fills Designs/'Fill Types simple.xar'` lists every fill
@@ -636,7 +672,7 @@ Each is a command that can be run or a number that can be measured.
 | `build_ramp`, 8 stops, len 256 | ≤ 50 µs | `criterion` |
 | `build_ramp`, 8 stops, len 2048 | ≤ 400 µs | `criterion` |
 | Ramp cache hit | ≤ 200 ns | `criterion` |
-| `Palette::redefine` on a 256-entry palette with a 4-deep derivation chain | ≤ 20 µs | `criterion` |
+| `ColourTable::redefine` on a 256-entry palette with a 4-deep derivation chain | ≤ 20 µs | `criterion` |
 | Repaint after redefining a colour used by 5,000 objects | ≤ 100 ms to first paint | CLI timing harness |
 | `resolve_colour_drop` per mouse move, 100k-object document | ≤ 1 ms | `criterion`, viewport-grid index |
 | `ColourContext::convert` | ≤ 20 ns | `criterion` |
@@ -689,7 +725,7 @@ a colour on each drop-target kind; cancel a drag with `Esc`; mutate a fill;
 redefine a palette colour mid-drag. Each asserts the resulting document state
 and the resulting undo-stack depth.
 
-**Fuzz.** `cargo-fuzz` target on `Palette` command sequences (create / reparent /
+**Fuzz.** `cargo-fuzz` target on `ColourTable` command sequences (create / reparent /
 redefine / delete with random ids), asserting no panic and no cycle ever becomes
 reachable.
 
@@ -724,9 +760,10 @@ Update **`docs/memory/ui.md`** with:
 Create **`docs/memory/colour.md`** from the template in
 `docs/memory/INDEX.md`, and add its row to that index. It must record:
 
-- The derivation model (`Direct` / `Tint` / `Shade` / `Linked`) and the decision
-  that resolution is a cached topological order, not a refcount.
+- The derivation model (phase 1's `ColourKind`) and the decision that
+  resolution is a cached parent-before-child order, not a refcount.
 - The `OnDelete` policy set and why there is no third option.
-- The invariant "`resolved_srgb` is never stale" and where it is enforced.
+- The invariant "`ColourDef::cached_rgb` is never stale after an edit" and
+  where it is enforced.
 - The reserved slot for ICC (phase 15): nothing may assume sRGB at storage time.
 - Dead ends encountered while matching Xara's tint/shade arithmetic.

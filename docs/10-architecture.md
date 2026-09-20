@@ -63,6 +63,15 @@ validated, and how `.xar → .xarast → png` conversions are benchmarked.
 | `xarast-shell` | Window, event loop, GPU surface, tablet input, portals, clipboard, DnD | `winit`, `wgpu`, `accesskit` |
 | `xarast-cli` | Headless convert/render/inspect; the test and benchmark driver | `xarast-app` |
 
+| `xarast-testkit` | Shared test fixtures: the `.xar` corpus loader, golden-image harness, comparison helpers. A dev-dependency only, never shipped | `xarast-doc` |
+
+**Where the document meets the renderer.** The crate table deliberately gives
+`xarast-render` no dependency on `xarast-doc`: the renderer consumes a scene,
+not a document. Walking the arena to build that scene therefore lives in
+`xarast-app`, which already depends on both. This keeps the renderer testable
+from hand-built scenes with no document present, and it is why the display list
+is the contract between the two rather than the node tree.
+
 **Rule:** nothing below `xarast-app` may depend on a UI toolkit. `xarast-doc`
 and `xarast-render` must build and run with no windowing system present —
 that is what makes CI rendering tests possible.
@@ -200,8 +209,13 @@ locks entirely.
 
 | # | Question | Decided by |
 |---|---|---|
-| 1 | Arena vs persistent store — confirm by measurement | Phase 1 benchmark |
-| 2 | `egui` immediate mode at professional panel density | Phase 4 UI spike |
-| 3 | `winit 0.31-beta` pinning for tablet pressure — is the beta stable enough | Phase 4 |
-| 4 | Whether text on a path needs our own layout pass over `parley` | Phase 7 |
-| 5 | Is a perceptual diff or exact match the right golden-image gate | Phase 3 |
+| 1 | Arena vs persistent store — confirm by measurement | Phase 2 benchmark |
+| 2 | `egui` immediate mode at professional panel density | Phase 5 UI spike |
+| 3 | `winit 0.31-beta` pinning for tablet pressure — is the beta stable enough | Phase 5 |
+| 4 | Whether text on a path needs our own layout pass over `parley` | Phase 9 |
+| 5 | Is a perceptual diff or exact match the right golden-image gate | Phase 4 |
+
+Questions 2 to 5 were originally filed against the wrong phases; the phase
+documents that actually answer them are the ones listed above. Question 1 moves
+from phase 1 to phase 2 because the document model, not the geometry crate, is
+what the benchmark measures.

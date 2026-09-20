@@ -15,6 +15,13 @@ workspace = true
 xarast-app = { path = "../xarast-app" }
 xarast-render = { path = "../xarast-render" }
 
+winit = { version = "0.30", default-features = false, features = ["wayland", "wayland-dlopen", "wayland-csd-adwaita", "x11", "rwh_06"] }
+wgpu = { version = "30.0", default-features = false, features = ["wgsl", "vulkan", "gles", "metal", "dx12"] }
+pollster = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 [[bin]]
 name = "xarast"
 path = "src/main.rs"

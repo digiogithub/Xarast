@@ -12,3 +12,16 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+kurbo = { workspace = true }
+i_overlay = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tiny-skia = { workspace = true }
+
+[[bench]]
+name = "geom"
+harness = false

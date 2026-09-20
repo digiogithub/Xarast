@@ -62,7 +62,7 @@ between the legacy model and this specification.
 **O1 — Full fidelity within Xarast.** A document saved and reopened in the same version
 of Xarast MUST be indistinguishable from the original: same geometry (down to millipoint
 precision), same attributes, same *editable* live effects, same undo-equivalent document
-state. Saving MUST NEVER destroy an object's parametricity (a QuickShape remains a
+state. Saving MUST NOT ever destroy an object's parametricity (a QuickShape remains a
 QuickShape, a blend remains a live blend).
 
 **O2 — Graceful degradation outside Xarast.** The `document.svg` file contained in the
@@ -93,7 +93,7 @@ archival longevity.
 list MUST NOT require decompressing or parsing the whole document. The ZIP central
 directory and `META-INF/manifest.xml` MUST suffice.
 
-**O7 — Atomic, failure-resistant writing.** A power cut during saving MUST NEVER leave
+**O7 — Atomic, failure-resistant writing.** A power cut during saving MUST NOT ever leave
 the user without the previous document (§10).
 
 **O8 — Stable under version control.** Two saves with no semantic changes SHOULD produce
@@ -460,8 +460,8 @@ or remove entries under `extensions/` that it did not create itself (§8.3).
 - All references from `document.svg` to resources **MUST** be **paths relative to the
   directory of `document.svg` itself**, that is, to the package root
   (`resources/images/b3-....png`).
-- References **MUST NOT** be absolute (`/resources/...`), nor `file://`, nor `http(s)://`,
-  and **MUST NOT** contain `..`. A reader **MUST** treat an external reference as a
+- References **MUST NOT** be absolute (`/resources/...`), nor `file://`, nor
+  `http(s)://`, nor contain `..`. A reader **MUST** treat an external reference as a
   missing resource and **MUST** warn the user rather than load it (mitigation against
   exfiltration and against documents that break when moved, the Scribus failure, §2.3).
 - Explicit exception: `data:` URIs **MAY** be used for resources smaller than 4 KiB
@@ -571,13 +571,13 @@ Normative notes:
 - A **conformant reader MUST** support `Stored` and `Deflate`, and **SHOULD** support
   `Zstandard` (method 93).
 - A **writer MUST** use the `portable` profile by default. The `compact` profile
-  **MUST** be enabled explicitly (preference or `--profile compact`), **MUST** be
-  declared in `mf:profile`, and **MUST** raise `mf:min-reader` to `1.0` with the `zstd`
+  **MUST** be enabled explicitly (preference or `--profile compact`) and **MUST** be
+  declared in `mf:profile` and raise `mf:min-reader` to `1.0` with the `zstd`
   capability in `<mf:requires>` (§8.4).
 - ID **93** is used and **NOT** 20. ID 20 was assigned to Zstandard in APPNOTE 6.3.7 and
   **replaced by 93** in 6.3.8 to avoid conflicts; 93 is what WinZip, libzip, libarchive,
   7-Zip and Python's `zipfile` module write. A reader **MAY** accept 20 on reading out
-  of tolerance, but **MUST NEVER** write it.
+  of tolerance, but **MUST NOT** ever write it.
 - BZip2, LZMA, XZ, PPMd, Deflate64 and Shrink/Implode **MUST NOT** be used. Reason: poor
   interoperability and marginal gain over zstd.
 - Recommended level: `Deflate` level 6 on interactive save, level 9 on
@@ -786,7 +786,7 @@ attribute is written into `document.svg` as the conjunction of two things:
 
 Normative rules of the principle:
 
-1. The base representation **MUST** always exist. There **MUST NEVER** be an object
+1. The base representation **MUST** always exist. There **MUST NOT** ever be an object
    visible in Xarast that is invisible or empty in a standard SVG renderer.
 2. The parametric representation, where it exists, is the **source of truth** for
    Xarast. On opening, Xarast **MUST** reconstruct the object from (b) and **MUST**
@@ -1649,3 +1649,1684 @@ costs little and improves the accessibility of the exported SVG.
 
 Xara distinguishes **direct RGB** colour (`TAG_DEFINERGBCOLOUR` 50) from **complex**
 colour (`TAG_DEFINECOMPLEXCOLOUR` 51), which can be CMYK, HSV, a spot colour, or a
+colour **derived** from another (tint, shade, or linked).
+
+#### 6.12.1 The document palette
+
+```xml
+<xarast:palette xarast:id="doc">
+  <xarast:colour xarast:id="c-sky" xarast:name="Sky"
+                 xarast:model="rgb" xarast:srgb="#3388cc"/>
+  <xarast:colour xarast:id="c-sky-50" xarast:name="Sky 50%"
+                 xarast:model="tint" xarast:parent="#c-sky" xarast:amount="0.5"
+                 xarast:srgb="#99c3e5"/>
+  <xarast:colour xarast:id="c-corp-red" xarast:name="Corporate red"
+                 xarast:model="cmyk" xarast:cmyk="0 0.91 0.76 0.06"
+                 xarast:srgb="#d21f35"
+                 xarast:profile="resources/profiles/b3-1122….icc"/>
+  <xarast:colour xarast:id="c-pantone" xarast:name="PANTONE 485 C"
+                 xarast:model="spot" xarast:spot-name="PANTONE 485 C"
+                 xarast:cmyk="0 0.95 1 0" xarast:srgb="#da291c"
+                 xarast:screen-angle="45" xarast:solid-ink="true"/>
+</xarast:palette>
+```
+
+| `xarast:model` | Meaning | Mandatory attributes |
+|---|---|---|
+| `rgb` | Direct sRGB | `xarast:srgb` |
+| `cmyk` | CMYK (with or without a profile) | `xarast:cmyk`, `xarast:srgb` |
+| `hsv` | HSV | `xarast:hsv`, `xarast:srgb` |
+| `grey` | Greyscale | `xarast:grey`, `xarast:srgb` |
+| `spot` | Spot colour | `xarast:spot-name`, `xarast:srgb` |
+| `tint` | Tint of a parent towards white | `xarast:parent`, `xarast:amount`, `xarast:srgb` |
+| `shade` | Shade of a parent towards black | `xarast:parent`, `xarast:amount`, `xarast:srgb` |
+| `linked` | Derived by an offset in HSV | `xarast:parent`, `xarast:hsv-delta`, `xarast:srgb` |
+
+**`xarast:srgb` is mandatory in every case**: it is the value that makes the base
+representation work, and the one that lets any reader paint something reasonable
+without understanding the colour model.
+
+#### 6.12.2 Reference from the objects
+
+Two modes, selectable with `xarast:colour-refs` on `<xarast:document>`:
+
+- **`literal` (default, recommended):**
+  ```xml
+  <path d="…" fill="#3388cc" xarast:fill-ref="#c-sky"/>
+  ```
+  Maximum compatibility: any renderer paints the correct colour; Xarast reconstructs the
+  link to the palette from `xarast:fill-ref`. Changing the palette colour means
+  rewriting every literal, which is cheap and deterministic.
+
+- **`var` (optional):**
+  ```xml
+  <style>:root{--c-sky:#3388cc;--c-sky-50:#99c3e5}</style>
+  …
+  <path d="…" fill="var(--c-sky, #3388cc)"/>
+  ```
+  Modern browsers resolve it; some viewers and Inkscape do so only partially, but the
+  fallback value (`, #3388cc`) covers them. It is offered because it makes the file much
+  easier to edit by hand, but it is **not** the default mode.
+
+#### 6.12.3 CMYK and ICC profiles
+
+SVG 1.1 defines the `icc-color()` syntax, which renderers that do not support it
+**ignore**, keeping the RGB colour that precedes it. It is exactly the degradation
+mechanism that is needed:
+
+```xml
+<path d="…" fill="#d21f35 icc-color(coated, 0 0.91 0.76 0.06)"
+      xarast:fill-ref="#c-corp-red"/>
+```
+with `<color-profile name="coated" xlink:href="resources/profiles/b3-1122….icc"/>` in
+`<defs>`.
+
+- The writer **SHOULD** emit the `icc-color()` syntax when the colour has CMYK
+  components and a profile exists.
+- The writer **MUST**, in every case, emit `xarast:fill-ref` or the CMYK components in
+  `xarast:cmyk` on the element itself if the colour is not in the palette: the
+  `icc-color()` form is fragile against sanitisers.
+- Colour plates and imagesetting (`TAG_COLOURPLATE` 3508, `TAG_IMAGESETTING` 3507,
+  `TAG_PRINTERSETTINGS` 3506/4135, registration marks 3509/3510) are stored in
+  `meta.xml` under `<xarast:print>`, not in the SVG: they do not affect the on-screen
+  render.
+
+### 6.13 Summary: what is lost in an external viewer
+
+| Looks **identical** | Looks **approximate** | Looks **different but reasonable** |
+|---|---|---|
+| Paths, shapes, groups, layers, Z order | Shadows, bevels, feathering (SVG filters) | Conical and 3/4-colour fills (faceted or raster) |
+| Flat, linear, radial and elliptical fills | Ramp profiles (baked, error ≤ 2/255) | Fractal fills (`feTurbulence` ≠ Xara's fractal) |
+| Bitmaps, patterns, clips, masks | HSL blend modes (saturation, hue, luminosity) | Text without the embedded font |
+| Flat and graduated transparencies | Contours and blends (exactly baked, but not live) | Overprint, spot colours, CMYK (the sRGB is seen) |
+| Strokes, dashes, caps, joins, arrows | Variable strokes and brushes (baked to a fill) | — |
+| Text with an embedded font, text on a path | Moulds (exactly baked, not live) | — |
+
+---
+
+## 7. Document metadata
+
+### 7.1 Location and authority
+
+The metadata lives in **`meta.xml`**, which is the **authoritative source**. A subset is
+**duplicated** in `document.svg` inside `<metadata><rdf:RDF>` in Dublin Core format, so
+that the extracted SVG remains self-describing (this is what Inkscape does, and it lets
+tools such as `exiftool` read it).
+
+In case of conflict between `meta.xml` and the SVG's `<metadata>`, **`meta.xml` wins**.
+The writer **MUST** keep them synchronised when saving.
+
+### 7.2 Contents of `meta.xml`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<xarast:meta xmlns:xarast="https://xarast.org/ns/document/1.0"
+             xmlns:dc="http://purl.org/dc/elements/1.1/"
+             xarast:version="1.0" xarast:min-reader="1.0">
+
+  <xarast:identity>
+    <xarast:doc-id>01J9Q7ZB2K4M8N6P3R5T7V9W1X</xarast:doc-id>
+    <xarast:revision>47</xarast:revision>
+  </xarast:identity>
+
+  <dc:title>Exhibition poster</dc:title>
+  <dc:creator>Ada Lovelace</dc:creator>
+  <dc:contributor>Grace Hopper</dc:contributor>
+  <dc:description>A3 poster for the spring exhibition.</dc:description>
+  <dc:subject>poster, exhibition, spring</dc:subject>
+  <dc:language>en-GB</dc:language>
+  <dc:rights>CC BY-SA 4.0</dc:rights>
+
+  <xarast:dates>
+    <xarast:created>2026-03-11T09:14:02Z</xarast:created>
+    <xarast:modified>2026-09-19T17:41:55Z</xarast:modified>
+    <xarast:printed>2026-05-02T11:00:00Z</xarast:printed>
+    <xarast:editing-duration>PT18H42M</xarast:editing-duration>
+    <xarast:editing-cycles>93</xarast:editing-cycles>
+  </xarast:dates>
+
+  <xarast:generator xarast:name="Xarast" xarast:version="0.1.0"
+                    xarast:platform="linux-x86_64"/>
+  <xarast:origin xarast:imported-from="xar" xarast:source-file="cartel.xar"
+                 xarast:source-format-version="2.1"/>
+
+  <xarast:statistics xarast:spreads="1" xarast:pages="1" xarast:layers="7"
+                     xarast:objects="1842" xarast:bitmaps="3"
+                     xarast:fonts="2" xarast:colours="18"/>
+
+  <xarast:units xarast:default="mm" xarast:precision="2">
+    <xarast:user-unit xarast:id="u-pica" xarast:name="Pica" xarast:abbrev="pc"
+                      xarast:points="12" xarast:prefix="" xarast:suffix=" pc"/>
+  </xarast:units>
+
+  <xarast:page-setup xarast:width="297mm" xarast:height="420mm"
+                     xarast:orientation="portrait"
+                     xarast:bleed="3mm"
+                     xarast:double-page="false"
+                     xarast:facing="false"
+                     xarast:margin-top="10mm" xarast:margin-right="10mm"
+                     xarast:margin-bottom="10mm" xarast:margin-left="10mm"/>
+
+  <xarast:grid xarast:kind="rectangular" xarast:origin="0 0"
+               xarast:spacing="10mm" xarast:subdivisions="10"
+               xarast:visible="true" xarast:snap="true"
+               xarast:colour="#c8d8e8"/>
+
+  <xarast:guides>
+    <xarast:guide xarast:orientation="vertical"   xarast:position="30mm"  xarast:colour="#00a0ff"/>
+    <xarast:guide xarast:orientation="horizontal" xarast:position="45mm"/>
+    <xarast:guide xarast:orientation="angled" xarast:position="100mm 100mm"
+                  xarast:angle="30"/>
+  </xarast:guides>
+
+  <xarast:view xarast:zoom="0.75" xarast:scroll="0 0" xarast:quality="antialiased"
+               xarast:active-layer="xL2"/>
+
+  <xarast:nudge xarast:distance="1mm"/>
+
+  <xarast:print>
+    <xarast:imagesetting xarast:screen-ruling="150" xarast:screen-angle="45"
+                         xarast:dot-shape="round" xarast:negative="false"
+                         xarast:emulsion-down="false"/>
+    <xarast:plate xarast:name="Cyan"    xarast:enabled="true" xarast:angle="15"/>
+    <xarast:plate xarast:name="Magenta" xarast:enabled="true" xarast:angle="75"/>
+    <xarast:plate xarast:name="Yellow"  xarast:enabled="true" xarast:angle="0"/>
+    <xarast:plate xarast:name="Black"   xarast:enabled="true" xarast:angle="45"/>
+    <xarast:printmarks xarast:kind="default"/>
+  </xarast:print>
+
+  <xarast:colour-management
+      xarast:working-rgb="sRGB IEC61966-2.1"
+      xarast:working-cmyk="resources/profiles/b3-1122….icc"
+      xarast:rendering-intent="relative-colorimetric"
+      xarast:black-point-compensation="true"/>
+
+  <xarast:comment>Revision approved by management on 2026-05-02.</xarast:comment>
+</xarast:meta>
+```
+
+Correspondence with Xara's tags: `TAG_DOCUMENTCOMMENT` (90), `TAG_DOCUMENTDATES` (91),
+`TAG_DOCUMENTFLAGS` (93), `TAG_DOCUMENTINFORMATION` (4136), `TAG_GRIDRULERSETTINGS`
+(46), `TAG_GRIDRULERORIGIN` (47), `TAG_DEFINE_DEFAULTUNITS` (87),
+`TAG_DEFINE_PREFIXUSERUNIT` (85), `TAG_DEFINE_SUFFIXUSERUNIT` (86),
+`TAG_DOCUMENTNUDGE` (4114), `TAG_VIEWPORT` (80), `TAG_VIEWQUALITY` (81),
+`TAG_DOCUMENTVIEW` (82), `TAG_SPREADINFORMATION` (45), `TAG_PRINTERSETTINGS` (3506),
+`TAG_IMAGESETTING` (3507), `TAG_COLOURPLATE` (3508), `TAG_PRINTMARK*` (3509/3510).
+
+### 7.3 Guides and grid: dual emission
+
+So that Inkscape shows the document's guides, the writer **SHOULD** additionally emit in
+`document.svg`:
+
+```xml
+<sodipodi:namedview id="base" units="mm" inkscape:document-units="mm"
+                    showgrid="true" inkscape:snap-global="true">
+  <inkscape:grid type="xygrid" spacingx="10mm" spacingy="10mm" originx="0" originy="0"/>
+  <sodipodi:guide position="85,0" orientation="1,0"/>
+  <sodipodi:guide position="0,127" orientation="0,1"/>
+</sodipodi:namedview>
+```
+
+**Mind the Y axis:** Inkscape ≥ 1.0 guides use the Y axis pointing downwards by default,
+as Xarast does (§5.5), so the conversion is the identity. The writer **MUST** emit an
+`inkscape:document-units` consistent with `xarast:units/@default`.
+
+### 7.4 Format version and capabilities
+
+Three different numbers, with different purposes:
+
+| Field | Where | Semantics |
+|---|---|---|
+| `xarast:version` | manifest and `meta.xml` | Version of the **format** it was written with (`MAJOR.MINOR`) |
+| `xarast:min-reader` | manifest and `meta.xml` | **Minimum** reader version required to open the file **without losing anything** |
+| `<mf:requires>` | manifest | List of discrete **capabilities** required |
+| `xarast:generator` | `meta.xml` | Application and version that wrote it (diagnostics) |
+
+Compatibility rules:
+
+1. **Backwards (reading old files).** A reader of version *V* **MUST** open without loss
+   any file with `xarast:version ≤ V` within the same major version.
+2. **Forwards (reading new files).** If `xarast:min-reader > V`, the reader **MUST**
+   warn clearly and **SHOULD** offer to open in **read-only mode**. If the user forces
+   editing, the rules of §8 apply and the reader **MUST** mark the document as degraded.
+3. If `xarast:min-reader ≤ V` but `xarast:version > V`, the reader **MUST** open and
+   edit normally: the writer has guaranteed that everything new can be safely ignored.
+   **This is the normal route for the evolution of the format.**
+4. A writer **MUST** raise `xarast:min-reader` **only** when it introduces something
+   whose being ignored would produce a **visually incorrect or dangerous** document,
+   never for adding a new parameter to an existing effect.
+5. The **major** version is only incremented on an incompatible change to the container
+   (a new namespace URI, §5.2).
+
+```xml
+<mf:requires>
+  <mf:capability mf:name="zstd"/>
+  <mf:capability mf:name="mesh-fill-v2" mf:optional="true"/>
+</mf:requires>
+```
+A capability with `mf:optional="true"` does **NOT** prevent opening: it only warns that
+something will look worse.
+
+---
+
+## 8. Unknown-data preservation
+
+This is requirement **O4** and is, deliberately, the strictest part of the
+specification. The reason is empirical: it is the property that almost every comparable
+format fails (§2.4), and its failure turns “the document looks odd” into “the user's
+work has been destroyed and there is no way back”.
+
+### 8.1 General principle
+
+> **A reader MUST preserve, in full and in place, every piece of data it does not
+> understand, and MUST write it back out when saving.** Not understanding does not
+> authorise deleting.
+
+### 8.2 Preservation within `document.svg` and `meta.xml`
+
+The in-memory document model **MUST** have, on each node, a container of *foreign
+baggage* that retains:
+
+1. **Unknown foreign-namespace attributes** (including `xarast:` ones from a future
+   version): stored as `(uri, local-name, value)` and re-emitted literally on the same
+   element.
+2. **Unknown foreign-namespace child elements**: stored as the XML subtree **serialised
+   as-is** (exact text, including prefixes and any necessary namespace declarations)
+   together with its **position** relative to the known siblings, and re-emitted at that
+   position.
+3. **Unknown SVG elements** (e.g. from unsupported SVG 2): as point 2, but the reader
+   **MUST** additionally warn that the document contains SVG it does not understand,
+   because it affects the render.
+4. **XML comments and processing instructions**: preserved and re-emitted in place.
+   (Low cost, high value: people put notes there.)
+5. **Unknown standard SVG attributes**: preserved.
+6. Attribute order is **NOT** significant and does **NOT** need to be preserved; the
+   writer **MUST** emit attributes in a deterministic order (standard SVG first in
+   canonical order, then foreign-namespace ones sorted by URI and local name) to satisfy
+   O8.
+
+**Example.** Xarast 0.1 opens a document written by Xarast 2.0:
+
+```xml
+<path id="xa7" d="M 0,0 L 100,0"
+      fill="#c33"
+      xarast:shape="quick"
+      xarast:mesh-warp="3 0.5 0.2 …"          <!-- unknown in 0.1 -->
+      acme:review-state="approved">            <!-- unknown, from a plugin -->
+  <xarast:quickshape xarast:sides="5" …/>      <!-- known -->
+  <xarast:neural-fill xarast:model="…"/>       <!-- unknown in 0.1 -->
+</path>
+```
+
+After editing the geometry in 0.1 and saving, the file **MUST** still contain
+`xarast:mesh-warp`, `acme:review-state` and `<xarast:neural-fill>`, intact.
+
+### 8.3 Preservation of ZIP entries
+
+1. Every ZIP entry whose name does not fit the layout of §3.2 **MUST** be copied
+   unaltered on save, together with its manifest entry.
+2. The writer **MUST NOT** recompress them with a different method (the compressed
+   stream is copied as-is where possible; if not, it is recompressed with the same
+   method).
+3. Resources under `resources/` referenced **only** from unknown baggage **MUST NOT** be
+   garbage-collected. For this, the reader **MUST** scan the baggage for strings
+   matching manifest entry paths and mark them as referenced. A deliberately
+   conservative rule: we prefer to carry a spare resource than to break a document.
+4. `extensions/` and `META-INF/` (except `manifest.xml`) are always preserved.
+
+### 8.4 Loss detection: the preservation digest
+
+Points 1-3 protect against **Xarast**. They do not protect against a third party (an
+SVG cleaner, a script, a version of Inkscape that breaks something) that destroys the
+baggage. For that:
+
+- The writer **SHOULD** emit on `<xarast:document>`:
+  ```xml
+  xarast:foreign-digest="blake3:9f2c…"
+  xarast:foreign-count="14"
+  ```
+  where the digest is computed over the canonical concatenation (C14N over each
+  fragment, ordered by the path of the owning element) of all the baggage the writer did
+  **not** understand.
+- On opening, the reader **MUST** recompute the digest. If it does not match or the
+  counter has decreased, it **MUST** warn: *“This document has been modified by another
+  application and N items of data from a more recent version of Xarast have been lost.
+  Saving will overwrite that loss permanently.”* and **SHOULD** offer “Save as a copy”.
+- The digest is **NOT** recomputed over the baggage the current reader **does**
+  understand: it only covers what is genuinely unknown.
+
+### 8.5 When the user edits an object carrying unknown baggage
+
+This is the hard case and it must be decided explicitly:
+
+1. **An edit that does not touch the object** (moving something else, changing a
+   different layer): the baggage is simply preserved.
+2. **An edit of orthogonal attributes** (moving the object, changing its colour): the
+   baggage is preserved and the object is marked with `xarast:foreign-dirty="true"`.
+3. **An edit that invalidates the baggage** (editing the nodes of a path carrying
+   `xarast:neural-fill`, when we do not know whether that fill depends on the geometry):
+   the reader **MUST** preserve the baggage **and** mark `xarast:foreign-stale="true"`.
+   A future reader that understands that baggage **MUST** check the mark and revalidate
+   or regenerate rather than trusting it blindly.
+4. **Deletion of the object**: the baggage goes with it. No attempt is made to save it.
+   It is recorded in the save warning (`N objects with data from future versions
+   deleted`).
+5. `xarast:base-authoritative="true"` (§5.1, rule 4) is the mark a writer sets when the
+   SVG **base** representation must win over the unknown parametric one; it is used,
+   for example, by an unknown live effect whose baking we cannot regenerate (§6.8.7).
+
+### 8.6 What a reader must NEVER do
+
+- It **MUST NOT** “normalise” the SVG by rewriting elements it has not touched.
+- It **MUST NOT** remove namespace declarations, even if they appear unused: they may be
+  in use from inside a serialised baggage fragment.
+- It **MUST NOT** reorder children.
+- It **MUST NOT** convert `<rect>`/`<circle>` to `<path>` on saving if it has not edited
+  them.
+- It **MUST NOT** reindent or rewrite the whole document if the user has changed
+  nothing (an “open and close” SHOULD NOT produce any writing at all).
+
+### 8.7 Preservation conformance test
+
+Mandatory in CI (§13.5):
+
+1. A reference document is taken and attributes and elements from a fictitious
+   namespace (`urn:test:future`) are injected mechanically into every node.
+2. It is opened with Xarast, a battery of edits is applied (move, change colour, group,
+   change layer, undo, redo) and it is saved.
+3. The SVG is extracted and it is checked that **100 %** of the injected content is
+   still present, on the same element and in the same relative position.
+4. The same is repeated with unknown ZIP entries and with a `meta.xml` containing
+   unknown sections.
+
+---
+
+## 9. Identification: magic bytes, extension, MIME
+
+### 9.1 Extension
+
+- Primary extension: **`.xarast`**.
+- Alternative extension accepted on reading: `.xrst` (for filesystems that limit the
+  extension to 4 characters). The writer **SHOULD NOT** use it by default.
+- The writer **MUST NOT** use `.xar` (already taken by Xara and by the macOS xar
+  archiver: a double collision, documented in §2).
+
+### 9.2 Signature (magic bytes)
+
+```
+offset  0  : 50 4B 03 04                      "PK\x03\x04"  (ZIP local header)
+offset 30  : 6D 69 6D 65 74 79 70 65          "mimetype"    (name of the 1st entry)
+offset 38  : 61 70 70 6C 69 63 61 74 69 6F 6E 2F 76 6E 64 2E
+             78 61 72 61 73 74 2B 7A 69 70    "application/vnd.xarast+zip"  (26 bytes)
+```
+
+The complete signature to check is therefore:
+
+```
+"PK\x03\x04" at 0  AND  "mimetype" at 30  AND  "application/vnd.xarast+zip" at 38
+```
+
+This works **without decompressing anything** and with only 64 bytes read. It is the
+same design used by EPUB and ODF, and that is why §3.2.1 forbids the extra field in the
+local header of `mimetype`.
+
+### 9.3 MIME type
+
+| Type | Use |
+|---|---|
+| `application/vnd.xarast+zip` | **Canonical.** The `+zip` suffix (RFC 6839) tells generic tools that the container is a ZIP |
+| `application/x-xarast` | Alias tolerated on reading; **MUST NOT** be written |
+| `image/svg+xml` | The type of `document.svg` inside the package |
+
+The `vnd.` (vendor) tree is chosen rather than `prs.` (personal) or `x-`
+(experimental, nowadays discouraged by RFC 6648). Registration with IANA **SHOULD** be
+requested before the stable v1.0.
+
+### 9.4 Linux integration: `shared-mime-info`
+
+File `packaging/linux/xarast.xml` (installed at
+`/usr/share/mime/packages/xarast.xml`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.xarast+zip">
+    <comment>Xarast document</comment>
+    <comment xml:lang="es">Documento de Xarast</comment>
+    <comment xml:lang="de">Xarast-Dokument</comment>
+    <comment xml:lang="fr">Document Xarast</comment>
+    <comment xml:lang="pt">Documento do Xarast</comment>
+    <acronym>XARAST</acronym>
+    <expanded-acronym>Xarast Vector Document</expanded-acronym>
+    <sub-class-of type="application/zip"/>
+    <generic-icon name="image-x-generic"/>
+    <magic priority="80">
+      <match type="string" value="PK\003\004" offset="0">
+        <match type="string" value="mimetype" offset="30">
+          <match type="string" value="application/vnd.xarast+zip" offset="38"/>
+        </match>
+      </match>
+    </magic>
+    <glob pattern="*.xarast"/>
+    <glob pattern="*.xrst"/>
+    <alias type="application/x-xarast"/>
+  </mime-type>
+</mime-info>
+```
+
+- `priority="80"` is higher than that of `application/zip` (which is low because it is
+  generic), following the specification's recommendation to use high values for
+  specific subtypes.
+- `<sub-class-of type="application/zip"/>` lets file managers offer “Extract here”
+  alongside “Open with Xarast”.
+- Installation: `update-mime-database /usr/share/mime`.
+- For the AppImage, the file **MUST** also be included at the root of the AppDir so that
+  desktop integration tools register it.
+
+### 9.5 `.desktop` file
+
+`packaging/linux/org.xarast.Xarast.desktop`:
+
+```ini
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Xarast
+GenericName=Vector Graphics Editor
+GenericName[es]=Editor de gráficos vectoriales
+Comment=Create and edit vector graphics and photo compositions
+Comment[es]=Crea y edita gráficos vectoriales y composiciones fotográficas
+Exec=xarast %F
+TryExec=xarast
+Icon=org.xarast.Xarast
+Terminal=false
+StartupNotify=true
+StartupWMClass=xarast
+Categories=Graphics;VectorGraphics;2DGraphics;
+Keywords=vector;svg;draw;illustration;xara;
+Keywords[es]=vectorial;svg;dibujo;ilustración;xara;
+MimeType=application/vnd.xarast+zip;image/svg+xml;image/svg+xml-compressed;application/vnd.xara;application/pdf;image/png;image/jpeg;image/webp;
+Actions=NewDocument;
+
+[Desktop Action NewDocument]
+Name=New Document
+Name[es]=Documento nuevo
+Exec=xarast --new
+```
+
+`application/vnd.xara` is included because Xarast imports `.xar` (a product
+requirement).
+
+### 9.6 Desktop thumbnails
+
+`packaging/linux/xarast.thumbnailer` (in `/usr/share/thumbnailers/`):
+
+```ini
+[Thumbnailer Entry]
+TryExec=xarast-thumbnailer
+Exec=xarast-thumbnailer -s %s %u %o
+MimeType=application/vnd.xarast+zip;
+```
+
+`xarast-thumbnailer` **MUST** confine itself to extracting `thumbnail.png` from the ZIP
+and rescaling it: it must not open or render the document. This is the operational
+justification for O6 and for keeping the thumbnail in the package.
+
+### 9.7 Other platforms (planned)
+
+- **Windows:** registry key `.xarast` → `Xarast.Document`, `PerceivedType=image`,
+  thumbnail extractor `IThumbnailProvider` that reads `thumbnail.png`.
+- **macOS:** `UTExportedTypeDeclarations` with the identifier `org.xarast.document`,
+  `UTTypeConformsTo = ["public.zip-archive", "public.composite-content"]`, and a
+  Quick Look extension.
+
+---
+
+## 10. Failure recovery
+
+### 10.1 Atomic writing (mandatory)
+
+The writer **MUST** save following exactly this sequence:
+
+1. Create `<name>.xarast.tmp-<pid>-<rand>` **in the same directory** as the target (so
+   that the `rename` is atomic: same filesystem).
+2. Write the complete ZIP.
+3. `flush` + **`fsync`** of the temporary file's descriptor.
+4. `rename(tmp, target)` — atomic on POSIX and on Windows (`MoveFileEx` with
+   `MOVEFILE_REPLACE_EXISTING`).
+5. `fsync` of the containing **directory** (POSIX), so that the rename survives a power
+   cut.
+6. Delete the associated autosave and journal.
+
+The writer **MUST NOT** truncate or write over the original file at any point. If step 2
+or 3 fails, the temporary file is deleted and the original is left intact.
+
+If the target exists and the user has the backup preference enabled, the writer
+**SHOULD** keep the previous one as `<name>.xarast.bak` (rotating a single
+copy).
+
+### 10.2 Autosave
+
+- Location: **outside** the document, in `$XDG_STATE_HOME/xarast/autosave/<doc-id>/`
+  (by default `~/.local/state/xarast/autosave/<doc-id>/`), where `<doc-id>` is the
+  document's persistent identifier (`meta.xml` → `<xarast:doc-id>`), or a fresh ULID if
+  the document has never been saved.
+- Content: a **complete and valid** `.xarast` (not a separate format), called
+  `snapshot.xarast`, plus a `state.json` with the path of the original document, the
+  `doc-id`, the timestamp, the PID and the host name.
+- Cadence: **every 5 minutes** of wall clock **and** every **50 undo operations**,
+  whichever comes first. Configurable; `0` disables it.
+- Autosave **MUST** use the same atomic writing as §10.1.
+- Autosave **MUST NOT** block the interface: it is serialised on a separate thread from
+  an immutable snapshot of the model (this is a requirement for the design of the
+  document model: persistent structures or copy-on-write make it cheap).
+- On startup, Xarast **MUST** scan the autosave directory and, if it finds snapshots
+  whose `state.json` points at a PID that no longer exists (or at another host), offer
+  recovery with a date comparison against the file on disk.
+
+### 10.3 Operation journal
+
+To reduce the loss window below the autosave cadence:
+
+- Location: `$XDG_STATE_HOME/xarast/autosave/<doc-id>/journal.ndjson`.
+- Format: **append-only NDJSON**, one line per applied undo operation, with
+  `{"seq":N,"ts":"…","op":"…","payload":{…}}`.
+- The writer **MUST** `write` + `fsync` each line (or batch them with an `fsync` every
+  250 ms at most).
+- On recovery, Xarast loads `snapshot.xarast` and **replays** the journal entries whose
+  `seq` is later than the snapshot's.
+- The journal **MUST** be truncated on every autosave and deleted on every real save.
+- An operation that is not representable in the journal (e.g. a 100 MB import) **MUST**
+  force an immediate autosave instead of writing to the journal.
+- Putting the journal **inside** the `.xarast` is explicitly rejected: it would force
+  the ZIP to be rewritten on every operation.
+
+### 10.4 Lock file
+
+To prevent two instances (or two users on a network drive) from editing the same
+document at once:
+
+- Name: `.<name>.xarast.lock`, in the **same directory** as the document (the
+  LibreOffice pattern, recognisable and working on network filesystems).
+- Content (UTF-8 text, one key per line):
+  ```
+  xarast-lock/1
+  pid=48213
+  host=machine-name
+  user=jose
+  boot-id=8f1c3d2e-…
+  doc-id=01J9Q7ZB2K4M8N6P3R5T7V9W1X
+  since=2026-09-19T17:02:11Z
+  ```
+- Creation: with `O_CREAT|O_EXCL` (failing if it exists), plus an advisory
+  `flock`/`LOCK_EX|LOCK_NB` lock on the lock file itself, which gives reliable local
+  detection even if the process dies.
+- If the lock exists:
+  - If `host` and `boot-id` match the current ones and the PID is **not** alive → stale
+    lock: it is reclaimed automatically and a warning is shown.
+  - In any other case → “Open read-only” / “Open a copy” / “Force (risky)” is offered.
+- The lock **MUST** be released on closing, and the process **MUST** install handlers
+  for `SIGINT`/`SIGTERM` that remove it. It **MUST NOT** be left to `atexit` alone.
+- If the directory is read-only, the absence of a lock **MUST NOT** prevent opening.
+
+### 10.5 Reading robustness
+
+- A `.xarast` with a damaged central directory **SHOULD** be recoverable by scanning the
+  local headers (`PK\x03\x04`). Xarast **SHOULD** offer `xarast repair doc.xarast`,
+  which performs that scan, validates digests against the manifest where it is readable,
+  and rebuilds a healthy package.
+- A `document.svg` with malformed XML **SHOULD** be recovered by parsing up to the point
+  of error and keeping what was read, with a clear warning and read-only opening.
+- Entries whose BLAKE3 digest does not match the manifest **MUST** be flagged; the
+  document is opened but a warning is shown, and corrupt resources are replaced by a
+  visible placeholder.
+- Mandatory hard limits against *zip bombs* and malicious XML:
+  - maximum decompression ratio per entry: **200:1** (configurable upwards);
+  - maximum total uncompressed size: **4 GiB** by default;
+  - maximum XML nesting depth: **256**;
+  - maximum number of XML entities: **0** (DTDs are rejected, §5.3);
+  - maximum number of entries: **65,535** without ZIP64, **1,000,000** with ZIP64.
+
+---
+
+## 11. Formal schemas
+
+They are provided in **RELAX NG Compact** (`.rnc`), being the most readable and the one
+that best expresses mixed content and open extensibility
+(`anyAttribute`/`anyElement`), which is exactly what §8 requires. The XML versions
+(`.rng`) are also generated for `xmllint`.
+
+Location in the repository: `crates/xarast-format/schemas/`.
+
+### 11.1 `manifest.rnc` — `META-INF/manifest.xml`
+
+```rnc
+default namespace = ""
+namespace mf = "https://xarast.org/ns/manifest/1.0"
+
+start = Manifest
+
+Manifest =
+  element mf:manifest {
+    attribute mf:version     { xsd:string { pattern = "[0-9]+\.[0-9]+" } },
+    attribute mf:min-reader  { xsd:string { pattern = "[0-9]+\.[0-9]+" } },
+    attribute mf:generator   { text }?,
+    attribute mf:profile     { "portable" | "compact" },
+    Requires?,
+    FileEntry+,
+    AnyForeign*
+  }
+
+Requires =
+  element mf:requires {
+    element mf:capability {
+      attribute mf:name     { text },
+      attribute mf:optional { xsd:boolean }?
+    }+
+  }
+
+FileEntry =
+  element mf:file-entry {
+    attribute mf:full-path   { text },
+    attribute mf:media-type  { text },
+    attribute mf:role        { Role }?,
+    attribute mf:size        { xsd:nonNegativeInteger }?,
+    attribute mf:method      { "stored" | "deflate" | "zstd" }?,
+    attribute mf:digest      { "blake3-256" }?,
+    attribute mf:digest-value{ xsd:string { pattern = "[0-9a-f]{64}" } }?,
+    attribute mf:refcount    { xsd:nonNegativeInteger }?,
+    attribute mf:derived-from{ xsd:string { pattern = "[0-9a-f]{64}" } }?,
+    attribute mf:derivation  { text }?,
+    AnyForeignAttr*,
+    AnyForeign*
+  }
+
+Role = "mimetype" | "manifest" | "meta" | "document" | "thumbnail"
+     | "preview" | "resource" | "history" | "extension" | "unknown"
+
+# --- Extensibility: EVERYTHING unknown is valid and MUST be preserved (§8) ---
+AnyForeignAttr = attribute * - mf:* { text }
+AnyForeign     = element   * - mf:* { (AnyForeignAttr | AnyForeign | text)* }
+```
+
+### 11.2 `xarast-doc.rnc` — extensions in `document.svg` (schematic)
+
+**Only** the `xarast:` vocabulary is validated; the base SVG is validated separately
+against the official SVG 1.1 schema.
+
+```rnc
+namespace x   = "https://xarast.org/ns/document/1.0"
+namespace svg = "http://www.w3.org/2000/svg"
+
+Num      = xsd:double
+Point    = xsd:string          # "x y"
+Matrix6  = xsd:string          # "a b c d e f"
+IdRef    = xsd:string          # "#id"
+Bool     = xsd:boolean
+Colour   = xsd:string          # "#rrggbb" | "#rrggbbaa"
+Profile  = xsd:string          # "<bias> <gain>"
+
+# ---------------- Document ----------------
+Document =
+  element x:document {
+    attribute x:version           { text },
+    attribute x:min-reader        { text },
+    attribute x:y-axis            { "down" | "up" }?,
+    attribute x:layout            { "single" | "split" }?,
+    attribute x:colour-refs       { "literal" | "var" }?,
+    attribute x:duplicate-offset  { Point }?,
+    attribute x:foreign-digest    { text }?,
+    attribute x:foreign-count     { xsd:nonNegativeInteger }?,
+    Chapter*, AnyForeign*
+  }
+
+Chapter = element x:chapter { attribute x:name { text }, attribute x:spreads { text } }
+
+Page =
+  element x:page {
+    attribute x:index  { xsd:positiveInteger },
+    attribute x:rect   { xsd:string },      # "x y w h"
+    attribute x:bleed  { Num }?,
+    attribute x:double { Bool }?,
+    attribute x:scale  { Num }?
+  }
+
+# ---------------- Parametric shapes ----------------
+QuickShape =
+  element x:quickshape {
+    attribute x:sides                 { xsd:positiveInteger },
+    attribute x:circular              { Bool },
+    attribute x:stellated             { Bool },
+    attribute x:primary-curvature     { Bool },
+    attribute x:stellation-curvature  { Bool },
+    attribute x:stell-radius-ratio    { Num }?,
+    attribute x:primary-curve-ratio   { Num }?,
+    attribute x:stell-curve-ratio     { Num }?,
+    attribute x:stell-offset-ratio    { Num }?,
+    attribute x:centre                { Point },
+    attribute x:major-axis            { Point },
+    attribute x:minor-axis            { Point },
+    attribute x:matrix                { Matrix6 }?,
+    attribute x:reformed              { Bool }?,
+    element x:edge-path { attribute d { text } }*,
+    AnyForeign*
+  }
+
+# ---------------- Fills and transparencies ----------------
+FillKind = "flat" | "linear" | "linear3" | "circular" | "elliptical"
+         | "conical" | "diamond" | "three-point" | "four-point"
+         | "bitmap" | "contone" | "fractal-clouds" | "fractal-plasma" | "noise"
+
+Fill =
+  element x:fill {
+    attribute x:type       { FillKind },
+    attribute x:repeat     { "simple" | "repeat" | "reflect" | "repeat-extra" }?,
+    attribute x:profile    { Profile }?,
+    attribute x:effect     { "fade" | "rainbow" | "alt-rainbow" }?,
+    attribute x:stops      { text }?,          # "0:#rrggbb 0.5:#… 1:#…"
+    attribute x:centre     { Point }?,
+    attribute x:seed       { xsd:integer }?,
+    attribute x:graininess { Num }?,
+    attribute x:octaves    { xsd:positiveInteger }?,
+    attribute x:dpi        { Num }?,
+    element x:point { attribute x { Num }, attribute y { Num },
+                      attribute x:colour { Colour } }*,
+    AnyForeignAttr*, AnyForeign*
+  }
+
+BlendMode = "mix" | "stained-glass" | "bleach" | "darken" | "lighten"
+          | "saturation" | "luminosity" | "hue" | "contrast" | "brightness"
+          | "bevel" | "additive" | "subtractive" | "lut"
+
+Transparency =
+  element x:transparency {
+    attribute x:type   { FillKind },
+    attribute x:blend  { BlendMode }?,
+    attribute x:amount { Num }?,
+    attribute x:profile{ Profile }?,
+    attribute x:stops  { text }?,
+    AnyForeignAttr*, AnyForeign*
+  }
+
+# ---------------- Stroke ----------------
+Stroke =
+  element x:stroke {
+    attribute x:type       { "plain" | "variable" | "brush" | "airbrush" },
+    attribute x:base-width { Num }?,
+    attribute x:profile    { Profile }?,
+    element x:width-table  { text }?,          # "t:w t:w …"
+    element x:pressure     { attribute x:encoding { "text" | "base64-u16le" }, text }?,
+    element x:source-path  { attribute d { text } }?,
+    AnyForeign*
+  }
+
+# ---------------- Live effects ----------------
+Shadow =
+  element x:shadow {
+    attribute x:type     { "wall" | "floor" | "glow" | "inner" },
+    attribute x:blur     { Num }, attribute x:offset { Point }?,
+    attribute x:angle    { Num }?, attribute x:darkness { Num },
+    attribute x:scale    { Num }?, attribute x:colour { Colour }?,
+    attribute x:penumbra { Num }?
+  }
+
+Bevel =
+  element x:bevel {
+    attribute x:type            { "round" | "flat" | "chisel" | "ridge" | "mesa" },
+    attribute x:indent          { Num },
+    attribute x:light-angle     { Num },
+    attribute x:light-elevation { Num }?,
+    attribute x:contrast        { Num },
+    attribute x:direction       { "inner" | "outer" },
+    attribute x:join            { "round" | "miter" | "bevel" }?,
+    attribute x:light-colour    { Colour }?,
+    attribute x:shadow-colour   { Colour }?
+  }
+
+Contour =
+  element x:contour {
+    attribute x:width          { Num },
+    attribute x:steps          { xsd:positiveInteger },
+    attribute x:direction      { "inner" | "outer" | "both" },
+    attribute x:join           { "round" | "miter" | "bevel" }?,
+    attribute x:profile        { Profile }?,
+    attribute x:colour-profile { Profile }?,
+    attribute x:insets         { Bool }?
+  }
+
+Blend =
+  element x:blend {
+    attribute x:steps             { xsd:positiveInteger },
+    attribute x:from              { IdRef },
+    attribute x:to                { IdRef },
+    attribute x:position-profile  { Profile }?,
+    attribute x:attribute-profile { Profile }?,
+    attribute x:one-to-one        { Bool }?,
+    attribute x:antialias         { Bool }?,
+    attribute x:path              { IdRef }?,
+    attribute x:rotate-along-path { Bool }?,
+    attribute x:start-angle       { Num }?,
+    attribute x:end-angle         { Num }?,
+    attribute x:tangential        { Bool }?,
+    element x:blend-map { attribute x:pairs { text } }?,
+    AnyForeign*
+  }
+
+Mould =
+  element x:mould {
+    attribute x:type   { "envelope" | "perspective" },
+    attribute x:bounds { xsd:string },
+    element x:mould-shape  { attribute d { text } },
+    element x:mould-source { AnySvg* },
+    AnyForeign*
+  }
+
+Feather = element x:feather { attribute x:width { Num },
+                              attribute x:profile { Profile }? }
+
+Effects =
+  element x:effects {
+    element x:effect {
+      attribute x:id     { xsd:ID },
+      attribute x:kind   { text },
+      attribute x:locked { Bool }?,
+      AnyForeignAttr*, AnyForeign*
+    }+
+  }
+
+# ---------------- Colour ----------------
+Palette =
+  element x:palette {
+    attribute x:id { text },
+    element x:colour {
+      attribute x:id     { xsd:ID },
+      attribute x:name   { text }?,
+      attribute x:model  { "rgb"|"cmyk"|"hsv"|"grey"|"spot"|"tint"|"shade"|"linked" },
+      attribute x:srgb   { Colour },
+      attribute x:cmyk   { text }?,
+      attribute x:hsv    { text }?,
+      attribute x:grey   { Num }?,
+      attribute x:spot-name  { text }?,
+      attribute x:parent     { IdRef }?,
+      attribute x:amount     { Num }?,
+      attribute x:hsv-delta  { text }?,
+      attribute x:profile    { text }?,
+      attribute x:screen-angle { Num }?,
+      attribute x:solid-ink  { Bool }?,
+      AnyForeignAttr*
+    }+,
+    AnyForeign*
+  }
+
+# ---------------- Loose attributes allowed on SVG elements ----------------
+CommonXarastAttrs =
+  attribute x:kind                { text }?,
+  attribute x:generated           { text }?,
+  attribute x:generated-by        { text }?,
+  attribute x:generated-rev       { xsd:nonNegativeInteger }?,
+  attribute x:generated-hash      { text }?,
+  attribute x:base-authoritative  { Bool }?,
+  attribute x:foreign-dirty       { Bool }?,
+  attribute x:foreign-stale       { Bool }?,
+  attribute x:names               { text }?,
+  attribute x:fill-ref            { IdRef }?,
+  attribute x:stroke-ref          { IdRef }?,
+  attribute x:clone-of            { IdRef }?,
+  attribute x:clone-mode          { "live" | "copy" }?,
+  attribute x:locked              { Bool }?,
+  attribute x:visible             { Bool }?,
+  attribute x:printable           { Bool }?
+
+AnySvg     = element svg:* { (attribute * { text } | AnySvg | text)* }
+AnyForeignAttr = attribute * - x:* { text }
+AnyForeign     = element   * - x:* { (attribute * { text } | AnyForeign | text)* }
+```
+### 11.3 `meta.rnc` — `meta.xml`
+
+Omitted for length; its structure is that of §7.2, with the same open extensibility
+rules (`AnyForeign*` at every level) and with `dc:*` taken from Dublin Core. The
+complete schema lives in `crates/xarast-format/schemas/meta.rnc`.
+
+### 11.4 Validation in CI
+
+```bash
+# Validation of the manifest and the metadata
+trang schemas/manifest.rnc schemas/manifest.rng
+xmllint --noout --relaxng schemas/manifest.rng  extracted/META-INF/manifest.xml
+xmllint --noout --relaxng schemas/meta.rng      extracted/meta.xml
+
+# Validation of the base SVG against the official SVG 1.1 schema
+xmllint --noout --relaxng vendor/svg11.rng      extracted/document.svg
+
+# Validation of the xarast: vocabulary (extracting only that subtree)
+xarast-validate extracted/document.svg --schema schemas/xarast-doc.rng
+```
+
+CI **MUST** run all four steps over every file in the conformance corpus.
+
+---
+
+## 12. Complete example
+
+A minimal `.xarast`: **a rectangle with a linear gradient (with a non-linear ramp
+profile) over a background layer**, on two layers, A4 page.
+
+> Everything that follows is **real and verified**: the files have been built, the XML
+> has been checked to be well formed (`xmllint --noout`), the BLAKE3 digests have been
+> computed with the reference implementation, and the ZIP listing and the hexadecimal
+> dump are the literal output of `unzip -lv` and `od`. The sizes and CRCs add up.
+
+### 12.1 ZIP listing
+
+```console
+$ unzip -lv ejemplo.xarast
+Archive:  ejemplo.xarast
+ Length   Method    Size  Cmpr    Date    Time   CRC-32   Name
+--------  ------  ------- ---- ---------- ----- --------  ----
+      26  Stored       26   0% 2026-09-19 17:41 8f97fcdc  mimetype
+    1458  Defl:N      534  63% 2026-09-19 17:41 e509c5f1  META-INF/manifest.xml
+    1841  Defl:N      771  58% 2026-09-19 17:41 7fed299a  meta.xml
+    3375  Defl:N     1289  62% 2026-09-19 17:41 257a57e2  document.svg
+     571  Stored      571   0% 2026-09-19 17:41 5cb1b71d  thumbnail.png
+--------          -------  ---                            -------
+    7271             3191  56%                            5 files
+```
+
+Total file size: **3,717 bytes**.
+
+### 12.2 Signature verification (magic bytes)
+
+```console
+$ od -A d -t x1z -v ejemplo.xarast | head -4
+0000000 50 4b 03 04 14 00 00 00 00 00 3b 8d 33 5d dc fc  >PK........;.3]..<
+0000016 97 8f 1a 00 00 00 1a 00 00 00 08 00 00 00 6d 69  >..............mi<
+0000032 6d 65 74 79 70 65 61 70 70 6c 69 63 61 74 69 6f  >metypeapplicatio<
+0000048 6e 2f 76 6e 64 2e 78 61 72 61 73 74 2b 7a 69 70  >n/vnd.xarast+zip<
+```
+
+Breakdown of the local header of the first entry:
+
+| Offset | Bytes | Field | Value |
+|---|---|---|---|
+| 0 | `50 4b 03 04` | signature | `PK\x03\x04` |
+| 4 | `14 00` | version needed | 2.0 |
+| 6 | `00 00` | flags | 0 (no encryption, no descriptor) |
+| 8 | `00 00` | method | **0 = STORED** |
+| 18 | `1a 00 00 00` | compressed size | 26 |
+| 22 | `1a 00 00 00` | uncompressed size | 26 |
+| 26 | `08 00` | name length | 8 |
+| **28** | `00 00` | **extra field length** | **0** ← requirement of §3.2.1 |
+| **30** | `6d 69 6d 65 74 79 70 65` | name | **`mimetype`** |
+| **38** | `61 70 70 …` | content | **`application/vnd.xarast+zip`** |
+
+### 12.3 `mimetype` (26 bytes, STORED, no trailing newline)
+
+```
+application/vnd.xarast+zip
+```
+
+### 12.4 `META-INF/manifest.xml`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0"
+             mf:version="1.0" mf:min-reader="1.0" mf:profile="portable"
+             mf:generator="Xarast/0.1.0 (linux; x86_64)">
+  <mf:file-entry mf:full-path="/" mf:media-type="application/vnd.xarast+zip"/>
+  <mf:file-entry mf:full-path="mimetype" mf:media-type="text/plain"
+                 mf:role="mimetype" mf:size="26" mf:method="stored"/>
+  <mf:file-entry mf:full-path="META-INF/manifest.xml" mf:media-type="application/xml"
+                 mf:role="manifest" mf:method="deflate"/>
+  <mf:file-entry mf:full-path="meta.xml" mf:media-type="application/xml"
+                 mf:role="meta" mf:size="1841" mf:method="deflate"
+                 mf:digest="blake3-256"
+                 mf:digest-value="0292ad76bf30d13dce31f284842a8b01f772b36a7974775ae9f2c0eb46a5f956"/>
+  <mf:file-entry mf:full-path="document.svg" mf:media-type="image/svg+xml"
+                 mf:role="document" mf:size="3375" mf:method="deflate"
+                 mf:digest="blake3-256"
+                 mf:digest-value="e07d64cd960dc94e50d9030c9d1c3333d8b91c877bc113e535ade8d3ba5adc47"/>
+  <mf:file-entry mf:full-path="thumbnail.png" mf:media-type="image/png"
+                 mf:role="thumbnail" mf:size="571" mf:method="stored"
+                 mf:digest="blake3-256"
+                 mf:digest-value="4ab11d84d1b953e36c278f709e317dd045c2242fdddcda28e5f1b35d02910607"/>
+</mf:manifest>
+```
+
+Note that the manifest's own entry carries **no** digest (it cannot contain its own
+hash) and no `mf:size` (the ZIP supplies it).
+
+### 12.5 `meta.xml`
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<xarast:meta xmlns:xarast="https://xarast.org/ns/document/1.0"
+             xmlns:dc="http://purl.org/dc/elements/1.1/"
+             xarast:version="1.0" xarast:min-reader="1.0">
+  <xarast:identity>
+    <xarast:doc-id>01J9Q7ZB2K4M8N6P3R5T7V9W1X</xarast:doc-id>
+    <xarast:revision>3</xarast:revision>
+  </xarast:identity>
+  <dc:title>Ejemplo mínimo</dc:title>
+  <dc:creator>Ada Lovelace</dc:creator>
+  <dc:language>es-ES</dc:language>
+  <xarast:dates>
+    <xarast:created>2026-09-19T17:02:11Z</xarast:created>
+    <xarast:modified>2026-09-19T17:41:55Z</xarast:modified>
+    <xarast:editing-duration>PT39M44S</xarast:editing-duration>
+    <xarast:editing-cycles>3</xarast:editing-cycles>
+  </xarast:dates>
+  <xarast:generator xarast:name="Xarast" xarast:version="0.1.0" xarast:platform="linux-x86_64"/>
+  <xarast:statistics xarast:spreads="1" xarast:pages="1" xarast:layers="2"
+                     xarast:objects="2" xarast:bitmaps="0" xarast:fonts="0" xarast:colours="3"/>
+  <xarast:units xarast:default="mm" xarast:precision="2"/>
+  <xarast:page-setup xarast:width="210mm" xarast:height="297mm"
+                     xarast:orientation="portrait" xarast:bleed="0mm" xarast:double-page="false"/>
+  <xarast:grid xarast:kind="rectangular" xarast:origin="0 0" xarast:spacing="10mm"
+               xarast:subdivisions="10" xarast:visible="false" xarast:snap="true"/>
+  <xarast:guides>
+    <xarast:guide xarast:orientation="vertical" xarast:position="105mm"/>
+  </xarast:guides>
+  <xarast:view xarast:zoom="0.75" xarast:scroll="0 0" xarast:quality="antialiased"
+               xarast:active-layer="xL2"/>
+  <xarast:nudge xarast:distance="1mm"/>
+  <xarast:colour-management xarast:working-rgb="sRGB IEC61966-2.1"
+                            xarast:rendering-intent="relative-colorimetric"/>
+</xarast:meta>
+```
+
+### 12.6 `document.svg` (literal content, 3,375 bytes)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     xmlns:xarast="https://xarast.org/ns/document/1.0"
+     xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+     xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+     width="210mm" height="297mm" viewBox="0 0 595.276 841.89"
+     version="1.1" id="xdoc">
+<title>Ejemplo mínimo</title>
+<desc>Un rectángulo con degradado, en dos capas.</desc>
+<metadata><rdf:RDF><rdf:Description>
+<dc:title>Ejemplo mínimo</dc:title><dc:creator>Ada Lovelace</dc:creator>
+<dc:date>2026-09-19T17:41:55Z</dc:date></rdf:Description></rdf:RDF></metadata>
+<defs>
+<xarast:document xarast:version="1.0" xarast:min-reader="1.0" xarast:y-axis="down"
+                 xarast:layout="single" xarast:colour-refs="literal"
+                 xarast:duplicate-offset="10 10"
+                 xarast:foreign-digest="blake3:0000000000000000" xarast:foreign-count="0"/>
+<xarast:units xarast:default="mm" xarast:precision="2"/>
+<xarast:palette xarast:id="doc">
+  <xarast:colour xarast:id="c-azul"   xarast:name="Azul"   xarast:model="rgb" xarast:srgb="#1c3f8f"/>
+  <xarast:colour xarast:id="c-ambar"  xarast:name="Ámbar"  xarast:model="rgb" xarast:srgb="#ffd166"/>
+  <xarast:colour xarast:id="c-grafito" xarast:name="Grafito" xarast:model="rgb" xarast:srgb="#2b2b2b"/>
+</xarast:palette>
+<linearGradient id="g7a3" gradientUnits="userSpaceOnUse"
+                x1="141.732" y1="255.118" x2="453.543" y2="255.118"
+                spreadMethod="pad" xarast:profile="0.35 0"
+                xarast:stops="0:#1c3f8f 1:#ffd166">
+  <stop offset="0" stop-color="#1c3f8f"/>
+  <stop offset=".125" stop-color="#2a4f9c"/>
+  <stop offset=".25" stop-color="#3b60a8"/>
+  <stop offset=".375" stop-color="#5173b3"/>
+  <stop offset=".5" stop-color="#6c88bd"/>
+  <stop offset=".625" stop-color="#8d9fc4"/>
+  <stop offset=".75" stop-color="#b3b8c6"/>
+  <stop offset=".875" stop-color="#dcc8bf"/>
+  <stop offset="1" stop-color="#ffd166"/>
+</linearGradient>
+</defs>
+<sodipodi:namedview id="base" units="mm" inkscape:document-units="mm"
+                    showgrid="false" inkscape:current-layer="xL2">
+  <sodipodi:guide position="297.638,0" orientation="1,0"/>
+</sodipodi:namedview>
+<g id="xSPREAD1" xarast:kind="spread" xarast:spread="1">
+<xarast:page xarast:index="1" xarast:rect="0 0 595.276 841.89" xarast:bleed="0"/>
+<g id="xL1" inkscape:groupmode="layer" inkscape:label="Fondo"
+   xarast:kind="layer" xarast:layer-kind="normal" xarast:visible="true"
+   xarast:locked="true" xarast:printable="true" xarast:solid="false"
+   sodipodi:insensitive="true" style="display:inline">
+<rect id="xk3m9q2vr7t" x="0" y="0" width="595.276" height="841.89" fill="#f4f1ea"/>
+</g>
+<g id="xL2" inkscape:groupmode="layer" inkscape:label="Ilustración"
+   xarast:kind="layer" xarast:layer-kind="normal" xarast:visible="true"
+   xarast:locked="false" xarast:printable="true" xarast:solid="false"
+   xarast:active="true" style="display:inline">
+<rect id="xp8w4n1zc6h" x="141.732" y="141.732" width="311.811" height="226.772"
+      rx="11.339" fill="url(#g7a3)" stroke="#2b2b2b" stroke-width="2.835"
+      xarast:fill-ref="#c-azul" xarast:stroke-ref="#c-grafito"/>
+</g>
+</g>
+</svg>
+```
+
+### 12.7 Commentary on the example
+
+The points it illustrates, one by one:
+
+1. **The SVG is valid and self-contained.** No `xarast:` element affects the render: a
+   browser paints the cream background, the rounded rectangle with the gradient and its
+   graphite border, at the correct A4 physical size.
+2. **The nine gradient stops are baked** from the profile `xarast:profile="0.35 0"`.
+   Xarast, on opening, **discards** those nine and regenerates them from the profile and
+   `xarast:stops="0:#1c3f8f 1:#ffd166"` (§6.4). An external viewer sees the curve
+   approximated with an error ≤ 2/255.
+3. **Both layers carry dual marking**: `inkscape:groupmode`/`inkscape:label` for
+   Inkscape and `xarast:*` for Xarast. The locking of the background layer is expressed
+   with `xarast:locked="true"` **and** with `sodipodi:insensitive="true"`, so that
+   Inkscape respects it too.
+4. **`<xarast:page>` is not rendered** because it is in a foreign namespace: the page
+   geometry does not pollute the drawing.
+5. **References to the palette** with `xarast:fill-ref`/`xarast:stroke-ref` alongside
+   the literal value. The correct colour is seen anywhere and Xarast keeps the link.
+6. **Coordinates in points with 3 decimals**: `595.276` pt = exactly 210 mm,
+   `141.732` pt = 50 mm, `2.835` pt = 1 mm. Millipoint precision with no ambiguity.
+7. **`xarast:foreign-count="0"`**: there is no unknown baggage. A writer **MAY** omit
+   both attributes when the counter is zero; here they are emitted to illustrate them.
+8. **Compression ratio 56 %** with only five entries and 7 KiB of content: on real
+   documents the SVG's ratio rises to 6:1-12:1 (§4.6).
+
+### 12.8 Reproducing the verification
+
+```console
+$ unzip -o ejemplo.xarast -d /tmp/ej && xdg-open /tmp/ej/document.svg   # render in a browser
+$ xmllint --noout /tmp/ej/document.svg /tmp/ej/meta.xml /tmp/ej/META-INF/manifest.xml
+$ b3sum /tmp/ej/document.svg
+e07d64cd960dc94e50d9030c9d1c3333d8b91c877bc113e535ade8d3ba5adc47  /tmp/ej/document.svg
+```
+
+---
+
+
+## 13. Rust implementation plan
+
+### 13.1 Location in the crate tree
+
+```
+crates/
+  xarast-model/      # document model (nodes, attributes, layers) — no I/O
+  xarast-format/     # THIS format: ZIP container, manifest, meta
+    schemas/         # *.rnc and *.rng
+  xarast-svg/        # SVG profile: model <-> SVG serialisation/deserialisation
+  xarast-render/     # rendering (for thumbnails, previews and baking)
+  xarast-xar/        # importer for the binary .xar
+  xarast-cli/        # `xarast` binary (extract, cat, repair, convert, validate)
+```
+
+`xarast-format` does **not** depend on `xarast-render`: thumbnail generation and baking
+are injected through *traits* (`ThumbnailProvider`, `BakeProvider`) so that the format
+crate remains testable without a graphics engine and without heavy dependencies.
+
+### 13.2 Third-party crates
+
+| Crate | Use | Notes |
+|---|---|---|
+| `zip` | Reading and writing the container | Supports `Stored`, `Deflated` and `Zstd` (method 93). Disable unnecessary features: `default-features = false, features = ["deflate", "zstd", "time"]` |
+| `flate2` (`zlib-rs` or `miniz_oxide` backend) | Deflate | Pulled in by `zip`; pin the backend for reproducibility |
+| `zstd` | `compact` profile | Only behind the `compact` feature |
+| `blake3` | Digests and deduplication | Very fast; streaming hashing during import |
+| `quick-xml` | SVG/XML parsing and serialisation | **Key**: one of the few that allow prefixes, comments and processing instructions to be preserved — a requirement of §8 |
+| `memchr` | Scan acceleration in `quick-xml` | Transitive |
+| `serde` + `serde_json` | Autosave `state.json`, NDJSON journal | Not for the manifest (that is XML) |
+| `time` or `jiff` | RFC 3339 dates and ZIP DOS dates | |
+| `ulid` or `uuid` (v7) | Persistent object IDs and `doc-id` | |
+| `fs4` | Cross-platform `flock`/advisory locking | For §10.4 |
+| `tempfile` | Atomic writing | `NamedTempFile::persist` |
+| `thiserror` | Typed errors for the public API | |
+| `tracing` | Diagnostics | |
+| `resvg` + `usvg` + `tiny-skia` | **Only in `xarast-render`**: external validation and reference thumbnails in tests | |
+| `image` | PNG thumbnail encoding | |
+| `insta` | Snapshot tests of the serialised SVG | |
+| `proptest` | Property-based round-trip | |
+| `cargo-fuzz` + `arbitrary` | Fuzzing the reader | Mandatory (principle 5 of the vision) |
+| `criterion` | Save/open benchmarks | |
+
+Explicitly rejected: any binding to `libxml2` (C surface, XXE by default), and
+`roxmltree` as the main parser (it is read-only and discards information needed for the
+round-trip; it is useful in tests, though).
+
+### 13.3 Proposed public API
+
+```rust
+// ============================ crates/xarast-format/src/lib.rs ============================
+
+/// Format version that this code writes.
+pub const FORMAT_VERSION: Version = Version { major: 1, minor: 0 };
+pub const MIME_TYPE: &str = "application/vnd.xarast+zip";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version { pub major: u16, pub minor: u16 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile { Portable, Compact }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method { Stored, Deflate, Zstd }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ResourceId(pub [u8; 32]);          // BLAKE3-256
+
+// --------------------------------- READING ---------------------------------
+
+pub struct XarastReader<R: Read + Seek> { /* … */ }
+
+impl<R: Read + Seek> XarastReader<R> {
+    /// Opens the container: validates the signature, reads the manifest and `meta.xml`.
+    /// Does NOT parse `document.svg` (requirement O6: cheap opening).
+    pub fn open(reader: R) -> Result<Self, ReadError>;
+
+    /// Checks only the first 64 bytes. Useful for type detection.
+    pub fn sniff(reader: &mut R) -> Result<bool, ReadError>;
+
+    pub fn format_version(&self) -> Version;
+    pub fn min_reader(&self) -> Version;
+    pub fn profile(&self) -> Profile;
+    pub fn manifest(&self) -> &Manifest;
+    pub fn meta(&self) -> &DocumentMeta;
+
+    /// Thumbnail without touching the document.
+    pub fn thumbnail(&mut self) -> Result<Option<Vec<u8>>, ReadError>;
+    pub fn preview(&mut self, spread: u32) -> Result<Option<Vec<u8>>, ReadError>;
+
+    /// Raw bytes of an entry; verifies the manifest digest.
+    pub fn entry(&mut self, path: &str) -> Result<Vec<u8>, ReadError>;
+    pub fn entry_stream(&mut self, path: &str) -> Result<impl Read + '_, ReadError>;
+    pub fn resource(&mut self, id: ResourceId) -> Result<Vec<u8>, ReadError>;
+    pub fn entries(&self) -> impl Iterator<Item = &FileEntry>;
+
+    /// Parses the whole document into the model. This is where the cost is paid.
+    pub fn document(&mut self, opts: &LoadOptions) -> Result<LoadedDocument, ReadError>;
+
+    /// Consumes the reader and returns the preservation context (§8) so that
+    /// the file can be rewritten without losing anything.
+    pub fn into_preservation(self) -> PreservationContext;
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct LoadOptions {
+    /// Regenerate the `xarast:generated` subtrees (default: yes).
+    pub rebake: bool,
+    /// Anti zip-bomb / malicious-XML limits (§10.5).
+    pub limits: Limits,
+    /// Reject rather than warn when a digest does not match.
+    pub strict: bool,
+}
+
+pub struct LoadedDocument {
+    pub document: xarast_model::Document,
+    pub preservation: PreservationContext,
+    pub diagnostics: Vec<Diagnostic>,     // warnings, not errors
+}
+
+// --------------------------------- WRITING ---------------------------------
+
+pub struct XarastWriter<W: Write + Seek> { /* … */ }
+
+#[derive(Debug, Clone)]
+pub struct WriteOptions {
+    pub profile: Profile,
+    pub deflate_level: u8,        // 0..=9
+    pub zstd_level: i32,          // -7..=22
+    pub deterministic: bool,      // O8: no varying timestamps, fixed order
+    pub fixed_mtime: Option<OffsetDateTime>,
+    pub pretty: bool,             // indent the SVG (for git)
+    pub thumbnail: bool,
+    pub previews: bool,
+    pub embed_fonts: bool,
+    pub materialize_derived: bool, // false = regenerate derived renditions on open (§4.4)
+    pub history: HistoryPolicy,
+}
+
+impl<W: Write + Seek> XarastWriter<W> {
+    pub fn new(writer: W, opts: WriteOptions) -> Self;
+
+    /// Re-injects the previously read unknown baggage (§8). If omitted,
+    /// the result is NOT a lossless round-trip and `finish()` flags it.
+    pub fn with_preservation(self, ctx: PreservationContext) -> Self;
+    pub fn with_thumbnail_provider(self, p: Arc<dyn ThumbnailProvider>) -> Self;
+    pub fn with_bake_provider(self, p: Arc<dyn BakeProvider>) -> Self;
+
+    pub fn write_document(&mut self, doc: &xarast_model::Document) -> Result<(), WriteError>;
+    pub fn add_resource(&mut self, kind: ResourceKind, bytes: &[u8]) -> Result<ResourceId, WriteError>;
+    pub fn finish(self) -> Result<WriteReport, WriteError>;
+}
+
+pub struct WriteReport {
+    pub bytes_written: u64,
+    pub entries: usize,
+    pub resources_deduplicated: usize,
+    pub bytes_saved_by_dedup: u64,
+    pub preservation_complete: bool,
+    pub warnings: Vec<Diagnostic>,
+}
+
+/// Full atomic save (§10.1): temporary + fsync + rename + fsync of the directory.
+pub fn save_atomic(
+    path: &Path,
+    doc: &xarast_model::Document,
+    ctx: Option<&PreservationContext>,
+    opts: &WriteOptions,
+) -> Result<WriteReport, WriteError>;
+
+// --------------------------------- PRESERVATION ---------------------------------
+
+/// Everything the reader did not understand and the writer MUST put back in place.
+#[derive(Debug, Default, Clone)]
+pub struct PreservationContext {
+    /// Foreign attributes and subtrees, indexed by the model's node id.
+    pub node_baggage: HashMap<NodeId, ForeignBaggage>,
+    /// Unknown ZIP entries, with their compressed stream intact.
+    pub unknown_entries: Vec<RawZipEntry>,
+    /// Unknown sections of `meta.xml`.
+    pub meta_baggage: Vec<ForeignFragment>,
+    /// Comments and processing instructions with their position.
+    pub comments: Vec<PositionedNode>,
+    pub foreign_digest: Option<[u8; 32]>,
+    pub foreign_count: usize,
+}
+
+impl PreservationContext {
+    /// Recomputes the canonical digest (§8.4).
+    pub fn digest(&self) -> [u8; 32];
+    /// Compares with the stored digest; `Err` if something has been lost.
+    pub fn verify(&self, stored: &[u8; 32]) -> Result<(), PreservationLoss>;
+}
+
+// --------------------------------- LOCKING AND RECOVERY ---------------------------------
+
+pub struct DocumentLock { /* … */ }
+impl DocumentLock {
+    pub fn acquire(doc_path: &Path) -> Result<Self, LockError>;   // §10.4
+    pub fn holder(&self) -> Option<&LockHolder>;
+    pub fn steal_if_stale(doc_path: &Path) -> Result<Self, LockError>;
+}
+
+pub struct AutosaveSession { /* … */ }
+impl AutosaveSession {
+    pub fn begin(doc_id: &DocId) -> Result<Self, IoError>;
+    pub fn snapshot(&mut self, doc: &xarast_model::Document) -> Result<(), IoError>;
+    pub fn journal(&mut self, op: &JournalEntry) -> Result<(), IoError>;
+    pub fn discard(self) -> Result<(), IoError>;
+    pub fn recoverable() -> Result<Vec<RecoveryCandidate>, IoError>;
+}
+```
+
+In `xarast-svg`:
+
+```rust
+pub struct SvgProfile { /* serialisation options */ }
+
+pub fn write_svg(
+    doc: &Document, ctx: Option<&PreservationContext>,
+    bake: &dyn BakeProvider, opts: &SvgProfile, out: &mut dyn Write,
+) -> Result<SvgWriteStats, SvgError>;
+
+pub fn read_svg(
+    input: &[u8], limits: &Limits,
+) -> Result<(Document, PreservationContext, Vec<Diagnostic>), SvgError>;
+
+/// Baking: all the logic of §5.4 and §6 lives behind this trait.
+pub trait BakeProvider: Send + Sync {
+    fn bake_gradient_profile(&self, g: &GradientSpec) -> Vec<GradientStop>;
+    fn bake_effect(&self, e: &LiveEffect, target: &Node) -> BakedSubtree;
+    fn bake_fill(&self, f: &Fill, bounds: Rect) -> BakedFill;   // may rasterise
+    fn bake_stroke(&self, s: &Stroke, path: &Path) -> BakedSubtree;
+}
+```
+
+### 13.4 Implementation details that must be got right
+
+1. **`quick-xml` in preserving mode.** Use `Reader` with `check_end_names(true)`,
+   `trim_text(false)` and **do not** expand entities. When writing, use `Writer` with
+   the same quotes and escapes as the original for the preserved fragments: baggage
+   fragments are re-emitted as **raw bytes** (`Event::Text` with
+   `BytesText::from_escaped`) to guarantee byte-for-byte identity.
+2. **`mimetype` entry with no extra field.** The `zip` crate may add extra fields
+   (extended timestamps, alignment). That entry must be built with
+   `SimpleFileOptions::default().compression_method(Stored).last_modified_time(fixed)`
+   and it must be **verified in a test** that byte 28 is `00 00` and that bytes 38..64
+   are the MIME type. It is a one-line test that protects type detection for the entire
+   format.
+3. **Copying compressed streams without recompressing.** For preserved entries and for
+   resources that have not changed, use `ZipWriter::raw_copy_file` (avoids
+   decompressing and recompressing megabytes on every save). It is the difference
+   between saving a photographic document in 0.2 s and in 8 s.
+4. **Streaming hashing.** `blake3::Hasher` over the reader, without materialising the
+   whole resource in memory when it exceeds a few MiB.
+5. **Deterministic writing.** `deterministic: true` ⇒ fixed DOS date
+   (`1980-01-01 00:00:00`, the minimum representable), fixed external attributes
+   (`0o644`), no extra fields, canonical entry and attribute order. Test: saving the
+   same model twice produces byte-identical files.
+6. **Limits before allocating.** All the limits of §10.5 are checked **before**
+   reserving memory, not after.
+7. **No `unsafe`.** `#![forbid(unsafe_code)]` in `xarast-format` and `xarast-svg`.
+
+### 13.5 Tests
+
+#### a) Structural round-trip (mandatory)
+
+```rust
+#[test] fn roundtrip_modelo_identico() {
+    for caso in corpus() {
+        let doc0 = load(&caso);
+        let bytes = save_to_vec(&doc0);
+        let doc1 = load_from_bytes(&bytes);
+        assert_eq!(doc0.canonical(), doc1.canonical());   // structural equality
+    }
+}
+```
+
+#### b) Byte-stable round-trip (O8)
+
+```rust
+#[test] fn guardar_dos_veces_es_identico() {
+    let doc = load(caso);
+    let a = save_to_vec_deterministic(&doc);
+    let b = save_to_vec_deterministic(&load_from_bytes(&a));
+    assert_eq!(a, b);            // fixed point on the first re-save
+}
+```
+
+#### c) Preservation of the unknown (§8.7) — **the most important test**
+
+```rust
+#[test] fn preserva_el_100_por_cien_del_equipaje_ajeno() {
+    let inyectado = inject_foreign_ns(load_raw(caso), "urn:test:future");
+    let doc = load_from_bytes(&inyectado);
+    let doc = aplicar_ediciones(doc);        // move, recolour, group, undo
+    let salida = save_to_vec(&doc);
+    assert_foreign_intact(&inyectado, &salida, "urn:test:future");
+}
+```
+
+#### d) Signature and detection
+
+```rust
+#[test] fn magic_bytes_en_offsets_fijos() {
+    let z = save_to_vec(&Document::empty());
+    assert_eq!(&z[0..4],   b"PK\x03\x04");
+    assert_eq!(&z[28..30], &[0, 0]);                 // no extra field
+    assert_eq!(&z[30..38], b"mimetype");
+    assert_eq!(&z[38..64], MIME_TYPE.as_bytes());
+}
+```
+
+#### e) Render conformance (§5.6)
+
+Golden tests: for each file in the corpus, render with Xarast and with `resvg`,
+Chromium and (if installed) Inkscape, and check the SSIM thresholds of the table in
+§5.6. The reference PNGs are stored in Git LFS.
+
+#### f) Schema validation
+
+Run `xmllint --relaxng` over the manifest, `meta.xml` and SVG of every generated file
+(§11.4).
+
+#### g) Deduplication
+
+```rust
+#[test] fn ocho_usos_una_entrada() {
+    let doc = documento_con_la_misma_imagen_n_veces(8);
+    let rep = save_report(&doc);
+    assert_eq!(rep.entries_under("resources/images/"), 1);
+    assert!(rep.bytes_saved_by_dedup > 7 * IMG_LEN - 4096);
+}
+```
+
+#### h) Compression
+
+```rust
+#[test] fn los_jpeg_no_se_recomprimen() {
+    let rep = save_report(&documento_con_jpeg());
+    assert_eq!(rep.method_of("resources/images/b3-*.jpg"), Method::Stored);
+}
+```
+
+#### i) Fuzzing (mandatory from day 1)
+
+```
+fuzz/fuzz_targets/
+  fuzz_open.rs       # XarastReader::open over arbitrary bytes
+  fuzz_document.rs   # parsing of document.svg over arbitrary XML
+  fuzz_roundtrip.rs  # load → save → load, checking for no panic and no divergence
+```
+Acceptance criterion: 24 h of `cargo fuzz` with no findings before each release.
+
+#### j) Properties (`proptest`)
+
+Generate random documents from the model and check:
+`load(save(d)) == d`, `save(load(save(d))) == save(d)`, and that no combination of
+write options changes the recovered model.
+
+#### k) Interoperability with Inkscape (manual, at every release)
+
+Open in Inkscape, move an object, save, reopen in Xarast: the layers, the guides and
+**all** the `xarast:` extensions must still be there (it is the real check of §8.4).
+
+### 13.6 Suggested implementation order
+
+| Step | Deliverable | Project phase |
+|---|---|---|
+| 1 | Container: read/write ZIP, `mimetype`, manifest, `meta.xml`, tests (d) and (b) | v0.1 |
+| 2 | **Core** SVG profile: paths, shapes, groups, layers, flat fills and linear/radial gradients, stroke, bitmaps; tests (a), (f) | v0.1 |
+| 3 | Preservation and round-trip of the unknown; tests (c) | v0.1 (**do not postpone**: it is far more expensive to add later) |
+| 4 | Deduplication, compression policy, atomic writing, locking, autosave; tests (g), (h) | v0.1 |
+| 5 | Text, clips, masks, palette, CMYK | v0.2 |
+| 6 | Live effects and baking (full `BakeProvider`), exotic fills | v0.3 |
+| 7 | `history/`, `compact` profile (zstd), split layout | v1.0 |
+
+> **Critical design note:** step 3 **MUST** be in v0.1, even though there is nothing to
+> preserve yet. If the document model is not born with the baggage container on every
+> node, adding it later means touching the whole model, the whole parser and the whole
+> serialiser. It is the direct lesson of §2.4.
+
+---
+
+## 14. Appendices
+
+### 14.1 Summary of decisions and rejected alternatives
+
+| Decision | Rejected alternative | Reason |
+|---|---|---|
+| ZIP container | Tar+zstd, SQLite, a bespoke format | Interoperability, ubiquitous tooling, random access |
+| `mimetype` STORED first | File extension only | Magic-based detection without decompressing |
+| XML manifest | `manifest.json` | Homogeneity of the XML chain, validation with `xmllint`, namespaces (§3.5) |
+| One `document.svg` | One SVG per spread; `content.xml`+`styles.xml` | Direct opening in a browser; no cross-references |
+| Namespace-based extensions | `data-*` attributes; an attached binary blob | Standard, ignorable by construction, readable |
+| Dual representation with baking | Parametric only; baked only | Satisfies O1 and O2 simultaneously |
+| Unit = PostScript point | CSS pixel; millipoint directly | Exact millipoint precision with 3 decimals |
+| Y axis downwards | Global `scale(1,-1)` | Does not break text, gradients or filters |
+| BLAKE3-256 | SHA-256, xxHash, CRC | Fast and cryptographically sound |
+| Deflate by default, zstd optional | zstd always | Read interoperability with common tools |
+| Binaries STORED | Recompress everything | CPU cost with no saving |
+| Journal outside the package | Journal inside the ZIP | Rewriting the ZIP per operation is unworkable |
+
+### 14.2 Conformance levels
+
+| Level | Name | A **reader** at this level… | A **writer** at this level… |
+|---|---|---|---|
+| **A** | Core | Opens the container, reads the manifest and metadata, and renders the base SVG. It does not understand `xarast:` but **MUST** preserve it (§8) | Produces a valid container and base SVG, with minimal `xarast:` (document, pages, layers) |
+| **B** | Complete | Understands the whole v1.0 `xarast:` vocabulary, regenerates the baking, edits with full fidelity | Emits the complete vocabulary and the baking of §5.4 |
+| **C** | Archival | Level B + verifies all digests, requires embedded fonts and text duplicated as curves, rejects references to missing resources | Level B + embeds fonts and ICC profiles, materialises all derived renditions, emits an empty `history/` and a `README.txt` |
+
+Xarast v0.1 targets level **B** for the v0.1 subset and level **A** in full.
+Third-party tools (importers, viewers, indexers) have in level **A** a target
+achievable in a few hours of work.
+
+### 14.3 Registry of effect `xarast:kind` values (v1.0)
+
+Effects with a defined baking to an SVG filter. Extending this table does **NOT** raise
+`min-reader` (§7.4, rule 4).
+
+| `xarast:kind` | Parameters | Baking |
+|---|---|---|
+| `gaussian-blur` | `radius` | `feGaussianBlur` |
+| `sharpen` / `unsharp` | `radius`, `amount` | `feConvolveMatrix` or `feGaussianBlur`+`feComposite arithmetic` |
+| `levels` | `black`, `white`, `gamma` | `feComponentTransfer type="gamma"` + `linear` |
+| `brightness-contrast` | `brightness`, `contrast` | `feComponentTransfer type="linear"` |
+| `hue-saturation` | `hue`, `saturation`, `lightness` | `feColorMatrix type="hueRotate"` + `saturate` |
+| `greyscale` | `method` | `feColorMatrix type="saturate" values="0"` |
+| `sepia` | `amount` | `feColorMatrix` |
+| `invert` | — | `feComponentTransfer type="table" tableValues="1 0"` |
+| `posterize` | `levels` | `feComponentTransfer type="discrete"` |
+| `noise` | `amount`, `seed` | `feTurbulence` + `feComposite` |
+| `emboss` | `angle`, `depth` | `feConvolveMatrix` |
+| `displace` | `map`, `scale` | `feDisplacementMap` |
+
+### 14.4 Conformance checklist for a `.xarast`
+
+- [ ] First entry = `mimetype`, STORED, no extra field, exactly 26 bytes
+- [ ] Bytes 0..4 = `PK\x03\x04`; 30..38 = `mimetype`; 38..64 = the MIME type
+- [ ] `META-INF/manifest.xml` present, validates against `manifest.rnc`
+- [ ] Manifest entry `/` with `media-type` = contents of `mimetype`
+- [ ] One manifest entry per ZIP entry; no duplicates
+- [ ] Correct BLAKE3 digests for `document`, `meta` and every `resource`
+- [ ] `document.svg` well formed, validates against SVG 1.1, no `<script>`, no DTD
+- [ ] All resource references are relative and resolve inside the package
+- [ ] `id`s unique throughout the document
+- [ ] Every `xarast:generated` subtree has an `xarast:generated-by` that resolves
+- [ ] No entry name with `..`, `\`, a leading `/` or control characters
+- [ ] Decompression ratio of each entry < 200:1
+- [ ] Mean corpus SSIM ≥ 0.90 against the native render
+
+### 14.5 Future work (v1.1+)
+
+1. **Deltas in `history/`** (`*.vcdiff`) instead of full snapshots.
+2. **Digital signatures** (`META-INF/signatures.xml`, XMLDSig over the manifest
+   digests) and **encryption** (`META-INF/encryption.xml`, AES-GCM per entry).
+3. **Flat model with `nodeChanges`** for incremental synchronisation and collaboration,
+   taking advantage of the stable IDs of §5.7 (the Figma lesson, §2.5).
+4. **IANA registration** of the type `application/vnd.xarast+zip`.
+5. **`web` profile**: a writer variant producing an SVG optimised for serving directly
+   (no extensions, with a consolidated `<style>` and a cropped `viewBox`).
+6. **Real colour meshes** if `svg-next` stabilises `<meshgradient>`; until then, baking
+   (§6.3).
+
+### 14.6 References
+
+- OASIS, *Open Document Format for Office Applications v1.2/1.3, Part 3: Packages* —
+  https://docs.oasis-open.org/office/v1.2/cs01/OpenDocument-v1.2-cs01-part3.html
+- Krita, *file_kra* — https://docs.krita.org/en/general_concepts/file_formats/file_kra.html
+  and https://github.com/2shady4u/godot-kra-psd-importer/blob/master/docs/KRA_FORMAT.md
+- Scribus, `.sla` structure — http://justsolve.archiveteam.org/wiki/Scribus
+- Inkscape, *Inkscape-specific XML attributes* —
+  https://wiki.inkscape.org/wiki/Inkscape-specific_XML_attributes
+  and *Inkscape SVG vs. plain SVG* — https://wiki.inkscape.org/wiki/Inkscape_SVG_vs._plain_SVG
+- W3C, *SVG 1.1 (Second Edition), 23 Extensibility* —
+  https://www.w3.org/TR/2011/REC-SVG11-20110816/extend.html
+- Libre Arts, *Gradient meshes and hatching to be removed from SVG 2.0* —
+  https://librearts.org/2018/05/gradient-meshes-and-hatching-to-be-removed-from-svg-2-0/
+- Figma `.fig` / Kiwi — https://github.com/OpenFig-org/openfig-core/blob/main/docs/research.md
+- Xara, *Xar Format Specification* — http://site.xara.com/support/docs/webformat/spec/XARFormatDocument.pdf
+- freedesktop.org, *Shared MIME-info Database* —
+  https://specifications.freedesktop.org/shared-mime-info-spec/latest-single/
+- Wikipedia, *ZIP (file format)* — compression methods and the change from ID 20 to 93
+  for Zstandard — https://en.wikipedia.org/wiki/ZIP_(file_format)
+- crate `zip` — https://docs.rs/zip/latest/zip/enum.CompressionMethod.html
+- crate `blake3` — https://docs.rs/blake3
+- Original source code: `/home/user/xara-xtreme/Kernel/cxftags.h` (209 tags),
+  `Kernel/fillval.h` (`FILLSHAPE_*`, `RepeatType`, `TranspType`),
+  `Kernel/nodershp.h` (`NodeRegularShape`), `Kernel/doccoord.h` (millipoints),
+  `Mime/xaralx.xml`, `xaralx.desktop`.

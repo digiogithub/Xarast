@@ -34,7 +34,7 @@ All of it survives a save to `.xarast`, a reload, and a re-edit.
 | Blend (including blend on a path) | Blend | `research/02 §6.6` |
 | Mould: envelope 4×4, envelope 2×2, perspective | Mould | `research/02 §6.7` |
 | Fractal (clouds) and noise (plasma) fills | Fractal fills | `research/02 §5.8`, `research/03 §2.8` |
-| The 12 transparency blend families as LUT compositing | — | `research/03 §2.7`, §3.4 |
+| The 12 transparency blend families — **completion and verification only**; Phase 4 M2 implements them and Phase 8 exposes them (see workstream I) | — | `research/03 §2.7`, §3.4 |
 | `.xar` import and `.xarast` read/write for all of the above | — | `research/06 §6.8` |
 | Tools and on-canvas interaction for each | — | `research/04 §1.10` |
 
@@ -42,7 +42,7 @@ All of it survives a save to `.xarast`, a reload, and a re-edit.
 
 | Out of scope | Owner / reason |
 |---|---|
-| ClipView | **Already shipped.** `research/04 §1.10` marks it P1 and it lands with Phase 7/8 structure work. If it has not, it is pulled into Phase 13 as a prerequisite, not as new scope |
+| ClipView | **Unowned as of writing** — no earlier phase document claims it, although `research/04 §1.10` marks it P1 and it belongs with Phase 7's structure operations. It is a live controller of exactly this shape (`research/02 §6.11`) and rides on workstream A's infrastructure. **Rule:** if Phase 7 or 8 has not delivered it when Phase 13 opens, Phase 13 adopts it as three extra tasks in workstream A (params + clip-region rendering + the Apply/Remove ClipView commands, roughly S+M+S), not as a new workstream — and this row is updated to say so |
 | XPE / external bitmap plug-in bridge, legacy effects | **Never.** `research/04 §2.3` and §7: depends on a plug-in ecosystem that does not exist on Linux; zero current value |
 | A generic user-visible effect stack with arbitrary chained bitmap effects | **Phase 15 at the earliest.** The `<xarast:effects>` chain of `research/06 §6.8.7` is *written and preserved* in this phase but only the effect kinds implemented here are generated |
 | Brushes and stroke types (`NodeBrush`, `BrushParams`) | Post-1.0. It shares `LiveKind` but is its own subsystem (`research/04 §2.3`) |
@@ -124,8 +124,8 @@ sampling. The queue collapses them, and the flush happens once, immediately befo
 | B7 | Radius clamping and the resolution policy: radius is in document units, converted per view; clamp to the original's 100 px ceiling at generation resolution and document what happens above it | `xarast-render` | M | B4 |
 | B8 | Profile application to the blurred alpha (`Profile::map` as a 256-entry transfer table over the alpha channel) | `xarast-render` | M | B4 |
 | B9 | Layer cache: offscreen results keyed by `(node content hash, quantised pixel width, quality, variant)`, LRU-by-cost, sharing the Phase 4 budget | `xarast-render` | M | B2 |
-| B10 | Destination-read compositing: ping-pong tiles for the exotic blend families, with the display list marking `needs_dst_read` | `xarast-render` | L | — |
-| B11 | The 12 blend families as 256×256 R8 LUT textures (GPU) and the identical tables in the CPU compositor, generated once from a single source of truth | `xarast-render` | L | B10 |
+| B10 | Destination-read compositing: ping-pong tiles for the exotic blend families, with the display list marking `needs_dst_read`. **Phase 4 (render milestone M2) owns this**; the task here is to confirm it holds for offscreen layers and to finish it if it does not | `xarast-render` | L | — |
+| B11 | The 12 blend families as 256×256 R8 LUT textures (GPU) and the identical tables in the CPU compositor, generated once from a single source of truth. **Also Phase 4 M2**; here it must additionally serve the `Bevel` family, which had no producer until workstream D | `xarast-render` | L | B10 |
 | B12 | Bit-exact CPU↔GPU parity test for every family at Final quality | `xarast-render` | M | B11 |
 
 This workstream is the reason the phase is ordered the way it is: **shadow, feather, bevel and
@@ -159,7 +159,7 @@ the *intermediate* precision is ours.
 
 | ID | Task | Crate | Size | Depends on |
 |---|---|---|---|---|
-| C1 | `ShadowParams { kind: Wall|Floor|Glow|Inner, offset, blur, darkness, profile, scale, tilt, colour }` and its controller | `xarast-doc` | M | A1 |
+| C1 | `ShadowParams { kind: Wall\|Floor\|Glow\|Inner, offset, blur, darkness, profile, scale, tilt, colour }` and its controller | `xarast-doc` | M | A1 |
 | C2 | Wall shadow generation: alpha layer → disc blur → profile → flood colour → composite behind the source | `xarast-render` | M | B4 |
 | C3 | Floor shadow: the perspective/skew transform of the silhouette before blurring, parameterised by scale and tilt | `xarast-render`, `xarast-geom` | L | C2 |
 | C4 | Glow: no offset, optional dilation before blur | `xarast-render` | M | C2 |
@@ -328,9 +328,19 @@ State that limitation in the `.xar` import notes and in the user manual.
 
 ### I. Advanced transparency blend modes
 
+**Ownership, stated plainly.** `docs/phases/phase-08-colour-fills-transparency.md` records
+that the 12 families are implemented by Phase 4 (render milestone M2) and exposed in the
+transparency infobar by Phase 8. Phase 13 therefore does **not** implement them from scratch;
+it closes what those phases necessarily leave open: the `Bevel` family (which had no producer
+until workstream D exists), any family not exposed because it had no consumer, the empirical
+grey-conversion weights that every luminance-based family depends on, and bit-exact CPU↔GPU
+parity for all families **through the offscreen-layer path** that live effects introduce — a
+code path Phase 4 never exercised. If Phases 4 and 8 delivered everything else, workstream I
+collapses to I3, I5 and verification, and that is a good outcome, not a gap.
+
 | ID | Task | Crate | Size | Depends on |
 |---|---|---|---|---|
-| I1 | `Transparency { family: BlendFamily, source: Flat|Gradient|Image }` in the document model, covering all 12 families | `xarast-doc` | M | — |
+| I1 | `Transparency { family: BlendFamily, source: Flat\|Gradient\|Image }` in the document model, covering all 12 families | `xarast-doc` | M | — |
 | I2 | LUT generation from one shared source of truth, consumed by both backends (B11) | `xarast-render` | M | B11 |
 | I3 | Recover the grey-conversion weights empirically (render a Darken over a known gradient in the original and fit), then freeze them | `xarast-render` | M | — |
 | I4 | Graduated and bitmap-sourced transparency for every family, with bias/gain profiles and multi-stop ramps | `xarast-render` | M | I1 |

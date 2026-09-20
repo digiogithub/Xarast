@@ -12,3 +12,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+slotmap = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "colour"
+harness = false

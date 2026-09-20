@@ -33,8 +33,9 @@ decision about geometry, the document model or rendering, it is out of scope.
   dependency graph, and each compiling with zero warnings.
 - **1 non-shipping crate**, `xarast-testkit` (`publish = false`), used only as a
   `dev-dependency`. It holds the corpus fixture, the golden-image comparator and
-  the deterministic RNG helpers. It is *not* a fourteenth product crate: it never
-  appears in the dependency graph of any binary we ship, and CI asserts that.
+  the deterministic RNG helpers. `docs/10-architecture.md §2` lists it in the
+  crate table, but it is not a product crate: it never appears in the dependency
+  graph of any binary we ship, and CI asserts that.
 - **Tooling config**: `rustfmt.toml`, lint policy, `deny.toml` (already present,
   extended), `rust-toolchain.toml`, `.cargo/config.toml`.
 - **CI**: `.github/workflows/ci.yml` (check gate) and
@@ -670,8 +671,9 @@ pub mod budget {
 ## Acceptance criteria
 
 1. `cargo build --workspace --all-targets` succeeds from a clean checkout with
-   `--locked`, and `cargo tree -e no-dev --workspace` lists exactly 13 product
-   crates plus their external dependencies.
+   `--locked`, and `cargo tree -e no-dev --workspace` lists exactly the 13
+   product crates of `10-architecture.md §2` plus their external dependencies —
+   `xarast-testkit` appears only under `-e dev`.
 2. `cargo fmt --all -- --check` exits 0.
 3. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
    exits 0.
@@ -806,7 +808,8 @@ Create and fill **`docs/memory/packaging.md`** from the template in
 - **Open TODOs.** aarch64 job promotion from `continue-on-error` to required
   (Phase 12). First-run MIME registration into `~/.local/share` (Phase 12).
   Flatpak as the second channel (Phase 12). The exact/perceptual golden gate
-  question (Phase 3/4). Real icon artwork (Phase 12).
+  question (`10-architecture.md §7` question 5, answered in Phase 4). Real icon
+  artwork (Phase 12).
 
 Also add a one-line "Phase 0 closed, see packaging.md" entry to
 `docs/memory/perf.md` with the two measured numbers (cold start, AppImage size),

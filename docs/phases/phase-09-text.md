@@ -332,7 +332,7 @@ faces (DejaVu, Liberation, Noto Sans Arabic / Devanagari / Thai / CJK subset)
 under `tests/fonts/`, and run golden renders with the system font path
 overridden to that directory only. Record this in `docs/memory/text.md`.
 
-## The acceptance fixture: `/home/user/xara-xtreme/TextDesigns/`
+### The acceptance fixture: `/home/user/xara-xtreme/TextDesigns/`
 
 Fourteen files. Each is a pass/fail gate for one part of this phase. The
 "exercises" column is the expected coverage; T9.7.1 confirms it against the

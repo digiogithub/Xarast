@@ -10,6 +10,24 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/digiogithub/Xarast"
 authors = ["The Xarast contributors"]
 
+# ── Shared dependency versions ───────────────────────────────────────────────
+# Every crate references these with `workspace = true`, so a version bump
+# happens in exactly one place and `cargo deny` sees a single graph.
+[workspace.dependencies]
+# Geometry. `kurbo` is the f64 curve library the whole stack (peniko, vello,
+# parley) is built around; `i_overlay` supplies polygon booleans with a
+# fixed-grid, bit-reproducible mode. Both are `MIT OR Apache-2.0`.
+kurbo = "0.13"
+i_overlay = "9.0"
+bitflags = "2.9"
+thiserror = "2.0"
+slotmap = "1.0"
+
+# Test and benchmark tooling.
+proptest = "1.7"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tiny-skia = "0.12"
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 missing_debug_implementations = "warn"
