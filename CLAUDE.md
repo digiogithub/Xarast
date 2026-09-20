@@ -24,9 +24,12 @@ repository is not.
   `claude/xara-xtreme-rust-port-ktggmu`). It is **read-only**: a normative
   reference for behaviour, never a codebase to translate.
 - Size of the original: `Kernel/` 559 `.cpp` + 627 `.h`; `wxOil/` 182 `.cpp`.
-- **`.xar` format**: defined in `Kernel/cxf*.{cpp,h}`; **211 tags** in
-  `Kernel/cxftags.h`. Real validation corpus in `xara-xtreme/testfiles/` and
-  `xara-xtreme/Designs/`.
+- **`.xar` format**: defined in `Kernel/cxf*.{cpp,h}`. `Kernel/cxftags.h`
+  defines **211** `TAG_*` names; counting `cxfdefs.h` and `basedoc.h` too there
+  are **433** distinct names, of which **300** have a documented wire meaning
+  and **157** actually occur in the corpus. The **59-file corpus** lives in
+  `xara-xtreme/{testfiles,Designs,Templates,TextDesigns}/` — used locally via
+  `XARAST_XAR_CORPUS`, **never copied into this repository**.
 - **Native `.xarast` format**: a ZIP container wrapping **SVG** plus
   deduplicated binary resources. Requirement: it must open with graceful
   degradation in a browser or Inkscape, and with full fidelity in Xarast.

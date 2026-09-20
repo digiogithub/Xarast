@@ -1,0 +1,420 @@
+//! Actions, transactions, the byte budget and the digest round trip.
+
+use std::sync::Arc;
+
+use crate::attr::AttrValue;
+use crate::history::{Action, CoalesceKey, Command, CommandBus, EditError, History, Tx};
+use crate::kind::NodeKind;
+use crate::resources::{BitmapData, BitmapInfo, BitmapResource, ResourceRef};
+use crate::tests::{black_fill, fixture, layer, path_node, square, white_fill};
+use crate::tree::{Attach, NodeFlags, NodeId};
+use xarast_geom::{Matrix, Mp, Point, Vector};
+
+struct Closure<F: Fn(&mut Tx<'_>) -> Result<(), EditError>> {
+    label: &'static str,
+    key: Option<CoalesceKey>,
+    f: F,
+}
+
+impl<F: Fn(&mut Tx<'_>) -> Result<(), EditError>> std::fmt::Debug for Closure<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Closure({})", self.label)
+    }
+}
+
+impl<F: Fn(&mut Tx<'_>) -> Result<(), EditError>> Command for Closure<F> {
+    fn label(&self) -> &'static str {
+        self.label
+    }
+    fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+        (self.f)(tx)
+    }
+    fn coalesce_key(&self) -> Option<CoalesceKey> {
+        self.key
+    }
+}
+
+/// A boxed command body, so that a table of cases can hold several shapes of
+/// closure at once.
+type Body = Box<dyn Fn(&mut Tx<'_>) -> Result<(), EditError>>;
+
+fn cmd<F: Fn(&mut Tx<'_>) -> Result<(), EditError>>(label: &'static str, f: F) -> Closure<F> {
+    Closure {
+        label,
+        key: None,
+        f,
+    }
+}
+
+#[test]
+fn every_action_round_trips_through_undo_and_redo() {
+    let f = fixture();
+    let (layer_id, path, group, shape) = (f.layer, f.path, f.group, f.shape_a);
+    let mut doc = f.doc;
+    let mut bus = CommandBus::new();
+
+    let bitmap = doc.resources.insert_bitmap(BitmapResource {
+        name: Arc::from("b"),
+        info: BitmapInfo {
+            width: 2,
+            height: 2,
+            bpp: 32,
+            dpi_x: 96,
+            dpi_y: 96,
+        },
+        pixels: Arc::new(BitmapData {
+            pixels: Arc::from(vec![1u8, 2, 3, 4]),
+            palette: Arc::from(Vec::new()),
+        }),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    });
+
+    let cases: Vec<Body> = vec![
+        Box::new(move |tx: &mut Tx<'_>| {
+            let n = tx.create(layer("new"))?;
+            tx.attach(n, layer_id, Attach::LastChild)
+        }),
+        Box::new(move |tx: &mut Tx<'_>| tx.delete(path)),
+        Box::new(move |tx: &mut Tx<'_>| tx.set_kind(path, path_node(square(Point::raw(5, 5), 50)))),
+        Box::new(move |tx: &mut Tx<'_>| tx.set_flags(shape, NodeFlags::MAGNETIC)),
+        Box::new(move |tx: &mut Tx<'_>| {
+            tx.transform(group, Matrix::translate(Vector::raw(1_000, -2_000)))
+        }),
+        Box::new(move |tx: &mut Tx<'_>| tx.transform(group, Matrix::rotate(0.3))),
+        Box::new(move |tx: &mut Tx<'_>| tx.set_attr(f.group_fill, black_fill())),
+        Box::new(move |tx: &mut Tx<'_>| tx.move_node(shape, layer_id, Attach::FirstChild)),
+        Box::new(move |tx: &mut Tx<'_>| {
+            tx.set_resource(
+                ResourceRef::Bitmap(bitmap),
+                Arc::new(BitmapData {
+                    pixels: Arc::from(vec![9u8, 9, 9, 9]),
+                    palette: Arc::from(Vec::new()),
+                }),
+            )
+        }),
+    ];
+
+    for (i, case) in cases.iter().enumerate() {
+        let before = doc.canonical_digest();
+        bus.dispatch(&mut doc, &cmd("case", case)).unwrap();
+        let after = doc.canonical_digest();
+        doc.validate().assert_clean();
+        assert!(bus.history_mut().undo(&mut doc).is_some());
+        assert_eq!(
+            before,
+            doc.canonical_digest(),
+            "case {i}: undo did not restore the document byte for byte"
+        );
+        doc.validate().assert_clean();
+        assert!(bus.history_mut().redo(&mut doc).is_some());
+        assert_eq!(after, doc.canonical_digest(), "case {i}: redo diverged");
+        assert!(bus.history_mut().undo(&mut doc).is_some());
+        assert_eq!(before, doc.canonical_digest(), "case {i}: second undo");
+        bus.history_mut().clear(&mut doc);
+    }
+}
+
+#[test]
+fn a_command_that_fails_halfway_changes_nothing() {
+    let mut f = fixture();
+    let before = f.doc.canonical_digest();
+    let mut bus = CommandBus::new();
+    let layer_id = f.layer;
+    let path = f.path;
+    let r = bus.dispatch(
+        &mut f.doc,
+        &cmd("half", move |tx: &mut Tx<'_>| {
+            let n = tx.create(layer("a"))?;
+            tx.attach(n, layer_id, Attach::LastChild)?;
+            tx.set_flags(path, NodeFlags::MAGNETIC)?;
+            tx.delete(path)?;
+            // Now fail.
+            Err(EditError::LimitExceeded("deliberate"))
+        }),
+    );
+    assert!(r.is_err());
+    assert_eq!(
+        before,
+        f.doc.canonical_digest(),
+        "a rolled-back command must leave the document untouched"
+    );
+    f.doc.validate().assert_clean();
+    assert!(!bus.history().can_undo());
+}
+
+#[test]
+fn dropping_a_transaction_rolls_it_back() {
+    let mut f = fixture();
+    let before = f.doc.canonical_digest();
+    {
+        let mut tx = Tx::begin(&mut f.doc);
+        tx.delete(f.path).unwrap();
+        tx.set_flags(f.shape_a, NodeFlags::LOCKED).unwrap();
+        // Dropped without commit.
+    }
+    assert_eq!(before, f.doc.canonical_digest());
+}
+
+#[test]
+fn the_history_budget_is_in_bytes_and_eviction_destroys_what_it_retained() {
+    let mut f = fixture();
+    let mut history = History::with_budget(4 * 1024);
+    let mut retained_first = None;
+    for i in 0..40 {
+        let node = f
+            .doc
+            .tree
+            .create(path_node(square(Point::raw(i, i), 1_000)));
+        f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
+        let mut tx = Tx::begin(&mut f.doc);
+        tx.delete(node).unwrap();
+        let t = tx.commit("delete");
+        if retained_first.is_none() {
+            retained_first = Some(node);
+        }
+        history.commit(&mut f.doc, t);
+    }
+    assert!(
+        history.bytes_used() <= 4 * 1024,
+        "the budget is a budget: {} bytes used",
+        history.bytes_used()
+    );
+    let first = retained_first.unwrap();
+    assert!(
+        !f.doc.tree.contains(first),
+        "eviction is what finally destroys a retained node"
+    );
+    f.doc.validate().assert_clean();
+}
+
+#[test]
+fn a_gesture_coalesces_into_one_undo_step() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let before = f.doc.canonical_digest();
+    let group = f.group;
+    let g = bus.begin_gesture();
+    for _ in 0..50 {
+        bus.dispatch(
+            &mut f.doc,
+            &cmd("drag", move |tx: &mut Tx<'_>| {
+                tx.transform(group, Matrix::translate(Vector::raw(10, 10)))
+            }),
+        )
+        .unwrap();
+    }
+    bus.end_gesture(g);
+    assert_eq!(
+        bus.history().len(),
+        1,
+        "fifty drag events are one undo step"
+    );
+    bus.history_mut().undo(&mut f.doc);
+    assert_eq!(before, f.doc.canonical_digest());
+}
+
+#[test]
+fn without_a_gesture_each_command_is_its_own_step() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let group = f.group;
+    for _ in 0..5 {
+        bus.dispatch(
+            &mut f.doc,
+            &cmd("nudge", move |tx: &mut Tx<'_>| {
+                tx.transform(group, Matrix::translate(Vector::raw(10, 0)))
+            }),
+        )
+        .unwrap();
+    }
+    assert_eq!(bus.history().len(), 5);
+}
+
+#[test]
+fn undoing_everything_and_redoing_everything_returns_both_digests() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let start = f.doc.canonical_digest();
+    let (layer_id, group, path) = (f.layer, f.group, f.path);
+    let steps: Vec<Body> = vec![
+        Box::new(move |tx: &mut Tx<'_>| {
+            let n = tx.create(layer("x"))?;
+            tx.attach(n, layer_id, Attach::LastChild)
+        }),
+        Box::new(move |tx: &mut Tx<'_>| tx.transform(group, Matrix::translate(Vector::raw(7, 7)))),
+        Box::new(move |tx: &mut Tx<'_>| tx.delete(path)),
+        Box::new(move |tx: &mut Tx<'_>| tx.set_attr(f.group_fill, white_fill())),
+        Box::new(move |tx: &mut Tx<'_>| tx.set_flags(group, NodeFlags::LOCKED)),
+    ];
+    for s in &steps {
+        bus.dispatch(&mut f.doc, &cmd("step", s)).unwrap();
+    }
+    let end = f.doc.canonical_digest();
+    while bus.history_mut().undo(&mut f.doc).is_some() {}
+    assert_eq!(start, f.doc.canonical_digest());
+    while bus.history_mut().redo(&mut f.doc).is_some() {}
+    assert_eq!(end, f.doc.canonical_digest());
+}
+
+#[test]
+fn a_locked_node_refuses_to_be_edited() {
+    let mut f = fixture();
+    f.doc
+        .tree
+        .get_mut(f.shape_a)
+        .unwrap()
+        .flags
+        .insert(NodeFlags::LOCKED);
+    let mut bus = CommandBus::new();
+    let shape = f.shape_a;
+    let r = bus.dispatch(
+        &mut f.doc,
+        &cmd("move", move |tx: &mut Tx<'_>| tx.delete(shape)),
+    );
+    assert!(matches!(r, Err(EditError::NotPermitted(_))));
+}
+
+#[test]
+fn inverse_is_computed_from_the_pre_apply_document() {
+    let f = fixture();
+    let doc = f.doc;
+    let a = Action::SetAttr {
+        node: f.group_fill,
+        new: Arc::new(black_fill()),
+    };
+    let inv = a.inverse(&doc);
+    match inv {
+        Action::SetAttr { new, .. } => assert_eq!(&*new, &white_fill()),
+        other => panic!("wrong inverse: {other:?}"),
+    }
+}
+
+#[test]
+fn a_translation_inverts_exactly_rather_than_snapshotting() {
+    let f = fixture();
+    let a = Action::Transform {
+        node: f.path,
+        matrix: Matrix::translate(Vector::new(Mp::new(13), Mp::new(-21))),
+    };
+    assert!(
+        matches!(a.inverse(&f.doc), Action::Transform { .. }),
+        "an exact integer translation must not cost a payload snapshot"
+    );
+    let b = Action::Transform {
+        node: f.path,
+        matrix: Matrix::scale(1.5, 1.5),
+    };
+    assert!(
+        matches!(b.inverse(&f.doc), Action::SetKind { .. }),
+        "anything lossy must snapshot instead, or undo stops being exact"
+    );
+}
+
+#[test]
+fn a_snapshot_round_trips_the_document() {
+    let mut f = fixture();
+    let before = f.doc.canonical_digest();
+    let snap = f.doc.snapshot();
+    let n = f.doc.tree.create(layer("scratch"));
+    f.doc.tree.attach(n, f.layer, Attach::LastChild).unwrap();
+    assert_ne!(before, f.doc.canonical_digest());
+    f.doc.restore(&snap);
+    assert_eq!(
+        before,
+        f.doc.canonical_digest(),
+        "a checkpoint must restore the document exactly"
+    );
+    f.doc.validate().assert_clean();
+}
+
+#[test]
+fn resources_are_deduplicated_by_content() {
+    let mut f = fixture();
+    let make = || BitmapResource {
+        name: Arc::from("same"),
+        info: BitmapInfo {
+            width: 4,
+            height: 1,
+            bpp: 32,
+            dpi_x: 96,
+            dpi_y: 96,
+        },
+        pixels: Arc::new(BitmapData {
+            pixels: Arc::from(vec![7u8; 16]),
+            palette: Arc::from(Vec::new()),
+        }),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    };
+    let a = f.doc.resources.insert_bitmap(make());
+    let b = f.doc.resources.insert_bitmap(make());
+    assert_eq!(a, b, "the same content must give the same id");
+    assert_eq!(f.doc.resources.counts().0, 1);
+}
+
+#[test]
+fn collect_unused_keeps_what_a_retained_node_still_references() {
+    let mut f = fixture();
+    let id = f.doc.resources.insert_bitmap(BitmapResource {
+        name: Arc::from("b"),
+        info: BitmapInfo::default(),
+        pixels: Arc::new(BitmapData::default()),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    });
+    let node = f
+        .doc
+        .tree
+        .create(NodeKind::Bitmap(Box::new(crate::kind::BitmapNode {
+            image: id,
+            origin: Point::ORIGIN,
+            major: Vector::raw(1, 0),
+            minor: Vector::raw(0, 1),
+        })));
+    f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
+
+    let mut history = History::default();
+    let mut tx = Tx::begin(&mut f.doc);
+    tx.delete(node).unwrap();
+    let t = tx.commit("delete bitmap");
+    history.commit(&mut f.doc, t);
+
+    assert_eq!(
+        crate::resources::collect_unused(&mut f.doc),
+        0,
+        "a node the history retains must keep its resources"
+    );
+
+    history.clear(&mut f.doc);
+    assert_eq!(
+        crate::resources::collect_unused(&mut f.doc),
+        1,
+        "once the transaction is gone the resource is an orphan"
+    );
+}
+
+/// Node ids are kept out of the digest on purpose; this pins that down.
+#[test]
+fn the_digest_ignores_allocation_order() {
+    let mut a = crate::Document::new_empty();
+    let mut b = crate::Document::new_empty();
+    // Churn b's arena so its keys differ.
+    for _ in 0..10 {
+        let n: NodeId = b.tree.create(layer("scratch"));
+        b.tree.destroy_subtree(n);
+    }
+    assert_eq!(a.canonical_digest(), b.canonical_digest());
+    let _ = &mut a;
+}
+
+#[test]
+fn an_attribute_value_blends_where_it_can_and_says_so_where_it_cannot() {
+    let a = AttrValue::LineWidth(Mp::new(0));
+    let b = AttrValue::LineWidth(Mp::new(1_000));
+    assert_eq!(a.blend(&b, 0.5), Some(AttrValue::LineWidth(Mp::new(500))));
+    assert_eq!(black_fill().blend(&white_fill(), 0.5), None);
+}

@@ -22,6 +22,22 @@ i_overlay = "9.0"
 bitflags = "2.9"
 thiserror = "2.0"
 slotmap = "1.0"
+smallvec = "1.16"
+# Persistent HAMT, used ONLY for history checkpoints (a snapshot *over* the
+# arena) and for the arena-vs-persistent benchmark of
+# `docs/10-architecture.md` §3.1. MPL-2.0, used unmodified: see deny.toml.
+imbl = "7.0"
+
+# `.xar` physical layer. flate2 gives raw DEFLATE (`windowBits = -15`) and the
+# zlib CRC-32 the format's compressed blocks are checksummed with. Default
+# backend is pure-Rust miniz_oxide, so there is no C dependency and no `unsafe`
+# of ours. `MIT OR Apache-2.0`.
+flate2 = "1.1"
+
+# SHA-256: corpus lock verification in tests, `Document::canonical_digest()`
+# and content-hash deduplication of bitmap resources. RustCrypto,
+# `MIT OR Apache-2.0`.
+sha2 = "0.10"
 
 # Test and benchmark tooling.
 proptest = "1.7"

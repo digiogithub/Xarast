@@ -1,0 +1,958 @@
+//! Actions, transactions, the undo log and the command bus.
+//!
+//! # Why the inverse is computed before the action applies
+//!
+//! [`Action::inverse`] takes `&Document`, so it physically cannot read
+//! post-apply state. The inverse of "set this node's kind" needs the old kind,
+//! and after applying, the old kind is gone. Making that a type-level fact
+//! rather than a convention is the cheapest defence against the worst failure
+//! mode in this crate: a wrong inverse corrupts documents silently.
+//!
+//! # Why the budget is in bytes
+//!
+//! A hundred keyboard nudges cost nothing and one "delete the 40 MB bitmap
+//! layer" costs everything. A step count cannot tell them apart; a byte budget
+//! can, and eviction is also what finally destroys the nodes a transaction was
+//! retaining.
+
+use std::sync::Arc;
+
+use xarast_geom::Matrix;
+
+use crate::Document;
+use crate::attr::AttrValue;
+use crate::kind::NodeKind;
+use crate::resources::{BitmapData, ResourceRef};
+use crate::tree::{Attach, NodeFlags, NodeId, Tree, TreeError};
+
+/// What can go wrong during an edit.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EditError {
+    /// The tree refused the relink.
+    #[error(transparent)]
+    Tree(#[from] TreeError),
+    /// The node is locked, or it is generated and so not directly editable.
+    #[error("the operation is not permitted on {0:?} (locked, or a generated node)")]
+    NotPermitted(NodeId),
+    /// The resource does not exist.
+    #[error("resource {0:?} does not exist")]
+    MissingResource(ResourceRef),
+    /// A build or history limit was hit.
+    #[error("limit exceeded: {0}")]
+    LimitExceeded(&'static str),
+    /// The action does not apply to that node.
+    #[error("action does not apply to {0:?}")]
+    WrongKind(NodeId),
+}
+
+/// An atomic, invertible change.
+#[derive(Clone, Debug)]
+pub enum Action {
+    /// Link a detached node into the tree.
+    Attach {
+        /// The node.
+        node: NodeId,
+        /// What it attaches to.
+        anchor: NodeId,
+        /// Where relative to the anchor.
+        how: Attach,
+    },
+    /// Unlink a node from the tree, keeping it alive.
+    Detach {
+        /// The node.
+        node: NodeId,
+        /// Where it was, so that the inverse can put it back.
+        prev_anchor: NodeId,
+        /// How it was attached.
+        prev_how: Attach,
+    },
+    /// Replace a node's payload.
+    SetKind {
+        /// The node.
+        node: NodeId,
+        /// The new payload.
+        new: Box<NodeKind>,
+    },
+    /// Replace a node's flags.
+    SetFlags {
+        /// The node.
+        node: NodeId,
+        /// The new flags.
+        new: NodeFlags,
+    },
+    /// Move a node's own geometry through a matrix. Children are unaffected;
+    /// [`Tx::transform`] expands a subtree into one action per node.
+    Transform {
+        /// The node.
+        node: NodeId,
+        /// The transform.
+        matrix: Matrix,
+    },
+    /// Replace an attribute node's value.
+    SetAttr {
+        /// The attribute node.
+        node: NodeId,
+        /// The new value.
+        new: Arc<AttrValue>,
+    },
+    /// Replace a bitmap resource's pixels.
+    SetResource {
+        /// Which resource.
+        id: ResourceRef,
+        /// The new pixels, or `None` to leave them.
+        new: Option<Arc<BitmapData>>,
+    },
+    /// Several actions that undo as one.
+    Batch(Vec<Action>),
+}
+
+impl Action {
+    pub(crate) fn apply(&self, doc: &mut Document) -> Result<(), EditError> {
+        match self {
+            Action::Attach { node, anchor, how } => {
+                doc.tree.attach(*node, *anchor, *how)?;
+            }
+            Action::Detach { node, .. } => {
+                doc.tree.detach(*node)?;
+            }
+            Action::SetKind { node, new } => {
+                let n = doc
+                    .tree
+                    .get_mut(*node)
+                    .ok_or(TreeError::NoSuchNode(*node))?;
+                n.kind = (**new).clone();
+                doc.tree.invalidate_bounds(*node);
+            }
+            Action::SetFlags { node, new } => {
+                let detached = doc
+                    .tree
+                    .get(*node)
+                    .map(|n| n.flags.contains(NodeFlags::DETACHED))
+                    .ok_or(TreeError::NoSuchNode(*node))?;
+                let n = doc
+                    .tree
+                    .get_mut(*node)
+                    .ok_or(TreeError::NoSuchNode(*node))?;
+                // `DETACHED` belongs to the tree, not to the caller.
+                n.flags = (*new & !NodeFlags::DETACHED)
+                    | if detached {
+                        NodeFlags::DETACHED
+                    } else {
+                        NodeFlags::empty()
+                    };
+            }
+            Action::Transform { node, matrix } => {
+                let n = doc
+                    .tree
+                    .get_mut(*node)
+                    .ok_or(TreeError::NoSuchNode(*node))?;
+                transform_kind(&mut n.kind, *matrix);
+                doc.tree.invalidate_bounds(*node);
+            }
+            Action::SetAttr { node, new } => {
+                let n = doc
+                    .tree
+                    .get_mut(*node)
+                    .ok_or(TreeError::NoSuchNode(*node))?;
+                match &mut n.kind {
+                    NodeKind::Attr(a) => a.value = (**new).clone(),
+                    _ => return Err(EditError::WrongKind(*node)),
+                }
+                doc.tree.invalidate_bounds(*node);
+            }
+            Action::SetResource { id, new } => {
+                let ResourceRef::Bitmap(b) = id else {
+                    return Err(EditError::MissingResource(*id));
+                };
+                doc.resources
+                    .replace_bitmap_pixels(*b, new.clone())
+                    .ok_or(EditError::MissingResource(*id))?;
+            }
+            Action::Batch(actions) => {
+                for a in actions {
+                    a.apply(doc)?;
+                }
+            }
+        }
+        doc.attrs.invalidate_all();
+        doc.epoch = doc.epoch.next();
+        Ok(())
+    }
+
+    /// The action that undoes this one, computed **before** it applies.
+    #[must_use]
+    pub fn inverse(&self, doc: &Document) -> Action {
+        match self {
+            Action::Attach { node, anchor, how } => {
+                // Undoing an attach is a detach; the anchor it records is
+                // where the node will be *after* the attach, which is what its
+                // own inverse needs.
+                Action::Detach {
+                    node: *node,
+                    prev_anchor: *anchor,
+                    prev_how: *how,
+                }
+            }
+            Action::Detach { node, .. } => match doc.tree.anchor_of(*node) {
+                Some((anchor, how)) => Action::Attach {
+                    node: *node,
+                    anchor,
+                    how,
+                },
+                None => Action::Batch(Vec::new()),
+            },
+            Action::SetKind { node, .. } => match doc.tree.get(*node) {
+                Some(n) => Action::SetKind {
+                    node: *node,
+                    new: Box::new(n.kind.clone()),
+                },
+                None => Action::Batch(Vec::new()),
+            },
+            Action::SetFlags { node, .. } => match doc.tree.get(*node) {
+                Some(n) => Action::SetFlags {
+                    node: *node,
+                    new: n.flags,
+                },
+                None => Action::Batch(Vec::new()),
+            },
+            Action::Transform { node, matrix } => {
+                // A pure translation in millipoints inverts exactly, so undo
+                // is cheap. Anything else would go through a float inverse and
+                // requantise, which would break byte-identical undo, so we
+                // snapshot the payload instead.
+                if matrix.is_translation_only() {
+                    Action::Transform {
+                        node: *node,
+                        matrix: Matrix::translate(xarast_geom::Vector::new(
+                            matrix.e.saturating_neg(),
+                            matrix.f.saturating_neg(),
+                        )),
+                    }
+                } else {
+                    match doc.tree.get(*node) {
+                        Some(n) => Action::SetKind {
+                            node: *node,
+                            new: Box::new(n.kind.clone()),
+                        },
+                        None => Action::Batch(Vec::new()),
+                    }
+                }
+            }
+            Action::SetAttr { node, .. } => match doc.tree.get(*node) {
+                Some(n) => match &n.kind {
+                    NodeKind::Attr(a) => Action::SetAttr {
+                        node: *node,
+                        new: Arc::new(a.value.clone()),
+                    },
+                    _ => Action::Batch(Vec::new()),
+                },
+                None => Action::Batch(Vec::new()),
+            },
+            Action::SetResource { id, .. } => {
+                let old = match id {
+                    ResourceRef::Bitmap(b) => doc.resources.bitmap(*b).map(|r| r.pixels.clone()),
+                    _ => None,
+                };
+                Action::SetResource { id: *id, new: old }
+            }
+            Action::Batch(actions) => {
+                let mut out = Vec::with_capacity(actions.len());
+                for a in actions.iter().rev() {
+                    out.push(a.inverse(doc));
+                }
+                Action::Batch(out)
+            }
+        }
+    }
+
+    /// An estimate of the bytes the action makes the history retain.
+    #[must_use]
+    pub fn size_hint(&self, doc: &Document) -> usize {
+        let base = size_of::<Action>();
+        base + match self {
+            Action::Detach { node, .. } => subtree_bytes(&doc.tree, *node),
+            Action::SetKind { new, .. } => new.size_hint(),
+            Action::SetAttr { new, .. } => new.size_hint(),
+            Action::SetResource { new, .. } => new
+                .as_ref()
+                .map_or(0, |p| p.pixels.len() + p.palette.len() * 4),
+            Action::Batch(a) => a.iter().map(|x| x.size_hint(doc)).sum(),
+            _ => 0,
+        }
+    }
+
+    /// The nodes this action detaches, and which the transaction must keep
+    /// alive.
+    fn retains(&self, out: &mut Vec<NodeId>) {
+        match self {
+            Action::Detach { node, .. } => out.push(*node),
+            Action::Batch(a) => {
+                for x in a {
+                    x.retains(out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn subtree_bytes(tree: &Tree, id: NodeId) -> usize {
+    tree.preorder(id)
+        .filter_map(|n| tree.get(n))
+        .map(|d| size_of::<crate::tree::NodeData>() + d.kind.size_hint())
+        .sum()
+}
+
+/// Moves a node's own geometry through a matrix.
+fn transform_kind(kind: &mut NodeKind, m: Matrix) {
+    match kind {
+        NodeKind::Path(p) => {
+            let t = p.data.transformed(m);
+            p.data = Arc::new(t);
+        }
+        NodeKind::Shape(s) => {
+            s.origin = m.transform_point(s.origin);
+            s.major = m.transform_vector(s.major);
+            s.minor = m.transform_vector(s.minor);
+        }
+        NodeKind::QuickShape(q) => {
+            q.centre = m.transform_point(q.centre);
+            q.major = m.transform_vector(q.major);
+            q.minor = m.transform_vector(q.minor);
+            if let Some(p) = &q.path {
+                q.path = Some(Arc::new(p.transformed(m)));
+            }
+        }
+        NodeKind::Bitmap(b) => {
+            b.origin = m.transform_point(b.origin);
+            b.major = m.transform_vector(b.major);
+            b.minor = m.transform_vector(b.minor);
+        }
+        NodeKind::TextStory(t) => {
+            t.transform = t.transform.then(m);
+        }
+        NodeKind::Attr(a) => {
+            if a.value.linked_to_geometry() {
+                a.value.transform(m);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One user-level operation: one undo step.
+#[derive(Debug)]
+pub struct Transaction {
+    /// What the UI calls it.
+    pub label: &'static str,
+    /// The inverses, in the order the forward actions were applied. Undo
+    /// applies them in reverse.
+    pub inverses: Vec<Action>,
+    /// Detached nodes this transaction keeps alive.
+    pub retained: Vec<NodeId>,
+    /// The estimated retained cost.
+    pub bytes: usize,
+    /// The key consecutive transactions merge on.
+    pub coalesce: Option<CoalesceKey>,
+}
+
+/// Two consecutive transactions with an equal key merge into one undo step.
+///
+/// The key is **gesture based**, not time based: a tool opens a gesture and
+/// closes it, so the merge is deterministic and therefore testable. A
+/// wall-clock window remains available behind the same API for the commands
+/// that have no gesture, such as keyboard nudges, which supply their own
+/// sequence number.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub struct CoalesceKey {
+    /// The gesture this command belongs to.
+    pub gesture: u64,
+    /// What sort of command it is; two different kinds never merge.
+    pub kind: &'static str,
+}
+
+/// Applies as it goes and records inverses.
+///
+/// Dropping without [`Tx::commit`] rolls back, so a command that fails halfway
+/// with `?` cannot leave a half-edited document. That is what removes the
+/// original's manual fail-and-execute dance.
+#[derive(Debug)]
+pub struct Tx<'d> {
+    doc: &'d mut Document,
+    inverses: Vec<Action>,
+    retained: Vec<NodeId>,
+    created: Vec<NodeId>,
+    bytes: usize,
+    committed: bool,
+}
+
+impl<'d> Tx<'d> {
+    /// Opens a transaction.
+    pub fn begin(doc: &'d mut Document) -> Tx<'d> {
+        Tx {
+            doc,
+            inverses: Vec::new(),
+            retained: Vec::new(),
+            created: Vec::new(),
+            bytes: 0,
+            committed: false,
+        }
+    }
+
+    /// The document, read only.
+    #[must_use]
+    pub fn doc(&self) -> &Document {
+        self.doc
+    }
+
+    /// Applies one action, recording its inverse.
+    pub fn act(&mut self, action: Action) -> Result<(), EditError> {
+        let inverse = action.inverse(self.doc);
+        self.bytes += action.size_hint(self.doc);
+        action.apply(self.doc)?;
+        action.retains(&mut self.retained);
+        self.inverses.push(inverse);
+        Ok(())
+    }
+
+    /// Creates a detached node.
+    ///
+    /// Creation is not itself undoable — the node simply stays detached and
+    /// unreachable if the transaction rolls back or is undone — which is why
+    /// it records no inverse. Attaching it does.
+    pub fn create(&mut self, kind: NodeKind) -> Result<NodeId, EditError> {
+        let id = self.doc.tree.create(kind);
+        self.created.push(id);
+        Ok(id)
+    }
+
+    /// Links a node into the tree.
+    pub fn attach(&mut self, node: NodeId, anchor: NodeId, how: Attach) -> Result<(), EditError> {
+        self.check_permitted(anchor)?;
+        self.act(Action::Attach { node, anchor, how })?;
+        self.keep_one_active_layer()
+    }
+
+    /// Deletes a node: detaches it and retains it for undo.
+    pub fn delete(&mut self, node: NodeId) -> Result<(), EditError> {
+        self.check_permitted(node)?;
+        let (anchor, how) = self
+            .doc
+            .tree
+            .anchor_of(node)
+            .ok_or(EditError::NotPermitted(node))?;
+        self.act(Action::Detach {
+            node,
+            prev_anchor: anchor,
+            prev_how: how,
+        })?;
+        self.keep_one_active_layer()
+    }
+
+    /// Moves a node somewhere else.
+    pub fn move_node(
+        &mut self,
+        node: NodeId,
+        anchor: NodeId,
+        how: Attach,
+    ) -> Result<(), EditError> {
+        self.check_permitted(node)?;
+        self.check_permitted(anchor)?;
+        let (prev_anchor, prev_how) = self
+            .doc
+            .tree
+            .anchor_of(node)
+            .ok_or(EditError::NotPermitted(node))?;
+        self.act(Action::Detach {
+            node,
+            prev_anchor,
+            prev_how,
+        })?;
+        self.act(Action::Attach { node, anchor, how })?;
+        self.keep_one_active_layer()
+    }
+
+    /// Replaces a node's payload.
+    pub fn set_kind(&mut self, node: NodeId, kind: NodeKind) -> Result<(), EditError> {
+        self.check_permitted(node)?;
+        self.act(Action::SetKind {
+            node,
+            new: Box::new(kind),
+        })?;
+        self.keep_one_active_layer()
+    }
+
+    /// Replaces a node's flags.
+    pub fn set_flags(&mut self, node: NodeId, flags: NodeFlags) -> Result<(), EditError> {
+        self.act(Action::SetFlags { node, new: flags })
+    }
+
+    /// Replaces an attribute node's value.
+    pub fn set_attr(&mut self, node: NodeId, value: AttrValue) -> Result<(), EditError> {
+        self.check_permitted(node)?;
+        self.act(Action::SetAttr {
+            node,
+            new: Arc::new(value),
+        })
+    }
+
+    /// Transforms a node and everything under it.
+    pub fn transform(&mut self, node: NodeId, m: Matrix) -> Result<(), EditError> {
+        self.check_permitted(node)?;
+        let nodes: Vec<NodeId> = self.doc.tree.preorder(node).collect();
+        let batch: Vec<Action> = nodes
+            .into_iter()
+            .map(|n| Action::Transform { node: n, matrix: m })
+            .collect();
+        self.act(Action::Batch(batch))
+    }
+
+    /// Replaces a bitmap resource's pixels.
+    pub fn set_resource(
+        &mut self,
+        id: ResourceRef,
+        pixels: Arc<BitmapData>,
+    ) -> Result<(), EditError> {
+        self.act(Action::SetResource {
+            id,
+            new: Some(pixels),
+        })
+    }
+
+    /// Restores "one spread, one active layer" as part of the same
+    /// transaction, so that undo puts the old active layer back too.
+    ///
+    /// The arena deliberately does **not** do this for itself: an automatic
+    /// change the undo log never saw is exactly how undo stops being exact.
+    /// Which layer is active is a policy, and policy belongs to commands.
+    fn keep_one_active_layer(&mut self) -> Result<(), EditError> {
+        let root = self.doc.tree.root();
+        let spreads: Vec<NodeId> = self
+            .doc
+            .tree
+            .preorder(root)
+            .filter(|id| matches!(self.doc.tree.kind(*id), Some(NodeKind::Spread(_))))
+            .collect();
+        for s in spreads {
+            let layers: Vec<NodeId> = self
+                .doc
+                .tree
+                .children(s)
+                .filter(|c| matches!(self.doc.tree.kind(*c), Some(NodeKind::Layer(_))))
+                .collect();
+            if layers.is_empty() {
+                continue;
+            }
+            let active: Vec<NodeId> = layers
+                .iter()
+                .copied()
+                .filter(|c| matches!(self.doc.tree.kind(*c), Some(NodeKind::Layer(l)) if l.active))
+                .collect();
+            if active.len() == 1 {
+                continue;
+            }
+            let chosen = layers
+                .iter()
+                .copied()
+                .find(|c| matches!(self.doc.tree.kind(*c), Some(NodeKind::Layer(l)) if !l.guide))
+                .unwrap_or(layers[0]);
+            for l in layers {
+                let Some(NodeKind::Layer(layer)) = self.doc.tree.kind(l) else {
+                    continue;
+                };
+                let want = l == chosen;
+                if layer.active == want {
+                    continue;
+                }
+                let mut next = layer.clone();
+                next.active = want;
+                self.act(Action::SetKind {
+                    node: l,
+                    new: Box::new(NodeKind::Layer(next)),
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_permitted(&self, node: NodeId) -> Result<(), EditError> {
+        let Some(n) = self.doc.tree.get(node) else {
+            return Err(EditError::Tree(TreeError::NoSuchNode(node)));
+        };
+        if n.flags.contains(NodeFlags::LOCKED) {
+            return Err(EditError::NotPermitted(node));
+        }
+        if let NodeKind::Live(l) = &n.kind
+            && l.role == crate::live::LiveRole::Generated
+        {
+            return Err(EditError::NotPermitted(node));
+        }
+        Ok(())
+    }
+
+    /// Closes the transaction and hands it to the caller to record.
+    #[must_use]
+    pub fn commit(mut self, label: &'static str) -> Transaction {
+        self.committed = true;
+        Transaction {
+            label,
+            inverses: std::mem::take(&mut self.inverses),
+            retained: std::mem::take(&mut self.retained),
+            bytes: self.bytes,
+            coalesce: None,
+        }
+    }
+
+    /// Undoes everything applied so far and closes the transaction.
+    pub fn rollback(mut self) {
+        self.undo_applied();
+        self.committed = true;
+    }
+
+    fn undo_applied(&mut self) {
+        let inverses = std::mem::take(&mut self.inverses);
+        for a in inverses.iter().rev() {
+            let _ = a.apply(self.doc);
+        }
+        let created = std::mem::take(&mut self.created);
+        for id in created {
+            if !self.doc.tree.is_reachable(id) {
+                self.doc.tree.destroy_subtree(id);
+            }
+        }
+    }
+}
+
+impl Drop for Tx<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.undo_applied();
+        }
+    }
+}
+
+/// The undo log.
+#[derive(Debug)]
+pub struct History {
+    past: Vec<Transaction>,
+    future: Vec<Transaction>,
+    bytes: usize,
+    budget: usize,
+    checkpoint_every: Option<usize>,
+    checkpoints: Vec<(usize, Arc<crate::Snapshot>)>,
+    committed: usize,
+}
+
+impl Default for History {
+    fn default() -> History {
+        History::with_budget(History::DEFAULT_BUDGET)
+    }
+}
+
+impl History {
+    /// 128 MiB.
+    pub const DEFAULT_BUDGET: usize = 128 << 20;
+
+    /// The cadence checkpointing uses when it is switched on.
+    ///
+    /// It is **off by default**, and that is a measured decision rather than
+    /// caution: a checkpoint builds a HAMT over the whole document, which on
+    /// a 100 000-node document costs about a hundred milliseconds. Taking one
+    /// every 64 edits put roughly 1.5 ms of amortised cost on *every* edit and
+    /// blew the phase's 1 ms undo budget on its own. Checkpoints are for
+    /// autosave, so from Phase 6 the autosave timer asks for them; the edit
+    /// path must not.
+    pub const DEFAULT_CHECKPOINT_EVERY: usize = 64;
+
+    /// An empty history with the given byte budget.
+    #[must_use]
+    pub fn with_budget(bytes: usize) -> History {
+        History {
+            past: Vec::new(),
+            future: Vec::new(),
+            bytes: 0,
+            budget: bytes,
+            checkpoint_every: None,
+            checkpoints: Vec::new(),
+            committed: 0,
+        }
+    }
+
+    /// Records a transaction, merging it into the last one when their coalesce
+    /// keys match.
+    pub fn commit(&mut self, doc: &mut Document, mut tx: Transaction) {
+        self.drop_future(doc);
+        let mergeable = matches!((self.past.last(), tx.coalesce),
+            (Some(last), Some(key)) if last.coalesce == Some(key));
+        self.bytes += tx.bytes;
+        if mergeable && let Some(last) = self.past.last_mut() {
+            last.inverses.append(&mut tx.inverses);
+            last.retained.append(&mut tx.retained);
+            last.bytes += tx.bytes;
+        } else {
+            self.past.push(tx);
+        }
+        self.committed += 1;
+        if let Some(every) = self.checkpoint_every
+            && every > 0
+            && self.committed.is_multiple_of(every)
+        {
+            self.checkpoints
+                .push((self.past.len(), Arc::new(doc.snapshot())));
+        }
+        self.evict_if_over_budget(doc);
+    }
+
+    /// Undoes the most recent transaction, returning its label.
+    pub fn undo(&mut self, doc: &mut Document) -> Option<&'static str> {
+        let tx = self.past.pop()?;
+        self.bytes = self.bytes.saturating_sub(tx.bytes);
+        let redo_inverses = apply_reversed(doc, &tx.inverses);
+        let label = tx.label;
+        let mut retained = Vec::new();
+        for a in &redo_inverses {
+            a.retains(&mut retained);
+        }
+        let bytes = tx.bytes;
+        self.future.push(Transaction {
+            label,
+            inverses: redo_inverses,
+            retained,
+            bytes,
+            coalesce: tx.coalesce,
+        });
+        Some(label)
+    }
+
+    /// Redoes the most recently undone transaction, returning its label.
+    pub fn redo(&mut self, doc: &mut Document) -> Option<&'static str> {
+        let tx = self.future.pop()?;
+        let undo_inverses = apply_reversed(doc, &tx.inverses);
+        let label = tx.label;
+        let mut retained = Vec::new();
+        for a in &undo_inverses {
+            a.retains(&mut retained);
+        }
+        self.bytes += tx.bytes;
+        self.past.push(Transaction {
+            label,
+            inverses: undo_inverses,
+            retained,
+            bytes: tx.bytes,
+            coalesce: tx.coalesce,
+        });
+        Some(label)
+    }
+
+    /// Whether there is anything to undo.
+    #[must_use]
+    pub fn can_undo(&self) -> bool {
+        !self.past.is_empty()
+    }
+
+    /// Whether there is anything to redo.
+    #[must_use]
+    pub fn can_redo(&self) -> bool {
+        !self.future.is_empty()
+    }
+
+    /// The undo labels, oldest first, and the redo labels, most recent first.
+    #[must_use]
+    pub fn labels(&self) -> (Vec<&'static str>, Vec<&'static str>) {
+        (
+            self.past.iter().map(|t| t.label).collect(),
+            self.future.iter().map(|t| t.label).collect(),
+        )
+    }
+
+    /// The estimated bytes the history retains.
+    #[must_use]
+    pub fn bytes_used(&self) -> usize {
+        self.bytes
+    }
+
+    /// The byte budget.
+    #[must_use]
+    pub fn budget(&self) -> usize {
+        self.budget
+    }
+
+    /// How many undo steps there are.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.past.len()
+    }
+
+    /// Whether there are no undo steps.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.past.is_empty()
+    }
+
+    /// Switches automatic checkpointing on, every `every` transactions.
+    ///
+    /// Off by default: see [`History::DEFAULT_CHECKPOINT_EVERY`].
+    pub fn set_checkpoint_cadence(&mut self, every: Option<usize>) {
+        self.checkpoint_every = every;
+    }
+
+    /// Takes a checkpoint now, whatever the cadence.
+    pub fn checkpoint(&mut self, doc: &Document) {
+        self.checkpoints
+            .push((self.past.len(), Arc::new(doc.snapshot())));
+    }
+
+    /// The checkpoints taken so far.
+    #[must_use]
+    pub fn checkpoints(&self) -> &[(usize, Arc<crate::Snapshot>)] {
+        &self.checkpoints
+    }
+
+    /// Forgets everything, destroying the nodes the history was retaining.
+    pub fn clear(&mut self, doc: &mut Document) {
+        let past = std::mem::take(&mut self.past);
+        let future = std::mem::take(&mut self.future);
+        for tx in past.into_iter().chain(future) {
+            reap(doc, &tx);
+        }
+        self.bytes = 0;
+        self.checkpoints.clear();
+    }
+
+    fn drop_future(&mut self, doc: &mut Document) {
+        let future = std::mem::take(&mut self.future);
+        for tx in future {
+            reap(doc, &tx);
+        }
+    }
+
+    fn evict_if_over_budget(&mut self, doc: &mut Document) {
+        while self.bytes > self.budget && !self.past.is_empty() {
+            let tx = self.past.remove(0);
+            self.bytes = self.bytes.saturating_sub(tx.bytes);
+            reap(doc, &tx);
+            let depth = self.past.len();
+            self.checkpoints.retain(|(at, _)| *at <= depth);
+        }
+    }
+}
+
+/// Destroys the nodes a discarded transaction was keeping alive.
+fn reap(doc: &mut Document, tx: &Transaction) {
+    for node in &tx.retained {
+        if doc.tree.contains(*node) && !doc.tree.is_reachable(*node) {
+            doc.tree.destroy_subtree(*node);
+        }
+    }
+}
+
+/// Applies `actions` in reverse order, returning the list that undoes what was
+/// just done — in the same "apply in reverse" convention, so the same function
+/// serves both undo and redo.
+fn apply_reversed(doc: &mut Document, actions: &[Action]) -> Vec<Action> {
+    let mut out = Vec::with_capacity(actions.len());
+    for a in actions.iter().rev() {
+        let inv = a.inverse(doc);
+        let _ = a.apply(doc);
+        out.push(inv);
+    }
+    out
+}
+
+/// A user-level operation. Tools implement this; tools never touch the arena.
+pub trait Command: core::fmt::Debug {
+    /// What the UI calls it.
+    fn label(&self) -> &'static str;
+
+    /// Does the work, through the transaction.
+    ///
+    /// # Errors
+    ///
+    /// Anything the transaction refuses. Returning `Err` rolls the whole
+    /// command back.
+    fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError>;
+
+    /// Consecutive commands with an equal key merge into one undo step.
+    fn coalesce_key(&self) -> Option<CoalesceKey> {
+        None
+    }
+}
+
+/// The only public way to change a document after it is built.
+#[derive(Debug, Default)]
+pub struct CommandBus {
+    history: History,
+    next_gesture: u64,
+    open_gesture: Option<u64>,
+}
+
+impl CommandBus {
+    /// A bus with the default history budget.
+    #[must_use]
+    pub fn new() -> CommandBus {
+        CommandBus::default()
+    }
+
+    /// A bus with a given history budget.
+    #[must_use]
+    pub fn with_budget(bytes: usize) -> CommandBus {
+        CommandBus {
+            history: History::with_budget(bytes),
+            next_gesture: 0,
+            open_gesture: None,
+        }
+    }
+
+    /// Runs a command and records it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the command returns. The document is left exactly as it was.
+    pub fn dispatch(
+        &mut self,
+        doc: &mut Document,
+        cmd: &dyn Command,
+    ) -> Result<&'static str, EditError> {
+        let mut tx = Tx::begin(doc);
+        if let Err(e) = cmd.run(&mut tx) {
+            tx.rollback();
+            return Err(e);
+        }
+        let mut transaction = tx.commit(cmd.label());
+        transaction.coalesce = cmd.coalesce_key().or_else(|| {
+            self.open_gesture.map(|g| CoalesceKey {
+                gesture: g,
+                kind: cmd.label(),
+            })
+        });
+        let label = transaction.label;
+        self.history.commit(doc, transaction);
+        Ok(label)
+    }
+
+    /// Opens a coalescing group. Every command dispatched until
+    /// [`CommandBus::end_gesture`] merges into one undo step.
+    pub fn begin_gesture(&mut self) -> u64 {
+        self.next_gesture += 1;
+        self.open_gesture = Some(self.next_gesture);
+        self.next_gesture
+    }
+
+    /// Closes a coalescing group.
+    pub fn end_gesture(&mut self, gesture: u64) {
+        if self.open_gesture == Some(gesture) {
+            self.open_gesture = None;
+        }
+    }
+
+    /// The undo log.
+    #[must_use]
+    pub fn history(&self) -> &History {
+        &self.history
+    }
+
+    /// The undo log, mutably.
+    pub fn history_mut(&mut self) -> &mut History {
+        &mut self.history
+    }
+}

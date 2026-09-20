@@ -99,9 +99,14 @@ is what actually scales on real documents.
 - Checkpoints: `imbl::HashMap<NodeId, Arc<NodeData>>` snapshots for autosave and
   session-persistent history, built *over* the arena.
 
-**This is provisional until measured.** Phase 1 ships a benchmark that walks a
-100,000-node document in both representations. The benchmark decides; the
-result is recorded in `docs/memory/document-model.md`.
+**Measured in Phase 2, and the arena stands.** The benchmark walks a
+100,000-node synthetic document in both representations
+(`crates/xarast-doc/examples/arena_vs_persistent.rs`), against the decision
+rule pre-registered in `docs/phases/phase-02-document-model.md` §W2.11. The
+HAMT lost every condition it had to win: 11× slower on traversal, 15× slower
+on lookup, and 7× *slower* on edit-then-undo rather than 5× faster; it was
+only inside the memory allowance. The numbers are in
+`docs/memory/document-model.md`. Question 1 of §7 is closed.
 
 ### 3.2 Node typing: enum, not trait objects
 
@@ -222,13 +227,13 @@ locks entirely.
 
 | # | Question | Decided by |
 |---|---|---|
-| 1 | Arena vs persistent store — confirm by measurement | Phase 2 benchmark |
+| 1 | ~~Arena vs persistent store — confirm by measurement~~ **Closed in Phase 2: the arena wins on every measure but memory, where it also wins.** | Phase 2 benchmark |
 | 2 | `egui` immediate mode at professional panel density | Phase 5 UI spike |
 | 3 | `winit 0.31-beta` pinning for tablet pressure — is the beta stable enough | Phase 5 |
 | 4 | Whether text on a path needs our own layout pass over `parley` | Phase 9 |
 | 5 | Is a perceptual diff or exact match the right golden-image gate | Phase 4 |
 
 Questions 2 to 5 were originally filed against the wrong phases; the phase
-documents that actually answer them are the ones listed above. Question 1 moves
+documents that actually answer them are the ones listed above. Question 1 moved
 from phase 1 to phase 2 because the document model, not the geometry crate, is
-what the benchmark measures.
+what the benchmark measures, and Phase 2 answered it.

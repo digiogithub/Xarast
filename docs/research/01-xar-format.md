@@ -526,10 +526,23 @@ many times the tag appears across the 59 `.xar` files analysed (0 = **not observ
 useful for prioritising). Every declared fixed size has been **verified against the actual
 observed sizes** and they match (§12.2).
 
-In total there are **300 tags defined** in `Kernel/cxftags.h`; **157 distinct ones**
-appear in the corpus.
+In total **300 tags** are catalogued below; **157 distinct ones** appear in the
+corpus.
 
-### 4.1. Master table (300 tags)
+> **Correction (verified 2026-09-20).** An earlier revision said these 300 were
+> all defined in `Kernel/cxftags.h`. They are not: that file defines **211**
+> `TAG_*` names. Counting `Kernel/cxfdefs.h` and `Kernel/basedoc.h` as well
+> gives **433** distinct `TAG_*` names in the original tree. The 300 here are
+> the ones with a known wire meaning, gathered from all three headers. Verify
+> with:
+> `grep -hoE '#define[[:space:]]+TAG_[A-Za-z0-9_]+' Kernel/*.h | awk '{print $2}' | sort -u | wc -l`
+>
+> Two tags are missing from the table below and are documented elsewhere in
+> this note: **`TAG_PATH_FLAGS` (111)**, which is 10.96 % of all corpus records
+> — see §7.5 — and **`TAG_TEXT_FONT_SIZE` (2906)** — see §4's text section.
+> Anyone implementing from the table alone would miss both.
+
+### 4.1. Master table
 
 | tag | symbolic name | size | corpus | description |
 |---:|---|---|---:|---|

@@ -6,7 +6,7 @@ note first and update it afterwards.
 | Note | Subsystem | Covers |
 |---|---|---|
 | `geometry.md` | Geometry & colour | Millipoints, paths, booleans, colour models, palettes |
-| `xar-import.md` | `.xar` importer | Tags implemented, format quirks, corpus files that still fail |
+| `xar-import.md` | `.xar` importer | Physical layer, tag coverage, format quirks, corpus acceptance numbers |
 | `document-model.md` | Document model | Node arena, attributes, invariants, undo |
 | `render.md` | Render engine | Pipeline, blend modes, caching, CPU/GPU decisions |
 | `xarast-format.md` | Native format | Versioning, round-trip, SVG extensions |

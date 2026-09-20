@@ -14,3 +14,17 @@ workspace = true
 [dependencies]
 xarast-geom = { path = "../xarast-geom" }
 xarast-color = { path = "../xarast-color" }
+bitflags = { workspace = true }
+imbl = { workspace = true }
+sha2 = { workspace = true }
+slotmap = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "doc"
+harness = false

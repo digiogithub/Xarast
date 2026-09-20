@@ -1,0 +1,67 @@
+[package]
+name = "xarast-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# Its own workspace: `cargo fuzz` needs nightly and a `-Z build-std`-ish
+# profile, and the main workspace must stay buildable on stable.
+[workspace]
+members = []
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+xarast-xar = { path = "../crates/xarast-xar" }
+xarast-geom = { path = "../crates/xarast-geom" }
+
+[profile.release]
+debug = 1
+# Unwinding, not aborting: cargo-fuzz reports a panic as a finding rather
+# than losing the process, which is the whole point of invariant 1.
+panic = "unwind"
+
+# The physical layer: magic, framing, the deflate state machine, the CRC
+# trailer reposition. The highest-value target — this is where the pointer
+# arithmetic and the length handling live.
+[[bin]]
+name = "fuzz_xar_records"
+path = "fuzz_targets/fuzz_xar_records.rs"
+test = false
+doc = false
+bench = false
+
+# DOWN/UP imbalance, atomic subtree stripping, deep nesting, numbering.
+[[bin]]
+name = "fuzz_xar_tree"
+path = "fuzz_targets/fuzz_xar_tree.rs"
+test = false
+doc = false
+bench = false
+
+# Every typed decoder, over the tree an arbitrary file produces.
+[[bin]]
+name = "fuzz_xar_decode"
+path = "fuzz_targets/fuzz_xar_decode.rs"
+test = false
+doc = false
+bench = false
+
+# The `% 9` check, the interleave, the delta sign, the extent clamp.
+[[bin]]
+name = "fuzz_xar_path"
+path = "fuzz_targets/fuzz_xar_path.rs"
+test = false
+doc = false
+bench = false
+
+# Inherit sentinels, parent chains, the depth limit.
+[[bin]]
+name = "fuzz_xar_colour"
+path = "fuzz_targets/fuzz_xar_colour.rs"
+test = false
+doc = false
+bench = false

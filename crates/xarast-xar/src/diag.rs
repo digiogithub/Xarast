@@ -1,0 +1,297 @@
+//! Recoverable findings.
+//!
+//! # Why a diagnostic carries no free text
+//!
+//! `xar-dump --stats` output is committed as a snapshot, and the corpus files
+//! it describes are Xara's artwork, which this repository may not
+//! redistribute (`docs/11-licensing-and-clean-room.md §3.2`). A diagnostic
+//! that could interpolate a colour name or a text run into its message would
+//! be one `--stats` run away from leaking file content into git.
+//!
+//! So a [`Diagnostic`] is a code, a severity, a record number, a tag and one
+//! `u64` of numeric detail. Every field is a fact about the file rather than
+//! anything taken out of it, which makes the clean-room rule structural
+//! instead of a review item.
+
+use core::fmt;
+
+/// How bad a [`Diagnostic`] is.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Severity {
+    /// Worth reporting, harmless. An unknown tag we skipped.
+    Info,
+    /// The file is readable but something was lost or repaired.
+    Warning,
+    /// Part of the file could not be read at all.
+    Error,
+}
+
+impl fmt::Display for Severity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Severity::Info => "info",
+            Severity::Warning => "warning",
+            Severity::Error => "error",
+        };
+        f.write_str(s)
+    }
+}
+
+/// What was found.
+///
+/// The set is deliberately small and stable: these names appear in committed
+/// snapshots, so adding one is a reviewable diff and renaming one is a
+/// breaking change to the test suite.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[non_exhaustive]
+pub enum DiagCode {
+    /// `DOWN` and `UP` did not balance. The detail is the number of scopes
+    /// closed implicitly, or of stray `UP`s ignored.
+    UnbalancedScope,
+    /// A tag with no handler was skipped. The detail is its payload size.
+    UnknownTag,
+    /// A tag on the atomic list had no handler, so its whole subtree went
+    /// with it. The detail is the number of records dropped.
+    AtomicSubtreeDropped,
+    /// A tag on the essential list had no handler.
+    EssentialTagMissing,
+    /// A record ran out of bytes before its fields did. The detail is the
+    /// payload size that was available.
+    TruncatedRecord,
+    /// A record carried more bytes than its layout accounts for. Usually a
+    /// newer writer with fields we do not know; never fatal.
+    TrailingRecordBytes,
+    /// A [`ReaderLimits`](crate::ReaderLimits) cap was hit.
+    LimitExceeded,
+    /// A coordinate fell outside the document extent and was clamped.
+    CoordinateClamped,
+    /// A reference pointed at a record number that holds no definition.
+    DanglingReference,
+    /// A path record could not be decoded into a well-formed path.
+    MalformedPath,
+    /// `TAG_PATH_FLAGS` disagreed with the point count of the path it
+    /// annotates. The detail is the flag count.
+    PathFlagsMismatch,
+    /// `TAG_STARTCOMPRESSION`'s high byte is not 0, so the block claims a
+    /// compression type other than DEFLATE. The original does not validate
+    /// this either, so we warn and try DEFLATE anyway.
+    UnknownCompressionType,
+    /// A `TAG_STARTCOMPRESSION` appeared inside a compressed block, or a
+    /// `TAG_ENDCOMPRESSION` outside one. Only a malformed file does this.
+    UnexpectedCompressionRecord,
+    /// A compressed block's deflate stream produced bytes that no record
+    /// consumed. The detail is how many.
+    UnconsumedBlockBytes,
+    /// A compressed block's CRC-32 did not match its trailer.
+    CrcMismatch,
+    /// A compressed block's uncompressed length did not match its trailer.
+    BlockLengthMismatch,
+    /// Bytes remained after `TAG_ENDOFFILE`. The detail is how many.
+    TrailingBytes,
+    /// The `DOWN` nesting went past
+    /// [`ReaderLimits::max_tree_depth`](crate::ReaderLimits::max_tree_depth);
+    /// deeper nodes were flattened onto the deepest level allowed.
+    DepthLimit,
+    /// A relative path payload was not a multiple of nine bytes, so its
+    /// implied point count is meaningless. The path is dropped rather than
+    /// guessed at (`research/01 §11` item 4).
+    BadRelativePathSize,
+    /// A field held a value the specification does not define. The detail is
+    /// the value.
+    UnknownEnumValue,
+}
+
+impl DiagCode {
+    /// The stable name used in reports and snapshots.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            DiagCode::UnbalancedScope => "UnbalancedScope",
+            DiagCode::UnknownTag => "UnknownTag",
+            DiagCode::AtomicSubtreeDropped => "AtomicSubtreeDropped",
+            DiagCode::EssentialTagMissing => "EssentialTagMissing",
+            DiagCode::TruncatedRecord => "TruncatedRecord",
+            DiagCode::TrailingRecordBytes => "TrailingRecordBytes",
+            DiagCode::LimitExceeded => "LimitExceeded",
+            DiagCode::CoordinateClamped => "CoordinateClamped",
+            DiagCode::DanglingReference => "DanglingReference",
+            DiagCode::MalformedPath => "MalformedPath",
+            DiagCode::PathFlagsMismatch => "PathFlagsMismatch",
+            DiagCode::UnknownCompressionType => "UnknownCompressionType",
+            DiagCode::UnexpectedCompressionRecord => "UnexpectedCompressionRecord",
+            DiagCode::UnconsumedBlockBytes => "UnconsumedBlockBytes",
+            DiagCode::CrcMismatch => "CrcMismatch",
+            DiagCode::BlockLengthMismatch => "BlockLengthMismatch",
+            DiagCode::TrailingBytes => "TrailingBytes",
+            DiagCode::DepthLimit => "DepthLimit",
+            DiagCode::BadRelativePathSize => "BadRelativePathSize",
+            DiagCode::UnknownEnumValue => "UnknownEnumValue",
+        }
+    }
+
+    /// The severity this code is normally raised at.
+    #[must_use]
+    pub const fn default_severity(self) -> Severity {
+        match self {
+            DiagCode::UnknownTag | DiagCode::TrailingRecordBytes => Severity::Info,
+            DiagCode::EssentialTagMissing
+            | DiagCode::CrcMismatch
+            | DiagCode::BlockLengthMismatch
+            | DiagCode::LimitExceeded
+            | DiagCode::MalformedPath
+            | DiagCode::BadRelativePathSize => Severity::Error,
+            _ => Severity::Warning,
+        }
+    }
+}
+
+impl fmt::Display for DiagCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// One recoverable finding.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct Diagnostic {
+    /// What was found.
+    pub code: DiagCode,
+    /// How bad it is.
+    pub severity: Severity,
+    /// The 1-based record number it was found in, if any.
+    pub record: Option<u32>,
+    /// The tag of that record, if any.
+    pub tag: Option<u32>,
+    /// A numeric detail whose meaning is documented on [`DiagCode`]. Numbers
+    /// only: see the module documentation.
+    pub detail: u64,
+}
+
+impl Diagnostic {
+    /// A diagnostic at its code's default severity, with no detail.
+    #[must_use]
+    pub const fn new(code: DiagCode) -> Diagnostic {
+        Diagnostic {
+            code,
+            severity: code.default_severity(),
+            record: None,
+            tag: None,
+            detail: 0,
+        }
+    }
+
+    /// Attaches the record it was found in.
+    #[must_use]
+    pub const fn at(mut self, record: u32, tag: u32) -> Diagnostic {
+        self.record = Some(record);
+        self.tag = Some(tag);
+        self
+    }
+
+    /// Attaches the numeric detail.
+    #[must_use]
+    pub const fn with_detail(mut self, detail: u64) -> Diagnostic {
+        self.detail = detail;
+        self
+    }
+
+    /// Overrides the severity.
+    #[must_use]
+    pub const fn with_severity(mut self, severity: Severity) -> Diagnostic {
+        self.severity = severity;
+        self
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.severity, self.code)?;
+        if let Some(r) = self.record {
+            write!(f, " at record {r}")?;
+        }
+        if let Some(t) = self.tag {
+            write!(f, " (tag {t})")?;
+        }
+        if self.detail != 0 {
+            write!(f, " [{}]", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+/// A growable diagnostic log with a hard cap.
+///
+/// A hostile file can produce one finding per record, so the sink stops
+/// storing after [`DiagSink::CAP`] and only counts from then on. Without the
+/// cap the diagnostics would themselves be the unbounded allocation the fuzz
+/// invariants forbid.
+#[derive(Clone, Debug, Default)]
+pub struct DiagSink {
+    items: Vec<Diagnostic>,
+    dropped: u64,
+    counts: [u64; 3],
+}
+
+impl DiagSink {
+    /// How many diagnostics are kept before only counting.
+    pub const CAP: usize = 4096;
+
+    /// An empty sink.
+    #[must_use]
+    pub fn new() -> DiagSink {
+        DiagSink::default()
+    }
+
+    /// Records a finding.
+    pub fn push(&mut self, d: Diagnostic) {
+        let slot = match d.severity {
+            Severity::Info => 0usize,
+            Severity::Warning => 1,
+            Severity::Error => 2,
+        };
+        if let Some(c) = self.counts.get_mut(slot) {
+            *c = c.saturating_add(1);
+        }
+        if self.items.len() < DiagSink::CAP {
+            self.items.push(d);
+        } else {
+            self.dropped = self.dropped.saturating_add(1);
+        }
+    }
+
+    /// The stored diagnostics, up to [`DiagSink::CAP`] of them.
+    #[must_use]
+    pub fn items(&self) -> &[Diagnostic] {
+        &self.items
+    }
+
+    /// How many findings were counted but not stored.
+    #[must_use]
+    pub const fn dropped(&self) -> u64 {
+        self.dropped
+    }
+
+    /// How many findings of each severity, stored or not.
+    #[must_use]
+    pub const fn count(&self, s: Severity) -> u64 {
+        match s {
+            Severity::Info => self.counts[0],
+            Severity::Warning => self.counts[1],
+            Severity::Error => self.counts[2],
+        }
+    }
+
+    /// Total findings of any severity.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.counts.iter().fold(0u64, |a, b| a.saturating_add(*b))
+    }
+
+    /// Moves everything from `other` into this sink.
+    pub fn absorb(&mut self, other: &DiagSink) {
+        for d in &other.items {
+            self.push(*d);
+        }
+        self.dropped = self.dropped.saturating_add(other.dropped);
+    }
+}
