@@ -14,3 +14,20 @@ workspace = true
 [dependencies]
 xarast-app = { path = "../xarast-app" }
 xarast-render = { path = "../xarast-render" }
+xarast-color = { path = "../xarast-color" }
+xarast-geom = { path = "../xarast-geom" }
+
+egui = { workspace = true }
+egui_extras = { workspace = true }
+egui_tiles = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+egui_kittest = { workspace = true }
+serde_json = { workspace = true }
+
+[[bench]]
+name = "ui_frame"
+harness = false

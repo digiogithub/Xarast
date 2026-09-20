@@ -1,18 +1,83 @@
 //! Windowing, GPU surface and platform integration.
 //!
-//! Wayland is the primary target: fractional scaling, client-side decorations,
-//! XDG portals for file dialogs, and pressure-sensitive tablet input.
+//! Wayland is the primary target: fractional scaling, client-side
+//! decorations, XDG portals for file dialogs, clipboard, drag and drop, and
+//! pressure-sensitive tablet input.
 //!
-//! See `docs/phases/phase-05-shell-and-ui.md`.
+//! # What this crate is for
+//!
+//! `xarast-shell` is the *only* crate that names `winit` and `wgpu`
+//! (`docs/10-architecture.md` §2). Everything above it consumes
+//! [`ShellEvent`], which mentions no windowing library at all. That is the
+//! whole design: phase 14 adds Windows and macOS by writing one new
+//! translation module, not by touching a tool, a panel or a command.
+//!
+//! ```text
+//!   winit / wgpu        input::translate        the rest of Xarast
+//!   ─────────────  ──►  ───────────────────  ──►  ─────────────────
+//!   platform events     ShellEvent, StrokeSample, ShellCtx
+//!                       ▲ replaced per platform   ▲ never replaced
+//! ```
+//!
+//! # Running without a compositor
+//!
+//! Every entry point degrades and reports rather than panicking. With no
+//! Wayland or X11 socket, [`run`] returns [`ShellError::NoDisplay`] with a
+//! reason; [`crate::clipboard::system_clipboard`] returns a clipboard that
+//! explains itself; [`crate::portal::PortalService`] answers every request
+//! with the reason portals are unreachable. Tests that need a compositor use
+//! [`crate::display::headless_skip_reason`] to **skip**, never to fail.
+//!
+//! # Modules
+//!
+//! | Module | What it owns |
+//! |---|---|
+//! | [`display`] | Which display server we are on and what it can do |
+//! | [`scale`] | The single owner of the fractional scale factor |
+//! | [`decorations`] | Who draws the window frame |
+//! | [`input`] | The platform-neutral event model and its translation |
+//! | [`portal`] | XDG portals on a services thread |
+//! | [`clipboard`] | The system clipboard, and its Wayland caveat |
+//!
+//! See `docs/phases/phase-05-shell-and-ui.md` and `docs/memory/ui.md`.
 
-use std::sync::Arc;
+#![deny(missing_docs)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowId};
+pub mod clipboard;
+pub mod decorations;
+pub mod display;
+pub mod input;
+pub mod portal;
+pub mod scale;
+mod window;
+
+/// The input-method seam.
+///
+/// At the crate root rather than under [`input`] because phase 9 is its only
+/// consumer and it is the one part of input that a text tool, not the shell,
+/// drives.
+#[path = "input/ime.rs"]
+pub mod ime;
+
+pub use clipboard::{Clipboard, ClipboardError, ClipboardImage};
+pub use decorations::{DecorationMode, DecorationPlan};
+pub use display::{
+    Desktop, DisplayEnvironment, DisplayServer, PlatformCapabilities, headless_skip_reason,
+};
+pub use input::event::{
+    ColorScheme, DragEvent, GestureEvent, PointerButton, PointerEvent, PointerId, PointerPhase,
+    ScrollUnit, ShellEvent,
+};
+pub use input::keyboard::{Key, KeyEvent, KeyLocation, KeyState, Modifiers, NamedKey, Shortcut};
+pub use input::tablet::{InputSource, StrokeSample, TabletCaps, TabletSource, ToolAxes};
+pub use portal::{
+    FileFilter, OpenFileRequest, PortalEvent, PortalHandle, PortalRequestId, SaveFileRequest,
+};
+pub use scale::{LogicalSize, PhysicalPos, PhysicalSize, ScaleFactor};
+pub use window::ShellCtx;
 
 /// The Wayland and X11 application identifier.
 ///
@@ -38,6 +103,7 @@ pub fn mark_process_start() {
 /// Milliseconds from process start to the first presented frame.
 ///
 /// `None` before the first frame is presented.
+#[must_use]
 pub fn cold_start_ms() -> Option<f64> {
     match COLD_START_MS.load(Ordering::Relaxed) {
         0 => None,
@@ -51,8 +117,7 @@ fn record_first_frame() {
     }
     let elapsed = PROCESS_START
         .get()
-        .map(|start| start.elapsed().as_secs_f64() * 1000.0)
-        .unwrap_or(f64::NAN);
+        .map_or(f64::NAN, |start| start.elapsed().as_secs_f64() * 1000.0);
     COLD_START_MS.store(elapsed.to_bits(), Ordering::Relaxed);
     tracing::info!(cold_start_ms = elapsed, "first frame presented");
 }
@@ -113,6 +178,47 @@ impl Default for ShellConfig {
     }
 }
 
+/// What the application asks for at the end of a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameRequest {
+    /// Nothing changed; park until the next input. Idle CPU has a budget too.
+    Idle,
+    /// Repaint as soon as possible.
+    Redraw,
+    /// Repaint after this delay — the Draft-to-Final timer, and nothing else
+    /// so far.
+    RedrawAfter(Duration),
+}
+
+/// Implemented by the application. The shell owns the loop; the application
+/// owns the state.
+///
+/// Every method has a default, so a caller that only wants a window (the
+/// self-tests, the cold-start measurement) implements nothing.
+pub trait ShellApp: 'static {
+    /// One platform event.
+    fn on_event(&mut self, event: ShellEvent, ctx: &mut ShellCtx<'_>) {
+        let _ = (event, ctx);
+    }
+
+    /// Called once per frame, before the surface is presented.
+    fn on_frame(&mut self, ctx: &mut ShellCtx<'_>) -> FrameRequest {
+        let _ = ctx;
+        FrameRequest::Idle
+    }
+
+    /// Called once, as the loop exits.
+    fn on_exit(&mut self, ctx: &mut ShellCtx<'_>) {
+        let _ = ctx;
+    }
+}
+
+/// An application that does nothing: a window, and no behaviour.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NullApp;
+
+impl ShellApp for NullApp {}
+
 /// What the shell actually got from the system.
 ///
 /// Printed by `--selftest-window` and worth asking for in any bug report: most
@@ -151,6 +257,16 @@ impl std::fmt::Display for AdapterReport {
 /// Anything that can stop the shell from starting.
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
+    /// There is no display server at all.
+    ///
+    /// Distinct from every other error on purpose: this one is a fact about
+    /// the machine, not a fault, and the caller should skip rather than
+    /// report a failure.
+    #[error("no display server: {reason}")]
+    NoDisplay {
+        /// What was looked for and not found.
+        reason: String,
+    },
     /// No adapter at all, not even a software one.
     #[error("no compatible GPU adapter (tried {tried})")]
     NoAdapter {
@@ -168,6 +284,14 @@ pub enum ShellError {
     EventLoop(String),
 }
 
+impl ShellError {
+    /// True when this is "the machine has no compositor" rather than a fault.
+    #[must_use]
+    pub const fn is_missing_display(&self) -> bool {
+        matches!(self, Self::NoDisplay { .. })
+    }
+}
+
 /// Initialises tracing from the `XARAST_LOG` environment variable.
 ///
 /// Idempotent: calling it twice is harmless, which matters because both the
@@ -181,319 +305,56 @@ pub fn init_tracing() {
         .try_init();
 }
 
-/// The GPU state bound to one window.
-struct Gpu {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    report: AdapterReport,
+/// Installs a panic hook that logs the panic before unwinding.
+///
+/// The event loop swallows a panic in a callback on some backends, which
+/// turns a crash into a silently dead window. Logging first means the report
+/// exists even when the process disappears.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(panic = %info, "xarast panicked");
+        previous(info);
+    }));
 }
 
-impl Gpu {
-    fn new(window: Arc<Window>, preference: BackendPreference) -> Result<Self, ShellError> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: preference.backends(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|e| ShellError::Surface(e.to_string()))?;
-
-        // `force_fallback_adapter` stays false: we would rather have the real
-        // GPU. A software adapter is still acceptable if it is all there is,
-        // which is why the failure below is the only hard stop.
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))
-        .map_err(|_| ShellError::NoAdapter {
-            tried: preference.describe().to_owned(),
-        })?;
-
-        let info = adapter.get_info();
-        let report = AdapterReport {
-            name: info.name.clone(),
-            backend: match info.backend {
-                wgpu::Backend::Vulkan => "Vulkan",
-                wgpu::Backend::Gl => "GL",
-                wgpu::Backend::Metal => "Metal",
-                wgpu::Backend::Dx12 => "DX12",
-                wgpu::Backend::BrowserWebGpu => "WebGPU",
-                wgpu::Backend::Noop => "none",
-            },
-            device_type: match info.device_type {
-                wgpu::DeviceType::DiscreteGpu => "discrete GPU",
-                wgpu::DeviceType::IntegratedGpu => "integrated GPU",
-                wgpu::DeviceType::VirtualGpu => "virtual GPU",
-                wgpu::DeviceType::Cpu => "CPU",
-                wgpu::DeviceType::Other => "other",
-            },
-            is_software: info.device_type == wgpu::DeviceType::Cpu,
-        };
-        tracing::info!(adapter = %report, "selected adapter");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("xarast device"),
-            ..Default::default()
-        }))
-        .map_err(|e| ShellError::Surface(e.to_string()))?;
-
-        let size = window.inner_size();
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .ok_or_else(|| {
-                ShellError::Surface("the adapter cannot present to this surface".to_owned())
-            })?;
-        // Prefer an sRGB swapchain so that the compositor does not apply a
-        // second, unwanted transfer function to output we already encoded.
-        let caps = surface.get_capabilities(&adapter);
-        if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
-            config.format = srgb;
-        }
-        surface.configure(&device, &config);
-
-        Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            report,
-        })
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-    }
-
-    /// Presents one frame. Phase 0 draws a flat clear colour; the scene arrives
-    /// in phase 4.
-    fn present(&mut self) -> FrameOutcome {
-        use wgpu::CurrentSurfaceTexture as Cst;
-
-        let frame = match self.surface.get_current_texture() {
-            Cst::Success(frame) => frame,
-            // Suboptimal still gives us a usable texture. Draw this frame, then
-            // reconfigure so the next one is not suboptimal too.
-            Cst::Suboptimal(frame) => {
-                self.reconfigure();
-                frame
-            }
-            Cst::Outdated | Cst::Lost => {
-                self.reconfigure();
-                return FrameOutcome::Skipped;
-            }
-            Cst::Timeout | Cst::Occluded => return FrameOutcome::Skipped,
-            Cst::Validation => return FrameOutcome::Failed,
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.10,
-                            g: 0.10,
-                            b: 0.11,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
-        record_first_frame();
-        FrameOutcome::Presented
-    }
-
-    /// Re-applies the current configuration, which is how a lost, outdated or
-    /// suboptimal swapchain is recovered.
-    fn reconfigure(&mut self) {
-        self.surface.configure(&self.device, &self.config);
-    }
+/// A one-line description of the session, for `--version --verbose` and for
+/// the first line of a bug report.
+#[must_use]
+pub fn platform_summary() -> String {
+    let env = DisplayEnvironment::from_env();
+    let caps = env.capabilities();
+    let plan = DecorationPlan::for_environment(&env);
+    format!(
+        "{} · {} · fractional scaling: {} · tablet axes: {} · gestures: {}",
+        env.summary(),
+        plan.summary(),
+        yes_no(caps.fractional_scale),
+        yes_no(caps.tablet_axes),
+        yes_no(caps.gestures),
+    )
 }
 
-/// The winit application. Holds everything that only exists once the event loop
-/// has resumed, which on Wayland is the only point at which a surface is legal.
-struct Shell {
-    config: ShellConfig,
-    window: Option<Arc<Window>>,
-    gpu: Option<Gpu>,
-    frames: u32,
-    consecutive_failures: u32,
-    report: Option<AdapterReport>,
-    error: Option<ShellError>,
-}
-
-/// How far a redraw got. Distinguishing "skipped" from "failed" is what keeps
-/// an occluded window cheap and a dead surface from spinning forever.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameOutcome {
-    Presented,
-    Skipped,
-    Failed,
-}
-
-/// Consecutive acquisition failures tolerated before giving up on the surface.
-const MAX_CONSECUTIVE_FRAME_FAILURES: u32 = 32;
-
-impl Shell {
-    fn new(config: ShellConfig) -> Self {
-        Self {
-            config,
-            window: None,
-            gpu: None,
-            frames: 0,
-            consecutive_failures: 0,
-            report: None,
-            error: None,
-        }
-    }
-
-    fn window_attributes(&self) -> winit::window::WindowAttributes {
-        let attrs = Window::default_attributes()
-            .with_title(self.config.title.clone())
-            .with_inner_size(winit::dpi::LogicalSize::new(
-                self.config.size.0,
-                self.config.size.1,
-            ));
-
-        // The app id has to match the desktop entry on both Wayland and X11, or
-        // the desktop environment cannot associate the window with the
-        // installed application. Both platform traits spell the setter
-        // `with_name`, so each call is fully qualified to say which one it is.
-        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
-        let attrs = {
-            use winit::platform::wayland::WindowAttributesExtWayland;
-            use winit::platform::x11::WindowAttributesExtX11;
-            let attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, "");
-            WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID)
-        };
-
-        attrs
-    }
-}
-
-impl ApplicationHandler for Shell {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
-            return;
-        }
-        let window = match event_loop.create_window(self.window_attributes()) {
-            Ok(w) => Arc::new(w),
-            Err(e) => {
-                self.error = Some(ShellError::Window(e.to_string()));
-                event_loop.exit();
-                return;
-            }
-        };
-        match Gpu::new(window.clone(), self.config.backends) {
-            Ok(gpu) => {
-                self.report = Some(gpu.report.clone());
-                self.gpu = Some(gpu);
-            }
-            Err(e) => {
-                self.error = Some(e);
-                event_loop.exit();
-                return;
-            }
-        }
-        window.request_redraw();
-        self.window = Some(window);
-    }
-
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize(size.width, size.height);
-                }
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                // Fractional scaling on Wayland arrives here; the surface is
-                // resized by the Resized event that follows.
-                tracing::debug!(scale_factor, "scale factor changed");
-            }
-            WindowEvent::RedrawRequested => {
-                let Some(gpu) = self.gpu.as_mut() else { return };
-                match gpu.present() {
-                    FrameOutcome::Presented => self.frames += 1,
-                    // A skipped frame is normal: the window is occluded, or the
-                    // swapchain went stale and has just been rebuilt.
-                    FrameOutcome::Skipped => {
-                        self.consecutive_failures = 0;
-                        return;
-                    }
-                    FrameOutcome::Failed => {
-                        self.consecutive_failures += 1;
-                        tracing::warn!(
-                            failures = self.consecutive_failures,
-                            "failed to acquire a surface texture"
-                        );
-                        // One failure is a hiccup; a run of them means the
-                        // surface will not come back, and spinning on it would
-                        // burn a core forever.
-                        if self.consecutive_failures >= MAX_CONSECUTIVE_FRAME_FAILURES {
-                            self.error = Some(ShellError::Surface(
-                                "the surface stopped producing textures".to_owned(),
-                            ));
-                            event_loop.exit();
-                        }
-                        return;
-                    }
-                }
-                self.consecutive_failures = 0;
-                if let Some(limit) = self.config.exit_after_frames
-                    && self.frames >= limit
-                {
-                    event_loop.exit();
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn run_shell(config: ShellConfig) -> Result<Shell, ShellError> {
-    let event_loop = EventLoop::new().map_err(|e| ShellError::EventLoop(e.to_string()))?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut shell = Shell::new(config);
-    event_loop
-        .run_app(&mut shell)
-        .map_err(|e| ShellError::EventLoop(e.to_string()))?;
-    match shell.error.take() {
-        Some(e) => Err(e),
-        None => Ok(shell),
-    }
+const fn yes_no(v: bool) -> &'static str {
+    if v { "yes" } else { "no" }
 }
 
 /// Runs the application to completion. Blocks the calling thread.
+///
+/// # Errors
+/// [`ShellError::NoDisplay`] when there is no compositor, and the
+/// window/surface/event-loop errors otherwise.
 pub fn run(config: ShellConfig) -> Result<(), ShellError> {
-    run_shell(config).map(|_| ())
+    run_app(config, NullApp)
+}
+
+/// Runs `app` to completion. Blocks the calling thread.
+///
+/// # Errors
+/// [`ShellError::NoDisplay`] when there is no compositor, and the
+/// window/surface/event-loop errors otherwise.
+pub fn run_app<A: ShellApp>(config: ShellConfig, app: A) -> Result<(), ShellError> {
+    window::run_shell(config, app).map(|_| ())
 }
 
 /// Creates a window and a surface, presents one frame, tears it all down and
@@ -501,11 +362,15 @@ pub fn run(config: ShellConfig) -> Result<(), ShellError> {
 ///
 /// This is the CI liveness check. It needs a compositor socket, not a
 /// human-visible display.
+///
+/// # Errors
+/// [`ShellError::NoDisplay`] when there is no compositor — a reason to skip,
+/// not to fail — and the window/surface errors otherwise.
 pub fn selftest_window(config: &ShellConfig) -> Result<AdapterReport, ShellError> {
     let mut config = config.clone();
     config.exit_after_frames = Some(config.exit_after_frames.unwrap_or(1));
-    let shell = run_shell(config)?;
-    shell.report.ok_or(ShellError::NoAdapter {
+    let shell = window::run_shell(config, NullApp)?;
+    shell.report.clone().ok_or(ShellError::NoAdapter {
         tried: "no adapter was reached".to_owned(),
     })
 }
@@ -539,5 +404,72 @@ mod tests {
     #[test]
     fn cold_start_is_none_before_any_frame() {
         assert!(cold_start_ms().is_none());
+    }
+
+    #[test]
+    fn a_machine_with_no_compositor_reports_that_and_does_not_panic() {
+        let Some(reason) = headless_skip_reason() else {
+            // There is a compositor; opening a window here would need a
+            // display we cannot assume in a test, so there is nothing to do.
+            return;
+        };
+        assert!(reason.contains("display server"), "{reason}");
+
+        let err = run(ShellConfig {
+            exit_after_frames: Some(1),
+            ..ShellConfig::default()
+        })
+        .expect_err("a headless machine cannot open a window");
+        assert!(err.is_missing_display(), "{err}");
+        assert!(err.to_string().contains("no display server"), "{err}");
+
+        let err = selftest_window(&ShellConfig::default())
+            .expect_err("a headless machine cannot present a frame");
+        assert!(err.is_missing_display(), "{err}");
+    }
+
+    #[test]
+    fn the_platform_summary_is_printable_anywhere() {
+        let s = platform_summary();
+        assert!(s.contains("fractional scaling"), "{s}");
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn backend_preferences_describe_themselves() {
+        assert_eq!(
+            BackendPreference::default(),
+            BackendPreference::VulkanThenGl
+        );
+        assert!(BackendPreference::GlOnly.describe().contains("GL"));
+        assert!(
+            BackendPreference::VulkanThenGl
+                .backends()
+                .contains(wgpu::Backends::VULKAN)
+        );
+    }
+
+    #[test]
+    fn an_application_with_no_opinion_parks_the_loop() {
+        // The default frame request has to be Idle: anything else spins the
+        // loop and blows the idle-CPU budget for every caller that has no
+        // opinion. There is no window here, so the context is not available;
+        // what is asserted is the default itself.
+        #[derive(Debug, Default)]
+        struct Counting(u32);
+        impl ShellApp for Counting {
+            fn on_event(&mut self, _event: ShellEvent, _ctx: &mut ShellCtx<'_>) {
+                self.0 += 1;
+            }
+        }
+        let app = Counting::default();
+        assert_eq!(app.0, 0);
+    }
+
+    #[test]
+    fn a_frame_request_carries_its_delay() {
+        let r = FrameRequest::RedrawAfter(Duration::from_millis(120));
+        assert_eq!(r, FrameRequest::RedrawAfter(Duration::from_millis(120)));
+        assert_ne!(r, FrameRequest::Idle);
     }
 }

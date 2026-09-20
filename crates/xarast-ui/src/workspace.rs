@@ -1,0 +1,273 @@
+//! The whole interface in one call: what the shell drives each frame.
+//!
+//! The shell owns the window, the surface and the scale; the application
+//! owns the document. Between them, one call builds the interface:
+//!
+//! ```no_run
+//! # use xarast_ui::{Scale, Workspace, model::UiModel};
+//! # let ctx = egui::Context::default();
+//! # let model = UiModel::default();
+//! let mut workspace = Workspace::new();
+//! let out = workspace.ui(&ctx, &model, Scale::new(1.25), &[]);
+//! // `out.canvas.rect_device` is the shell's scissor rectangle for the
+//! // canvas pass; `out.commands` is what the user asked for.
+//! ```
+//!
+//! The layout is fixed in shape and free in arrangement: rulers and canvas
+//! in the centre, docked panels on the right, the status bar at the foot.
+//! The canvas is deliberately not a dockable pane — it shares the surface
+//! with the shell's own passes, and a pane can be dragged into a tab
+//! group, which the canvas cannot survive.
+
+use crate::canvas::{CanvasResponse, CanvasWidget};
+use crate::model::{CommandSink, DocumentView, UiCommand, UiModel};
+use crate::overlay::OverlayItem;
+use crate::panel::{LayoutState, Panel, PanelCtx, PanelId, UiHost};
+use crate::panels::{ColourPanel, LayerPanel, StatusBar};
+use crate::scale::Scale;
+use crate::theme::{self, ResolvedTheme, ThemeTokens};
+
+/// What one frame of the interface produced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceOutput {
+    /// What the user asked for, in the order they asked.
+    pub commands: Vec<UiCommand>,
+    /// Where the document is drawn, and what the canvas did not consume.
+    pub canvas: Option<CanvasResponse>,
+    /// The theme the frame was drawn in, after resolving "follow system".
+    pub theme: ResolvedTheme,
+}
+
+/// The assembled interface.
+#[derive(Debug)]
+pub struct Workspace {
+    host: UiHost,
+    canvas: CanvasWidget,
+    status: StatusBar,
+    side_width: f32,
+}
+
+impl Default for Workspace {
+    fn default() -> Self {
+        Workspace::new()
+    }
+}
+
+impl Workspace {
+    /// Builds the default arrangement: layers and colour docked on the
+    /// right, the canvas in the centre, the status bar at the foot.
+    pub fn new() -> Workspace {
+        let mut host = UiHost::new();
+        host.register(Box::new(LayerPanel::new()));
+        host.register(Box::new(ColourPanel::new()));
+        host.set_default_layout(&[crate::panels::layers::ID, crate::panels::colour::ID]);
+        Workspace {
+            host,
+            canvas: CanvasWidget::new(),
+            status: StatusBar::new(),
+            side_width: 280.0,
+        }
+    }
+
+    /// Adds a panel to the dock. Call before [`Workspace::ui`] and then
+    /// rebuild the layout, or load a saved one.
+    pub fn register(&mut self, panel: Box<dyn Panel>) {
+        self.host.register(panel);
+    }
+
+    /// Rebuilds the default layout from the panels registered now.
+    pub fn set_default_layout(&mut self, order: &[PanelId]) {
+        self.host.set_default_layout(order);
+    }
+
+    /// The layout, for persisting to preferences.
+    pub fn save_layout(&self) -> LayoutState {
+        self.host.save_layout()
+    }
+
+    /// Restores a persisted layout, returning false when it is unusable
+    /// and the default has been kept.
+    pub fn load_layout(&mut self, state: &LayoutState) -> bool {
+        self.host.load_layout(state)
+    }
+
+    /// The status bar, for a transient note.
+    pub fn status_bar(&mut self) -> &mut StatusBar {
+        &mut self.status
+    }
+
+    /// Builds one frame.
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        model: &UiModel,
+        scale: Scale,
+        overlay: &[OverlayItem],
+    ) -> WorkspaceOutput {
+        let resolved = model.theme.resolve(model.system_scheme);
+        theme::apply(ctx, resolved);
+        ctx.set_pixels_per_point(scale.ppp_f32());
+        let tokens = ThemeTokens::of(resolved);
+
+        let mut out = CommandSink::new();
+        let mut canvas_response = None;
+
+        egui::TopBottomPanel::bottom("xarast_status")
+            .exact_height(crate::theme::STATUS_BAR_HEIGHT)
+            .show(ctx, |ui| {
+                let mut pctx = PanelCtx {
+                    model,
+                    tokens: &tokens,
+                    out: &mut out,
+                };
+                self.status.ui(ui, &mut pctx);
+            });
+
+        egui::SidePanel::right("xarast_dock")
+            .default_width(self.side_width)
+            .show(ctx, |ui| {
+                let mut pctx = PanelCtx {
+                    model,
+                    tokens: &tokens,
+                    out: &mut out,
+                };
+                self.host.run(ui, &mut pctx);
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(tokens.canvas_backdrop))
+            .show(ctx, |ui| match model.document.as_ref() {
+                Some(doc) => {
+                    canvas_response =
+                        Some(self.canvas.show(ui, doc, scale, &tokens, overlay, &mut out));
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("Open a document to start");
+                    });
+                }
+            });
+
+        WorkspaceOutput {
+            commands: out.drain(),
+            canvas: canvas_response,
+            theme: resolved,
+        }
+    }
+
+    /// The document view the canvas last drew, for a caller that wants to
+    /// know whether a guide drag is in progress before it starts a tool.
+    pub fn is_dragging_guide(&self) -> bool {
+        self.canvas.is_dragging_guide()
+    }
+}
+
+/// A convenience for a caller that has no document yet.
+pub fn empty_document() -> DocumentView {
+    DocumentView::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{LayerInfo, ViewTransform};
+    use crate::theme::{ColorScheme, Theme};
+
+    fn model() -> UiModel {
+        UiModel {
+            document: Some(DocumentView {
+                layers: vec![LayerInfo::new(1, "Background")],
+                active_layer: Some(crate::model::LayerKey(1)),
+                view: ViewTransform::default(),
+                ..Default::default()
+            }),
+            palette: vec![crate::model::PaletteEntry::none()],
+            ..Default::default()
+        }
+    }
+
+    fn run(workspace: &mut Workspace, model: &UiModel, scale: Scale) -> WorkspaceOutput {
+        let ctx = egui::Context::default();
+        let mut out = None;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                out = Some(workspace.ui(ctx, model, scale, &[]));
+            });
+        }
+        out.expect("a frame ran")
+    }
+
+    #[test]
+    fn a_frame_with_a_document_reports_a_canvas_region() {
+        let mut w = Workspace::new();
+        let out = run(&mut w, &model(), Scale::new(1.0));
+        let canvas = out.canvas.expect("a canvas");
+        assert!(!canvas.rect_device.is_empty());
+        assert!(out.commands.is_empty(), "{:?}", out.commands);
+    }
+
+    #[test]
+    fn a_frame_with_no_document_has_no_canvas_and_does_not_panic() {
+        let mut w = Workspace::new();
+        let out = run(&mut w, &UiModel::default(), Scale::new(1.0));
+        assert!(out.canvas.is_none());
+    }
+
+    #[test]
+    fn the_theme_follows_the_system_and_the_override_wins() {
+        let mut w = Workspace::new();
+        let mut m = model();
+        m.theme = Theme::FollowSystem;
+        m.system_scheme = ColorScheme::Light;
+        assert_eq!(run(&mut w, &m, Scale::new(1.0)).theme, ResolvedTheme::Light);
+        m.theme = Theme::Dark;
+        assert_eq!(run(&mut w, &m, Scale::new(1.0)).theme, ResolvedTheme::Dark);
+    }
+
+    #[test]
+    fn the_canvas_shrinks_by_the_dock_and_the_status_bar() {
+        let mut w = Workspace::new();
+        let out = run(&mut w, &model(), Scale::new(1.0));
+        let canvas = out.canvas.unwrap();
+        assert!(canvas.rect_points.width() < 1600.0 - 200.0);
+        assert!(canvas.rect_points.height() < 900.0 - crate::theme::STATUS_BAR_HEIGHT);
+    }
+
+    #[test]
+    fn every_scale_factor_produces_a_whole_pixel_canvas() {
+        for s in [1.0, 1.25, 1.5, 2.0] {
+            let mut w = Workspace::new();
+            let out = run(&mut w, &model(), Scale::new(s));
+            let canvas = out.canvas.expect("a canvas");
+            assert!(!canvas.rect_device.is_empty(), "scale {s}");
+            // The device rectangle is the logical one times the scale, to
+            // within the outward rounding of one pixel per edge.
+            let expected = canvas.rect_points.width() as f64 * s;
+            assert!(
+                (canvas.rect_device.width as f64 - expected).abs() <= 2.0,
+                "scale {s}: {} device px for {expected:.2}",
+                canvas.rect_device.width
+            );
+        }
+    }
+
+    #[test]
+    fn a_saved_layout_survives_a_round_trip_through_the_workspace() {
+        let mut w = Workspace::new();
+        let saved = w.save_layout();
+        let json = serde_json::to_string(&saved).unwrap();
+        let back: LayoutState = serde_json::from_str(&json).unwrap();
+        assert!(w.load_layout(&back));
+        let out = run(&mut w, &model(), Scale::new(1.0));
+        assert!(out.canvas.is_some());
+        assert!(!w.is_dragging_guide());
+        assert_eq!(empty_document().title, "Untitled");
+    }
+}

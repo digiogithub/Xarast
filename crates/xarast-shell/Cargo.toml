@@ -11,16 +11,27 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["portals", "clipboard"]
+# XDG portal file dialogs and the settings portal, on the services thread.
+portals = ["dep:rfd", "dep:ashpd"]
+# System clipboard. Off in builds that must not touch a display at all.
+clipboard = ["dep:arboard"]
+
 [dependencies]
 xarast-app = { path = "../xarast-app" }
 xarast-render = { path = "../xarast-render" }
 
-winit = { version = "0.30", default-features = false, features = ["wayland", "wayland-dlopen", "wayland-csd-adwaita", "x11", "rwh_06"] }
-wgpu = { version = "30.0", default-features = false, features = ["wgsl", "vulkan", "gles", "metal", "dx12"] }
-pollster = "1.0"
-thiserror = "2.0"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+rfd = { workspace = true, optional = true }
+ashpd = { workspace = true, optional = true }
+arboard = { workspace = true, optional = true }
 
 [[bin]]
 name = "xarast"
