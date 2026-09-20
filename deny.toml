@@ -23,7 +23,17 @@ confidence-threshold = 0.9
 
 # Every MPL-2.0 or otherwise non-trivial crate must be listed here with a
 # reason, so that adding one is a deliberate, reviewable act.
-exceptions = []
+#
+# resvg, usvg and their siblings are MPL-2.0: per-file copyleft. They are used
+# unmodified, and only by `xtask`, which generates committed assets and never
+# ships. Nothing in the distributed binary links them.
+exceptions = [
+    { name = "resvg", allow = ["MPL-2.0"] },
+    { name = "usvg", allow = ["MPL-2.0"] },
+    { name = "svgtypes", allow = ["MPL-2.0"] },
+    { name = "simplecss", allow = ["MPL-2.0"] },
+    { name = "svgfilters", allow = ["MPL-2.0"] },
+]
 
 [bans]
 # Nothing in the GPL family may ever reach the dependency graph.

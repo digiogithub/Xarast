@@ -7,3 +7,5 @@
 *.AppDir
 .DS_Store
 /tests/corpus/out
+/squashfs-root
+*.zsync

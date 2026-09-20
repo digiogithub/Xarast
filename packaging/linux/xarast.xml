@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+
+  <!-- The native format. A ZIP whose first entry is an uncompressed
+       `mimetype` member, following the ODF convention, so the magic match
+       below is reliable at a fixed offset. -->
+  <mime-type type="application/vnd.xarast+zip">
+    <comment>Xarast drawing</comment>
+    <comment xml:lang="es">Dibujo de Xarast</comment>
+    <sub-class-of type="application/zip"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.xarast"/>
+    <magic priority="70">
+      <match type="string" value="PK\003\004" offset="0">
+        <match type="string" value="mimetype" offset="30">
+          <match type="string" value="application/vnd.xarast+zip" offset="38"/>
+        </match>
+      </match>
+    </magic>
+  </mime-type>
+
+  <!-- The legacy Xara format. Read-only: Xarast imports it and never writes
+       it. The magic is the file header record that opens every .xar. -->
+  <mime-type type="image/x-xar">
+    <comment>Xara drawing</comment>
+    <comment xml:lang="es">Dibujo de Xara</comment>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.xar"/>
+    <glob pattern="*.web"/>
+    <magic priority="60">
+      <match type="string" value="XARA" offset="1"/>
+    </magic>
+  </mime-type>
+
+</mime-info>

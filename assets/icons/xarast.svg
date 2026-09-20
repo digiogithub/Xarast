@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Xarast application icon.
+
+  An original mark: a bezier curve with its control handles exposed, which is
+  the one image every vector editor's users recognise instantly. Deliberately
+  unlike any Xara artwork — see docs/11-licensing-and-clean-room.md.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2f45"/>
+      <stop offset="1" stop-color="#171a29"/>
+    </linearGradient>
+    <linearGradient id="curve" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff7a45"/>
+      <stop offset="0.5" stop-color="#ffb03a"/>
+      <stop offset="1" stop-color="#38c9b0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- Control polygon -->
+  <g stroke="#6c7391" stroke-width="3" stroke-dasharray="7 7" fill="none">
+    <path d="M56 196 L96 84"/>
+    <path d="M200 60 L160 172"/>
+  </g>
+
+  <!-- The curve itself -->
+  <path d="M56 196 C96 84 160 172 200 60"
+        fill="none" stroke="url(#curve)" stroke-width="16"
+        stroke-linecap="round"/>
+
+  <!-- Anchor points, square; control points, round -->
+  <g fill="#0f1220" stroke="#f4f6ff" stroke-width="6">
+    <rect x="44" y="184" width="24" height="24" rx="3"/>
+    <rect x="188" y="48" width="24" height="24" rx="3"/>
+  </g>
+  <g fill="#f4f6ff">
+    <circle cx="96" cy="84" r="9"/>
+    <circle cx="160" cy="172" r="9"/>
+  </g>
+</svg>

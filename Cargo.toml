@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "xtask"]
 
 [workspace.package]
 version = "0.0.1"
@@ -44,7 +44,9 @@ opt-level = 2
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Unwinding, not aborting. cargo-fuzz needs it to catch a panic as a finding
+# rather than losing the process, and the .xar importer is fuzzed from day one.
+panic = "unwind"
 
 # Used by the golden-image and corpus tests, which are unbearably slow otherwise.
 [profile.test]
