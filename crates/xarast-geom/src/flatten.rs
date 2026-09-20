@@ -51,14 +51,22 @@ impl Tolerance {
         let t = px * doc_units_per_px;
         // A non-positive or non-finite tolerance would make `kurbo`'s
         // subdivision loop forever, so it is clamped rather than trusted.
-        Tolerance(if t.is_finite() && t > 0.0 { t } else { Tolerance::EXPORT.0 })
+        Tolerance(if t.is_finite() && t > 0.0 {
+            t
+        } else {
+            Tolerance::EXPORT.0
+        })
     }
 
     /// The tolerance value, guaranteed finite and positive.
     #[inline]
     #[must_use]
     pub fn get(self) -> f64 {
-        if self.0.is_finite() && self.0 > 0.0 { self.0 } else { Tolerance::EXPORT.0 }
+        if self.0.is_finite() && self.0 > 0.0 {
+            self.0
+        } else {
+            Tolerance::EXPORT.0
+        }
     }
 }
 
@@ -104,7 +112,11 @@ impl SegmentTrace {
     #[must_use]
     pub fn source_of(&self, polyline: usize, vertex: usize) -> Option<(usize, usize)> {
         let s = self.sources.get(polyline)?.get(vertex)?;
-        if s.segment == u32::MAX { None } else { Some((polyline, s.segment as usize)) }
+        if s.segment == u32::MAX {
+            None
+        } else {
+            Some((polyline, s.segment as usize))
+        }
     }
 
     /// Whether a vertex is an original on-curve point rather than one the
@@ -167,44 +179,48 @@ pub fn flatten_traced(path: &Path, tol: Tolerance) -> (Vec<Polyline>, SegmentTra
             },
         };
         let mut pts = vec![start];
-        let mut src = vec![VertexSource { segment: u32::MAX, original: true }];
+        let mut src = vec![VertexSource {
+            segment: u32::MAX,
+            original: true,
+        }];
 
         for (i, seg) in segs.iter().enumerate() {
             let si = u32::try_from(i).unwrap_or(u32::MAX - 1);
             match *seg {
                 Segment::Line { p1, .. } => {
                     pts.push(p1);
-                    src.push(VertexSource { segment: si, original: true });
+                    src.push(VertexSource {
+                        segment: si,
+                        original: true,
+                    });
                 }
                 Segment::Cubic { p0, p1, p2, p3 } => {
                     let before = pts.len();
-                    kurbo::flatten(
-                        [
-                            kurbo::PathEl::MoveTo(p0.to_kurbo()),
-                            kurbo::PathEl::CurveTo(p1.to_kurbo(), p2.to_kurbo(), p3.to_kurbo()),
-                        ],
-                        tol,
-                        |el| {
-                            if let kurbo::PathEl::LineTo(p) = el {
-                                pts.push(Point::from_kurbo(p));
-                            }
-                        },
+                    let c = kurbo::CubicBez::new(
+                        p0.to_kurbo(),
+                        p1.to_kurbo(),
+                        p2.to_kurbo(),
+                        p3.to_kurbo(),
                     );
+                    subdivide_cubic(c, tol, 0, &mut pts);
                     if pts.len() == before {
                         // A fully degenerate cubic emits nothing; keep the
                         // endpoint so the polyline stays connected.
                         pts.push(p3);
                     } else {
-                        // `kurbo` lands on the true endpoint in `f64`, but
-                        // quantising it can move it by half a millipoint.
-                        // Forcing the exact endpoint is what makes the trace
-                        // usable: the refit step asks whether the run ends on
-                        // the source segment's own endpoint.
+                        // Quantising the last vertex can move it by half a
+                        // millipoint. Forcing the exact endpoint is what
+                        // makes the trace usable: the refit step asks
+                        // whether a run ends on its source segment's own
+                        // endpoint.
                         let last = pts.len() - 1;
                         pts[last] = p3;
                     }
                     for _ in before..pts.len() {
-                        src.push(VertexSource { segment: si, original: false });
+                        src.push(VertexSource {
+                            segment: si,
+                            original: false,
+                        });
                     }
                     let last = src.len() - 1;
                     src[last].original = true;
@@ -220,11 +236,65 @@ pub fn flatten_traced(path: &Path, tol: Tolerance) -> (Vec<Polyline>, SegmentTra
             src.pop();
         }
 
-        polys.push(Polyline { points: pts, closed: sp.closed });
+        polys.push(Polyline {
+            points: pts,
+            closed: sp.closed,
+        });
         sources.push(src);
     }
 
     (polys, SegmentTrace { sources })
+}
+
+/// How deep [`subdivide_cubic`] may recurse.
+///
+/// The flatness bound falls by about four with each level, so a curve that is
+/// not degenerate reaches tolerance within a handful. The cap exists for the
+/// degenerate ones — a cubic whose control points are all but coincident
+/// never satisfies the bound — and 20 levels is already a million segments,
+/// far past any useful output.
+const MAX_SUBDIVISION_DEPTH: u32 = 20;
+
+/// Appends the flattened form of a cubic, excluding its start point.
+///
+/// # Why not `kurbo::flatten`
+///
+/// `kurbo`'s flattener converts cubics to quadratics and estimates the error
+/// of that conversion. The estimate is excellent for ordinary curves and
+/// unreliable near a cusp: measured over 20 000 random cubics it exceeded the
+/// requested tolerance by up to a factor of nine. Since "the polyline is
+/// within `tol` of the curve" is a contract this crate advertises and the
+/// boolean pipeline relies on, the flattener here uses the **rigorous**
+/// control-polygon bound instead; see [`chord_bound`]. The result is a few
+/// more vertices on ordinary curves in exchange for a bound that holds.
+fn subdivide_cubic(c: kurbo::CubicBez, tol: f64, depth: u32, out: &mut Vec<Point>) {
+    if depth >= MAX_SUBDIVISION_DEPTH || chord_bound(c) <= tol {
+        out.push(Point::from_kurbo(c.p3));
+        return;
+    }
+    let (a, b) = kurbo::ParamCurve::subdivide(&c);
+    subdivide_cubic(a, tol, depth + 1, out);
+    subdivide_cubic(b, tol, depth + 1, out);
+}
+
+/// A rigorous upper bound on the distance from a cubic to the **line segment**
+/// joining its endpoints.
+///
+/// The obvious bound — three quarters of the control points' perpendicular
+/// distance from the chord — is not enough, and getting that wrong is worth
+/// recording: it measures deviation from the infinite *line*, so a cubic
+/// whose control points overshoot along the chord direction registers as
+/// flat while the curve bulges far past its own endpoint. This is the
+/// classical bound on `|B(t) - L(t)|` for the two curves parameterised
+/// together, which accounts for both components.
+fn chord_bound(c: kurbo::CubicBez) -> f64 {
+    let ux = 3.0 * c.p1.x - 2.0 * c.p0.x - c.p3.x;
+    let uy = 3.0 * c.p1.y - 2.0 * c.p0.y - c.p3.y;
+    let vx = 3.0 * c.p2.x - c.p0.x - 2.0 * c.p3.x;
+    let vy = 3.0 * c.p2.y - c.p0.y - 2.0 * c.p3.y;
+    let x = (ux * ux).max(vx * vx);
+    let y = (uy * uy).max(vy * vy);
+    ((x + y) / 16.0).sqrt()
 }
 
 /// The greatest distance from any of `samples` points on the curve to the

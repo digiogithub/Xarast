@@ -28,8 +28,14 @@ impl Default for Rect {
 impl Rect {
     /// The union identity: `lo = (MAX, MAX)`, `hi = (MIN, MIN)`.
     pub const EMPTY: Rect = Rect {
-        lo: Point { x: Mp::MAX, y: Mp::MAX },
-        hi: Point { x: Mp::MIN, y: Mp::MIN },
+        lo: Point {
+            x: Mp::MAX,
+            y: Mp::MAX,
+        },
+        hi: Point {
+            x: Mp::MIN,
+            y: Mp::MIN,
+        },
     };
 
     /// Builds a rectangle from two corners, normalising them so that `lo` is
@@ -74,14 +80,22 @@ impl Rect {
     #[inline]
     #[must_use]
     pub fn width(self) -> Mp {
-        if self.is_empty() { Mp::ZERO } else { self.hi.x - self.lo.x }
+        if self.is_empty() {
+            Mp::ZERO
+        } else {
+            self.hi.x - self.lo.x
+        }
     }
 
     /// Height, or [`Mp::ZERO`] when empty.
     #[inline]
     #[must_use]
     pub fn height(self) -> Mp {
-        if self.is_empty() { Mp::ZERO } else { self.hi.y - self.lo.y }
+        if self.is_empty() {
+            Mp::ZERO
+        } else {
+            self.hi.y - self.lo.y
+        }
     }
 
     /// The centre point, or [`Point::ORIGIN`] when empty.
@@ -176,7 +190,10 @@ impl Rect {
         if self.is_empty() {
             return Rect::EMPTY;
         }
-        Rect { lo: self.lo + by, hi: self.hi + by }
+        Rect {
+            lo: self.lo + by,
+            hi: self.hi + by,
+        }
     }
 
     /// Whether every corner lies inside the document extent.
@@ -209,8 +226,14 @@ impl Rect {
     #[must_use]
     pub fn from_kurbo(r: kurbo::Rect) -> Rect {
         Rect {
-            lo: Point::new(Mp::from_f64_round(r.x0.floor()), Mp::from_f64_round(r.y0.floor())),
-            hi: Point::new(Mp::from_f64_round(r.x1.ceil()), Mp::from_f64_round(r.y1.ceil())),
+            lo: Point::new(
+                Mp::from_f64_round(r.x0.floor()),
+                Mp::from_f64_round(r.y0.floor()),
+            ),
+            hi: Point::new(
+                Mp::from_f64_round(r.x1.ceil()),
+                Mp::from_f64_round(r.y1.ceil()),
+            ),
         }
     }
 }

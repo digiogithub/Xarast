@@ -35,10 +35,9 @@
 
 use crate::{FillRule, Mp, Path, PathBuilder, Point, Polyline, SegmentTrace, Tolerance};
 use i_overlay::core::fill_rule::FillRule as IoFillRule;
-use i_overlay::core::overlay::{ContourDirection, IntOverlayOptions};
+use i_overlay::core::overlay::{ContourDirection, IntOverlayOptions, Overlay};
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::core::simplify::Simplify;
-use i_overlay::core::single::SingleIntOverlay;
 use i_overlay::i_float::int::point::IntPoint;
 use std::collections::HashMap;
 
@@ -96,7 +95,8 @@ pub fn boolean(a: &Path, b: &Path, op: BoolOp, rule: FillRule, tol: Tolerance) -
     if subj.is_empty() && clip.is_empty() {
         return Path::new();
     }
-    let shapes = subj.overlay(&clip, op.to_overlay(), rule.to_overlay());
+    let shapes = Overlay::from_subj_and_clip_custom(&subj, &clip, options(), Default::default())
+        .overlay(op.to_overlay(), rule.to_overlay());
     let restore = RestoreTable::build(&[(a, &pa, &ta), (b, &pb, &tb)]);
     from_shapes(&shapes, &restore)
 }
@@ -172,7 +172,7 @@ struct RestoreTable {
     /// and a handful of comparisons; keying by the whole run would mean
     /// scanning every possible run length at every output vertex, which is
     /// quadratic on the 100 000-segment paths the budget covers.
-    runs: HashMap<(i32, i32), Vec<(Vec<Point>, [Point; 3])>>,
+    runs: HashMap<(i32, i32), Vec<RestoreRun>>,
 }
 
 impl RestoreTable {
@@ -180,9 +180,22 @@ impl RestoreTable {
     fn build(operands: &[(&Path, &Vec<Polyline>, &SegmentTrace)]) -> RestoreTable {
         let mut t = RestoreTable::default();
         for (path, polys, trace) in operands {
-            let segs = path.indexed_segments();
+            // Grouped by subpath up front. Scanning the flat segment list
+            // once per run is quadratic, and on a 10 000-segment operand
+            // that scan dominated the cost of the whole boolean.
+            let mut by_subpath: Vec<Vec<crate::Segment>> = Vec::new();
+            for (sp, _, seg) in path.indexed_segments() {
+                if by_subpath.len() <= sp {
+                    by_subpath.resize(sp + 1, Vec::new());
+                }
+                by_subpath[sp].push(seg);
+            }
             for (pi, poly) in polys.iter().enumerate() {
-                let Some(src) = trace.polyline_sources(pi) else { continue };
+                let Some(src) = trace.polyline_sources(pi) else {
+                    continue;
+                };
+                let segs: &[crate::Segment] = by_subpath.get(pi).map_or(&[][..], Vec::as_slice);
+                let last_seg = segs.len().checked_sub(1);
                 let mut i = 0usize;
                 while i < src.len() {
                     let seg_id = src[i].segment;
@@ -198,21 +211,49 @@ impl RestoreTable {
                     // `src[i - 1 ..= j]`: the previous vertex is the
                     // segment's start.
                     if i > 0
-                        && let Some(&(_, _, crate::Segment::Cubic { p1, p2, p3, .. })) = segs
-                            .iter()
-                            .find(|(sp, si, _)| *sp == pi && *si == seg_id as usize)
+                        && let Some(&crate::Segment::Cubic { p1, p2, p3, .. }) =
+                            segs.get(seg_id as usize)
                     {
                         let start = poly.points[i - 1];
-                        let end = poly.points[j];
-                        let interior = poly.points[i..j].to_vec();
-                        debug_assert_eq!(key(end), key(p3));
-                        t.runs.entry(key(start)).or_default().push((interior, [p1, p2, p3]));
+                        // A closed polyline does not repeat its start
+                        // vertex, so the *final* segment's endpoint is
+                        // vertex zero rather than one past the end. Missing
+                        // that costs the closing cubic of every closed
+                        // curve — a quarter of every circle in the document.
+                        //
+                        // It applies only to the final segment, though. When
+                        // that segment is a line its single vertex is the
+                        // one that was dropped, so the last run in `src`
+                        // belongs to the segment before it and ends
+                        // normally. Treating every trailing run as wrapping
+                        // pairs a cubic with the wrong endpoint.
+                        let wraps =
+                            poly.closed && j + 1 == src.len() && Some(seg_id as usize) == last_seg;
+                        let (end, interior) = if wraps {
+                            (poly.points[0], poly.points[i..=j].to_vec())
+                        } else {
+                            (poly.points[j], poly.points[i..j].to_vec())
+                        };
+                        // A run whose end is not the segment's own endpoint
+                        // cannot be restored, and indexing it would pair the
+                        // cubic with the wrong span. Skip rather than guess.
+                        if end == p3 {
+                            t.runs
+                                .entry(key(start))
+                                .or_default()
+                                .push((interior, [p1, p2, p3]));
+                        }
                     }
                     i = j + 1;
                 }
             }
         }
         t
+    }
+
+    /// Whether any indexed run starts at this point.
+    fn starts_a_run(&self, p: Point) -> bool {
+        self.runs.contains_key(&key(p))
     }
 
     /// If the output vertices from `at` onwards reproduce a stored run,
@@ -237,6 +278,10 @@ impl RestoreTable {
     }
 }
 
+/// One indexed input cubic: the subdivision vertices it produced between its
+/// endpoints, and the control points plus endpoint needed to re-emit it.
+type RestoreRun = (Vec<Point>, [Point; 3]);
+
 /// Integer key for a point.
 #[inline]
 fn key(p: Point) -> (i32, i32) {
@@ -245,10 +290,7 @@ fn key(p: Point) -> (i32, i32) {
 
 /// Rebuilds a [`Path`] from the engine's shapes, restoring cubics where the
 /// trace allows and cleaning the result.
-fn from_shapes(
-    shapes: &[Vec<Vec<IntPoint<i32>>>],
-    restore: &RestoreTable,
-) -> Path {
+fn from_shapes(shapes: &[Vec<Vec<IntPoint<i32>>>], restore: &RestoreTable) -> Path {
     let mut b = PathBuilder::new();
     for shape in shapes {
         for contour in shape {
@@ -256,21 +298,42 @@ fn from_shapes(
             if pts.len() < 3 {
                 continue;
             }
-            b.move_to(pts[0]);
+            // The engine picks its own start vertex for a contour, which
+            // can land in the middle of one of the input's curves — and a
+            // run that straddles the contour's start cannot be expressed by
+            // a `MoveTo`-anchored walk, so that curve would be lost. Rotate
+            // to a vertex the restore table knows as a run start, which by
+            // construction is an original endpoint of some input segment.
+            let mut pts = pts;
+            if let Some(k) = (0..pts.len()).find(|&i| restore.starts_a_run(pts[i])) {
+                pts.rotate_left(k);
+            }
+            // Walk with the start vertex appended, so the closing edge is a
+            // run like any other.
+            let mut ext = pts.clone();
+            ext.push(pts[0]);
+            b.move_to(ext[0]);
             let mut i = 0usize;
-            while i + 1 < pts.len() {
-                if let Some((span, [c1, c2, p3])) = restore.lookup(&pts, i) {
+            while i + 1 < ext.len() {
+                if let Some((span, [c1, c2, p3])) = restore.lookup(&ext, i) {
                     b.cubic_to(c1, c2, p3);
                     i += span;
                 } else {
-                    b.line_to(pts[i + 1]);
+                    b.line_to(ext[i + 1]);
                     i += 1;
                 }
             }
             b.close();
         }
     }
-    b.build()
+    // Step 4 of the pipeline, but only the ordering half of it. The engine
+    // already emits outer contours counter-clockwise and holes clockwise, and
+    // exactly; recomputing that here with the nesting heuristic in
+    // `Path::normalised` would be strictly worse, and on a shape whose
+    // subpaths touch it silently flips a hole into an outer contour. So:
+    // trust the engine for orientation, canonicalise only the start vertex
+    // and the subpath order, which the engine does not define.
+    b.build().canonically_ordered()
 }
 
 /// Drops repeated vertices. Coordinates are integers, so "closer than 1 mp"

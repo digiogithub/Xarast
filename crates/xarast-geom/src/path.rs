@@ -232,7 +232,11 @@ impl Path {
         points: Vec<Point>,
         flags: Vec<PointFlags>,
     ) -> Result<Path, PathError> {
-        let p = Path { verbs, points, flags };
+        let p = Path {
+            verbs,
+            points,
+            flags,
+        };
         p.validate()?;
         Ok(p)
     }
@@ -296,7 +300,10 @@ impl Path {
 
     /// Iterates the subpaths as verb ranges.
     pub fn subpaths(&self) -> impl Iterator<Item = SubPathRef> + '_ {
-        SubPathIter { verbs: &self.verbs, at: 0 }
+        SubPathIter {
+            verbs: &self.verbs,
+            at: 0,
+        }
     }
 
     /// Iterates every segment, with start points resolved.
@@ -306,7 +313,13 @@ impl Path {
     /// otherwise appear in every rectangle and would have to be filtered out
     /// by every consumer.
     pub fn segments(&self) -> impl Iterator<Item = Segment> + '_ {
-        SegmentIter { path: self, verb: 0, point: 0, cur: Point::ORIGIN, start: Point::ORIGIN }
+        SegmentIter {
+            path: self,
+            verb: 0,
+            point: 0,
+            cur: Point::ORIGIN,
+            start: Point::ORIGIN,
+        }
     }
 
     /// Iterates every segment together with the subpath index and the
@@ -342,7 +355,16 @@ impl Path {
                 }
                 Verb::CubicTo => {
                     let (p1, p2, p3) = (self.points[i], self.points[i + 1], self.points[i + 2]);
-                    out.push((subpath, index, Segment::Cubic { p0: cur, p1, p2, p3 }));
+                    out.push((
+                        subpath,
+                        index,
+                        Segment::Cubic {
+                            p0: cur,
+                            p1,
+                            p2,
+                            p3,
+                        },
+                    ));
                     index += 1;
                     cur = p3;
                     i += 3;
@@ -367,7 +389,9 @@ impl Path {
     /// root-solve per cubic.
     #[must_use]
     pub fn bounds(&self) -> Rect {
-        self.points.iter().fold(Rect::EMPTY, |acc, &p| acc.union_point(p))
+        self.points
+            .iter()
+            .fold(Rect::EMPTY, |acc, &p| acc.union_point(p))
     }
 
     /// Exact bounds of the curve itself, costing a root-solve per cubic.
@@ -488,9 +512,29 @@ impl Path {
     /// the document model deduplicate shapes by equality.
     ///
     /// Open subpaths keep their direction and their start point, because for
-    /// them both are meaningful.
+    /// them both are meaningful — the direction is the stroke direction and
+    /// the arrowhead hangs off the end.
+    ///
+    /// Nesting is decided by a point-in-outline test, which is a heuristic
+    /// for a strongly concave subpath whose probe point falls outside itself.
+    /// When the orientation is already known to be right — as it is for the
+    /// boolean engine's output — use [`Path::canonically_ordered`] instead
+    /// and leave it alone.
     #[must_use]
     pub fn normalised(&self) -> Path {
+        self.canonicalise(true)
+    }
+
+    /// Canonical start vertex and subpath order, leaving every subpath's
+    /// direction as it is.
+    #[must_use]
+    pub fn canonically_ordered(&self) -> Path {
+        self.canonicalise(false)
+    }
+
+    /// The shared implementation; `orient` decides whether subpath directions
+    /// are recomputed from the nesting depth.
+    fn canonicalise(&self, orient: bool) -> Path {
         #[derive(Clone)]
         struct Sp {
             segs: Vec<Segment>,
@@ -502,48 +546,45 @@ impl Path {
         for sp in self.subpaths() {
             let segs: Vec<Segment> = self.subpath_segments(&sp);
             if segs.is_empty() {
-                sps.push(Sp { segs, closed: sp.closed, lone: self.subpath_start(&sp) });
+                sps.push(Sp {
+                    segs,
+                    closed: sp.closed,
+                    lone: self.subpath_start(&sp),
+                });
             } else {
-                sps.push(Sp { segs, closed: sp.closed, lone: None });
+                sps.push(Sp {
+                    segs,
+                    closed: sp.closed,
+                    lone: None,
+                });
             }
         }
 
-        // Orientation: a subpath nested inside an odd number of others is a
-        // hole. Testing one point of each against the others is O(n^2) in the
-        // subpath count, which is fine — documents have a handful of subpaths
-        // per shape, not thousands.
-        let outlines: Vec<Path> = sps
-            .iter()
-            .map(|s| {
-                let mut b = PathBuilder::default();
-                if let Some(first) = s.segs.first() {
-                    b.move_to(first.start());
-                    for seg in &s.segs {
-                        match *seg {
-                            Segment::Line { p1, .. } => b.line_to(p1),
-                            Segment::Cubic { p1, p2, p3, .. } => b.cubic_to(p1, p2, p3),
-                        };
-                    }
-                    b.close();
-                }
-                b.build()
-            })
-            .collect();
+        if orient {
+            // A subpath nested inside an odd number of others is a hole.
+            // Testing one point of each against the others is quadratic in
+            // the subpath count, which is fine: shapes have a handful of
+            // subpaths, not thousands.
+            let outlines: Vec<Path> = sps.iter().map(|s| outline_of(&s.segs)).collect();
 
-        for i in 0..sps.len() {
-            if sps[i].segs.is_empty() {
-                continue;
-            }
-            let probe = sps[i].segs[0].start();
-            let depth = (0..sps.len())
-                .filter(|&j| j != i && !outlines[j].is_empty())
-                .filter(|&j| crate::hit_fill(&outlines[j], probe, crate::FillRule::EvenOdd))
-                .count();
-            let want_ccw = depth % 2 == 0;
-            let area: f64 = sps[i].segs.iter().map(|s| s.to_kurbo().signed_area()).sum();
-            let is_ccw = area > 0.0;
-            if area != 0.0 && is_ccw != want_ccw {
-                sps[i].segs = reverse_segments(&sps[i].segs);
+            for i in 0..sps.len() {
+                // Only closed subpaths have their direction normalised. For
+                // an open one the direction is meaningful, and reversing it
+                // would also move its start point, which would stop this
+                // from being idempotent.
+                if sps[i].segs.is_empty() || !sps[i].closed {
+                    continue;
+                }
+                let probe = probe_point(&sps[i].segs);
+                let depth = (0..sps.len())
+                    .filter(|&j| j != i && !outlines[j].is_empty())
+                    .filter(|&j| crate::hit_fill(&outlines[j], probe, crate::FillRule::EvenOdd))
+                    .count();
+                let want_ccw = depth % 2 == 0;
+                let area: f64 = sps[i].segs.iter().map(|s| s.to_kurbo().signed_area()).sum();
+                if area != 0.0 && (area > 0.0) != want_ccw {
+                    sps[i].segs = reverse_segments(&sps[i].segs);
+                }
             }
         }
 
@@ -603,7 +644,10 @@ impl Path {
     pub fn validate(&self) -> Result<(), PathError> {
         let expected: usize = self.verbs.iter().map(|v| v.arity()).sum();
         if expected != self.points.len() {
-            return Err(PathError::ArityMismatch { points: self.points.len(), expected });
+            return Err(PathError::ArityMismatch {
+                points: self.points.len(),
+                expected,
+            });
         }
         if !self.flags.is_empty() && self.flags.len() != self.points.len() {
             return Err(PathError::FlagsMismatch {
@@ -770,7 +814,12 @@ impl Path {
     }
 
     /// The segments of one subpath, with its start point resolved.
-    pub(crate) fn subpath_segments(&self, sp: &SubPathRef) -> Vec<Segment> {
+    ///
+    /// Takes a [`SubPathRef`] from [`Path::subpaths`]; a range that does not
+    /// begin at a `MoveTo` yields whatever the verbs in it describe starting
+    /// from the origin, which is not useful but is not unsound either.
+    #[must_use]
+    pub fn subpath_segments(&self, sp: &SubPathRef) -> Vec<Segment> {
         let mut out = Vec::new();
         // Walk from the start of the path so that `cur` is correct on entry;
         // a subpath always begins with its own `MoveTo`, so only the verbs in
@@ -789,7 +838,10 @@ impl Path {
                     i += 1;
                 }
                 Verb::LineTo => {
-                    out.push(Segment::Line { p0: cur, p1: self.points[i] });
+                    out.push(Segment::Line {
+                        p0: cur,
+                        p1: self.points[i],
+                    });
                     cur = self.points[i];
                     i += 1;
                 }
@@ -848,7 +900,10 @@ impl Path {
                     i += 1;
                 }
                 Verb::LineTo => {
-                    out.push(Segment::Line { p0: cur, p1: self.points[i] });
+                    out.push(Segment::Line {
+                        p0: cur,
+                        p1: self.points[i],
+                    });
                     cur = self.points[i];
                     i += 1;
                 }
@@ -878,6 +933,54 @@ impl Path {
     }
 }
 
+/// The closed outline a segment chain describes, for containment testing.
+fn outline_of(segs: &[Segment]) -> Path {
+    let mut b = PathBuilder::default();
+    if let Some(first) = segs.first() {
+        b.move_to(first.start());
+        for seg in segs {
+            match *seg {
+                Segment::Line { p1, .. } => b.line_to(p1),
+                Segment::Cubic { p1, p2, p3, .. } => b.cubic_to(p1, p2, p3),
+            };
+        }
+        b.close();
+    }
+    b.build()
+}
+
+/// A point for testing which other subpaths enclose this one.
+///
+/// It is the subpath's lexicographically smallest vertex nudged a short way
+/// towards the mean of its vertices. Both of those are invariant under
+/// rotating and reversing the chain, which is what makes
+/// [`Path::normalised`] idempotent, and the nudge matters twice over: it
+/// moves the probe off a vertex that a neighbouring subpath may share, where
+/// a containment test would be a coin flip, and it keeps the probe near the
+/// boundary rather than at the centre, so that an outer subpath is not
+/// mistaken for a hole of the hole it contains.
+fn probe_point(segs: &[Segment]) -> Point {
+    let n = segs.len() as f64;
+    let (sx, sy) = segs.iter().fold((0.0, 0.0), |(x, y), s| {
+        let (px, py) = s.start().to_f64();
+        (x + px, y + py)
+    });
+    let (mx, my) = (sx / n, sy / n);
+    let corner = segs
+        .iter()
+        .map(|s| s.start())
+        .min_by_key(|p| key(*p))
+        .unwrap_or(Point::ORIGIN);
+    let (cx, cy) = corner.to_f64();
+    // A thousandth of the way in, but at least a millipoint, so the nudge is
+    // visible at integer resolution however small the subpath is.
+    let step = |c: f64, m: f64| {
+        let d = (m - c) / 1024.0;
+        if d.abs() < 1.0 { (m - c).signum() } else { d }
+    };
+    Point::from_f64_round(cx + step(cx, mx), cy + step(cy, my))
+}
+
 /// Lexicographic sort key for canonicalisation.
 #[inline]
 fn key(p: Point) -> (i32, i32) {
@@ -890,7 +993,12 @@ fn reverse_segments(segs: &[Segment]) -> Vec<Segment> {
         .rev()
         .map(|s| match *s {
             Segment::Line { p0, p1 } => Segment::Line { p0: p1, p1: p0 },
-            Segment::Cubic { p0, p1, p2, p3 } => Segment::Cubic { p0: p3, p1: p2, p2: p1, p3: p0 },
+            Segment::Cubic { p0, p1, p2, p3 } => Segment::Cubic {
+                p0: p3,
+                p1: p2,
+                p2: p1,
+                p3: p0,
+            },
         })
         .collect()
 }
@@ -924,7 +1032,10 @@ impl Iterator for SubPathIter<'_> {
             }
         }
         self.at = i;
-        Some(SubPathRef { verb_range: start..i, closed })
+        Some(SubPathRef {
+            verb_range: start..i,
+            closed,
+        })
     }
 }
 
@@ -963,7 +1074,12 @@ impl Iterator for SegmentIter<'_> {
                     let p2 = self.path.points[self.point + 1];
                     let p3 = self.path.points[self.point + 2];
                     self.point += 3;
-                    let seg = Segment::Cubic { p0: self.cur, p1, p2, p3 };
+                    let seg = Segment::Cubic {
+                        p0: self.cur,
+                        p1,
+                        p2,
+                        p3,
+                    };
                     self.cur = p3;
                     return Some(seg);
                 }
@@ -1147,7 +1263,15 @@ impl PathBuilder {
     #[must_use]
     pub fn build(mut self) -> Path {
         self.flush_empty_move();
-        let flags = if self.any_flags { self.flags } else { Vec::new() };
-        Path { verbs: self.verbs, points: self.points, flags }
+        let flags = if self.any_flags {
+            self.flags
+        } else {
+            Vec::new()
+        };
+        Path {
+            verbs: self.verbs,
+            points: self.points,
+            flags,
+        }
     }
 }

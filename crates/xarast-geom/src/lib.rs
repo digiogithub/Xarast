@@ -53,12 +53,18 @@ pub mod stroke;
 
 pub use boolean::{BoolOp, boolean, self_union};
 pub use fixed::Fixed16;
-pub use flatten::{Polyline, SegmentTrace, Tolerance, VertexSource, flatten, flatten_traced, max_deviation};
+pub use flatten::{
+    Polyline, SegmentTrace, Tolerance, VertexSource, flatten, flatten_traced, max_deviation,
+};
 pub use matrix::Matrix;
-pub use measure::{HitIndex, Nearest, arclen, hit_fill, hit_stroke, nearest_point, point_at_arclen};
+pub use measure::{
+    HitIndex, Nearest, arclen, hit_fill, hit_stroke, nearest_point, point_at_arclen,
+};
 pub use mp::{Mp, ParseMpError};
 pub use path::{Path, PathBuilder, PathError, PointFlags, Segment, SubPathRef, Verb};
 pub use point::{Point, Vector};
 pub use profile::BiasGain;
 pub use rect::Rect;
-pub use stroke::{Cap, DashPattern, FillRule, Join, StrokeError, StrokeStyle, dash, offset, stroke_to_path};
+pub use stroke::{
+    Cap, DashPattern, FillRule, Join, StrokeError, StrokeStyle, dash, offset, stroke_to_path,
+};

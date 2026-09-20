@@ -10,7 +10,11 @@ use kurbo::{ParamCurve, ParamCurveArclen, ParamCurveDeriv, ParamCurveNearest, Sh
 /// it: this crate is stateless by design, so the cache belongs to the caller.
 #[must_use]
 pub fn arclen(path: &Path, accuracy: f64) -> f64 {
-    let acc = if accuracy.is_finite() && accuracy > 0.0 { accuracy } else { 1e-6 };
+    let acc = if accuracy.is_finite() && accuracy > 0.0 {
+        accuracy
+    } else {
+        1e-6
+    };
     path.segments().map(|s| s.to_kurbo().arclen(acc)).sum()
 }
 
@@ -25,7 +29,11 @@ pub fn point_at_arclen(path: &Path, distance: f64, accuracy: f64) -> Option<(Poi
     if !distance.is_finite() || distance < 0.0 {
         return None;
     }
-    let acc = if accuracy.is_finite() && accuracy > 0.0 { accuracy } else { 1e-6 };
+    let acc = if accuracy.is_finite() && accuracy > 0.0 {
+        accuracy
+    } else {
+        1e-6
+    };
     let mut remaining = distance;
     let mut last: Option<(Point, Vector)> = None;
     for seg in path.segments() {
@@ -83,7 +91,11 @@ pub struct Nearest {
 /// segments.
 #[must_use]
 pub fn nearest_point(path: &Path, p: Point, accuracy: f64) -> Option<Nearest> {
-    let acc = if accuracy.is_finite() && accuracy > 0.0 { accuracy } else { 1e-3 };
+    let acc = if accuracy.is_finite() && accuracy > 0.0 {
+        accuracy
+    } else {
+        1e-3
+    };
     let target = p.to_kurbo();
     let mut best: Option<Nearest> = None;
     for (sp, si, seg) in path.indexed_segments() {
@@ -136,7 +148,11 @@ pub fn hit_stroke(path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool
     // A quick rejection on the control hull first: it is conservative, so a
     // miss here is a genuine miss, and it costs one rectangle test against
     // the per-segment work below.
-    if !path.bounds().inflated(half_width.abs() + Mp::new(1)).contains(p) {
+    if !path
+        .bounds()
+        .inflated(half_width.abs() + Mp::new(1))
+        .contains(p)
+    {
         return false;
     }
     let acc = (tol.get() * 0.5).max(1e-3);
@@ -215,7 +231,12 @@ impl HitIndex {
                 }
             }
         }
-        HitIndex { edges, rows, bounds, row_height: h }
+        HitIndex {
+            edges,
+            rows,
+            bounds,
+            row_height: h,
+        }
     }
 
     /// The row a y coordinate falls in, or `None` when outside the bounds.
@@ -268,7 +289,11 @@ impl HitIndex {
     pub fn hit_stroke(&self, path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool {
         let _ = tol;
         let limit = half_width.to_f64().abs();
-        if !self.bounds.inflated(half_width.abs() + Mp::new(1)).contains(p) {
+        if !self
+            .bounds
+            .inflated(half_width.abs() + Mp::new(1))
+            .contains(p)
+        {
             return false;
         }
         let Some(row) = self.row_of(p.y.to_f64()) else {
@@ -304,7 +329,11 @@ fn point_segment_distance_sq(p: Point, a: Point, b: Point) -> f64 {
     let (bx, by) = b.to_f64();
     let (dx, dy) = (bx - ax, by - ay);
     let len_sq = dx * dx + dy * dy;
-    let t = if len_sq == 0.0 { 0.0 } else { (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0) };
+    let t = if len_sq == 0.0 {
+        0.0
+    } else {
+        (((px - ax) * dx + (py - ay) * dy) / len_sq).clamp(0.0, 1.0)
+    };
     let (cx, cy) = (ax + t * dx, ay + t * dy);
     (px - cx) * (px - cx) + (py - cy) * (py - cy)
 }

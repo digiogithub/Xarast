@@ -39,7 +39,10 @@ pub struct Vector {
 
 impl Point {
     /// The document origin, the bottom-left of the page bounding rectangle.
-    pub const ORIGIN: Point = Point { x: Mp::ZERO, y: Mp::ZERO };
+    pub const ORIGIN: Point = Point {
+        x: Mp::ZERO,
+        y: Mp::ZERO,
+    };
 
     /// Builds a point from two millipoint coordinates.
     #[inline]
@@ -129,7 +132,10 @@ impl Point {
 
 impl Vector {
     /// The zero displacement.
-    pub const ZERO: Vector = Vector { dx: Mp::ZERO, dy: Mp::ZERO };
+    pub const ZERO: Vector = Vector {
+        dx: Mp::ZERO,
+        dy: Mp::ZERO,
+    };
 
     /// Builds a vector from two millipoint components.
     #[inline]
@@ -142,7 +148,10 @@ impl Vector {
     #[inline]
     #[must_use]
     pub const fn raw(dx: i32, dy: i32) -> Vector {
-        Vector { dx: Mp(dx), dy: Mp(dy) }
+        Vector {
+            dx: Mp(dx),
+            dy: Mp(dy),
+        }
     }
 
     /// Exact conversion to a pair of `f64` millipoints.

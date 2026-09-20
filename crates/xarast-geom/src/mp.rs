@@ -17,7 +17,7 @@
 //!
 //! The resolution:
 //!
-//! 1. [`Add`](core::ops::Add), [`Sub`](core::ops::Sub), [`Neg`](core::ops::Neg)
+//! 1. [`Add`], [`Sub`], [`Neg`]
 //!    and their assigning forms **saturate**, identically in debug and release.
 //!    Saturation is total, deterministic and order-preserving, so a value that
 //!    leaves the plane lands on its edge rather than on the far side of it.
@@ -97,17 +97,24 @@ impl Mp {
     pub const PER_INCH: i32 = 72_000;
     /// Millipoints per CSS pixel at 96 dpi.
     pub const PER_PX96: i32 = 750;
-    /// Millipoints per millimetre, as specified by the phase document.
+    /// Millipoints per millimetre, derived from [`Mp::PER_INCH`].
     ///
-    /// Note that this is `72000 / 25.399977`, not `72000 / 25.4`: it carries
-    /// over the historical inch used by the original, and so differs from
-    /// [`Mp::PER_INCH`] by 2.5 parts per million. Metric and imperial
-    /// conversions are therefore not exactly reciprocal. The error is 0.4 mp
-    /// across an A4 page and so is invisible in practice, but it is real; see
-    /// `docs/memory/geometry.md`.
-    pub const PER_MM: f64 = 2834.652715;
+    /// A point is 1/72 inch and an inch has been exactly 25.4 mm since 1959,
+    /// so this is `72000 / 25.4` and nothing else. Deriving it rather than
+    /// writing a literal is what keeps millimetre and inch conversions exactly
+    /// reciprocal.
+    ///
+    /// The original hard-coded `2834.652715` (`Kernel/units.h:120`), which is
+    /// 2.5 ppm high and corresponds to no definition of the inch. It was not
+    /// even self-consistent: `Kernel/linwthop.cpp:123` clamps line widths
+    /// using `2834646` millipoints per metre, which is the correct value. We
+    /// use the correct one. Millipoints are the storage unit in both file
+    /// formats and millimetres are only an entry and display unit, so nothing
+    /// round-trips through this constant and there is no compatibility to
+    /// preserve — only 2.5 µm per metre of error to avoid.
+    pub const PER_MM: f64 = Mp::PER_INCH as f64 / 25.4;
     /// Millipoints per centimetre; ten times [`Mp::PER_MM`].
-    pub const PER_CM: f64 = 28346.52715;
+    pub const PER_CM: f64 = Mp::PER_MM * 10.0;
 
     /// Wraps a raw millipoint count without clamping.
     #[inline]
@@ -127,11 +134,7 @@ impl Mp {
     /// `MIN`/`MAX` invariant is enforced.
     #[inline]
     const fn clamped(raw: i32) -> Mp {
-        if raw < Mp::MIN.0 {
-            Mp::MIN
-        } else {
-            Mp(raw)
-        }
+        if raw < Mp::MIN.0 { Mp::MIN } else { Mp(raw) }
     }
 
     /// Clamps an `i64` into the canonical range.
@@ -201,7 +204,7 @@ impl Mp {
     #[inline]
     #[must_use]
     pub fn from_px(v: f64, dpi: f64) -> Mp {
-        if !(dpi > 0.0) || !dpi.is_finite() {
+        if !dpi.is_finite() || dpi <= 0.0 {
             return Mp::ZERO;
         }
         Mp::from_f64_round(v * (Mp::PER_INCH as f64) / dpi)
@@ -233,7 +236,7 @@ impl Mp {
     #[inline]
     #[must_use]
     pub fn to_px(self, dpi: f64) -> f64 {
-        if !(dpi > 0.0) || !dpi.is_finite() {
+        if !dpi.is_finite() || dpi <= 0.0 {
             return 0.0;
         }
         self.to_f64() * dpi / Mp::PER_INCH as f64
@@ -565,5 +568,20 @@ impl core::str::FromStr for Mp {
             "px" => Ok(Mp::from_f64_round(v * Mp::PER_PX96 as f64)),
             other => Err(ParseMpError::UnknownUnit(other.to_owned())),
         }
+    }
+}
+
+#[cfg(test)]
+mod reciprocity_tests {
+    use super::*;
+
+    /// Millimetres and inches must be exactly reciprocal through millipoints.
+    /// The original's hard-coded constant was not, by 2.5 ppm; see [`Mp::PER_MM`].
+    #[test]
+    fn metric_and_imperial_agree() {
+        assert!((Mp::PER_MM * 25.4 - f64::from(Mp::PER_INCH)).abs() < 1e-9);
+        assert!((Mp::PER_CM - Mp::PER_MM * 10.0).abs() < 1e-9);
+        assert_eq!(Mp::from_mm(1000.0).raw(), 2_834_646);
+        assert!((Mp::new(2_834_646).to_mm() - 1000.0).abs() < 1e-3);
     }
 }

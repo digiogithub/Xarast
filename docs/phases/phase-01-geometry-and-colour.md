@@ -484,8 +484,8 @@ impl Mp {
     pub const PER_PICA: i32;               // 12_000
     pub const PER_INCH: i32;               // 72_000
     pub const PER_PX96: i32;               // 750
-    pub const PER_MM: f64;                 // 2834.652715
-    pub const PER_CM: f64;                 // 28346.52715
+    pub const PER_MM: f64;                 // PER_INCH / 25.4 = 2834.645669
+    pub const PER_CM: f64;                 // PER_MM * 10
 
     pub const fn new(raw: i32) -> Mp;
     pub const fn raw(self) -> i32;

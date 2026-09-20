@@ -104,7 +104,10 @@ impl DashPattern {
         if !factor.is_finite() || factor <= 0.0 {
             return Vec::new();
         }
-        self.elements.iter().map(|e| (e.to_f64() * factor).max(0.0)).collect()
+        self.elements
+            .iter()
+            .map(|e| (e.to_f64() * factor).max(0.0))
+            .collect()
     }
 }
 
@@ -175,7 +178,9 @@ pub fn stroke_to_path(
         return Err(StrokeError::Degenerate("negative stroke width"));
     }
     if !style.mitre_limit.is_finite() || style.mitre_limit < 1.0 {
-        return Err(StrokeError::Degenerate("mitre limit below 1.0 or not finite"));
+        return Err(StrokeError::Degenerate(
+            "mitre limit below 1.0 or not finite",
+        ));
     }
     if path.is_empty() {
         return Ok(Path::new());
@@ -203,10 +208,20 @@ pub fn stroke_to_path(
         s
     };
 
-    let out = kurbo::stroke(bez.iter(), &base(style.cap_start, style.cap_end), &opts, tol.get());
+    let out = kurbo::stroke(
+        bez.iter(),
+        &base(style.cap_start, style.cap_end),
+        &opts,
+        tol.get(),
+    );
     let (mut p, _) = Path::from_bez_path(&out);
     if style.cap_start != style.cap_end {
-        let alt = kurbo::stroke(bez.iter(), &base(style.cap_end, style.cap_start), &opts, tol.get());
+        let alt = kurbo::stroke(
+            bez.iter(),
+            &base(style.cap_end, style.cap_start),
+            &opts,
+            tol.get(),
+        );
         let (q, _) = Path::from_bez_path(&alt);
         p = crate::boolean(&p, &q, BoolOp::Union, FillRule::NonZero, tol);
     }
@@ -225,8 +240,7 @@ pub fn dash(path: &Path, pattern: &DashPattern, line_width: Mp, tol: Tolerance) 
     }
     let _ = tol;
     let bez = path.to_bez_path();
-    let out: kurbo::BezPath =
-        kurbo::dash(bez.iter(), pattern.offset.to_f64(), &elements).collect();
+    let out: kurbo::BezPath = kurbo::dash(bez.iter(), pattern.offset.to_f64(), &elements).collect();
     Path::from_bez_path(&out).0
 }
 
@@ -311,7 +325,8 @@ fn offset_segment(seg: Segment, d: f64, tol: f64) -> kurbo::BezPath {
             p
         }
         Segment::Cubic { p0, p1, p2, p3 } => {
-            let c = kurbo::CubicBez::new(p0.to_kurbo(), p1.to_kurbo(), p2.to_kurbo(), p3.to_kurbo());
+            let c =
+                kurbo::CubicBez::new(p0.to_kurbo(), p1.to_kurbo(), p2.to_kurbo(), p3.to_kurbo());
             let mut out = kurbo::BezPath::new();
             kurbo::offset::offset_cubic(c, d, tol, &mut out);
             out
@@ -338,7 +353,11 @@ fn append_el(b: &mut crate::PathBuilder, el: kurbo::PathEl) {
             b.quad_to(Point::from_kurbo(c), Point::from_kurbo(p));
         }
         kurbo::PathEl::CurveTo(c1, c2, p) => {
-            b.cubic_to(Point::from_kurbo(c1), Point::from_kurbo(c2), Point::from_kurbo(p));
+            b.cubic_to(
+                Point::from_kurbo(c1),
+                Point::from_kurbo(c2),
+                Point::from_kurbo(p),
+            );
         }
         kurbo::PathEl::ClosePath => {}
     };
@@ -382,7 +401,11 @@ fn append_join(
             }
             let arc = kurbo::Arc::new((corner.x, corner.y), (r, r), a0, sweep, 0.0);
             arc.to_cubic_beziers(tol, |c1, c2, p| {
-                b.cubic_to(Point::from_kurbo(c1), Point::from_kurbo(c2), Point::from_kurbo(p));
+                b.cubic_to(
+                    Point::from_kurbo(c1),
+                    Point::from_kurbo(c2),
+                    Point::from_kurbo(p),
+                );
             });
         }
     }

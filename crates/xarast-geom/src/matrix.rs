@@ -43,21 +43,41 @@ impl Default for Matrix {
 
 impl Matrix {
     /// The transform that changes nothing.
-    pub const IDENTITY: Matrix =
-        Matrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: Mp::ZERO, f: Mp::ZERO };
+    pub const IDENTITY: Matrix = Matrix {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: Mp::ZERO,
+        f: Mp::ZERO,
+    };
 
     /// A pure translation.
     #[inline]
     #[must_use]
     pub const fn translate(by: Vector) -> Matrix {
-        Matrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: by.dx, f: by.dy }
+        Matrix {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: by.dx,
+            f: by.dy,
+        }
     }
 
     /// A scale about the origin.
     #[inline]
     #[must_use]
     pub const fn scale(sx: f64, sy: f64) -> Matrix {
-        Matrix { a: sx, b: 0.0, c: 0.0, d: sy, e: Mp::ZERO, f: Mp::ZERO }
+        Matrix {
+            a: sx,
+            b: 0.0,
+            c: 0.0,
+            d: sy,
+            e: Mp::ZERO,
+            f: Mp::ZERO,
+        }
     }
 
     /// A scale about an arbitrary centre.
@@ -79,7 +99,14 @@ impl Matrix {
     #[must_use]
     pub fn rotate(radians: f64) -> Matrix {
         let (s, c) = radians.sin_cos();
-        Matrix { a: c, b: s, c: -s, d: c, e: Mp::ZERO, f: Mp::ZERO }
+        Matrix {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            e: Mp::ZERO,
+            f: Mp::ZERO,
+        }
     }
 
     /// A rotation about an arbitrary centre.
@@ -100,7 +127,14 @@ impl Matrix {
     /// A skew by the given angles, in radians.
     #[must_use]
     pub fn skew(ax: f64, ay: f64) -> Matrix {
-        Matrix { a: 1.0, b: ay.tan(), c: ax.tan(), d: 1.0, e: Mp::ZERO, f: Mp::ZERO }
+        Matrix {
+            a: 1.0,
+            b: ay.tan(),
+            c: ax.tan(),
+            d: 1.0,
+            e: Mp::ZERO,
+            f: Mp::ZERO,
+        }
     }
 
     /// Composition: **`self` first, then `other`**.
@@ -202,9 +236,9 @@ impl Matrix {
             Point::new(r.lo.x, r.hi.y),
             Point::new(r.hi.x, r.hi.y),
         ];
-        corners
-            .iter()
-            .fold(Rect::EMPTY, |acc, &p| acc.union_point(self.transform_point(p)))
+        corners.iter().fold(Rect::EMPTY, |acc, &p| {
+            acc.union_point(self.transform_point(p))
+        })
     }
 
     /// Whether this is exactly the identity.
@@ -261,7 +295,14 @@ impl Matrix {
     #[inline]
     #[must_use]
     pub fn to_affine(self) -> kurbo::Affine {
-        kurbo::Affine::new([self.a, self.b, self.c, self.d, self.e.to_f64(), self.f.to_f64()])
+        kurbo::Affine::new([
+            self.a,
+            self.b,
+            self.c,
+            self.d,
+            self.e.to_f64(),
+            self.f.to_f64(),
+        ])
     }
 
     /// Reads back from `kurbo`, quantising the translation to millipoints.

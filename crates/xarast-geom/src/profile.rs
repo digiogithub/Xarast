@@ -24,14 +24,20 @@ impl Default for BiasGain {
 
 impl BiasGain {
     /// The profile that maps every `t` to itself.
-    pub const IDENTITY: BiasGain = BiasGain { bias: 0.0, gain: 0.0 };
+    pub const IDENTITY: BiasGain = BiasGain {
+        bias: 0.0,
+        gain: 0.0,
+    };
 
     /// Builds a profile, clamping both parameters into `-1.0..=1.0`. A NaN
     /// becomes `0.0`, so that a corrupt file cannot produce a profile that
     /// turns every gradient stop into a NaN.
     #[must_use]
     pub fn new(bias: f64, gain: f64) -> BiasGain {
-        BiasGain { bias: clamp_param(bias), gain: clamp_param(gain) }
+        BiasGain {
+            bias: clamp_param(bias),
+            gain: clamp_param(gain),
+        }
     }
 
     /// Maps `t` in `0.0..=1.0` to `0.0..=1.0`, applying the bias first and
