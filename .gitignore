@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+*.pdb
+/dist
+/build
+*.AppImage
+*.AppDir
+.DS_Store
+/tests/corpus/out
