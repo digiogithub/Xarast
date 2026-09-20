@@ -1,5 +1,13 @@
 # 04 — Inventario completo de funcionalidad de Xara Xtreme (Xara LX)
 
+> **Nota de sala limpia.** Este documento describe el *comportamiento* y los
+> *formatos de datos* de Xara Xtreme (GPL-2.0-only) con fines de
+> interoperabilidad: es un inventario de funcionalidad observable y de su coste
+> de reimplementación. No reproduce código fuente del original; las referencias
+> `fichero:línea` apuntan al árbol de referencia en `xara-xtreme/` y sirven solo
+> para localizar la lógica descrita. Xarast se implementa desde esta
+> especificación, no traduciendo el original.
+
 > **Propósito**: backlog de paridad funcional para la reimplementación en Rust (proyecto *Xarast*).
 > **Fuente**: árbol de código original `/home/user/xara-xtreme` (Xara LX / Xara Xtreme for Linux, GPLv2, © 1993–2006 Xara Group Ltd).
 > **Volumen del original**: ~825 `.cpp` + ~915 `.h`, repartidos en `Kernel/` (modelo de documento, operaciones, filtros, galerías), `tools/` (herramientas interactivas), `wxOil/` (capa OIL = *OS Interface Layer*, wxWidgets), `GDraw/` (motor de rasterizado propietario CDraw), `filters/SVGFilter/` (filtro SVG externo).

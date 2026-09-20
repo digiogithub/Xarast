@@ -1,5 +1,14 @@
 # Xarast — Stack tecnológico recomendado
 
+> **Nota de sala limpia.** Este documento analiza las *implicaciones de licencia*
+> y el stack técnico de Xarast frente a Xara Xtreme (GPL-2.0-only), con fines de
+> interoperabilidad y de decisión de diseño. No reproduce código fuente del
+> original —la única cita textual es el aviso de licencia del original, §1.1,
+> reproducido como prueba documental—; las referencias `fichero:línea` apuntan al
+> árbol de referencia en `xara-xtreme/` y sirven solo para localizar la lógica
+> descrita. Xarast se implementa desde esta especificación, no traduciendo el
+> original.
+
 > **Documento:** `docs/research/05-stack-tecnologico.md`
 > **Fecha de investigación:** 19 de septiembre de 2026
 > **Método:** verificación directa contra la API de `crates.io`, `docs.rs`, `README`/`CHANGELOG` de los repositorios y búsqueda web. Todas las versiones, licencias y fechas de actualización de esta tabla se consultaron **el 19-09-2026**; no proceden de conocimiento previo del modelo.
@@ -30,6 +39,18 @@
 ---
 
 ## 1. Restricción de licencia — LEER ANTES DE ELEGIR NADA
+
+> **Nota de actualización (pasada de higiene de sala limpia).** El análisis de esta
+> sección parte del supuesto de que Xarast podría ser un **trabajo derivado** de
+> Xara LX y, por tanto, quedar cubierto por su GPL-2.0-only. Ese supuesto **ya no
+> se sostiene**: Xarast se desarrolla en **sala limpia** a partir de las
+> especificaciones de `docs/research/`, sin copiar ni traducir código del
+> original, y la decisión de proyecto vigente es publicarlo bajo
+> **MIT OR Apache-2.0**. Con esa premisa, la incompatibilidad GPL-2.0-only ↔
+> Apache-2.0 descrita más abajo **no aplica a Xarast**, y tampoco aplica la
+> «ACCIÓN INMEDIATA» de la sección DECISIONES (sustituir el `LICENSE` por
+> GPL-3.0). El resto del análisis (licencias de cada crate, `cargo-deny`,
+> `cargo-about`) sigue siendo válido y necesario.
 
 Esta es la decisión más condicionante de todo el documento y hay un problema real que hay que resolver **hoy**, no en la fase 5.
 
@@ -898,6 +919,11 @@ Defensas que el fuzzing debe verificar: límite duro de memoria por documento, l
 ## DECISIONES
 
 ### Licencia
+
+> **Obsoleto — ver la nota de actualización del §1.** El bloque siguiente refleja la
+> decisión anterior, tomada bajo el supuesto de trabajo derivado. La decisión vigente
+> es **MIT OR Apache-2.0** para todo el proyecto, sostenida por la disciplina de sala
+> limpia.
 
 ```
 Xarast se publica bajo GPL-3.0-or-later.

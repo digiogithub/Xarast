@@ -1,5 +1,14 @@
 # El motor de render de Xara (CDraw/GDraw): ingeniería inversa y plan de reimplementación en Rust
 
+> **Nota de sala limpia.** Este documento describe el *comportamiento* y los
+> *formatos de datos* del motor de render de Xara Xtreme (aplicación GPL-2.0-only;
+> el rasterizador CDraw es una librería binaria propietaria) con fines de
+> interoperabilidad y de reimplementación independiente. No reproduce código
+> fuente ni cabeceras del original; las referencias `fichero:línea` apuntan al
+> árbol de referencia en `xara-xtreme/` y sirven solo para localizar la lógica
+> descrita. Xarast se implementa desde esta especificación, no traduciendo el
+> original.
+
 > **Estado:** INVESTIGACIÓN — base para la fase «motor de render» de Xarast.
 > **Documento:** `docs/research/03-motor-render.md`
 > **Fecha:** 2026-09-19
@@ -75,9 +84,9 @@ y nada más — dato clave para una migración incremental.
 
 CDraw no es orientado a objetos hacia fuera: cada llamada recibe un `pGCONTEXT` opaco.
 
-```c
-struct GCONTEXT { DWORD Valid; DWORD Data[1]; };   // GDraw/gconsts.h:237, Valid == 0xC90FDAA2
-```
+El tipo `GCONTEXT` (`GDraw/gconsts.h:237`) es opaco: una palabra de 32 bits de validación
+seguida de un bloque de datos de tamaño indeterminado desde el punto de vista del cliente.
+La palabra de validación vale `0xC90FDAA2` cuando el contexto está inicializado.
 
 El tamaño se pide en tiempo de ejecución con `GDraw_ContextLength()` y la app lo reserva con su
 propio `malloc` (`Kernel/GDrawIntf.cpp:258-272`). Del desensamblado se deduce que el contexto es
@@ -187,12 +196,20 @@ sección (f). Tabla completa en §2.6.
 `GColour_SetTilePattern(4)`, `GColour_SetTransparentTilePattern(4)`, `GBitmap_PlotTile(4)`.
 Firma representativa (`gdraw.h:351`):
 
-```c
-INT32 GColour_SetTilePattern(pGCONTEXT, pcBITMAPINFOHEADER, pcBYTE Bitmap, DWORD Style,
-    pcPOINT A, pcPOINT B, pcPOINT C,           // paralelogramo (o A..D en la variante «4»)
-    COLORREF DefaultColour, pcBGRT TranslationTable,
-    pcBYTE Red, pcBYTE Green, pcBYTE Blue, pcBYTE TransparencyTable, INT32 TileOffset);
-```
+`GColour_SetTilePattern` (`gdraw.h:351`) recibe, además del contexto, los parámetros
+siguientes (devuelve un entero de estado):
+
+| Parámetro | Tipo | Papel |
+|---|---|---|
+| cabecera del bitmap | puntero a `BITMAPINFOHEADER` | dimensiones y profundidad del tile |
+| píxeles | puntero a bytes | datos del tile |
+| estilo | entero de 32 bits | modo de repetición/muestreo |
+| A, B, C | puntos | paralelogramo de mapeo (la variante «4» añade un punto D) |
+| color por defecto | `COLORREF` | color fuera del tile cuando no se repite |
+| tabla de traducción | tabla BGR | remapeo de color global |
+| tablas R, G, B | 3 tablas de 256 bytes | corrección por canal (contone, separación) |
+| tabla de transparencia | tabla de 256 bytes | transparencia por índice/valor |
+| desplazamiento del tile | entero | offset de fase del mosaico |
 
 Las cuatro tablas de traducción permiten *contone*, corrección de color y separación en el
 propio muestreo. `GColour_SetTileSmoothingFlag` (interpolación bilineal) y
@@ -228,11 +245,13 @@ exportadas como C**).
 bisel (8 bits) se convierte en iluminación. La segunda API (`GDraw/gdraw2.h`, **sin contexto**,
 estado global) genera ese mapa:
 
-```c
-INT32 GDraw2_SetDIBitmap(const BITMAPINFOHEADER*, const BYTE*, eBevelStyle, float LightAngle1, float LightAngle2);
-INT32 GDraw2_FillTriangle (const POINT[3], double NormalX, double NormalY);
-INT32 GDraw2_FillTrapezium(const POINT[4], double NormalX, double NormalY);
-```
+| Función (`GDraw/gdraw2.h`) | Entradas | Papel |
+|---|---|---|
+| `GDraw2_SetDIBitmap` | cabecera + píxeles del bitmap destino, estilo de bisel, dos ángulos de luz (`float`) | fija el destino y los parámetros de iluminación |
+| `GDraw2_FillTriangle` | 3 puntos + normal (x, y) en `double` | rellena un triángulo del mapa de normales |
+| `GDraw2_FillTrapezium` | 4 puntos + normal (x, y) en `double` | ídem para un trapecio |
+
+Todas devuelven un entero de estado y operan sobre estado global (no reciben contexto).
 
 15 estilos de bisel (`gdraw2.h:104`): FLAT, ROUND, HALFROUND, FRAME, MESA_1/2, SMOOTH_1/2,
 POINT_1/2a/2b, RUFFLE_2a/2b/3a/3b. Uso real en `Kernel/beveler.cpp:756, 764, 844`.
@@ -311,19 +330,26 @@ y `BYTE[]` de verbos `PT_MOVETO=6`, `PT_LINETO=2`, `PT_BEZIERTO=4`, `| PT_CLOSEF
 
 La matriz documento→dispositivo es:
 
-```c
-struct GMATRIX { INT32 AX, AY, BX, BY; XLONG CX, CY; };   // gconsts.h:310  (XLONG = int64)
-const INT32 FX = 14;                                      // gconsts.h:354
-```
+| Campo | Ancho | Significado |
+|---|---|---|
+| `AX`, `AY`, `BX`, `BY` | entero con signo de 32 bits | parte lineal (a, b, c, d) |
+| `CX`, `CY` | entero con signo de 64 bits | traslación (e, f) |
+
+Declarada en `gconsts.h:310`. La constante de escala fraccionaria es `FX = 14`
+(`gconsts.h:354`).
 
 Construcción real (`wxOil/grndrgn.cpp:5297-5340`):
 
-```c
-const XLONG Mult = (INT32)(dPixelsPerInch * (1 << FX) + 0.5);
-gmat.AX = ((XLONG)abcd[0].GetRawLong() * Mult) / 72000;   // abcd = FIXED16 (16.16)
-...
-gmat.CX = -((XLONG)xdisp * (XLONG)(1 << (FX + 16)));      // traslación: 30 bits fraccionarios
-```
+El procedimiento, descrito paso a paso:
+
+1. Calcular un multiplicador entero `Mult = round(ppp · 2^FX)`, donde `ppp` son los píxeles
+   por pulgada del dispositivo y `FX = 14`.
+2. Para cada uno de los cuatro términos lineales (a, b, c, d), tomados como enteros en punto
+   fijo 16.16: multiplicar por `Mult` en aritmética de 64 bits y dividir por 72 000
+   (millipuntos por pulgada). Resultado: punto fijo **2.30** (16 bits de la fracción de
+   origen + 14 de `FX`).
+3. Para la traslación (e, f): multiplicar el desplazamiento en píxeles por `2^(FX+16)` en
+   64 bits y **cambiar el signo**. Resultado: 64 bits con **30 bits fraccionarios**.
 
 → **a,b,c,d en punto fijo 2.30** (16 bits de `FIXED16` + `FX`=14) y **e,f en 64 bits con 30 bits
 fraccionarios**. A 96 dpi, `AX = 2^30 · 96/72000 = 1 431 655`. El comentario del código
@@ -437,12 +463,12 @@ punto D y la interpolación es proyectiva, validada por `MouldPerspective::WillB
 
 ### 2.6.2 La tabla de gradiente
 
-```c
-struct GraduationTable   { DWORD Length; COLORREF Start, End; DitherBlock Table[0x100]; }; // gconsts.h:248
-struct GraduationTable32 { DWORD Length; COLORREF Start, End; COLORREF   Table[0x100]; };
-struct TransparentGradTable { BYTE Table[0x100]; };                                        // gconsts.h:262
-struct DitherBlock { DWORD Data[4]; };
-```
+| Estructura | Campos | Uso |
+|---|---|---|
+| `GraduationTable` (`gconsts.h:248`) | longitud (`u32`), color inicial, color final, 256 entradas de tipo `DitherBlock` | destinos de menos de 32 bpp |
+| `GraduationTable32` | longitud (`u32`), color inicial, color final, 256 colores | destinos de 32 bpp |
+| `TransparentGradTable` (`gconsts.h:262`) | 256 bytes | rampa de transparencia |
+| `DitherBlock` | 4 palabras de 32 bits | patrón de dither 4×4 precalculado para un color |
 
 `Length` puede ser 256 o **2048** (tablas «largas», `LargeGradTables`, `Kernel/gradtbl.cpp:262`)
 para evitar bandas en gradientes grandes. Para destinos de <32 bpp cada entrada no es un color
@@ -486,20 +512,23 @@ profile(x) = gain( g, bias(b, x) )          (biasgain.cpp:572)
 Con `B = G = 0` ⇒ `b = g = 0.5` ⇒ identidad (el código incluso cortocircuita ese caso,
 `biasgain.cpp:341`). Aplicación a la rampa (`gradtbl.cpp:1206`, transparencia):
 
-```c
-BiasGain.SetIntervals(0, Length);
-for (i = 0; i < Length; i++) {
-    f = BiasGain.MapInterval(i) / Length;      // == profile(i/Length)
-    Table[i] = Start·(1−f) + End·f;
-}
+```text
+# Construcción de la rampa con perfil (equivalente a gradtbl.cpp:1206)
+dominio del perfil := [0, Length]
+para i en 0 .. Length-1:
+    f        := profile(i / Length)          # perfil bias/gain normalizado a 0..1
+    Table[i] := lerp(Start, End, f)          # interpolación lineal del color/valor
 ```
 
 Interpolación de transparencia sin perfil, en punto fijo (`gradtbl.cpp:1562`):
 
-```c
-t   = (start << 22) + 0x00200000;              // +0.5 para redondear
-inc = ((end − start) << 22) / (endIdx − startIdx);
-Table[i] = (t >> 22) & 0xFF;  t += inc;
+```text
+# Interpolación lineal en punto fijo con 22 bits fraccionarios (gradtbl.cpp:1562)
+t   := (start << 22) + 2^21          # el sumando 2^21 equivale a +0,5: redondeo al más cercano
+inc := ((end - start) << 22) / (endIdx - startIdx)
+para cada i del tramo:
+    Table[i] := (t >> 22) AND 0xFF
+    t        := t + inc
 ```
 
 ## 2.7 Transparencia y modos de mezcla
@@ -530,11 +559,16 @@ El modelo de documento usa su propio `TranspType` (`Kernel/fillval.h:144`) con
 `TT_Mix=1, TT_StainGlass=2, TT_Bleach=3` y luego los valores de GDraw a partir de 13; la
 traducción está en `GRenderRegion::MapTranspTypeToGDraw` (`wxOil/grndrgn.cpp:8844`):
 
-```cpp
-if (ttype <= TT_Bleach)  return ttype − TT_Mix   + (bGraduated ? T_GRAD_REFLECTIVE : T_FLAT_REFLECTIVE);
-if (ttype >= TT_CONTRAST && ttype <= TT_BEVEL)
-                         return ttype − TT_CONTRAST + (bGraduated ? T_GRAD_CONTRAST : T_FLAT_CONTRAST);
-```
+La traducción es un simple cambio de base entre dos numeraciones contiguas, en dos tramos:
+
+* **Tramo clásico** (`TT_Mix`, `TT_StainGlass`, `TT_Bleach`): se resta el valor de `TT_Mix`
+  para obtener el índice 0, 1 o 2 dentro de la familia, y se suma la base de GDraw
+  correspondiente — `T_FLAT_REFLECTIVE` si la transparencia es plana, `T_GRAD_REFLECTIVE`
+  si es graduada.
+* **Tramo de modos de mezcla** (de `TT_CONTRAST` a `TT_BEVEL`): igual, restando la base
+  `TT_CONTRAST` y sumando `T_FLAT_CONTRAST` o `T_GRAD_CONTRAST`.
+
+Cualquier otro valor cae fuera de ambos tramos y no tiene equivalente.
 
 Convenio de valores: **0 = opaco, 255 = totalmente transparente** (inverso del alfa habitual).
 
@@ -653,10 +687,12 @@ cuadrilátero A..D en perspectiva) y el tipo de repetición viene de `FillMappin
 (`fracfill.cpp:290`) con parámetros `Seed`, `Tileable`, `Squash`, `Graininess` (0..32) y
 `Gravity` (0..255):
 
-```c
-// fracfill.cpp:213-262  (Adjust)
-potential = ((aGraininess · (potential>>17)) >> RecursionLevel)     // ruido
-          − (aGravity >> (RecursionLevel·2));                        // atracción al centro
+```text
+# Ajuste del desplazamiento en cada nivel de subdivisión (fracfill.cpp:213-262)
+# 'potencial' es el valor pseudoaleatorio del punto medio antes de escalar.
+ruido     := (graininess · (potencial >> 17)) >> nivel        # amplitud /2 por nivel
+atraccion := gravity >> (2 · nivel)                           # sesgo hacia el centro
+desplazamiento := ruido - atraccion
 ```
 
 El resultado es un bitmap que se pinta con la maquinaria de tile normal. El ruido Perlin

@@ -1,5 +1,13 @@
 # Formato de fichero `.xar` (CXF / Camelot eXchange Format) — especificación técnica
 
+> **Nota de sala limpia.** Este documento describe el *comportamiento* y los
+> *formatos de datos* de Xara Xtreme (GPL-2.0-only) con fines de
+> interoperabilidad: layout binario del contenedor `.xar`, numeración de tags y
+> semántica de cada record. No reproduce código fuente del original; las
+> referencias `fichero:línea` apuntan al árbol de referencia en `xara-xtreme/` y
+> sirven solo para localizar la lógica descrita. Xarast se implementa desde esta
+> especificación, no traduciendo el original.
+
 > **Estado:** documento normativo de referencia para implementar el importador `.xar` en Rust.
 > **Origen:** ingeniería inversa del código fuente original de **Xara Xtreme / Xara LX**
 > (`/home/user/xara-xtreme`, C++, GPL v2), validada contra 59 ficheros `.xar` reales del
@@ -58,10 +66,10 @@ secuencial de records**. El único "puntero" del formato es el *número de recor
 
 Definición: `Kernel/cxfdefs.h:109-110`
 
-```c
-#define CXF_IDWORD1   0x41524158
-#define CXF_IDWORD2   0x0a0da3a3
-```
+| Constante | Valor (`u32`) | Definida en |
+|---|---|---|
+| `CXF_IDWORD1` | `0x41524158` | `Kernel/cxfdefs.h:109` |
+| `CXF_IDWORD2` | `0x0A0DA3A3` | `Kernel/cxfdefs.h:110` |
 
 Se escriben como dos `u32` **little-endian** (`Kernel/cxfile.cpp:241-242`), de modo que
 los 8 primeros bytes del fichero son exactamente:
@@ -144,11 +152,13 @@ Además existe una versión **del subsistema de compresión** dentro de
 
 Identificadores (`Kernel/camfiltr.h:143-145`):
 
-```c
-#define EXPORT_FILETYPE_WEB     "CXW"   // formato .web
-#define EXPORT_FILETYPE_MIN     "CXM"   // formato web "mínimo"
-#define EXPORT_FILETYPE_NATIVE  "CXN"   // formato nativo .xar
-```
+| Constante del original | Valor (3 caracteres ASCII) | Formato que identifica |
+|---|---|---|
+| `EXPORT_FILETYPE_WEB` | `CXW` | formato web (`.web`) |
+| `EXPORT_FILETYPE_MIN` | `CXM` | formato web «mínimo» |
+| `EXPORT_FILETYPE_NATIVE` | `CXN` | formato nativo (`.xar`) |
+
+Este identificador es el campo `type` del `TAG_FILEHEADER` (§1.4).
 
 * **La estructura binaria es idéntica.** El mismo lector sirve para los tres.
 * La diferencia es *qué* records se emiten. El exportador llama a
@@ -216,11 +226,10 @@ Tres mecanismos producen tamaño variable:
 
 `Kernel/cxfile.cpp:1997-2065` (`CXaraFile::ReadNextRecord`):
 
-```c
-if (no hay handler para ReadTag) {
-    // Leer el resto del record y tirarlo
-    for (i = 0; i < ReadSize; i++) Read(&b);
-}
+```text
+si no existe un manejador registrado para el tag leído:
+    consumir los `size` bytes del payload sin interpretarlos
+    continuar con el record siguiente
 ```
 
 Es decir: **saltar `size` bytes y continuar**. Pero hay dos matices críticos
@@ -374,10 +383,8 @@ JPEG/PNG embebidos.)
 
 `Kernel/cxfile.cpp:705-742`:
 
-```c
-UINT32 Version = ZLIB_MAJOR_VERSIONNO * 100 + ZLIB_MINOR_VERSIONNO;  // = 0*100 + 99 = 99
-Rec.WriteUINT32(Version);
-```
+El escritor original compone el valor como `major * 100 + minor` a partir de las dos
+constantes de versión de zlib que lleva el propio árbol, y lo emite como un único `u32`.
 
 | Offset | Tipo | Campo |
 |---|---|---|
@@ -395,12 +402,16 @@ Inmediatamente **después** de los 4 bytes de payload comienza el flujo deflate.
 
 `Kernel/zstream.cpp:490-545` (inicialización) y `Kernel/zstream.cpp:760-770`:
 
-```c
-// escritura
-deflateInit2(&stream, Z_DEFAULT_COMPRESSION, DEFLATED, -MAX_WBITS, DEF_MEM_LEVEL, 0);
-// lectura
-inflateInit2(&stream, -MAX_WBITS);
-```
+El original inicializa zlib con los parámetros siguientes (los nombres son los de la
+API pública de zlib, no del original):
+
+| Sentido | Parámetro | Valor usado | Efecto |
+|---|---|---|---|
+| escritura | `level` | `Z_DEFAULT_COMPRESSION` (6) | irrelevante para el lector |
+| escritura | `method` | `Z_DEFLATED` | DEFLATE |
+| ambos | `windowBits` | `-MAX_WBITS` (`-15`) | **flujo crudo**: sin cabecera zlib ni gzip |
+| escritura | `memLevel` | `DEF_MEM_LEVEL` (8) | uso de memoria del compresor |
+| escritura | `strategy` | `Z_DEFAULT_STRATEGY` (0) | estrategia por defecto |
 
 * Algoritmo: **DEFLATE (RFC 1951) crudo, sin cabecera zlib ni gzip** (`windowBits`
   negativo = `-15`).
@@ -1577,13 +1588,15 @@ contiguos y zlib los comprima mejor.
 
 `GDraw/gconsts.h:108-112`:
 
-```c
-const BYTE PT_CLOSEFIGURE = 1;   // bit-flag
-const BYTE PT_LINETO      = 2;
-const BYTE PT_BEZIERTO    = 4;
-const BYTE PT_MOVETO      = 6;   // == PT_LINETO | PT_BEZIERTO
-const BYTE PT_PATHELEMENT = 6;   // máscara del tipo
-```
+| Nombre en el original | Valor | Papel |
+|---|---|---|
+| `PT_CLOSEFIGURE` | `0x01` | bit-flag: este punto **cierra** el subcamino |
+| `PT_LINETO` | `0x02` | tipo: segmento recto |
+| `PT_BEZIERTO` | `0x04` | tipo: segmento Bézier cúbico |
+| `PT_MOVETO` | `0x06` | tipo: inicio de subcamino (`PT_LINETO | PT_BEZIERTO`) |
+| `PT_PATHELEMENT` | `0x06` | máscara para extraer el tipo |
+
+Los bits 3–7 no se usan; el byte de verbo solo lleva tipo (bits 1–2) y cierre (bit 0).
 
 Decodificación:
 

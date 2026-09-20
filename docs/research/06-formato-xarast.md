@@ -1,5 +1,13 @@
 # Especificación del formato nativo `.xarast` — versión 1.0
 
+> **Nota de sala limpia.** Este documento especifica el formato nativo `.xarast`
+> y describe, solo donde hace falta para la interoperabilidad, el
+> *comportamiento* y los *formatos de datos* de Xara Xtreme (GPL-2.0-only). No
+> reproduce código fuente del original; las referencias `fichero:línea` apuntan
+> al árbol de referencia en `xara-xtreme/` y sirven solo para localizar la lógica
+> descrita. Xarast se implementa desde esta especificación, no traduciendo el
+> original.
+
 > **Estado:** NORMATIVO — candidato a congelación para Xarast v0.1.
 > **Documento:** `docs/research/06-formato-xarast.md`
 > **Versión de formato descrita:** `1.0`

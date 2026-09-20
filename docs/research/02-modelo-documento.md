@@ -1,5 +1,12 @@
 # Modelo de documento de Xara Xtreme (Xara LX) — análisis y propuesta de reimplementación en Rust
 
+> **Nota de sala limpia.** Este documento describe el *comportamiento* y los
+> *formatos de datos* del modelo de documento de Xara Xtreme (GPL-2.0-only) con
+> fines de interoperabilidad, y propone un diseño propio en Rust. No reproduce
+> código fuente del original; las referencias `fichero:línea` apuntan al árbol de
+> referencia en `xara-xtreme/` y sirven solo para localizar la lógica descrita.
+> Xarast se implementa desde esta especificación, no traduciendo el original.
+
 > **Fuente analizada:** `/home/user/xara-xtreme` (Xara LX / Xara Xtreme, GPLv2, Xara Group Ltd 1993‑2006).
 > Todas las referencias `fichero:línea` son relativas a `/home/user/xara-xtreme/Kernel/` salvo que se indique otra cosa.
 > **Documento de solo lectura sobre el C++ original.** Nada del código fuente original ha sido modificado.
@@ -50,25 +57,23 @@ Esto es capital para entender el modelo: **muchísima lógica del kernel enruta 
 
 Además, para evitar el coste del RTTI en caminos calientes, `Node` declara **~60 predicados virtuales de tipo rápido** (`node.h:460‑520`):
 
-```cpp
-virtual BOOL IsAnObject()      const {return FALSE;}   // node.h:460
-virtual BOOL IsAnAttribute()   const {return FALSE;}   // node.h:455
-virtual BOOL IsPaper()         const {return FALSE;}   // node.h:457
-virtual BOOL IsLayer()         const {return FALSE;}
-virtual BOOL IsSpread()        const {return FALSE;}
-virtual BOOL IsChapter()       const {return FALSE;}
-virtual BOOL IsNodeDocument()  const {return FALSE;}
-virtual BOOL IsNodeHidden()    const {return FALSE;}
-virtual BOOL IsNodePath()      const {return FALSE;}
-virtual BOOL IsCompound()      const {return FALSE;}
-virtual BOOL IsController()          {return FALSE;}
-virtual BOOL IsABlend()              {return FALSE;}
-virtual BOOL IsABevel()        const {return FALSE;}
-virtual BOOL IsAContour()      const {return FALSE;}
-virtual BOOL IsAShadow()       const {return FALSE;}
-virtual BOOL IsEffect()        const {return FALSE;}
-// ... etcétera
-```
+`Node` declara un predicado por cada categoría relevante; todos devuelven falso en la clase
+base y cada subclase redefine el suyo. Los que importan para el recorrido del árbol son
+(`node.h:455-520`):
+
+| Predicado | Responde a | Referencia |
+|---|---|---|
+| `IsAnObject` | ¿es un objeto de dibujo? | `node.h:460` |
+| `IsAnAttribute` | ¿es un nodo de atributo? | `node.h:455` |
+| `IsPaper` | ¿es el papel del spread? | `node.h:457` |
+| `IsLayer` / `IsSpread` / `IsChapter` / `IsNodeDocument` | nivel estructural del árbol | `node.h:460-520` |
+| `IsNodeHidden` | ¿es un nodo oculto (borrado deshacible)? | ídem |
+| `IsNodePath` | ¿es un camino? | ídem |
+| `IsCompound` / `IsController` | ¿es compuesto? ¿es controlador de un compuesto? | ídem |
+| `IsABlend` / `IsABevel` / `IsAContour` / `IsAShadow` / `IsEffect` | familia de objeto «live» | ídem |
+
+La lista real es de unos 60 predicados; los anteriores son los que el recorrido y el
+renderizado consultan en caliente.
 
 > **Lectura para Rust:** esta batería de predicados es exactamente lo que un `enum NodeKind` + `matches!` resuelve de forma gratuita y exhaustiva. Es la señal más clara de que la jerarquía de herencia estaba compensando la falta de *sum types*.
 
@@ -78,27 +83,29 @@ virtual BOOL IsEffect()        const {return FALSE;}
 
 Datos de instancia (`node.h:757‑784`):
 
-```cpp
-struct CCAPI NodeFlags            // node.h:758
-{
-    BOOL Locked: 1;               // no usado actualmente
-    BOOL Mangled: 1;              // usado por el importador de ArtWorks
-    BOOL Marked: 1;               // usado por CopyMarkedObjects
-    BOOL Selected: 1;             // seleccionado por el usuario
-    BOOL Renderable:1;            // el nodo es renderizable
-    BOOL SelectedChildren: 1;     // tiene hijos seleccionados (select-inside)
-    BOOL OpPermission1: 1;        // par de bits -> OpPermissionState
-    BOOL OpPermission2: 1;
-};
+Banderas de nodo (`node.h:758`), empaquetadas en campos de 1 bit:
 
-UINT32     Tag;            // node.h:773  identificador único en el documento
-NodeFlags  Flags;          // node.h:774
-Node      *Previous;       // node.h:777  hermano anterior
-Node      *Next;           // node.h:778  hermano siguiente
-Node      *Child;          // node.h:779  PRIMER hijo
-Node      *Parent;         // node.h:780  padre
-UINT32     HiddenRefCnt;   // node.h:784  nº de NodeHidden que ocultan este nodo
-```
+| Bandera | Significado |
+|---|---|
+| `Locked` | reservada; no se usa en esta versión |
+| `Mangled` | la usa el importador de ArtWorks |
+| `Marked` | la usa la copia de objetos marcados |
+| `Selected` | seleccionado por el usuario |
+| `Renderable` | el nodo se renderiza |
+| `SelectedChildren` | tiene hijos seleccionados (*select-inside*) |
+| `OpPermission1`, `OpPermission2` | par de bits que codifica un `OpPermissionState` |
+
+Campos de enlace y de identidad del propio `Node`:
+
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `Tag` | entero de 32 bits sin signo | identificador único dentro del documento | `node.h:773` |
+| `Flags` | banderas de arriba | estado del nodo | `node.h:774` |
+| `Previous` | puntero a nodo | hermano anterior | `node.h:777` |
+| `Next` | puntero a nodo | hermano siguiente | `node.h:778` |
+| `Child` | puntero a nodo | **primer** hijo | `node.h:779` |
+| `Parent` | puntero a nodo | padre | `node.h:780` |
+| `HiddenRefCnt` | entero de 32 bits sin signo | número de `NodeHidden` que ocultan este nodo | `node.h:784` |
 
 Es decir: **lista doblemente enlazada de hermanos + puntero a primer hijo + puntero a padre**. No hay puntero a último hijo (se recorre: `Node::FindLastChild()`, `node.h:571`), ni vector de hijos. Esto hace que `AttachNode`/`MoveNode` sean O(1) y que la identidad de nodo sea el puntero.
 
@@ -133,16 +140,16 @@ El bucle real está en `RenderRegion::RenderTree()`, `rndrgn.cpp:~7000‑7150`. 
 
 ```
 para cada nodo en orden:
-    state = pNode->RenderSubtree(this, &pNextNode, bClip)   // node.h:390 (virtual)
-    si state == SUBTREE_ROOTANDCHILDREN y tiene hijos:
-        SaveContext();                 // rndrgn.cpp:7076   <<<< bajando
-        pNode = primerHijo; continue;
-    si state ∈ {ROOTONLY, ROOTANDCHILDREN, RUNTO}:
-        RenderNode(pNode);             // dibuja o empuja atributo
-    pNode->RenderAfterSubtree(this);
-    ... al subir al padre:
-        RenderNode(padre);             // el ink se dibuja AQUÍ
-        RestoreContext();              // rndrgn.cpp:7130   >>>> subiendo
+    estado := consultar al nodo qué hacer con su subárbol   # node.h:390 (virtual)
+    si estado == ROOTANDCHILDREN y el nodo tiene hijos:
+        guardar contexto de atributos                       # rndrgn.cpp:7076  (bajando)
+        descender al primer hijo y repetir
+    si estado ∈ {ROOTONLY, ROOTANDCHILDREN, RUNTO}:
+        renderizar el nodo                                  # dibuja, o empuja un atributo
+    avisar al nodo de que su subárbol ha terminado
+    al subir al padre:
+        renderizar el padre                                 # la tinta del compuesto se dibuja AQUÍ
+        restaurar contexto de atributos                     # rndrgn.cpp:7130  (subiendo)
 ```
 
 `SubtreeRenderState` (`node.h:203`):
@@ -287,24 +294,23 @@ graph TD
 
 `NodeRegularShape` (`nodershp.h:299‑322`) es interesante por su naturaleza paramétrica:
 
-```cpp
-Path  EdgePath1;              // arista primaria -> punto de estelación
-Path  EdgePath2;              // punto de estelación -> punto primario
-UINT32 NumSides;              // nº de lados (ángulo primario)
-BOOL   Circular : 1;          // basada en círculo
-BOOL   Stellated : 1;         // estrellada
-BOOL   PrimaryCurvature : 1;
-BOOL   StellationCurvature : 1;
-double StellRadiusToPrimary;  // ratio radio estelación / radio primario
-double PrimaryCurveToPrimary;
-double StellCurveToStell;
-double StellOffsetRatio;      // ±0.5 = 360/NumSides
-// caché (podrían calcularse al vuelo):
-DocCoord UTCentrePoint, UTMajorAxes, UTMinorAxes;   // "UT" = untransformed
-Path*    CachedRenderPath;
-BOOL     PathCacheInvalid : 1;
-Matrix   TransformMatrix;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `EdgePath1` | camino | arista primaria → punto de estelación |
+| `EdgePath2` | camino | punto de estelación → punto primario |
+| `NumSides` | entero sin signo | número de lados (ángulo primario) |
+| `Circular` | bit | la forma se basa en un círculo |
+| `Stellated` | bit | es estrellada |
+| `PrimaryCurvature`, `StellationCurvature` | bits | hay curvatura en la arista primaria / de estelación |
+| `StellRadiusToPrimary` | `double` | razón radio de estelación / radio primario |
+| `PrimaryCurveToPrimary`, `StellCurveToStell` | `double` | control de curvatura relativo |
+| `StellOffsetRatio` | `double` | desfase angular; ±0,5 equivale a 360/`NumSides` |
+| `UTCentrePoint`, `UTMajorAxes`, `UTMinorAxes` | coordenadas de documento | caché **sin transformar** («UT» = *untransformed*) |
+| `CachedRenderPath` | puntero a camino | caché del camino generado |
+| `PathCacheInvalid` | bit | la caché anterior hay que regenerarla |
+| `TransformMatrix` | matriz | transformación aplicada a la forma |
+
+Los tres últimos grupos son caché pura: podrían recalcularse al vuelo.
 
 Nótese el patrón **parámetros + matriz + path cacheado con bit de invalidación** (`InvalidateCache()`, `nodershp.h:296`). Es un modelo que en Rust se expresa casi literalmente.
 
@@ -407,23 +413,17 @@ BaseDocument (no es un Node; es el dueño: basedoc.h:51)
 └──► EndDocument                                      (dumbnode.h:162)
 ```
 
-El fragmento real:
+El procedimiento de inicialización (`document.cpp:415`, `Document::InitTree`) construye el
+esqueleto mínimo en este orden:
 
-```cpp
-// document.cpp:415
-BOOL Document::InitTree(NodeDocument* pRootNode)
-{
-    Chapter* pChapter = new Chapter(pRootNode, LASTCHILD);          // :424
-    m_pSetSentinel = new NodeSetSentinel(pChapter, FIRSTCHILD);     // :429
-    NodeBarProperty* pbp = new NodeBarProperty(m_pSetSentinel, LASTCHILD); // :431
-    DocRect PasteRect(...);                                          // :435
-    Spread *pSpread = new Spread(pChapter, FIRSTCHILD, PasteRect);   // :441
-    pSpread->CreateDefaultPageAndGrid(TRUE);                         // :445
-    InsertPos = new InsertionNode(this);                             // :452
-    InsertPos->AttachNode(pSpread, LASTCHILD);                       // :454
-    return TRUE;
-}
-```
+1. Crear un `Chapter` como último hijo del `NodeDocument` recibido (`:424`).
+2. Crear el `NodeSetSentinel` como primer hijo del capítulo (`:429`) y colgar de él un
+   `NodeBarProperty` (`:431`).
+3. Calcular el rectángulo de pasteboard (`:435`) y crear con él un `Spread` como primer hijo
+   del capítulo (`:441`).
+4. Pedir al spread que genere su página y su rejilla por defecto (`:445`).
+5. Crear el `InsertionNode` del documento (`:452`) y engancharlo como último hijo del spread
+   (`:454`), que queda así como posición de inserción actual.
 
 ### 3.2 Rol de cada nivel
 
@@ -442,11 +442,11 @@ BOOL Document::InitTree(NodeDocument* pRootNode)
 
 Raíz del árbol. Sus datos:
 
-```cpp
-DocCoord      LowExtent;   // nodedoc.h:164
-DocCoord      HighExtent;  // nodedoc.h:166
-BaseDocument *pParentDoc;  // nodedoc.h:168
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `LowExtent` | coordenada de documento | esquina inferior del extent | `nodedoc.h:164` |
+| `HighExtent` | coordenada de documento | esquina superior del extent | `nodedoc.h:166` |
+| `pParentDoc` | puntero a `BaseDocument` | documento dueño del árbol | `nodedoc.h:168` |
 
 Su bloque de **primeros hijos** contiene los atributos por defecto del documento (§4.4). Esto es intencional: al ser ancestros de todo, el mecanismo normal de herencia de atributos entrega los valores por defecto sin código especial.
 
@@ -458,15 +458,15 @@ Agrupación de spreads. Casi vestigial en Xara LX (siempre uno). Hereda el paste
 
 Es el nivel más rico. Define un **espacio de coordenadas propio**:
 
-```cpp
-MILLIPOINT BleedOffset;    // spread.h:329   sangrado
-BOOL   ShowDropShadow;     // spread.h:330
-BOOL   RalphDontShowPaper; // spread.h:331
-DocCoord SpreadOrigin;     // spread.h:332   origen del espacio de spread (en coords de documento)
-DocCoord UserOrigin;       // spread.h:333   origen de las reglas (coords de usuario)
-AnimPropertiesParam m_AnimPropertiesParam;  // spread.h:334  props de animación GIF
-DimScale SpreadDimScale;   // spread.h:383   escala de dibujo (ej. 1:50)
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `BleedOffset` | millipuntos | sangrado alrededor de la página | `spread.h:329` |
+| `ShowDropShadow` | booleano | dibujar la sombra del papel | `spread.h:330` |
+| `RalphDontShowPaper` | booleano | ocultar el papel (modo visor) | `spread.h:331` |
+| `SpreadOrigin` | coordenada de documento | origen del espacio de spread | `spread.h:332` |
+| `UserOrigin` | coordenada de documento | origen de las reglas (coordenadas de usuario) | `spread.h:333` |
+| `m_AnimPropertiesParam` | estructura de parámetros | propiedades de animación GIF | `spread.h:334` |
+| `SpreadDimScale` | escala de dimensión | escala de dibujo (p. ej. 1:50) | `spread.h:383` |
 
 Conversiones (`spread.h:221‑232`): `SpreadCoordToDocCoord`, `DocCoordToSpreadCoord`, `SpreadCoordToPagesCoord`, `PagesCoordToSpreadCoord`, `TextToSpreadCoord`. Y navegación: `FindFirstPageInSpread`, `FindActiveLayer`, `FindFirstGuideLayer` (`spread.cpp:1214`), `FindFirstPageBackgroundLayer` (`spread.cpp:1243`), `FindFirstFrameLayer`, `FindFirstDefaultGridInSpread`.
 
@@ -480,29 +480,32 @@ Solo `DocRect PageRect` (`page.h:179`) + `static DocColour PageColour`. Múltipl
 
 La capa es donde pasan las cosas. Estado (`layer.h:341‑380`):
 
-```cpp
-LayerStatus LayerSt;     // contiene String_256 StringLayerID (nombre único en el spread)
-BOOL Active;             // capa activa: destino de los objetos nuevos. Exactamente una por spread.
-BOOL Visible;            // se renderiza o no
-BOOL Locked;             // no modificable; el hit-test la ignora
-BOOL Printable;          // se envía a impresora
-BOOL Background;         // capa de fondo (no imprimible)
-BOOL Outline;            // renderiza todo en modo contorno (calidad mínima)
-BOOL Guide;              // CAPA DE GUÍAS: contiene NodeGuideline
-BOOL m_PageBackground;   // CAPA DE FONDO DE PÁGINA: rect que cubre la página con color o bitmap
-// --- animación GIF / "frames" ---
-BOOL   m_Overlay;        // este frame se superpone al anterior en vez de taparlo
-BOOL   m_Solid;          // frame sólido: hace de fondo para los de arriba
-BOOL   m_Edited;         // hay que regenerar el bitmap del frame
-BOOL   m_Frame;          // es un frame de animación GIF
-BOOL   m_HiddenFrame;    // frame oculto: no se guarda pero participa en el render
-DWORD  m_FrameDelay;     // retardo del frame
-Quality m_CaptureQuality;
-KernelBitmapRef m_GeneratedBitmap;    // bitmap generado para el frame
-KernelBitmap*   m_pReferencedBitmap;
-DocColour*     pGuideColour;          // color de las guías de esta capa
-IndexedColour* pIndexedGuideColour;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `LayerSt` | estructura de estado | contiene la cadena identificadora de la capa, única dentro del spread |
+| `Active` | booleano | capa activa: destino de los objetos nuevos. Exactamente una por spread |
+| `Visible` | booleano | se renderiza o no |
+| `Locked` | booleano | no modificable; el *hit-test* la ignora |
+| `Printable` | booleano | se envía a impresora |
+| `Background` | booleano | capa de fondo (no imprimible) |
+| `Outline` | booleano | renderiza todo en modo contorno (calidad mínima) |
+| `Guide` | booleano | **capa de guías**: contiene nodos `NodeGuideline` |
+| `m_PageBackground` | booleano | **capa de fondo de página**: rectángulo que cubre la página con color o bitmap |
+
+Campos específicos de la animación GIF («frames»):
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_Overlay` | booleano | el frame se superpone al anterior en vez de taparlo |
+| `m_Solid` | booleano | frame sólido: hace de fondo para los de arriba |
+| `m_Edited` | booleano | hay que regenerar el bitmap del frame |
+| `m_Frame` | booleano | la capa es un frame de animación |
+| `m_HiddenFrame` | booleano | frame oculto: no se guarda pero participa en el render |
+| `m_FrameDelay` | entero de 32 bits | retardo del frame |
+| `m_CaptureQuality` | calidad | calidad con la que se captura el frame |
+| `m_GeneratedBitmap` | referencia a bitmap | bitmap generado para el frame |
+| `m_pReferencedBitmap` | puntero a bitmap | bitmap referenciado |
+| `pGuideColour`, `pIndexedGuideColour` | color / color indexado | color de las guías de esta capa |
 
 **Capas especiales identificadas:**
 
@@ -518,13 +521,17 @@ IndexedColour* pIndexedGuideColour;
 
 `Layer::RenderSubtree()` (`layer.cpp:426‑500`) decide la visibilidad y además **activa el cacheo de capa en bitmap**:
 
-```cpp
-// layer.cpp:481 — Layer::EnableLayerCacheing
-case 1:  // cachear todas las capas
-    if (IsVisible() && !IsGuide() && RenderCached(pRender)) return SUBTREE_NORENDER;
-case 2:  // cachear todas menos la activa
-    if (IsVisible() && !IsGuide() && !IsActive() && RenderCached(pRender)) return SUBTREE_NORENDER;
-```
+El comportamiento (`layer.cpp:481`, `Layer::EnableLayerCacheing`) es una escala de tres
+niveles ajustable por el usuario:
+
+| Nivel | Condición para cachear la capa entera en un bitmap |
+|---|---|
+| 0 | nunca |
+| 1 | la capa es visible, no es de guías, y la captura en caché tiene éxito |
+| 2 | además de lo anterior, la capa **no** es la activa |
+
+Cuando la caché se usa, el recorrido del subárbol se corta: la capa se pinta desde el bitmap
+y sus hijos no se visitan.
 
 ### 3.3 Invariantes del árbol
 
@@ -573,28 +580,23 @@ Hay una separación deliberada en dos capas:
 | Nodo del árbol | `NodeAttribute : NodeRenderable` | `nodeattr.h:185` | Identidad, posición, undo, serialización, UI (blobs de relleno), comparación. |
 | Valor renderizable | `AttributeValue : CCObject` | `attrval.h:134` | El dato puro + cómo se aplica a un `RenderRegion`. |
 
-Cada `NodeAttribute` concreto contiene por **valor** (no por puntero) una instancia de su `AttributeValue`, siempre llamada `Value`, y la expone:
-
-```cpp
-// patrón repetido en todo el kernel, p.ej. fillattr2.h:132-138
-virtual AttributeValue* GetAttributeValue() { return &Value; }
-...
-FlatFillAttribute Value;
-```
+Cada `NodeAttribute` concreto contiene por **valor** (no por puntero) una instancia de su `AttributeValue`, siempre llamada `Value`, y la expone mediante un accesor virtual `GetAttributeValue()` que devuelve su dirección. El patrón se repite en todo el kernel (por ejemplo, `fillattr2.h:132-138`).
 
 Interfaz de `AttributeValue` (`attrval.h:134‑173`):
 
-```cpp
-virtual void Render (RenderRegion*, BOOL Temp = FALSE) = 0;  // hacerse "current" por 1ª vez
-virtual void Restore(RenderRegion*, BOOL Temp)         = 0;  // volver a ser "current" al hacer pop
-virtual void GoingOutOfScope(RenderRegion*)                ; // limpiar PathProcessors, etc.
-virtual void SimpleCopy(AttributeValue*)               = 0;
-virtual NodeAttribute* MakeNode();                            // valor -> nodo
-virtual BOOL IsDifferent(AttributeValue*);
-virtual BOOL Blend(BlendAttrParam*);                          // interpolación para blends
-virtual AttributeValue* MouldIntoStroke(PathStrokerVector*, double);  // deformar con un molde
-virtual BOOL CanBeRenderedDirectly();
-```
+| Método virtual | Papel |
+|---|---|
+| `Render(RenderRegion*, bool temporal)` | *(puro)* el valor pasa a ser el vigente por primera vez |
+| `Restore(RenderRegion*, bool temporal)` | *(puro)* el valor vuelve a ser vigente tras un *pop* |
+| `GoingOutOfScope(RenderRegion*)` | limpieza al salir de ámbito (p. ej. `PathProcessor`s) |
+| `SimpleCopy(AttributeValue*)` | *(puro)* copia plana del valor |
+| `MakeNode()` | construye el nodo de atributo equivalente al valor |
+| `IsDifferent(AttributeValue*)` | comparación de valores (base de la normalización) |
+| `Blend(BlendAttrParam*)` | interpolación del valor para las mezclas |
+| `MouldIntoStroke(PathStrokerVector*, double)` | deforma el valor con un molde |
+| `CanBeRenderedDirectly()` | ¿el motor sabe pintarlo sin conversión previa? |
+
+Definidos en `attrval.h:134-173`.
 
 `Render` vs `Restore` distingue «primera vez que este valor entra en vigor» de «reactivación tras hacer pop de otro». Permite que atributos con estado externo (p. ej. `ClipRegionAttribute`, que instala un `PathProcessor` en la render region) hagan trabajo sólo la primera vez.
 
@@ -624,38 +626,47 @@ Interfaz de `NodeAttribute` (`nodeattr.h:198‑331`), lo relevante:
 
 `RenderRegion` (`rndrgn.h:345`) mantiene:
 
-```cpp
-AttributeEntry *CurrentAttrs;   // rndrgn.h:904  ARRAY plano indexado por AttrIndex
-INT32 NumCurrentAttrs;          // rndrgn.h:905
-RenderStack TheStack;           // rndrgn.h:935  pila de save/restore
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `CurrentAttrs` | array plano de `AttributeEntry`, indexado por `AttrIndex` | estado gráfico vigente | `rndrgn.h:904` |
+| `NumCurrentAttrs` | entero de 32 bits | tamaño del array | `rndrgn.h:905` |
+| `TheStack` | `RenderStack` | pila de *save/restore* | `rndrgn.h:935` |
 
 `AttributeEntry` (`attrmgr.h:127`):
 
-```cpp
-AttributeValue* pAttr;   // puntero al valor vigente
-BOOL Temp   : 2;         // temporal: borrar al terminar
-BOOL Ignore : 2;         // no añadir a un path (ApplyBasedOnDefaults)
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `pAttr` | puntero a `AttributeValue` | el valor vigente para ese slot |
+| `Temp` | campo de bits | el valor es temporal: se borra al terminar |
+| `Ignore` | campo de bits | no añadir a un camino (usado por la aplicación basada en defaults) |
 
 Acceso mediante macros (`rndrgn.h:971‑1008`) — esto es literalmente **la tabla de estado gráfico actual**:
 
-```cpp
-#define RR_STROKECOLOUR() (((StrokeColourAttribute*) CurrentAttrs[ATTR_STROKECOLOUR ].pAttr)->Colour)
-#define RR_FILLCOLOUR()   (((ColourFillAttribute  *) CurrentAttrs[ATTR_FILLGEOMETRY ].pAttr)->Colour)
-#define RR_LINEWIDTH()    (((LineWidthAttribute   *) CurrentAttrs[ATTR_LINEWIDTH    ].pAttr)->LineWidth)
-#define RR_WINDINGRULE()  (((WindingRuleAttribute *) CurrentAttrs[ATTR_WINDINGRULE  ].pAttr)->WindingRule)
-#define RR_TXTFONTSIZE()  (((TxtFontSizeAttribute *) CurrentAttrs[ATTR_TXTFONTSIZE  ].pAttr)->FontSize)
-// ... uno por cada AttrIndex
-```
+El acceso al estado vigente se hace con una macro por cada `AttrIndex`
+(`rndrgn.h:971-1008`): cada macro indexa el array `CurrentAttrs` con su constante
+`ATTR_*`, convierte el puntero al tipo concreto de atributo y devuelve el campo que
+interesa. Por ejemplo, el color de trazo se obtiene del slot `ATTR_STROKECOLOUR` como el
+campo de color de un `StrokeColourAttribute`, y el grosor de línea del slot
+`ATTR_LINEWIDTH` como el campo de anchura de un `LineWidthAttribute`.
+
+| Macro | Slot consultado | Valor devuelto |
+|---|---|---|
+| `RR_STROKECOLOUR()` | `ATTR_STROKECOLOUR` | color de trazo |
+| `RR_FILLCOLOUR()` | `ATTR_FILLGEOMETRY` | color de relleno |
+| `RR_LINEWIDTH()` | `ATTR_LINEWIDTH` | grosor de línea |
+| `RR_WINDINGRULE()` | `ATTR_WINDINGRULE` | regla de relleno |
+| `RR_TXTFONTSIZE()` | `ATTR_TXTFONTSIZE` | cuerpo de la fuente |
+
+Hay una macro equivalente por cada `AttrIndex`. En conjunto, **este array es literalmente
+la tabla de estado gráfico actual**.
 
 `RenderStack` (`rndstack.h:121`):
 
-```cpp
-BOOL Push(AttributeValue* pAttrValue, BOOL Temporary = FALSE);  // rndstack.h:128
-void SaveContext()  { ContextLevel++; }                          // rndstack.h:131
-void RestoreContext(RenderRegion* pRegion);                      // rndstack.h:132
-```
+| Operación | Efecto | Referencia |
+|---|---|---|
+| `Push(valor, temporal)` | instala un valor en su slot y registra el anterior en la pila | `rndstack.h:128` |
+| `SaveContext()` | incrementa el nivel de contexto (marca) | `rndstack.h:131` |
+| `RestoreContext(RenderRegion*)` | deshace todas las entradas hasta la marca anterior | `rndstack.h:132` |
 
 El algoritmo es un **undo-log con marcas de nivel**: al empujar un atributo se guarda el valor anterior de ese slot; `RestoreContext` deshace todo hasta la marca. Es exactamente el patrón que conviene replicar en Rust.
 
@@ -663,26 +674,25 @@ El algoritmo es un **undo-log con marcas de nivel**: al empujar un atributo se g
 
 Registro global, estático, por tipo (`attrmgr.h:251‑276`):
 
-```cpp
-static UINT32 RegisterDefaultAttribute(CCRuntimeClass* pNodeType, AttributeValue* pValue);
-static AttributeEntry* GetDefaultAttributes();          // array indexado por AttrIndex
-static NodeAttribute*  GetDefaultAttribute(AttrIndex);
-static AttributeValue* GetDefaultAttributeVal(AttrIndex);
-static UINT32 GetNumAttributes();
-static BOOL ApplyBasedOnDefaults(Node* Target, AttributeEntry* AttrsToApply);
-```
+| Operación estática | Papel |
+|---|---|
+| `RegisterDefaultAttribute(tipo de nodo, valor)` | registra el default y devuelve el `AttrIndex` asignado |
+| `GetDefaultAttributes()` | array de entradas indexado por `AttrIndex` |
+| `GetDefaultAttribute(AttrIndex)` | nodo de atributo por defecto de ese slot |
+| `GetDefaultAttributeVal(AttrIndex)` | valor por defecto de ese slot |
+| `GetNumAttributes()` | número de slots registrados |
+| `ApplyBasedOnDefaults(nodo destino, entradas)` | aplica al nodo solo lo que difiere de los defaults |
+
+Declaradas en `attrmgr.h:251-276`.
 
 Cada clase de atributo se registra en su `static BOOL Init()` (llamado al arrancar). El `AttrIndex` devuelto es el índice en el array plano.
 
 Después, `Document::InitDefaultAttributeNodes()` (`document.cpp:488‑535`) **materializa** un nodo de atributo por cada default y lo cuelga como primer hijo del `NodeDocument`:
 
-```cpp
-for (UINT32 i = 0; i < NumDefaultAttribs; i++) {
-    Node* NodeAttr = DefaultAttribs[i].pAttr->MakeNode();
-    NodeAttr->AttachNode(TreeRoot, FIRSTCHILD, FALSE);   // document.cpp:520
-    ...
-}
-```
+El paso de materialización recorre el array de defaults registrados y, para cada uno,
+construye el nodo de atributo equivalente (`MakeNode()`) y lo engancha como **primer hijo**
+del nodo raíz del documento (`document.cpp:520`). Al terminar, el árbol tiene un nodo de
+atributo por cada slot registrado, todos por delante del contenido.
 
 Comentario del propio código (`document.cpp:481`): *«The Attribute optimisation routines will not work if the document does not contain the default attributes.»* Los defaults son el **caso base** del algoritmo de herencia.
 
@@ -692,15 +702,16 @@ Comentario del propio código (`document.cpp:481`): *«The Attribute optimisatio
 
 `AttributeManager` (`attrmgr.h:215`) mantiene, **por documento**, listas de «atributos actuales» agrupadas:
 
-```cpp
-class AttributeGroup : public ListItem {     // attrmgr.h:161
-    CCRuntimeClass* AttrGroup;   // identificador del grupo (una RuntimeClass)
-    CCRuntimeClass* BaseGroup;   // grupo base (herencia de grupos), puede ser NULL
-    NodeAttribute*  AttrListHd;  // lista de atributos actuales del grupo
-    String_256      GroupName;
-};
-const INT32 NUM_ATTR_GROUPS = 2;   // attrmgr.h:122 — actualmente: gráfico y texto
-```
+`AttributeGroup` (`attrmgr.h:161`) agrupa los atributos actuales por familia:
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| `AttrGroup` | token de tipo en tiempo de ejecución | identificador del grupo |
+| `BaseGroup` | token de tipo o nulo | grupo base (herencia entre grupos) |
+| `AttrListHd` | lista de nodos de atributo | atributos actuales del grupo |
+| `GroupName` | cadena | nombre legible del grupo |
+
+El número de grupos está fijado en **2** (`attrmgr.h:122`): gráfico y texto.
 
 Cada objeto ink declara a qué grupo pertenece: `NodeRenderableInk::GetCurrentAttribGroup()` (`ink.h:225`); `BaseTextClass` lo sobreescribe para devolver el grupo de texto (`nodetxts.h:143`). Así, cambiar el tamaño de fuente con texto seleccionado no altera el «relleno actual» del grupo gráfico.
 
@@ -952,11 +963,17 @@ La rama de color y la de transparencia son **estructuralmente idénticas**: la m
 
 `FillGeometryAttribute` (`fillval.h:193‑345`) define una interfaz de acceso **por índice implícito** con hasta **4 puntos de control** y **4 paradas de color/transparencia**:
 
-```cpp
-virtual DocCoord*  GetStartPoint();  GetEndPoint();  GetEndPoint2();  GetEndPoint3();
-virtual DocColour* GetStartColour(); GetEndColour(); GetEndColour2(); GetEndColour3();
-virtual UINT32*    GetStartTransp(); GetEndTransp(); GetEndTransp2(); GetEndTransp3();
-```
+La interfaz común de los rellenos graduados expone, por cada extremo o punto de control,
+un trío de accesores virtuales del mismo patrón:
+
+| Familia de accesores | Devuelve | Variantes |
+|---|---|---|
+| punto de control | coordenada de documento | inicio, fin, fin 2, fin 3 |
+| color | color de documento | inicio, fin, fin 2, fin 3 |
+| transparencia | entero de 32 bits sin signo | inicio, fin, fin 2, fin 3 |
+
+Los «fin 2» y «fin 3» solo existen en los rellenos de tres y cuatro colores y en los que
+necesitan un tercer punto de control (cuadrado, perspectiva).
 
 Semántica de los puntos por tipo de relleno:
 
@@ -991,38 +1008,30 @@ FILLSHAPE_PLASMA     = 10    // NoiseFillAttribute
 
 ### 5.4 Repetición / teselado (`RepeatType`, `fillval.h:133‑138`)
 
-```cpp
-enum RepeatType {
-    RT_NoRepeatType = 0,
-    RT_Simple,          // una sola copia; fuera del tile se usa el color/transparencia de borde
-    RT_Repeating,       // mosaico normal
-    RT_RepeatInverted   // mosaico espejado (sin costuras)
-};
-```
+| Valor | Nombre | Significado |
+|---|---|---|
+| 0 | `RT_NoRepeatType` | sin definir |
+| 1 | `RT_Simple` | una sola copia; fuera del tile se usa el color/transparencia de borde |
+| 2 | `RT_Repeating` | mosaico normal |
+| 3 | `RT_RepeatInverted` | mosaico espejado (sin costuras) |
 
 Accesible por `GetTesselation()` / `SetTesselation()` (`fillval.h:283‑284`) y modificable con `AttrBitmapTessChange` (`fillattr2.h:233`).
 
 ### 5.5 Tipos de transparencia (`TranspType`, `fillval.h:144‑176`)
 
-```cpp
-enum TranspType {
-    TT_NoTranspType = 0,   // opaco
-    TT_Mix,                // mezcla normal (alpha)
-    TT_StainGlass,         // vidriera (multiplicativo)
-    TT_Bleach,             // blanqueado (screen)
-    TT_SPECIAL_1 = T_SPECIAL_1, TT_SPECIAL_2, TT_SPECIAL_3,
-    // valores de GDraw, no legales en las estructuras de datos de Camelot:
-    TT_CONTRAST,   TT_FLAT_CONTRAST,   TT_GRAD_CONTRAST,
-    TT_SATURATION, TT_FLAT_SATURATION, TT_GRAD_SATURATION,
-    TT_DARKEN,     TT_FLAT_DARKEN,     TT_GRAD_DARKEN,
-    TT_LIGHTEN,    TT_FLAT_LIGHTEN,    TT_GRAD_LIGHTEN,
-    TT_BRIGHTNESS, TT_FLAT_BRIGHTNESS, TT_GRAD_BRIGHTNESS,
-    TT_LUMINOSITY, TT_FLAT_LUMINOSITY, TT_GRAD_LUMINOSITY,
-    TT_HUE,        TT_FLAT_HUE,        TT_GRAD_HUE,
-    TT_BEVEL,      TT_FLAT_BEVEL,      TT_GRAD_BEVEL,
-    TT_MAX
-};
-```
+| Valor | Nombre | Significado |
+|---|---|---|
+| 0 | `TT_NoTranspType` | opaco |
+| 1 | `TT_Mix` | mezcla normal (alfa) |
+| 2 | `TT_StainGlass` | vidriera (multiplicativo) |
+| 3 | `TT_Bleach` | blanqueado (*screen*) |
+| 4–6 | `TT_SPECIAL_1/2/3` | reservados; alineados con los `T_SPECIAL_*` de GDraw |
+| 7 en adelante | `TT_CONTRAST`, `TT_SATURATION`, `TT_DARKEN`, `TT_LIGHTEN`, `TT_BRIGHTNESS`, `TT_LUMINOSITY`, `TT_HUE`, `TT_BEVEL` | modos de mezcla, cada uno con sus variantes plana (`TT_FLAT_*`) y graduada (`TT_GRAD_*`) |
+
+Los valores del segundo bloque **no son legales** en las estructuras de datos del documento:
+solo existen como valores de GDraw. El último elemento de la enumeración, `TT_MAX`, marca el
+número total.  La correspondencia numérica con `TransparencyEnum` de GDraw está en
+`docs/research/03-motor-render.md` §2.7.
 
 La transparencia **no es un canal alfa por objeto**: es un *relleno* completo (con su propia geometría) cuyo «color» es un escalar 0–255, más un **modo de composición**. Es decir, Xara tiene degradados de modo de mezcla desde 1995.
 
@@ -1030,21 +1039,13 @@ La transparencia **no es un canal alfa por objeto**: es un *relleno* completo (c
 
 Los degradados de dos colores se generalizan con una **rampa**: lista de paradas intermedias.
 
-```cpp
-class RampItem : public ListItem {        // fillramp.h:134
-    float Position;    // 0..1  posición a lo largo del degradado
-    BOOL  Selected;    // estado de selección en la UI
-};
-class ColRampItem : public RampItem {     // fillramp.h:173
-    DocColour Colour;
-};
-class TranspRampItem : public RampItem {  // fillramp.h:206
-    UINT32 Transparency;
-};
-class FillRamp : public List { ... };     // fillramp.h:243
-class ColourRamp       : public FillRamp;
-class TransparencyRamp : public FillRamp;
-```
+| Clase | Referencia | Contenido |
+|---|---|---|
+| `RampItem` | `fillramp.h:134` | posición en el degradado (`float`, 0..1) y estado de selección en la UI |
+| `ColRampItem` | `fillramp.h:173` | añade un color de documento |
+| `TranspRampItem` | `fillramp.h:206` | añade una transparencia (entero de 32 bits sin signo) |
+| `FillRamp` | `fillramp.h:243` | lista de elementos de rampa |
+| `ColourRamp`, `TransparencyRamp` | ídem | especializaciones de `FillRamp` para color y transparencia |
 
 Acceso: `GradFillAttribute::GetColourRamp()` (`fillval.h:471`), `SetColourRamp`, `MakeNewColourRamp`, `SameColourRampAs`, `DeleteColourRamp` (`fillval.h:483‑487`); `SupportsFillRamps()` (`fillval.h:481`) es `TRUE` para todos los `GradFillAttribute` **salvo** three/four-colour (`fillval.h:697`).
 
@@ -1054,27 +1055,23 @@ Las paradas de inicio (`Colour`) y fin (`EndColour`) **no** están en la rampa: 
 
 Todo `FillGeometryAttribute` lleva un perfil (`fillval.h:328‑332`):
 
-```cpp
-CProfileBiasGain DiagramMapper;
-void              SetProfile(CProfileBiasGain&);
-CProfileBiasGain& GetProfile();
-CProfileBiasGain* GetProfilePtr();
-```
+El perfil se guarda como un miembro por valor (`CProfileBiasGain`), con los accesores
+habituales para leerlo y sustituirlo (por valor o por puntero).
 
 `CProfileBiasGain : IProfile` (`biasgain.h:147`):
 
-```cpp
-virtual void SetBiasGain(AFp BiasMinus1ToPlus1, AFp GainMinus1ToPlus1);  // biasgain.h:170
-virtual void SetBias(AFp);  SetGain(AFp);
-virtual AFp  GetBias() const;  GetGain() const;
-virtual AFp  MapZeroToOne(AFp ZeroToOne) const;   // biasgain.h:180 — la función de mapeo
-virtual void SetIntervals(AFp Low, AFp High);
-virtual void SetIntervals(AFp DomainLow, AFp DomainHigh, AFp RangeLow, AFp RangeHigh);
-virtual AFp  MapInterval(AFp) const;
-virtual void MapInterval(AFp Table[], INT32 length) const;   // precálculo de LUT
-BOOL generatesInfiniteUndo;   // biasgain.h:241
-BOOL isAFeatherProfile;       // biasgain.h:243
-```
+| Operación | Papel | Referencia |
+|---|---|---|
+| `SetBiasGain(bias, gain)` | fija ambos parámetros, en el rango −1..+1 | `biasgain.h:170` |
+| `SetBias` / `SetGain`, `GetBias` / `GetGain` | acceso individual | ídem |
+| `MapZeroToOne(x)` | **la función de mapeo**: 0..1 → 0..1 | `biasgain.h:180` |
+| `SetIntervals(lo, hi)` y su variante de 4 argumentos | define dominio y rango del mapeo | ídem |
+| `MapInterval(x)` | mapeo en el intervalo configurado | ídem |
+| `MapInterval(tabla, longitud)` | precalcula una LUT completa | ídem |
+| `generatesInfiniteUndo` | bandera: el ajuste interactivo no genera un paso de undo por evento | `biasgain.h:241` |
+| `isAFeatherProfile` | bandera: el perfil es el de un difuminado | `biasgain.h:243` |
+
+Los parámetros se manejan en el tipo de coma flotante interno del original (`AFp`).
 
 Es la clásica función *bias/gain* de Schlick/Perlin, con bias y gain normalizados a [-1, +1]. Se usa en degradados, contornos (`NodeContour::m_Profile`, `nodecntr.h:301`), sombras (`NodeShadow::m_BiasGain`, `nodeshad.h:316`), feather y blends.
 
@@ -1095,52 +1092,50 @@ Y el **efecto de interpolación de color** (`AttrFillEffect`, `fillattr2.h:2660`
 
 `FractalFillAttribute` (`fillval.h:913`) — **nubes** (`FILLSHAPE_CLOUDS`):
 
-```cpp
-INT32   Seed;         // semilla
-FIXED16 Graininess;   // 0 .. ~32
-FIXED16 Gravity;      // 0 .. ~255
-FIXED16 Squash;
-INT32   Dpi;
-BOOL    Tileable;
-INT32   Dim;          // dimensión (tamaño del bitmap generado)
-```
+| Campo | Tipo | Rango típico | Significado |
+|---|---|---|---|
+| `Seed` | entero de 32 bits | — | semilla del generador |
+| `Graininess` | punto fijo 16.16 | 0 .. ~32 | granularidad del ruido |
+| `Gravity` | punto fijo 16.16 | 0 .. ~255 | atracción hacia el centro |
+| `Squash` | punto fijo 16.16 | — | aplastamiento |
+| `Dpi` | entero de 32 bits | — | resolución de generación |
+| `Tileable` | booleano | — | el resultado debe ser mosaicable |
+| `Dim` | entero de 32 bits | — | dimensión del bitmap generado |
 
 `NoiseFillAttribute` (`fillval.h:841`) — **plasma** (`FILLSHAPE_PLASMA`):
 
-```cpp
-INT32   seed;
-UINT32  dpi;
-BOOL    tileable;
-UINT32  dim;
-FIXED16 grain;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `seed` | entero de 32 bits | semilla |
+| `dpi` | entero de 32 bits sin signo | resolución |
+| `tileable` | booleano | mosaicable |
+| `dim` | entero de 32 bits sin signo | dimensión del bitmap |
+| `grain` | punto fijo 16.16 | granularidad |
 
 Ambos generan un `KernelBitmap` bajo demanda:
 
-```cpp
-// fillval.h:343-344
-KernelBitmap* GenerateFractalBitmap(INT32 seed, double grain, double gravity, double squash, UINT32 dim);
-KernelBitmap* GenerateNoiseBitmap(FIXED16 grain, INT32 seed);
-// fillval.h:317-318  — caché: evitar regenerar si los parámetros no cambiaron
-virtual void CacheFractalData(FillGeometryAttribute* pCachedFractal);
-virtual BOOL IsSameAsCachedFractal(FillGeometryAttribute* pCachedFractal);
-virtual BOOL Randomise();       // fillval.h:274
-virtual BOOL RecalcFractal();   // fillval.h:275
-```
+| Operación | Papel | Referencia |
+|---|---|---|
+| generar bitmap fractal | a partir de semilla, granularidad, gravedad, aplastamiento y dimensión | `fillval.h:343` |
+| generar bitmap de ruido | a partir de granularidad y semilla | `fillval.h:344` |
+| `CacheFractalData(...)` | guarda los parámetros con los que se generó | `fillval.h:317` |
+| `IsSameAsCachedFractal(...)` | evita regenerar si los parámetros no han cambiado | `fillval.h:318` |
+| `Randomise()` | nueva semilla | `fillval.h:274` |
+| `RecalcFractal()` | fuerza la regeneración | `fillval.h:275` |
 
 ### 5.9 Interacción con moldes y blends
 
 Cada valor de relleno implementa dos transformaciones especiales:
 
-```cpp
-virtual INT32 Mould(MouldAttribute*, DocCoord* src, INT32 n, DocCoord* dst);  // fillval.h:296
-virtual AttributeValue* MouldIntoStroke(PathStrokerVector*, double TransScale); // fillval.h:337
-virtual BOOL Blend(BlendAttrParam*);                                          // fillval.h:288
-virtual BOOL BlendFillColours(DocColour* S, DocColour* E, DocColour* B, double& r, ...);
-virtual BOOL BlendFillTransp (UINT32* S, UINT32* E, UINT32* B, double& r, ...);
-virtual BOOL BlendControlPoints(DocCoord* S, DocCoord* E, DocCoord* B, double& r, ..., BOOL swapOrder);
-virtual BOOL CheckForGreyscaleBitmapBlend(KernelBitmap*, DocColour* Start, DocColour* End);
-```
+| Operación | Papel | Referencia |
+|---|---|---|
+| `Mould(...)` | deforma un array de *n* coordenadas de origen a destino | `fillval.h:296` |
+| `MouldIntoStroke(...)` | deforma el relleno a lo largo de un trazo, con escala | `fillval.h:337` |
+| `Blend(...)` | interpolación del relleno en una mezcla | `fillval.h:288` |
+| `BlendFillColours(...)` | interpola los colores extremos del relleno | — |
+| `BlendFillTransp(...)` | interpola las transparencias extremas | — |
+| `BlendControlPoints(...)` | interpola los puntos de control, con opción de invertir el orden | — |
+| `CheckForGreyscaleBitmapBlend(...)` | caso especial: mezcla de bitmap en escala de grises entre dos colores | — |
 
 Es decir, el relleno **sabe deformarse** con el objeto (los puntos de control se moldean) y **sabe interpolarse** con otro relleno del mismo tipo. `MouldIntoStroke` además escala anchos de línea y transparencias.
 
@@ -1148,11 +1143,11 @@ Es decir, el relleno **sabe deformarse** con el objeto (los puntos de control se
 
 `DocColour` (`doccolor.h:81`) ocupa tres campos (`doccolor.h:204‑207`):
 
-```cpp
-ColourInfo   Info;            // modelo + flags (¿es referencia a IndexedColour?)
-ColourPacked SourceColour;    // valor en el modelo de origen
-ColourPacked CachedColour;    // valor cacheado en el modelo de destino
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `Info` | `ColourInfo` | modelo de color y banderas (entre ellas, si es referencia a un `IndexedColour`) |
+| `SourceColour` | color empaquetado | valor en el modelo de origen |
+| `CachedColour` | color empaquetado | valor cacheado ya convertido al modelo de destino |
 
 Modelos (`colmodel.h:199‑215`):
 
@@ -1214,16 +1209,16 @@ El propagador de cambios es `Node::WarnParentOfChange(ObjChangeParam*, AllParent
 - **Dirección** (`objchge.h:122`): `OBJCHANGE_CALLEDBYOP`, `OBJCHANGE_CALLEDBYPARENT`, `OBJCHANGE_CALLEDBYCHILD`.
 - **Flags de cambio físico** (`ObjChangeFlags`, `objchge.h:163`):
 
-```cpp
-BYTE DeleteNode        : 1;   // el nodo se va a borrar (u ocultar)
-BYTE ReplaceNode       : 1;   // se sustituye por *uno* otro
-BYTE MoveNode          : 1;   // se mueve a otro sitio del árbol
-BYTE Attribute         : 1;   // se le aplican atributos
-BYTE MultiReplaceNode  : 1;   // se sustituye por uno o más nodos
-BYTE TransformNode     : 1;   // se transforma
-BYTE CopyNode          : 1;   // se copia al portapapeles
-BYTE RegenerateNode    : 1;   // se regenera
-```
+| Bandera (1 bit) | Qué anuncia |
+|---|---|
+| `DeleteNode` | el nodo se va a borrar (u ocultar) |
+| `ReplaceNode` | se sustituye por **un** nodo |
+| `MoveNode` | se mueve a otro sitio del árbol |
+| `Attribute` | se le aplican atributos |
+| `MultiReplaceNode` | se sustituye por uno o más nodos |
+| `TransformNode` | se transforma |
+| `CopyNode` | se copia al portapapeles |
+| `RegenerateNode` | se regenera |
 
 - **Máscara de notificación** (`ObjChangeMask`, `objchge.h:202`): `EorBlobs`, `Finished`. Los padres marcan qué mensajes quieren recibir.
 - Puntero a la operación (`GetOpPointer()`), al hijo que llama, y al spread.
@@ -1232,42 +1227,39 @@ BYTE RegenerateNode    : 1;   // se regenera
 
 Y **el permiso de operación** (`OpPermissionState`, `node.h:231`) es el mecanismo complementario, de arriba a abajo:
 
-```cpp
-enum OpPermissionState { PERMISSION_UNDEFINED, PERMISSION_DENIED, PERMISSION_ALLOWED };
-```
+`OpPermissionState` tiene tres valores: `PERMISSION_UNDEFINED` (sin decidir),
+`PERMISSION_DENIED` (denegado) y `PERMISSION_ALLOWED` (permitido). Se codifica en el par de
+bits `OpPermission1`/`OpPermission2` de las banderas del nodo (§1.3).
 
 `Node::AllowOp(ObjChangeParam*, SetOpPermissionState, DoPreTriggerEdit)` (`node.h:381`) pregunta al árbol si una operación es legal sobre un nodo; un blend puede **denegar** el borrado de sus hijos generados. La clase `Range` no devuelve nodos con `PERMISSION_DENIED`.
 
 Núcleo de `NodeCompound::OnChildChange` (`nodecomp.cpp:272‑320`):
 
-```cpp
-if (!pOp && pParam->GetChangeType()  == OBJCHANGE_FINISHED &&
-            pParam->GetDirection()   == OBJCHANGE_CALLEDBYCHILD &&
-            pParam->GetChangeFlags().RegenerateNode)
-{
-    RegenerateNode(NULL, FALSE, FALSE);
-    return CC_OK;
-}
-```
+El núcleo de `NodeCompound::OnChildChange` (`nodecomp.cpp:272-320`) se reduce a una sola
+regla: **si no hay operación en curso**, el cambio viene marcado como *terminado*, la
+notificación la origina un hijo, y la máscara de cambio pide regeneración, entonces el
+controlador regenera su subárbol derivado y devuelve «hecho» sin grabar undo. En cualquier
+otro caso el mensaje sigue su curso normal hacia arriba.
 
 ### 6.3 Regeneración diferida
 
 Además de la regeneración inmediata, hay una **cola global** en `Application` (`app.cpp:1830‑1860`):
 
-```cpp
-BOOL Application::AddNodeToRegenList(Node* pNode);   // app.cpp:1880
-void Application::RegenerateNodesInList()            // app.cpp:1830
-{
-    for (cada pItem en RegenList) {
-        if (pItem->pNode->GetHiddenCnt() == 0) {
-            if (IsBounded()) InvalidateBoundingRect();
-            pItem->pNode->RegenerateNode(NULL, FALSE, FALSE);
-            if (IsBounded()) InvalidateBoundingRect();
-        }
-    }
-    RegenList.DeleteAll();
-}
+La aplicación mantiene una **lista de regeneración diferida**: los nodos que hay que
+recalcular se apuntan con `Application::AddNodeToRegenList(Node*)` (`app.cpp:1880`) y se
+procesan después en `Application::RegenerateNodesInList()` (`app.cpp:1830`), cuyo bucle es:
+
+```text
+para cada entrada de la lista de regeneración:
+    si el nodo no está oculto (contador de ocultamiento == 0):
+        si el nodo tiene caja: invalidar su bounding box
+        regenerar el nodo
+        si el nodo tiene caja: invalidar su bounding box otra vez
+vaciar la lista
 ```
+
+La doble invalidación es deliberada: la primera cubre el área que ocupaba el nodo antes de
+regenerarse y la segunda la que ocupa después, de modo que el redibujado cubra ambas.
 
 Patrón: **invalidar caja → regenerar → invalidar caja otra vez** (porque la caja nueva puede ser distinta). La lista se vacía en el momento del repintado (`bCacheRender = TRUE` en `RegenerateNode`).
 
@@ -1277,25 +1269,22 @@ Añade sobre `NodeCompound`:
 
 - `Describe`, `OnChildChange`, `OnClick` (selección del grupo entero).
 - **Tight groups** — cacheo del grupo como bitmap (`group.h:204‑209`):
-  ```cpp
-  virtual BOOL   RenderTight(RenderRegion*);
-  virtual BOOL   CaptureTight(RenderRegion*);
-  virtual double GetTightGroupPixelsPerInch(RenderRegion* = NULL) const;
-  virtual double GetTightGroupPixelWidth(RenderRegion* = NULL) const {return 72000.0/GetTightGroupPixelsPerInch(...);}
-  virtual void   TransformTight(TransformBase&, double dTestPixelWidth);
-  ```
+  cuatro operaciones virtuales: pintar el grupo desde su bitmap, capturarlo en bitmap,
+  consultar la resolución del grupo (en puntos por pulgada, o su equivalente en anchura de
+  píxel — 72 000 millipuntos por pulgada dividido entre los ppp) y transformar el bitmap
+  cacheado sin regenerarlo.
   Un grupo con transparencia o efectos se rasteriza una vez y se reutiliza mientras no cambie la resolución.
 - `IsValidEffectAttr(NodeAttribute*)` (`group.h:211`): qué atributos de efecto puede llevar el grupo.
 - `CompoundName` (`nodecomp.h:298`): nombre del grupo.
 
 Las **cajas** se gestionan en `NodeRenderableBounded` (`node.h:1425‑1440`):
 
-```cpp
-BOOL    IsBoundingRectValid;   // node.h:1432
-DocRect BoundingRectangle;     // node.h:1435
-BOOL    Magnetic;              // node.h:1438  objeto magnético (snap)
-BOOL    MayBeCached;           // node.h:1440  FALSE => nunca buscar en la caché de bitmaps
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `IsBoundingRectValid` | booleano | la caja cacheada es válida | `node.h:1432` |
+| `BoundingRectangle` | rectángulo de documento | caja cacheada | `node.h:1435` |
+| `Magnetic` | booleano | objeto magnético (participa en el *snap*) | `node.h:1438` |
+| `MayBeCached` | booleano | si es falso, **nunca** se busca este nodo en la caché de bitmaps | `node.h:1440` |
 
 con `ValidateBoundingRect()` / `InvalidateBoundingRect(bool InvalidateChildBounds)` (`node.h:1346‑1345`) y `GetBoundingRect(DontUseAttrs, HitTest)` (`node.h:1351`). `InvalidateBoundingRect` **sube** invalidando a los ancestros.
 
@@ -1303,45 +1292,43 @@ con `ValidateBoundingRect()` / `InvalidateBoundingRect(bool InvalidateChildBound
 
 Interfaz en `NodeRenderableBounded` (`node.h:1388‑1392`):
 
-```cpp
-virtual BOOL RenderCached(RenderRegion*);
-virtual BOOL CaptureCached(RenderRegion*);
-virtual BOOL ReleaseCached(BOOL bAndParents = TRUE, BOOL bAndChildren = TRUE,
-                           BOOL bSelf = TRUE, BOOL bAndDerived = TRUE);
-virtual void CopyCached(NodeRenderableBounded* pCopy, double dRes, INT32 maxOption = 0);
-virtual void TransformCached(TransformBase&, double dTestPixelWidth);
-virtual BOOL HasCachedDirectBitmap() {return FALSE;}
-static BOOL bEnableCacheing;     // node.h:1448
-static BOOL bThrottleCacheing;   // node.h:1449  limitar al 5% del tiempo de render
-static BOOL bShowCacheBlobs;     // node.h:1450
-```
+| Operación | Papel |
+|---|---|
+| `RenderCached(RenderRegion*)` | intenta pintar el nodo desde la caché |
+| `CaptureCached(RenderRegion*)` | rasteriza el nodo y guarda el resultado en la caché |
+| `ReleaseCached(padres, hijos, sí mismo, derivados)` | invalida selectivamente entradas de caché |
+| `CopyCached(destino, resolución, variante)` | traslada las entradas de caché a una copia del nodo |
+| `TransformCached(transformación, anchura de píxel)` | transforma la caché en vez de regenerarla |
+| `HasCachedDirectBitmap()` | ¿el nodo es en sí un bitmap ya cacheado? |
+
+Tres interruptores estáticos controlan el subsistema: activación global
+(`node.h:1448`), limitación del tiempo dedicado a capturar caché —en el original, al 5 % del
+tiempo de render— (`node.h:1449`) y visualización de marcas de depuración (`node.h:1450`).
 
 El almacén es global y asociativo (`bitmapcache.h`):
 
-```cpp
-class CBitmapCacheKey {          // bitmapcachekey.h:104
-    LPVOID pOwner;        // puntero al nodo dueño
-    double dPixelWidth;   // resolución buscada
-    UINT32 nOption;       // variante (varios bitmaps del mismo nodo a la misma resolución)
-};
-class CCachedBitmap {            // bitmapcache.h:114
-    LPBITMAPINFO pbmpInfo;  LPBYTE pbmpBits;
-    DocCoord coord0, coord1, coord2;   // paralelogramo: permite transformar la caché sin regenerar
-    INT32 nPriority;                   // CACHEPRIORITY_NORMAL / _TEMPBITMAP_HIGH(1000) / _PERMANENT(8000)
-    BOOL  bFullCoverage;               // el bitmap cubre por completo al objeto
-};
-typedef std::map<CBitmapCacheKey, CCachedBitmap, LessBitmapCacheKey> CCacheKeyMap;  // bitmapcache.h:152
-class CBitmapCache {             // bitmapcache.h:161
-    void StoreBitmap(key, bitmap);
-    CCachedBitmap RemoveBitmap(key);
-    BOOL RemoveAllOwnedBitmaps(key, bOpaqueOnly, maxpriority);
-    void RemoveLowPriorityBitmaps(maxpriority);
-    void SetMaximumDataSize(UINT64);          // por defecto: % de la RAM libre
-    static UINT64 CalcRecommendedMaximumDataSize();
-private:
-    CCacheKeyMap m_map;  UINT64 m_lMaxDataSize;  UINT32 m_lCurrentDataSize;
-};
-```
+**Clave de caché** (`bitmapcachekey.h:104`):
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| dueño | puntero opaco | el nodo propietario del bitmap |
+| anchura de píxel | `double` | resolución buscada |
+| variante | entero de 32 bits sin signo | permite varios bitmaps del mismo nodo a la misma resolución |
+
+**Entrada cacheada** (`bitmapcache.h:114`):
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| cabecera + píxeles | punteros | el bitmap propiamente dicho |
+| tres coordenadas de documento | paralelogramo | permite transformar la caché sin regenerarla |
+| prioridad | entero de 32 bits | `NORMAL`, `TEMPBITMAP_HIGH` (1000) o `PERMANENT` (8000) |
+| cobertura completa | booleano | el bitmap cubre por entero al objeto |
+
+**La caché** (`bitmapcache.h:161`) es un mapa ordenado de clave a entrada
+(`bitmapcache.h:152`) con: almacenar, extraer, eliminar todas las entradas de un dueño
+(opcionalmente solo las opacas y hasta cierta prioridad), purgar las de prioridad baja, y
+fijar un tamaño máximo en bytes. Por defecto el máximo se calcula como un porcentaje de la
+RAM libre.
 
 Política de desalojo: aleatoria acotada por prioridad (`RemoveRandomBitmap`, `bitmapcache.h:215`).
 
@@ -1363,42 +1350,39 @@ NodeBlend (NodeGroup)                         nodeblnd.h:129
 
 Estado de `NodeBlend` (`nodeblnd.h:330‑369`):
 
-```cpp
-UINT32 m_NumBlendSteps;      // nº de pasos
-double m_StepDistance;       // distancia entre pasos
-double m_DistanceEntered;    // la última distancia pedida por el usuario
-BOOL   m_AWEPSCompatible;    // compatible con EPS de ArtWorks
-BOOL   m_AWEPSCompatibleCache;
-BOOL   m_OneToOne;           // mapeo 1-a-1 de subpaths en vez de automático
-BOOL   m_NotAntialiased;     // no antialias en los pasos intermedios
-BOOL   m_Tangential;         // los pasos se orientan tangentes a la curva
-BOOL   m_BlendedOnCurve;     // hay un NodeBlendPath
-UINT32 m_NumNodeBlendPaths;
-static BOOL s_DefaultNotAntialiased;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_NumBlendSteps` | entero de 32 bits sin signo | número de pasos |
+| `m_StepDistance` | `double` | distancia entre pasos |
+| `m_DistanceEntered` | `double` | última distancia pedida por el usuario |
+| `m_AWEPSCompatible` (+ su caché) | booleano | compatibilidad con el EPS de ArtWorks |
+| `m_OneToOne` | booleano | mapeo 1 a 1 de subcaminos en vez de automático |
+| `m_NotAntialiased` | booleano | sin antialias en los pasos intermedios |
+| `m_Tangential` | booleano | los pasos se orientan tangentes a la curva |
+| `m_BlendedOnCurve` | booleano | la mezcla sigue un `NodeBlendPath` |
+| `m_NumNodeBlendPaths` | entero de 32 bits sin signo | número de caminos de mezcla |
+
+Existe además un valor estático con el ajuste por defecto de «sin antialias».
 
 Interpolación de **color** por `AttrFillEffect` (fade / rainbow / alt-rainbow) y de **perfil** por `CProfileBiasGain` (`nodeblnd.h:221` «Profile blending functions»).
 
 `NodeBlender` mantiene el estado de un par:
 
-```cpp
-class BlendPath : public ListItem {           // nodebldr.h:140
-    Path*              m_pPath;               // el path de este extremo
-    NodeRenderableInk* m_pBlendNode;          // nodo mezclado
-    NodeRenderableInk* m_pCreatedByNode;      // nodo original que lo generó
-    CCAttrMap*         m_pAppliedAttrs;       // atributos resueltos del original
-    BOOL               m_bCreatedViaNodeBlendPath;
-    Path*              m_pCopyPath;  CCAttrMap* m_pCopyAttrs;
-};
-class BlendRef {                              // nodebldr.h:287
-    NodeRenderableInk* GetNode();
-    CCAttrMap* FindAppliedAttributes(BlendPath*);
-    BOOL AddBlendPath(BlendPath*);
-    UINT32 GetNumBlendPaths();
-    BlendPath* GetFirstBlendPath() / GetNextBlendPath(...) / GetBlendPath(INT32);
-    void StripRedundantNodeBlendPaths(BlendRef* spouse);
-};
-```
+`BlendPath` (`nodebldr.h:140`) representa un extremo de la mezcla:
+
+| Campo | Tipo | Significado |
+|---|---|---|
+| camino | puntero a `Path` | el camino de este extremo |
+| nodo mezclado | puntero a nodo de tinta | el nodo que participa en la mezcla |
+| nodo creador | puntero a nodo de tinta | el nodo original que lo generó |
+| atributos aplicados | mapa de atributos | atributos ya resueltos del original |
+| bandera de origen | booleano | se creó a través de un `NodeBlendPath` |
+| camino y atributos de copia | punteros | copias de trabajo |
+
+`BlendRef` (`nodebldr.h:287`) es el índice de los caminos de un extremo: da acceso al nodo,
+busca los atributos aplicados de un `BlendPath`, añade caminos, cuenta e itera sobre ellos
+(primero / siguiente / por índice) y elimina los caminos de mezcla redundantes comparando
+con el extremo opuesto.
 
 `Reinit()` / `Deinit()` (`nodeblnd.h:196‑197`) reconstruyen/liberan toda la estructura cacheada de los blenders. `BeginBlendStep` / `EndBlendStep` (`ink.h:392‑395`) permiten a los nodos compuestos participar en cada paso.
 
@@ -1417,21 +1401,20 @@ NodeMould (NodeGroup)               nodemold.h:161   posee un MouldGeometry*
 
 `MouldGeometry` (`moldshap.h:130`) es la abstracción de la deformación:
 
-```cpp
-virtual BOOL       Validate(Path*, UINT32& errorID);
-virtual BOOL       Define(Path*, DocRect*);
-virtual MouldSpace Describe();                 // MOULDSPACE_ENVELOPE / _PERSPECTIVE / _UNDEFINED
-virtual BOOL       MakeValidFrom(Path** Out, Path* In, INT32* CornersHint);
-virtual BOOL       MouldPathToPath(Path* src, Path* dst);
-virtual BOOL       MouldBitmapToTile(KernelBitmap* src, KernelBitmap* dst);
-virtual BOOL       MouldPoint(DocCoord p, DocCoord& q);
-virtual void       MouldPathRender(Path*, RenderRegion*);
-virtual void       MouldBitmapRender(KernelBitmap*, DocCoord* pParallel, RenderRegion*);
-virtual void       Transform(Path* pNewPath, DocRect*, TransformBase&);
-virtual MouldGeometry* MakeCopy();
-virtual ChangeCode RecordContext(UndoableOperation*);   // undo
-virtual void       SetThreshold(INT32 t);   INT32 MouldThreshold;   // subdivisión adaptativa
-```
+| Operación | Papel |
+|---|---|
+| `Validate(camino, id de error)` | ¿el camino sirve como molde? |
+| `Define(camino, rectángulo)` | fija la geometría del molde |
+| `Describe()` | devuelve el tipo: envolvente, perspectiva o indefinido |
+| `MakeValidFrom(salida, entrada, pista de esquinas)` | corrige un camino para que sea un molde válido |
+| `MouldPathToPath(origen, destino)` | deforma un camino |
+| `MouldBitmapToTile(origen, destino)` | deforma un bitmap a un tile |
+| `MouldPoint(p, q)` | deforma un punto |
+| `MouldPathRender(...)` / `MouldBitmapRender(...)` | dibujan directamente el resultado deformado |
+| `Transform(...)` | aplica una transformación al propio molde |
+| `MakeCopy()` | duplica el molde |
+| `RecordContext(UndoableOperation*)` | graba el estado para el undo |
+| umbral de subdivisión | entero: controla la subdivisión adaptativa de las Béziers |
 
 Implementaciones:
 
@@ -1455,23 +1438,21 @@ NodeContourController (NodeGroup)   ncntrcnt.h:153
 
 Estado de `NodeContour` (`nodecntr.h:215‑304`):
 
-```cpp
-Path  m_SourcePath;         // path de origen
-Path* m_pPathList;          // pasos generados
-INT32 m_NumPaths;
-BOOL  m_FirstRender;
-// del controlador / parámetros:
-Path* m_pSummedPath;
-INT32 m_NumSteps;
-INT32 m_Width;              // anchura del contorno (MILLIPOINT); signo = dentro/fuera
-BOOL  m_bNodeIsPath;
-BOOL  m_bOuter;             // contorno exterior
-BOOL  m_bIncludeLineWidths;
-CProfileBiasGain m_Profile; // perfil de espaciado de los pasos
-JointType m_Join;           // tipo de unión
-double m_Flatness;          // aplanado de las Béziers
-BOOL  m_bContourBrush;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_SourcePath` | camino | camino de origen |
+| `m_pPathList`, `m_NumPaths` | array de caminos + contador | pasos generados |
+| `m_FirstRender` | booleano | primer render tras la generación |
+| `m_pSummedPath` | puntero a camino | camino acumulado del controlador |
+| `m_NumSteps` | entero de 32 bits | número de pasos |
+| `m_Width` | millipuntos | anchura del contorno; el **signo** indica dentro o fuera |
+| `m_bNodeIsPath` | booleano | el nodo fuente ya es un camino |
+| `m_bOuter` | booleano | contorno exterior |
+| `m_bIncludeLineWidths` | booleano | tener en cuenta el grosor de línea |
+| `m_Profile` | perfil bias/gain | espaciado de los pasos |
+| `m_Join` | tipo de unión | esquinas del contorno |
+| `m_Flatness` | `double` | aplanado de las Béziers |
+| `m_bContourBrush` | booleano | el contorno se usa como pincel |
 
 `ContourBecomeA` / `ContourBecomeA2` (`nodecntr.h:239` / `nodecntr.h:~285`) y `ContourNodePathProcessor` implementan la conversión a formas.
 
@@ -1485,22 +1466,20 @@ NodeShadowController (NodeEffect)   nodecont.h:215
 
 `NodeShadow` (`nodeshad.h:284‑336`):
 
-```cpp
-KernelBitmap*              m_ShadowBitmap;   // la sombra rasterizada y desenfocada
-BitmapTranspFillAttribute* m_pBMPTransFill;  // se pinta como transparencia de bitmap
-Path   m_Path;                  Path m_NonTranslatedPath;
-INT32  m_ShadowWidth, m_ShadowHeight;
-BOOL   m_bHaveTransformed, m_RenderBitmaps, m_bAmCopying, m_bAmLoading;
-double m_dDarkness;             // oscuridad
-DocRect m_SelectedRect;
-INT32  m_PreviousBlur;
-CBitmapShadow* m_pShadower;     // el generador
-INT32  m_BitmapXOffset;
-CProfileBiasGain m_BiasGain;    // perfil del desenfoque
-MILLIPOINT m_LastRequestedPixWidth;      // resolución con la que se generó
-enum Quality::Fill m_LastQualitySetting;
-double m_LastActualPixWidth;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_ShadowBitmap` | puntero a bitmap del kernel | la sombra ya rasterizada y desenfocada |
+| `m_pBMPTransFill` | puntero a atributo de transparencia de bitmap | la sombra se pinta como transparencia |
+| `m_Path`, `m_NonTranslatedPath` | caminos | silueta con y sin el desplazamiento de la sombra |
+| `m_ShadowWidth`, `m_ShadowHeight` | enteros de 32 bits | tamaño del bitmap de sombra |
+| `m_bHaveTransformed`, `m_RenderBitmaps`, `m_bAmCopying`, `m_bAmLoading` | booleanos | banderas de estado del ciclo de vida |
+| `m_dDarkness` | `double` | oscuridad de la sombra |
+| `m_SelectedRect` | rectángulo de documento | caja de selección |
+| `m_PreviousBlur` | entero de 32 bits | radio de desenfoque anterior |
+| `m_pShadower` | puntero al generador | objeto que produce el bitmap |
+| `m_BitmapXOffset` | entero de 32 bits | desplazamiento horizontal del bitmap |
+| `m_BiasGain` | perfil bias/gain | perfil del desenfoque |
+| `m_LastRequestedPixWidth`, `m_LastActualPixWidth`, `m_LastQualitySetting` | millipuntos / `double` / calidad | resolución y calidad con las que se generó, para decidir si hay que regenerar |
 
 El patrón clave es **«último estado con el que se generó»** (`m_LastRequestedPixWidth`, `m_LastQualitySetting`, `m_LastActualPixWidth`): la regeneración se salta si nada relevante ha cambiado. Es el equivalente manual de una memoización con clave.
 
@@ -1517,24 +1496,23 @@ NodeBevelController (NodeGroup)     nbevcont.h:125
 
 `NodeBevel` (`nodebev.h:277‑344`):
 
-```cpp
-INT32  m_BevelType;      // tipo de perfil de bisel
-INT32  m_Indent;         // anchura
-double m_LightAngle;     // ángulo de la luz
-BOOL   m_bOuter;         // bisel exterior
-INT32  m_Contrast;
-double m_Tilt;           // inclinación de la luz
-BOOL   m_IsABlendStepBevel;
-DocCoord m_BMPCentre;   DocRect m_SelectedRect;   JointType m_JointType;
-Path   m_Path;   Path m_OuterBevelPath;
-KernelBitmap* m_pBevelBitmap;      // mapa de iluminación
-KernelBitmap* m_pCombiBitmap;
-BitmapFillAttribute*       m_pBMPFill;
-BitmapTranspFillAttribute* m_pTranspFill;
-INT32 m_BitmapWidth, m_BitmapHeight;
-DocCoord m_SubPixelOffset;   DocRect m_PixelAllignedRect;
-BOOL m_MustRegenOnChildChange;   BOOL m_bCached;   BOOL m_bStopRender;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_BevelType` | entero de 32 bits | tipo de perfil de bisel |
+| `m_Indent` | entero de 32 bits | anchura del bisel |
+| `m_LightAngle`, `m_Tilt` | `double` | ángulo e inclinación de la luz |
+| `m_bOuter` | booleano | bisel exterior |
+| `m_Contrast` | entero de 32 bits | contraste de la iluminación |
+| `m_IsABlendStepBevel` | booleano | el bisel pertenece a un paso de mezcla |
+| `m_BMPCentre`, `m_SubPixelOffset` | coordenadas de documento | centrado y ajuste subpíxel del bitmap |
+| `m_SelectedRect`, `m_PixelAllignedRect` | rectángulos de documento | caja de selección y caja alineada a píxel |
+| `m_JointType` | tipo de unión | esquinas del bisel |
+| `m_Path`, `m_OuterBevelPath` | caminos | silueta interior y exterior |
+| `m_pBevelBitmap` | puntero a bitmap | **mapa de iluminación** del bisel |
+| `m_pCombiBitmap` | puntero a bitmap | bitmap combinado final |
+| `m_pBMPFill`, `m_pTranspFill` | punteros a atributos de relleno | con los que se pinta el bisel |
+| `m_BitmapWidth`, `m_BitmapHeight` | enteros de 32 bits | tamaño del bitmap generado |
+| `m_MustRegenOnChildChange`, `m_bCached`, `m_bStopRender` | booleanos | control de regeneración y de render |
 
 Cada **parámetro** del bisel es además un atributo independiente (`attrbev.h`): `AttrBevelIndent`, `AttrBevelType`, `AttrBevelContrast`, `AttrBevelLightAngle`, `AttrBevelLightTilt`, con valores `BevelAttributeValue*`. Esto permite heredarlos, mezclarlos y aplicarlos por galería.
 
@@ -1549,30 +1527,24 @@ NodeClipViewController (NodeGroup)  ndclpcnt.h:146
 
 `NodeClipView` (`nodeclip.h:179‑212`):
 
-```cpp
-BOOL           m_bRenderingForward;
-BYTE*          m_pRegion;              // región de recorte rasterizada
-GCONTEXT*      m_pContext;
-CONST REGION*  m_pSavedRegion;         // región previa (para restaurar)
-BOOL           m_bGDrawClipRegionSet;
-RECT           m_SavedClipRect;
-ClipRegionAttribute m_ClipRegionAttribute;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `m_bRenderingForward` | booleano | sentido del recorrido (aplicar o quitar el recorte) |
+| `m_pRegion` | buffer de bytes | región de recorte rasterizada |
+| `m_pContext` | puntero al contexto de GDraw | contexto sobre el que se instala la región |
+| `m_pSavedRegion` | puntero a la región previa | para restaurarla al salir |
+| `m_bGDrawClipRegionSet` | booleano | ya hay una región instalada en GDraw |
+| `m_SavedClipRect` | rectángulo | recorte rectangular previo |
+| `m_ClipRegionAttribute` | atributo de región de recorte | el valor que se empuja en la pila de atributos |
 
 Y el atributo `ClipRegionAttribute` (`clipattr.h:121`) guarda `Path* m_pClipPath` e implementa `GoingOutOfScope()` para desinstalar el recorte al salir del ámbito — un ejemplo perfecto de por qué `AttributeValue` necesita los tres ganchos `Render` / `Restore` / `GoingOutOfScope`.
 
 ### 6.12 Efectos «live» (XPE) (`nodepostpro.h`, `nodeliveeffect.h`)
 
-```
-NodeEffect (NodeCompound)           nodepostpro.h:130
- └── String_256 m_strPostProID;     // identificador único del efecto XPE
-
-NodeBitmapEffect (NodeEffect)       nodeliveeffect.h:163
- ├── IXMLDOMDocumentPtr m_pEditsDoc;   // lista de parámetros en XML
- ├── BOOL   m_bHasChangedRecently;
- ├── String_64 m_strDisplayName;
- └── double m_dPixelsPerInch;
-```
+| Clase | Base | Estado propio |
+|---|---|---|
+| `NodeEffect` (`nodepostpro.h:130`) | `NodeCompound` | una cadena con el identificador único del efecto XPE |
+| `NodeBitmapEffect` (`nodeliveeffect.h:163`) | `NodeEffect` | un documento XML con la lista de parámetros del efecto; una bandera de «cambiado recientemente»; el nombre visible; y la resolución (puntos por pulgada) a la que se rasteriza |
 
 Flujo (`nodeliveeffect.h:196‑260`):
 
@@ -1599,10 +1571,10 @@ Xara no tiene un nodo «soft group». Lo que hay es el mecanismo de **nombres de
 
 El mecanismo genérico de «convertir a» (`becomea.h`, `mkshapes.cpp`):
 
-```cpp
-virtual BOOL Node::CanBecomeA(BecomeA* pBecomeA);   // node.h:656
-virtual BOOL Node::DoBecomeA (BecomeA* pBecomeA);   // node.h:657
-```
+La conversión entre representaciones pasa por dos operaciones virtuales de `Node`:
+`CanBecomeA(BecomeA*)` (`node.h:656`) pregunta si el nodo sabe convertirse al tipo pedido, y
+`DoBecomeA(BecomeA*)` (`node.h:657`) realiza la conversión. El parámetro `BecomeA` lleva el
+tipo destino, la operación de undo en curso y el modo (contar, pasar o reemplazar).
 
 `BecomeA` lleva la razón (`BECOMEA_REPLACE`, `BECOMEA_PASSBACK`…), la clase destino y la operación de undo. Subclases especializadas: `BlendBecomeA`, `ContourBecomeA`, `NodeShadowBecomeA`, `NodeCompoundBlendBecomeA`, `PathBecomeA`, `HandleBecomeA`. Es como un QuickShape se convierte en `NodePath`, o un blend en `NodeGroup`.
 
@@ -1635,28 +1607,24 @@ Dos observaciones importantes:
 
 ### 7.2 `TextStory` (`nodetxts.h:260`)
 
-```cpp
-static TextStory* pFocusStory;   // nodetxts.h:456  la historia con el foco de entrada
-Matrix     StoryMatrix;          // nodetxts.h:458  matriz de la historia completa
-DocRect    RedrawRect;
-CaretNode* CachedCaret;          // nodetxts.h:460
-MILLIPOINT mLeftIndent;          // sangría izquierda a lo largo del path
-MILLIPOINT mRightIndent;         // sangría derecha
-MILLIPOINT StoryWidth;           // ancho cuando NO está sobre un path; 0 => "texto en un punto"
-BOOL TextOnPathReversed   : 1;   // texto invertido sobre el path
-BOOL TextOnPathTangential : 1;   // caracteres tangentes al path (vs. horizontales)
-BOOL PrintAsShapes        : 1;
-BOOL WordWrapping         : 1;   // la historia ajusta líneas
-BOOL BeingCopied          : 1;
-MILLIPOINT    ImportFormatWidth; // compat. importación CDR
-BaseShiftEnum ImportBaseShift;
-FIXED16 CharsScale;              // transformaciones aplicadas a los caracteres
-FIXED16 CharsAspect;             //   ANTES de ajustarlos al path
-ANGLE   CharsRotation;
-ANGLE   CharsShear;
-ImportedStringList* pImportedStringList;
-bool    AutoKern;                // kerning automático desde las tablas de la fuente
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| historia con el foco | puntero estático a `TextStory` | la historia que recibe la entrada de teclado | `nodetxts.h:456` |
+| `StoryMatrix` | matriz | transformación de la historia completa | `nodetxts.h:458` |
+| `RedrawRect` | rectángulo de documento | área a redibujar | — |
+| `CachedCaret` | puntero a nodo de cursor | cursor cacheado | `nodetxts.h:460` |
+| `mLeftIndent`, `mRightIndent` | millipuntos | sangrías a lo largo del camino |  — |
+| `StoryWidth` | millipuntos | anchura cuando **no** está sobre un camino; 0 significa «texto en un punto» | — |
+| `TextOnPathReversed` | bit | texto invertido sobre el camino | — |
+| `TextOnPathTangential` | bit | caracteres tangentes al camino (frente a horizontales) | — |
+| `PrintAsShapes` | bit | imprimir el texto convertido a formas | — |
+| `WordWrapping` | bit | la historia ajusta líneas | — |
+| `BeingCopied` | bit | la historia se está copiando | — |
+| `ImportFormatWidth`, `ImportBaseShift` | millipuntos / enumerado | compatibilidad con la importación de CDR | — |
+| `CharsScale`, `CharsAspect` | punto fijo 16.16 | escala y proporción aplicadas a los caracteres **antes** de ajustarlos al camino | — |
+| `CharsRotation`, `CharsShear` | ángulos | rotación y sesgo, ídem | — |
+| `pImportedStringList` | puntero a lista | cadenas importadas pendientes de resolver | — |
+| `AutoKern` | booleano | kerning automático desde las tablas de la fuente | — |
 
 **Tres modos de historia:**
 
@@ -1674,40 +1642,40 @@ Para el texto sobre path: `CreateUntransformedPath(TextStoryInfo*)` (`nodetxts.h
 
 `TextStoryInfo` (`nodetxts.h:229`) — contexto a nivel de historia:
 
-```cpp
-UndoableOperation* pUndoOp;
-BOOL       WordWrap;            // FALSE para undo/redo y para el portapapeles
-MILLIPOINT StoryWidth;   BOOL WordWrapping;
-Path*      pPath;               // el path (si lo hay)
-MILLIPOINT PathLength;   MILLIPOINT PathClosed;
-double     UnitDirectionVectorX, UnitDirectionVectorY;
-MILLIPOINT LeftPathIndent, RightPathIndent;
-MILLIPOINT DescentLine;  BOOL DescentLineValid;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `pUndoOp` | puntero a operación deshacible | operación en curso, si la hay |
+| `WordWrap` | booleano | falso al deshacer/rehacer y al usar el portapapeles |
+| `StoryWidth`, `WordWrapping` | millipuntos / booleano | copia del ajuste de línea de la historia |
+| `pPath` | puntero a camino | el camino de la historia, si lo hay |
+| `PathLength`, `PathClosed` | millipuntos | longitud del camino y si está cerrado |
+| `UnitDirectionVectorX/Y` | `double` | vector director unitario en el punto actual |
+| `LeftPathIndent`, `RightPathIndent` | millipuntos | sangrías sobre el camino |
+| `DescentLine`, `DescentLineValid` | millipuntos / booleano | línea de descenso calculada y su validez |
 
 `TextLineInfo` (`nodetxtl.h:253`) — contexto a nivel de línea:
 
-```cpp
-MILLIPOINT      SumCharAdvances;   // NO incluye el tracking del último carácter
-Justification   justification;
-MILLIPOINT      LeftMargin, RightMargin;        // relativos al inicio de línea
-MILLIPOINT      ParaLeftMargin, ParaRightMargin;
-const TxtRuler* Ruler;
-BOOL            WordWrapping;
-INT32           NumChars, NumSpaces;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `SumCharAdvances` | millipuntos | suma de avances; **no** incluye el tracking del último carácter |
+| `justification` | enumerado | justificación vigente |
+| `LeftMargin`, `RightMargin` | millipuntos | márgenes, relativos al inicio de línea |
+| `ParaLeftMargin`, `ParaRightMargin` | millipuntos | márgenes de párrafo |
+| `Ruler` | puntero a regla de tabulaciones (solo lectura) | tabulaciones vigentes |
+| `WordWrapping` | booleano | la línea participa en el ajuste |
+| `NumChars`, `NumSpaces` | enteros de 32 bits | cuentas necesarias para la justificación completa |
 
 `FormatState` (`nodetxtl.h:198`) — estado de la máquina de formateo (tabuladores, espacio restante, anclas):
 
-```cpp
-const BOOL       SetCharPositions;   // ¿fijar posiciones o solo medir?
-const MILLIPOINT FitWidth;
-const MILLIPOINT CharPosOffset, ExtraOnChars, ExtraOnSpaces;  // para justificación completa
-MILLIPOINT       Width;              // ancho consumido
-MILLIPOINT       ActiveTabPos;
-MILLIPOINT       AnchorPos;
-MILLIPOINT       RemainingSpace;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `SetCharPositions` | booleano (constante) | ¿fijar posiciones o solo medir? |
+| `FitWidth` | millipuntos (constante) | anchura a la que ajustar |
+| `CharPosOffset`, `ExtraOnChars`, `ExtraOnSpaces` | millipuntos (constantes) | reparto del sobrante en la justificación completa |
+| `Width` | millipuntos | anchura consumida |
+| `ActiveTabPos` | millipuntos | posición de la tabulación activa |
+| `AnchorPos` | millipuntos | ancla de la tabulación |
+| `RemainingSpace` | millipuntos | espacio que queda en la línea |
 
 Pasos de `TextLine::Format(TextStoryInfo*)` (`nodetxtl.h:321`):
 
@@ -1719,16 +1687,16 @@ Pasos de `TextLine::Format(TextStoryInfo*)` (`nodetxtl.h:321`):
 
 Estado cacheado por línea (`nodetxtl.h:391‑404`):
 
-```cpp
-MILLIPOINT    mLineDescent;    // mayor descenso de cualquier carácter
-MILLIPOINT    mLineAscent;     // mayor ascenso
-MILLIPOINT    mLineSize;       // mayor tamaño
-Justification mJustification;  // caché del valor leído de la pila de atributos
-MILLIPOINT    mLineSpacing;    FIXED16 mLineSpaceRatio;
-MILLIPOINT    mLeftMargin, mFirstIndent, mRightMargin;
-TxtRuler*     mpRuler;
-MILLIPOINT    mPosInStory;     // y de la base de la línea relativa a la historia
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `mLineDescent` | millipuntos | mayor descenso de cualquier carácter de la línea |
+| `mLineAscent` | millipuntos | mayor ascenso |
+| `mLineSize` | millipuntos | mayor tamaño |
+| `mJustification` | enumerado | **caché** del valor leído de la pila de atributos |
+| `mLineSpacing`, `mLineSpaceRatio` | millipuntos / punto fijo 16.16 | interlineado absoluto y proporcional |
+| `mLeftMargin`, `mFirstIndent`, `mRightMargin` | millipuntos | márgenes y sangría de primera línea |
+| `mpRuler` | puntero a regla de tabulaciones | tabulaciones vigentes |
+| `mPosInStory` | millipuntos | *y* de la base de la línea, relativa a la historia |
 
 > Obsérvese que la línea **cachea** los atributos resueltos de la pila. Es la solución de Xara al hecho de que resolver atributos por herencia es caro y el formateo los necesita muchas veces.
 
@@ -1736,30 +1704,30 @@ MILLIPOINT    mPosInStory;     // y de la base de la línea relativa a la histor
 
 `VisibleTextNode` (`nodetext.h:126`) — base de todo lo que ocupa hueco:
 
-```cpp
-Matrix     CharMatrix;   // nodetext.h:200  matriz del carácter (posición + rotación en path)
-MILLIPOINT PosInLine;    // nodetext.h:201  x del carácter dentro de la línea
-// predicados:
-virtual BOOL IsACaret()        const;  IsAnEOLNode() const;
-virtual BOOL IsASpace();  IsAVisibleSpace();  IsAHyphen();  IsADecimalPoint();
-virtual MILLIPOINT GetCharAdvance();  GetCharWidth();  GetBaseLineShift();
-virtual MILLIPOINT GetAutoKernSize(FormatRegion*);   // nodetext.h:184
-MILLIPOINT CalcCharDistAlongLine(BOOL IncludeThisChar);  // nodetext.h:166
-```
+| Miembro | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `CharMatrix` | matriz | posición y rotación del carácter (también sobre un camino) | `nodetext.h:200` |
+| `PosInLine` | millipuntos | *x* del carácter dentro de la línea | `nodetext.h:201` |
+
+Predicados y consultas virtuales: si el nodo es un cursor o un fin de línea; si es un
+espacio, un espacio visible, un guion o un separador decimal; el avance, la anchura y el
+desplazamiento de línea base del carácter; el ajuste de kerning automático
+(`nodetext.h:184`); y la distancia acumulada a lo largo de la línea, con o sin el carácter
+actual (`nodetext.h:166`).
 
 `AbstractTextChar` (`nodetext.h:214`) — métricas cacheadas (`nodetext.h:271‑278`):
 
-```cpp
-MILLIPOINT mCharWidth;      // ancho de la tinta
-MILLIPOINT mCharAdvance;    // avance (incluye tracking)
-MILLIPOINT mBaseLineShift;
-MILLIPOINT mFontAscent;
-MILLIPOINT mFontDescent;
-MILLIPOINT mFontSize;
-DocRect    mAttrdCharBounds; // caja del path del carácter incluyendo el efecto de los atributos
-virtual WCHAR GetUnicodeValue();               // nodetext.h:240
-virtual BOOL  ReCacheMetrics(FormatRegion*);   // nodetext.h:233
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `mCharWidth` | millipuntos | anchura de la tinta |
+| `mCharAdvance` | millipuntos | avance (incluye el tracking) |
+| `mBaseLineShift` | millipuntos | desplazamiento de la línea base |
+| `mFontAscent`, `mFontDescent`, `mFontSize` | millipuntos | métricas de la fuente vigente |
+| `mAttrdCharBounds` | rectángulo de documento | caja del camino del carácter **incluyendo** el efecto de los atributos |
+
+Dos operaciones virtuales completan la clase: obtener el valor Unicode del carácter
+(`nodetext.h:240`) y recachear las métricas a partir de una `FormatRegion`
+(`nodetext.h:233`).
 
 `TextChar` (`nodetext.h:289`) añade el código Unicode real (`WCHAR`).
 `KernCode` (`nodetext.h:349`) es un ajuste de kerning **manual** insertado como nodo entre dos caracteres.
@@ -1769,24 +1737,24 @@ virtual BOOL  ReCacheMetrics(FormatRegion*);   // nodetext.h:233
 
 `FormatRegion : RenderRegion` (`nodetxtl.h:130`) es una *render region* que **lanza un error si intentas dibujar en ella**:
 
-```cpp
-virtual void DrawPathToOutputDevice(...) { ERROR3("Rendering into a FormatRegion"); }
-// ... todas las primitivas de dibujo abortan
-```
+Todas las primitivas de dibujo de la `FormatRegion` abortan con un error de desarrollo: la
+región de formato **solo mide**, nunca pinta. Es una `RenderRegion` degenerada que ejecuta
+la resolución de atributos y el cálculo de métricas sin producir píxeles.
 
 Su utilidad es exclusivamente **mantener la pila de atributos y resolver métricas**:
 
-```cpp
-MILLIPOINT    GetCharsKerning(WCHAR chLeft, WCHAR chRight);   // nodetxtl.h:173
-MILLIPOINT    GetTracking()       { return RR_TXTTRACKING(); }
-Justification GetJustification()  { return RR_TXTJUSTIFICATION(); }
-MILLIPOINT    GetLineSpacing()    { return RR_TXTLINESPACE(); }
-MILLIPOINT    GetFontSize()       { return RR_TXTFONTSIZE(); }
-MILLIPOINT    GetBaseLineShift()  { return RR_TXTBASELINE(); }
-MILLIPOINT    GetLeftMargin()     { return RR_TXTLEFTMARGIN(); }
-MILLIPOINT    GetRightMargin()    { return RR_TXTRIGHTMARGIN(); }
-MILLIPOINT    GetFirstIndent()    { return RR_TXTFIRSTINDENT(); }
-```
+| Consulta | Devuelve | Origen |
+|---|---|---|
+| kerning entre dos caracteres | millipuntos | tabla de kerning de la fuente (`nodetxtl.h:173`) |
+| tracking | millipuntos | slot `ATTR_TXTTRACKING` de la pila |
+| justificación | enumerado | slot `ATTR_TXTJUSTIFICATION` |
+| interlineado | millipuntos | slot `ATTR_TXTLINESPACE` |
+| cuerpo de la fuente | millipuntos | slot `ATTR_TXTFONTSIZE` |
+| desplazamiento de línea base | millipuntos | slot `ATTR_TXTBASELINE` |
+| margen izquierdo / derecho | millipuntos | slots `ATTR_TXTLEFTMARGIN` / `ATTR_TXTRIGHTMARGIN` |
+| sangría de primera línea | millipuntos | slot `ATTR_TXTFIRSTINDENT` |
+
+Salvo el kerning, todas son lecturas directas del estado gráfico vigente (§4.3).
 
 > **Lección de diseño:** el formateo de texto y el renderizado comparten el **mismo** mecanismo de resolución de atributos. En Rust, esto se modela como un `AttrResolver`/`AttrStack` reutilizable e independiente del back-end gráfico.
 
@@ -1827,13 +1795,13 @@ graph LR
 
 ### 8.2 `KernelBitmap` (`bitmap.h:483`)
 
-```cpp
-OILBitmap*  ActualBitmap;             // bitmap.h:627  los píxeles reales
-BitmapList* m_pParentList;            // bitmap.h:630  lista del documento a la que pertenece
-BOOL m_bDontDeleteActualBitmap : 1;   // bitmap.h:632
-BOOL m_bFractalAttached : 1;          // bitmap.h:633  generado por un relleno fractal
-BOOL m_bUsedByBrush : 1;              // bitmap.h:634
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `ActualBitmap` | puntero a bitmap de la capa OIL | los píxeles reales | `bitmap.h:627` |
+| `m_pParentList` | puntero a `BitmapList` | lista del documento a la que pertenece | `bitmap.h:630` |
+| `m_bDontDeleteActualBitmap` | bit | el bitmap de píxeles no es propiedad de este objeto | `bitmap.h:632` |
+| `m_bFractalAttached` | bit | lo generó un relleno fractal | `bitmap.h:633` |
+| `m_bUsedByBrush` | bit | lo usa un pincel | `bitmap.h:634` |
 
 API relevante (`bitmap.h:490‑624`):
 
@@ -1853,25 +1821,27 @@ API relevante (`bitmap.h:490‑624`):
 
 `BitmapInfo` (`bitmpinf.h:104`) es el descriptor plano:
 
-```cpp
-UINT32 PixelWidth, PixelHeight;
-UINT32 PixelDepth;            // 1,2,4,8,16,24,32
-UINT32 NumPaletteEntries;     // 0 = sin paleta
-MILLIPOINT RecommendedWidth;  // tamaño original en el documento
-UINT32 HDPI, VDPI;
-UINT32 MemoryUsed;
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `PixelWidth`, `PixelHeight` | enteros de 32 bits sin signo | dimensiones en píxeles |
+| `PixelDepth` | entero de 32 bits sin signo | 1, 2, 4, 8, 16, 24 o 32 bpp |
+| `NumPaletteEntries` | entero de 32 bits sin signo | 0 significa «sin paleta» |
+| `RecommendedWidth` | millipuntos | tamaño original en el documento |
+| `HDPI`, `VDPI` | enteros de 32 bits sin signo | resolución horizontal y vertical |
+| `MemoryUsed` | entero de 32 bits sin signo | memoria ocupada |
 
 ### 8.3 `KernelBitmapRef` (`bitmap.h:650`)
 
-```cpp
-KernelBitmap* m_pTheBitmap;   // bitmap.h:671
-BOOL          m_bHidden;      // bitmap.h:673  la referencia está en un subárbol oculto (undo)
-void Attach(KernelBitmap*, Document* = NULL);   // bitmap.h:664
-void Detach(BOOL bTryRemoveFromDoc = FALSE);
-void DeleteBmp();
-void RemoveFromTree();   void AddtoTree();       // bitmap.h:668-669
-```
+| Miembro | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `m_pTheBitmap` | puntero a `KernelBitmap` | el bitmap referenciado | `bitmap.h:671` |
+| `m_bHidden` | booleano | la referencia está en un subárbol oculto (undo) | `bitmap.h:673` |
+
+Operaciones: enlazar la referencia a un bitmap, opcionalmente dentro de un documento
+(`bitmap.h:664`); desenlazarla, con opción de retirar el bitmap del documento si queda sin
+usos; borrar el bitmap; y quitar o volver a poner la referencia en el árbol
+(`bitmap.h:668-669`). El conjunto implementa un **conteo de referencias por presencia en el
+árbol**, no por contador explícito.
 
 La distinción `RemoveFromTree` / `AddtoTree` existe **por el undo**: cuando un nodo se oculta, sus referencias a bitmaps deben dejar de contar como «uso» para que la galería de bitmaps sea coherente, pero sin liberar el bitmap (podría reaparecer con un *redo*).
 
@@ -1891,10 +1861,8 @@ Además existe un `GlobalBitmapList` (amigo de `BitmapList`, `bmpcomp.h:161`) pa
 - 32 bpp lleva canal alfa; `Pixel32bpp` y `PixelGreyscale` son los tipos de acceso.
 - Transparencia de 8 bpp por **índice** (`SetTransparencyIndex`, estilo GIF).
 - **JPEG embebido**: `KernelBitmap::IsLossy()` (`bitmap.h:561`) / `SetAsLossy(bLossy)` (`bitmap.h:575`) marca que el bitmap proviene de datos JPEG y que hay que **volver a escribir el JPEG original** en lugar de recomprimir. El par de funciones específico es:
-  ```cpp
-  virtual BOOL WritePalette(BaseCamelotFilter*);                               // bitmap.h:514
-  virtual BOOL Convert24To8(RGBTRIPLE* pPalette, UINT32 NumberOfPaletteEntries); // bitmap.h:516
-  ```
+  escribir la paleta en un registro aparte (`bitmap.h:514`) y reconvertir de 24 a 8 bpp a
+  partir de esa paleta (`bitmap.h:516`).
   es decir: un JPEG de 8 bpp se exporta como JPEG de 24 bpp + una paleta en un registro aparte, y al reimportarlo se reconstruyen los 8 bpp. `GetOriginalSource(BitmapSource**, BaseBitmapFilter**)` (`bitmap.h:565`) conserva el buffer del fichero original.
 - La importación desde el fichero `.xar` pasa por `KernelBitmap::ImportBitmap(pFile, pBitmapFilter, pFilter, IsCompressed, pPalette, N, ppImported, pIsNew)` (`bitmap.h:519`), que **deduplica** (`IsNew`).
 - Los bitmaps de textura fractal se marcan con `SetAsFractal()` (`bitmap.h:573`) y **no se guardan**: se regeneran desde la semilla.
@@ -1903,10 +1871,10 @@ Además existe un `GlobalBitmapList` (amigo de `BitmapList`, `bmpcomp.h:161`) pa
 
 Deriva de `NodeRect`: un bitmap colocado **es** un rectángulo (paralelogramo `Parallel[4]`) con una imagen. Datos:
 
-```cpp
-KernelBitmapRef BitmapRef;        // nodebmp.h:180
-BOOL ApplyContoneColour;          // duotono: colorear un bitmap en escala de grises
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `BitmapRef` | referencia a bitmap del kernel | el bitmap que pinta el nodo | `nodebmp.h:180` |
+| `ApplyContoneColour` | booleano | duotono: colorear un bitmap en escala de grises | — |
 
 Puntos de interés:
 
@@ -1927,31 +1895,33 @@ La selección **no es una lista externa**: es un **flag en cada nodo** (`NodeFla
 
 Sobre eso se construye `Range` / `SelRange`:
 
-```cpp
-struct CCAPI RangeControl {          // range.h:219
-    BOOL Selected             :1;    // incluir nodos seleccionados
-    BOOL Unselected           :1;    // incluir no seleccionados
-    BOOL CrossLayer           :1;    // el rango puede cruzar capas
-    BOOL IgnoreLockedLayers   :1;
-    BOOL IgnoreNoneRenderable :1;
-    BOOL IgnoreInvisibleLayers:1;
-    BOOL SiblingsOnly         :1;    // solo hermanos del primero
-    BOOL PromoteToParent      :1;    // promover al controlador (ShouldITransformWithChildren)
-};
-class Range : public CCObject { ... };        // range.h:311
-class SelRange : public Range { ... };        // range.h:528
-```
+`RangeControl` (`range.h:219`) es un conjunto de banderas de 1 bit que define **qué**
+recorre un rango:
+
+| Bandera | Efecto |
+|---|---|
+| `Selected` | incluir nodos seleccionados |
+| `Unselected` | incluir nodos no seleccionados |
+| `CrossLayer` | el rango puede cruzar capas |
+| `IgnoreLockedLayers` | saltar capas bloqueadas |
+| `IgnoreNoneRenderable` | saltar nodos no renderizables |
+| `IgnoreInvisibleLayers` | saltar capas invisibles |
+| `SiblingsOnly` | solo hermanos del primer nodo |
+| `PromoteToParent` | promover al controlador cuando el hijo se transforma con sus padres |
+
+Sobre él se construyen `Range` (`range.h:311`) y su especialización para la selección
+`SelRange` (`range.h:528`).
 
 `SelRange` (`range.h:528`) es un **singleton por aplicación** (`Application::FindSelection()`) con caché agresiva (`range.h:632‑662`):
 
-```cpp
-BOOL    Cached;                // el rango es directamente usable
-BOOL    CachedBounds;
-DocRect CachedBBox;            // caja de la selección
-DocRect CachedBlobBBox;        // caja incluyendo los blobs de selección
-BOOL    CachedBoundsNoAttrs;   DocRect CachedBBoxNoAttrs;
-INT32   CachedCount;           // nº de objetos (INVÁLIDO si !Cached)
-```
+| Campo | Tipo | Significado |
+|---|---|---|
+| `Cached` | booleano | el rango es directamente usable |
+| `CachedBounds` | booleano | la caja cacheada es válida |
+| `CachedBBox` | rectángulo de documento | caja de la selección |
+| `CachedBlobBBox` | rectángulo de documento | caja incluyendo los *blobs* de selección |
+| `CachedBoundsNoAttrs`, `CachedBBoxNoAttrs` | booleano + rectángulo | ídem sin el efecto de los atributos |
+| `CachedCount` | entero de 32 bits | número de objetos; **inválido** si el rango no está cacheado |
 
 Invalidación por mensajes: `SelRangeMessageHandler` (`range.h:496`), `Update(TellWorld, SelectedNode)` (`range.h:547`), `UpdateBounds()` (`range.h:550`), `AttrsHaveChanged()` (`range.h:555`), `FreshenCache()` (`range.h:543`), `SetGag(BOOL)` (`range.h:618`, silenciar notificaciones durante operaciones largas).
 
@@ -1965,40 +1935,29 @@ Hit-testing: `FindSimpleAtPoint(...)` (`ink.h:279`), `FindCompoundAtPoint(...)` 
 
 Una operación es una unidad atómica de cambio, deshacible o no.
 
-```cpp
-class CCAPI Operation : public MessageHandler {   // ops.h:323
-    virtual void Do(OpDescriptor*);                        // ops.h:391
-    virtual void DoWithParam(OpDescriptor*, OpParam*);     // ops.h:394
-    virtual void DoSmart();                                // ops.h:385
-    virtual void End();                                    // ops.h:337
-    virtual BOOL Undo();  virtual BOOL Redo();             // ops.h:377-378
-    // gestión de fallo:
-    void FailAndExecute();                     // ops.h:368  deshace lo hecho y aborta
-    void FailAndExecuteAllButLast();
-    void FailAndDiscard();
-    void FailAndExecuteIgnoreSelActions();
-    void SucceedAndDiscard();                  // ops.h:374  éxito pero sin undo
-    OperationStatus OpStatus;                  // ops.h:404  DO / UNDO / REDO
-    // eventos de arrastre:
-    virtual void DragPointerMove(...);  DragPointerIdle(...);  DragFinished(...);
-    virtual BOOL DragKeyPress(KeyPress*, BOOL bSolidDrag);
-    virtual void RenderDragBlobs(DocRect, Spread*, BOOL bSolidDrag);
-};
-```
+`Operation` (`ops.h:323`) deriva de `MessageHandler`. Su interfaz se agrupa así:
+
+| Grupo | Operaciones | Referencia |
+|---|---|---|
+| Ejecución | `Do(OpDescriptor*)`, `DoWithParam(...)`, `DoSmart()`, `End()` | `ops.h:385-394`, `:337` |
+| Undo/redo | `Undo()`, `Redo()` | `ops.h:377-378` |
+| Gestión de fallo | `FailAndExecute()` (deshace lo hecho y aborta), y sus variantes «todo menos el último», «descartar» e «ignorando las acciones de selección»; más `SucceedAndDiscard()` (éxito, pero sin registrar undo) | `ops.h:368`, `:374` |
+| Estado | `OpStatus`: en ejecución, deshaciendo o rehaciendo | `ops.h:404` |
+| Arrastre | eventos de movimiento, reposo y fin del puntero; pulsación de tecla durante el arrastre; dibujo de los *blobs* de arrastre | — |
 
 Flags de comportamiento al terminar (`OpFlgsStr`, `ops.h:213`):
 
-```cpp
-BOOL Failed               : 1;  // no se pudo crear una acción
-BOOL ExecuteOnEnd         : 1;  // ejecutar todas las acciones en End()
-BOOL AllButLast           : 1;
-BOOL KeepOnEnd            : 1;  // no borrar en End()
-BOOL UnwindingActions     : 1;  // la op se está deshaciendo
-BOOL HasOwnTimeIndicator  : 1;
-BOOL SucceedAndDiscard    : 1;  // tras terminar, descartar el undo
-BOOL DeleteOnEnd          : 1;
-BOOL IgnoreSelectActions  : 1;
-```
+| Bandera (1 bit) | Significado |
+|---|---|
+| `Failed` | no se pudo crear una acción |
+| `ExecuteOnEnd` | ejecutar todas las acciones al terminar |
+| `AllButLast` | ejecutar todas menos la última |
+| `KeepOnEnd` | no destruir la operación al terminar |
+| `UnwindingActions` | la operación se está deshaciendo |
+| `HasOwnTimeIndicator` | la operación gestiona su propio indicador de progreso |
+| `SucceedAndDiscard` | al terminar con éxito, descartar el undo |
+| `DeleteOnEnd` | destruir la operación al terminar |
+| `IgnoreSelectActions` | no tener en cuenta las acciones de selección |
 
 `UndoableOperation : Operation` (`undoop.h:195`) es la clase de trabajo real: expone una batería de **primitivas deshacibles** que, además de hacer el cambio, **fabrican la acción inversa**:
 
@@ -2026,31 +1985,28 @@ BOOL IgnoreSelectActions  : 1;
 
 Una `Action` es un paso **invertible atómico** que vive en una lista:
 
-```cpp
-class CCAPI Action : public ListItem {     // ops.h:559
-    virtual ActionCode Execute();          // ops.h:572  -> ejecuta Y crea la acción inversa
-    static  ActionCode Init(Operation* pOp, ActionList* pActionList, UINT32 Size,
-                            CCRuntimeClass* ActionClass, Action** NewAction);  // ops.h:573
-    virtual BOOL IsADiscardableAction() { return FALSE; }   // ops.h:581
-    virtual void Slaughter();              // ops.h:571  destrucción agresiva
-    UINT32 GetSize();                      // ops.h:588
-    BOOL TransferToOtherOp(Operation*, ActionList* pAdd, ActionList* pOther);  // ops.h:594
-protected:
-    Operation*  pOperation;       // ops.h:598  op a la que pertenece
-    ActionList* pOppositeActLst;  // ops.h:604  lista opuesta (undo <-> redo)
-    UINT32      Size;             // ops.h:608  bytes que ocupa (para el presupuesto del historial)
-};
-```
+`Action` (`ops.h:559`) deriva de `ListItem`. Lo esencial:
+
+| Miembro | Papel | Referencia |
+|---|---|---|
+| `Execute()` | ejecuta la acción **y** crea la acción inversa en la lista opuesta | `ops.h:572` |
+| `Init(operación, lista, tamaño, clase, salida)` | fábrica estática: reserva la acción y la encola | `ops.h:573` |
+| `IsADiscardableAction()` | ¿se puede tirar si hay presión de memoria? | `ops.h:581` |
+| `Slaughter()` | destrucción agresiva | `ops.h:571` |
+| `GetSize()` | bytes que ocupa | `ops.h:588` |
+| `TransferToOtherOp(...)` | mueve la acción a otra operación | `ops.h:594` |
+| operación dueña | a qué operación pertenece | `ops.h:598` |
+| lista opuesta | lista undo ↔ redo donde va la inversa | `ops.h:604` |
+| tamaño | contabilidad para el presupuesto del historial | `ops.h:608` |
 
 **Truco clave:** `Execute()` *no solo* aplica el cambio; **crea la acción inversa** en `pOppositeActLst`. Por eso el mismo objeto sirve para undo y para redo, alternando entre listas.
 
 `ActionList : List` (`ops.h:196`):
 
-```cpp
-BOOL ExecuteForwards(BOOL AllButLast);                                  // ops.h:203
-BOOL ExecuteBackwards(BOOL AllButLast, BOOL bIgnoreSelectActions=FALSE);// ops.h:204
-Action* FindActionOfClass(CCRuntimeClass*, Action* LastAction = NULL);  // ops.h:208
-```
+La lista de acciones se ejecuta en bloque hacia delante (`ops.h:203`) o hacia atrás
+(`ops.h:204`), en ambos casos con la opción de dejar fuera la última acción; la variante
+hacia atrás puede además ignorar las acciones de selección. También se puede buscar la
+última acción de una clase dada dentro de la lista (`ops.h:208`).
 
 Acciones concretas destacadas (`ops.h:765‑1140`):
 
@@ -2070,30 +2026,26 @@ Acciones concretas destacadas (`ops.h:765‑1140`):
 
 ### 9.4 El historial: `OperationHistory` (`ophist.h:141`)
 
-```cpp
-UINT32    MaxSize;        // ophist.h:219  presupuesto en BYTES (no en nº de pasos)
-UINT32    CurrentSize;    // ophist.h:220
-List      OpHistoryList;  // ophist.h:221  operaciones pasadas y futuras
-ListItem* NowPtr;         // ophist.h:223  frontera undo/redo
-BOOL      Reduced;        // ophist.h:232  se descartaron registros por falta de memoria
-```
+| Campo | Tipo | Significado | Referencia |
+|---|---|---|---|
+| `MaxSize` | entero de 32 bits sin signo | presupuesto **en bytes**, no en número de pasos | `ophist.h:219` |
+| `CurrentSize` | entero de 32 bits sin signo | bytes ocupados | `ophist.h:220` |
+| `OpHistoryList` | lista | operaciones pasadas y futuras | `ophist.h:221` |
+| `NowPtr` | puntero a elemento de la lista | frontera entre undo y redo | `ophist.h:223` |
+| `Reduced` | booleano | se descartaron registros por falta de memoria | `ophist.h:232` |
 
 Semántica de `NowPtr`: todo lo que está **en o antes** de `NowPtr` es deshacible; todo lo que está **después** es rehacible. `NULL` = no hay nada que deshacer.
 
 API (`ophist.h:169‑210`):
 
-```cpp
-BOOL SetNewMaxSize(UINT32);   UINT32 GetSize();  UINT32 GetMaxSize();
-BOOL ReduceSize(UINT32 MaxSize, BOOL ExcludeLastUndo, BOOL DeleteWhatYouCan = FALSE);
-UINT32 GetNumUndoSteps();  GetNumRedoSteps();  BOOL IsReduced();
-BOOL UndoPrev();  BOOL RedoNext();  BOOL CanUndo();  BOOL CanRedo();
-void GetUndoOpName(String_256*);  void GetRedoOpName(String_256*);
-// fusión de operaciones:
-Operation* FindLastOp();   Operation* FindPrevToLastOp();
-void DeleteLastOp(BOOL ReduceOpHistSize = TRUE);
-void DeletePrevToLastOp(BOOL ReduceOpHistSize = TRUE);
-void DeleteUndoableOps();  void DeleteRedoableOps();
-```
+| Grupo | Operaciones |
+|---|---|
+| Presupuesto | fijar el tamaño máximo, consultar tamaño actual y máximo, y reducir el historial hasta un tamaño dado (con opciones de excluir el último undo y de borrar todo lo que se pueda) |
+| Consulta | número de pasos de undo y de redo, y si el historial ha sido recortado |
+| Navegación | deshacer el anterior, rehacer el siguiente, y los predicados «¿se puede deshacer / rehacer?» |
+| Etiquetas | nombre de la operación a deshacer y de la de rehacer, para la UI |
+| Fusión | localizar la última operación y la penúltima, y borrar cualquiera de las dos |
+| Purga | borrar todas las operaciones deshacibles o todas las rehacibles |
 
 La **fusión de operaciones** (`Operation::PerformMergeProcessing()`, `undoop.h:492`) permite colapsar, por ejemplo, 50 pasos de arrastre en uno solo.
 
@@ -2104,13 +2056,10 @@ La **presión de memoria** es de primer orden en este diseño: el macro `ALLOC_W
 Tres consecuencias estructurales muy visibles:
 
 1. **`NodeHidden` en lugar de borrar** (`node.h:1475`). Borrar un nodo es caro de deshacer (habría que reconstruirlo y reconectarlo); ocultarlo es O(1) y conserva la identidad del puntero. El `HiddenRefCnt` (`node.h:784`) permite ocultamientos anidados.
-   ```cpp
-   class NodeHidden : public Node {   // node.h:1475
-       NodeHidden(Node* HiddenNode);  // node.h:1479
-       Node* ShowNode();              // node.h:1480  reconecta y se autodestruye
-       Node* HiddenNd;                // node.h:1481
-   };
-   ```
+   `NodeHidden` (`node.h:1475`) deriva de `Node`, se construye envolviendo al nodo que
+   oculta (`node.h:1479`), guarda un puntero a ese nodo (`node.h:1481`) y expone una única
+   operación relevante: volver a mostrarlo, que lo reconecta en su sitio y destruye el
+   propio `NodeHidden` (`node.h:1480`).
    Ganchos: `Node::HidingNode()` / `Node::ShowingNode()` (`node.h:697‑698`) y `Node::ComplexHide(pOp, pNextInRange)` (`node.h:699`) para nodos que deben ocultarse en bloque (p. ej. una `TextLine` con sus caracteres, `nodetxtl.h:303`).
 
 2. **Punteros estables**. Como las acciones guardan `Node*`, ningún nodo puede moverse en memoria ni destruirse mientras haya undo. En Rust esto se traduce directamente en **arena con claves generacionales**.
@@ -2119,15 +2068,17 @@ Tres consecuencias estructurales muy visibles:
 
 ### 9.6 Copia de nodos: simple vs. compleja
 
-```cpp
-typedef enum CopyType  { SIMPLECOPY, COMPLEXCOPY };   // node.h:245
-typedef enum CopyStage { COPYOBJECT, COPYFINISHED };  // node.h:250
-typedef enum CopyControlFlags { ccALL, ccLOCKED, ccMANGLED, ccMARKED, ccSELECTED, ccRENDERABLE }; // node.h:256
-virtual CopyType GetCopyType();                                           // node.h:439
-virtual Node*    SimpleCopy();                                            // node.h:786
-virtual INT32    ComplexCopy(CopyStage, Range& RangeToCopy, Node** pOut);  // node.h:787
-BOOL CopyComplexRange(Range& RangeToCopy);                                // node.h:418
-```
+Tres enumerados gobiernan la copia (`node.h:245`, `:250`, `:256`):
+
+| Enumerado | Valores | Papel |
+|---|---|---|
+| tipo de copia | copia simple / copia compleja | ¿basta con duplicar el nodo o hace falta el protocolo por etapas? |
+| etapa de copia | copiando objeto / copia terminada | fase del protocolo complejo |
+| banderas de control | todos, bloqueados, *mangled*, marcados, seleccionados, renderizables | qué nodos entran en la copia |
+
+Y tres operaciones (`node.h:439`, `:786`, `:787`, `:418`): consultar el tipo de copia que
+necesita el nodo, hacer la copia simple, ejecutar la copia compleja por etapas sobre un
+rango, y la utilidad de nivel superior que copia un rango completo.
 
 `COMPLEXCOPY` existe para nodos que **no pueden existir solos** y que, al copiarse, deben devolver un árbol completo (p. ej. copiar una `TextLine` seleccionada debe producir una `TextStory` con esa línea). Implementaciones: `TextLine::ComplexCopy` (`nodetxtl.h:302`), los controladores de efectos.
 
