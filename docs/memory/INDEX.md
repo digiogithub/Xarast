@@ -1,30 +1,30 @@
-# Índice de memoria del proyecto
+# Project memory index
 
-Notas persistentes por subsistema. Cada agente que trabaje en un subsistema
-**debe** leer su nota antes y actualizarla después.
+Durable per-subsystem notes. Any agent working on a subsystem **must** read its
+note first and update it afterwards.
 
-| Nota | Subsistema | Cubre |
+| Note | Subsystem | Covers |
 |---|---|---|
-| `xar-import.md` | Importador `.xar` | Tags implementados, rarezas del formato, ficheros de prueba que fallan |
-| `document-model.md` | Modelo de documento | Arena de nodos, atributos, invariantes, undo |
-| `render.md` | Motor de render | Pipeline, blend modes, caché, decisiones GPU/CPU |
-| `xarast-format.md` | Formato nativo | Versionado, round-trip, extensiones SVG |
-| `ui.md` | Interfaz | Toolkit, layout de paneles, atajos, Wayland |
-| `packaging.md` | Empaquetado | AppImage, CI, compatibilidad glibc |
-| `text.md` | Texto | Shaping, fuentes, texto en path |
-| `perf.md` | Rendimiento | Benchmarks, presupuestos, regresiones |
+| `xar-import.md` | `.xar` importer | Tags implemented, format quirks, corpus files that still fail |
+| `document-model.md` | Document model | Node arena, attributes, invariants, undo |
+| `render.md` | Render engine | Pipeline, blend modes, caching, CPU/GPU decisions |
+| `xarast-format.md` | Native format | Versioning, round-trip, SVG extensions |
+| `ui.md` | User interface | Toolkit, panel layout, shortcuts, Wayland |
+| `packaging.md` | Packaging | AppImage, CI, glibc compatibility |
+| `text.md` | Text | Shaping, fonts, text on a path |
+| `perf.md` | Performance | Benchmarks, budgets, regressions |
 
-## Estado
+## Status
 
-Las notas se crean conforme arrancan las fases. Si una nota no existe todavía,
-créala con la plantilla:
+Notes are created as their phase starts. If one does not exist yet, create it
+from this template:
 
 ```markdown
-# <subsistema>
+# <subsystem>
 
-## Estado actual
-## Decisiones tomadas (y por qué)
-## Invariantes que NO se pueden romper
-## Callejones sin salida (no volver a intentar)
-## Pendiente / TODO
+## Current state
+## Decisions taken (and why)
+## Invariants that must not be broken
+## Dead ends (do not retry)
+## Open TODOs
 ```

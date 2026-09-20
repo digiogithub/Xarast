@@ -1,7 +1,7 @@
 # License policy for Xarast. Enforced in CI with `cargo deny check licenses`.
 #
 # Xarast ships as MIT OR Apache-2.0, which only holds if no copyleft dependency
-# leaks into the binary. See docs/11-licencia-y-sala-limpia.md.
+# leaks into the binary. See docs/11-licensing-and-clean-room.md.
 
 [licenses]
 version = 2
