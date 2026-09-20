@@ -418,3 +418,69 @@ fn an_attribute_value_blends_where_it_can_and_says_so_where_it_cannot() {
     assert_eq!(a.blend(&b, 0.5), Some(AttrValue::LineWidth(Mp::new(500))));
     assert_eq!(black_fill().blend(&white_fill(), 0.5), None);
 }
+
+/// Moving the active layer takes two mutations, and the intermediate state is
+/// necessarily invalid: either no layer is active or two are. This is a
+/// regression test for a repair that used to run after *every* operation and
+/// therefore silently reverted the move — no pair of operations could shift
+/// the active layer at all. The repair now runs once, at commit.
+#[test]
+fn the_active_layer_can_be_moved_within_one_transaction() {
+    use crate::structure::LayerNode;
+
+    let f = fixture();
+    let mut doc = f.doc;
+    let spread = doc.active_spread();
+    let first = doc
+        .active_layer(spread)
+        .expect("fixture has an active layer");
+    let mut bus = CommandBus::new();
+
+    bus.dispatch(
+        &mut doc,
+        &cmd("add a second layer", move |tx| {
+            let id = tx.create(NodeKind::Layer(Box::new(LayerNode::named("second"))))?;
+            tx.attach(id, spread, Attach::LastChild)
+        }),
+    )
+    .unwrap();
+
+    let second = doc
+        .tree
+        .children(spread)
+        .find(|c| matches!(doc.tree.kind(*c), Some(NodeKind::Layer(l)) if &*l.name == "second"))
+        .expect("the second layer was attached");
+    assert_ne!(first, second);
+    assert_eq!(doc.active_layer(spread), Some(first));
+
+    bus.dispatch(
+        &mut doc,
+        &cmd("move the active layer", move |tx| {
+            for (id, active) in [(first, false), (second, true)] {
+                let Some(NodeKind::Layer(layer)) = tx.doc().tree.kind(id) else {
+                    unreachable!("both nodes are layers")
+                };
+                let mut layer = layer.clone();
+                layer.active = active;
+                tx.set_kind(id, NodeKind::Layer(layer))?;
+            }
+            Ok(())
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        doc.active_layer(spread),
+        Some(second),
+        "the transaction asked for `second` to be active"
+    );
+    doc.validate().assert_clean();
+
+    // And the move is undoable, which is the reason the repair has to happen
+    // inside the transaction rather than outside it.
+    bus.history_mut()
+        .undo(&mut doc)
+        .expect("the move is undoable");
+    assert_eq!(doc.active_layer(spread), Some(first));
+    doc.validate().assert_clean();
+}

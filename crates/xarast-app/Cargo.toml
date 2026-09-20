@@ -12,9 +12,20 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
 xarast-doc = { path = "../xarast-doc" }
 xarast-render = { path = "../xarast-render" }
 xarast-xar = { path = "../xarast-xar" }
 xarast-format = { path = "../xarast-format" }
 xarast-io = { path = "../xarast-io" }
 xarast-text = { path = "../xarast-text" }
+
+indexmap = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+kurbo = { workspace = true }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+xarast-render = { path = "../xarast-render" }

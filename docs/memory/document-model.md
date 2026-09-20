@@ -378,6 +378,27 @@ Plus, from this phase:
 19. **Invariant 6 is a command-level invariant, not an arena-level one.**
     Raw tree surgery may break it; a `Tx` may not leave it broken.
 
+## Fixed defects worth remembering
+
+**Invariant repair must run at commit, not per operation.** `Tx::attach`,
+`delete`, `move_node` and `set_kind` each used to call
+`keep_one_active_layer` immediately. That looks safer and is a trap: moving
+the active layer takes two mutations, and the intermediate state necessarily
+has zero or two active layers. The per-operation repair saw that intermediate
+state, picked the first layer, and silently reverted the caller — so **no pair
+of operations could ever move the active layer**, and the failure was silent.
+Found by the phase 5 app-core work, which had to route around it.
+
+The repair now runs once in `Tx::commit`, still inside the transaction, so its
+own actions are recorded and undo stays exact. Pinned by
+`tests::undo::the_active_layer_can_be_moved_within_one_transaction`, which was
+confirmed to fail against the old behaviour before being committed.
+
+The general rule this establishes: **a transaction is allowed to pass through
+an invalid intermediate state — that is what transactions are for.** Repairs
+and invariant checks belong at the boundary, never between two mutations that
+are meant to be one change.
+
 ## Dead ends (do not retry)
 
 - **`Box<dyn Node>` + `Any`.** Reproduces the original's constant downcasting

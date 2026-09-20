@@ -430,7 +430,7 @@ impl<'d> Tx<'d> {
     pub fn attach(&mut self, node: NodeId, anchor: NodeId, how: Attach) -> Result<(), EditError> {
         self.check_permitted(anchor)?;
         self.act(Action::Attach { node, anchor, how })?;
-        self.keep_one_active_layer()
+        Ok(())
     }
 
     /// Deletes a node: detaches it and retains it for undo.
@@ -446,7 +446,7 @@ impl<'d> Tx<'d> {
             prev_anchor: anchor,
             prev_how: how,
         })?;
-        self.keep_one_active_layer()
+        Ok(())
     }
 
     /// Moves a node somewhere else.
@@ -469,7 +469,7 @@ impl<'d> Tx<'d> {
             prev_how,
         })?;
         self.act(Action::Attach { node, anchor, how })?;
-        self.keep_one_active_layer()
+        Ok(())
     }
 
     /// Replaces a node's payload.
@@ -479,7 +479,7 @@ impl<'d> Tx<'d> {
             node,
             new: Box::new(kind),
         })?;
-        self.keep_one_active_layer()
+        Ok(())
     }
 
     /// Replaces a node's flags.
@@ -593,6 +593,19 @@ impl<'d> Tx<'d> {
     /// Closes the transaction and hands it to the caller to record.
     #[must_use]
     pub fn commit(mut self, label: &'static str) -> Transaction {
+        // Repair "one spread, one active layer" once, here, rather than after
+        // every individual operation.
+        //
+        // Doing it per operation looks safer and is actually a trap: moving the
+        // active layer takes two steps, and the intermediate state has either
+        // zero or two active layers. A per-operation repair sees that
+        // intermediate state, picks the first layer, and silently undoes the
+        // caller's intent — so no pair of operations could ever move the active
+        // layer at all. Running it at commit lets a transaction pass through an
+        // inconsistent intermediate state, which is the whole point of having
+        // transactions. Undo stays exact because the repair's own actions are
+        // recorded in this transaction, before it is sealed.
+        let _ = self.keep_one_active_layer();
         self.committed = true;
         Transaction {
             label,

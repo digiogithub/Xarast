@@ -228,12 +228,12 @@ locks entirely.
 | # | Question | Decided by |
 |---|---|---|
 | 1 | ~~Arena vs persistent store — confirm by measurement~~ **Closed in Phase 2: the arena wins on every measure but memory, where it also wins.** | Phase 2 benchmark |
-| 2 | `egui` immediate mode at professional panel density | Phase 5 UI spike |
+| 2 | ~~`egui` immediate mode at professional panel density~~ **Closed in Phase 5: egui is confirmed. The density probe — 1,789 controls, a 5,000-row virtualised tree, 512 swatches, 2,000 thumbnails — builds a frame in 1.65 ms p50 / 3.40 ms p99 against a 3/8 ms bar, a slider drag costs +0.05 ms over idle, and resident growth is 9.3 MB of a 50 MB allowance. No fallback taken. Four axes (GPU pass, visual legibility, presented latency, and the presented halves of the main-thread and scrolling budgets) are **unmeasured** for want of a display. The nine numbers are in `docs/memory/ui.md`.** | Phase 5 UI spike |
 | 3 | `winit 0.31-beta` pinning for tablet pressure — is the beta stable enough | Phase 5 |
 | 4 | Whether text on a path needs our own layout pass over `parley` | Phase 9 |
 | 5 | Is a perceptual diff or exact match the right golden-image gate | Phase 4 |
 
-Questions 2 to 5 were originally filed against the wrong phases; the phase
+Questions 3 to 5 were originally filed against the wrong phases; the phase
 documents that actually answer them are the ones listed above. Question 1 moved
 from phase 1 to phase 2 because the document model, not the geometry crate, is
 what the benchmark measures, and Phase 2 answered it.

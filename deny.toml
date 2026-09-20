@@ -17,7 +17,9 @@ allow = [
     "CC0-1.0",
     "BSL-1.0",
     "Unicode-3.0",
-    "MPL-2.0",   # per-file copyleft: acceptable only unmodified, see exceptions
+    # MPL-2.0 is deliberately NOT allowed globally. It is per-file copyleft,
+    # so every use needs its own justified entry under [licenses.exceptions]
+    # below. Listing it here would make those entries decorative.
 ]
 confidence-threshold = 0.9
 
@@ -44,6 +46,21 @@ exceptions = [
     { name = "svgtypes", allow = ["MPL-2.0"] },
     { name = "simplecss", allow = ["MPL-2.0"] },
     { name = "svgfilters", allow = ["MPL-2.0"] },
+
+    # egui bundles default typefaces in `epaint_default_fonts`, declared
+    # `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`. Both extra terms
+    # are **font licences covering font data, not code**: they place no
+    # condition on our own source, which stays `MIT OR Apache-2.0`, and both
+    # permit redistribution inside an application. Allowed narrowly, to this
+    # one crate.
+    #
+    # Caveat worth remembering: the Ubuntu Font Licence requires renaming on
+    # modification, which some distributions treat as non-free. That does not
+    # affect the AppImage we ship ourselves, but it would be a snag for Debian
+    # packaging. The clean exit is to turn egui's `default_fonts` feature off
+    # and supply our own faces through `xarast-text`, which phase 9 builds
+    # anyway. Revisit there.
+    { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [bans]

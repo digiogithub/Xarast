@@ -88,6 +88,24 @@ A naive bounding-box scan over 100 000 objects costs 36.5 ms — forty times the
 therefore carries precomputed bounds and the tile planner bins by them; an
 incremental redraw that rediscovers its own geometry is not incremental.
 
+## Phase 5 — user interface (`xarast-ui`)
+
+Measured by `cargo run -p xarast-ui --release --example density` and kept
+honest by `cargo bench -p xarast-ui`. Same container as Phase 4: 4 slow
+cores, **no GPU and no compositor**, so the GPU and presentation rows are
+unmeasured rather than estimated. Full context in `docs/memory/ui.md`.
+
+| Budget | Target | Measured | Note |
+|---|---|---|---|
+| `build_ui_frame()`, density probe (1,789 controls, 2560×1440) | ≤ 3 ms p50 | **1.65 ms p50, 3.40 ms p99** | passes |
+| UI build + tessellation, same probe | ≤ 8 ms | **6.68 ms** (p99 + p99) | events and submit not included |
+| egui GPU pass | ≤ 1.5 ms | **unmeasured** | needs an adapter |
+| 5,000-row virtualised tree, 600 scrolled frames | no frame over 16 ms | **worst 2.99 ms** (CPU only) | presentation unmeasured |
+| One slider dragged vs. idle frame | within 1 ms | **+0.05 ms** | partial update is a non-issue |
+| Resident growth, all panels open | ≤ 50 MB | **9.3 MB** | |
+| Frame build at 1× / 1.25× / 1.5× | no scale cliff | **1.77 / 1.79 / 1.78 ms** | rows are 20/25/30 device px |
+| AccessKit tree, full probe | tree, fields, toggles present | **2,415 nodes, 1,752 labelled** | list roles are published by us, not by egui |
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape

@@ -8,6 +8,7 @@ note first and update it afterwards.
 | `geometry.md` | Geometry & colour | Millipoints, paths, booleans, colour models, palettes |
 | `xar-import.md` | `.xar` importer | Physical layer, tag coverage, format quirks, corpus acceptance numbers |
 | `document-model.md` | Document model | Node arena, attributes, invariants, undo |
+| `app-core.md` | Application core | `EditState`, `Viewport`, the arena→`Scene` walker, sessions, command dispatch, the shell/UI contract |
 | `render.md` | Render engine | Pipeline, blend modes, caching, CPU/GPU decisions |
 | `xarast-format.md` | Native format | Versioning, round-trip, SVG extensions |
 | `ui.md` | User interface | Toolkit, panel layout, shortcuts, Wayland |

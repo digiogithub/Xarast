@@ -66,10 +66,93 @@ png = "0.18"
 # Band and tile parallelism. `MIT OR Apache-2.0`.
 rayon = "1.12"
 
+# ── Application core ─────────────────────────────────────────────────────────
+# Insertion-ordered set/map. The selection is an ordered set: "the first
+# object selected" and "the last" are both user-visible, and iteration order
+# has to be stable or the scene walker's overlay order flickers.
+# `MIT OR Apache-2.0`.
+indexmap = "2.14"
+
 # Test and benchmark tooling.
 proptest = "1.7"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tiny-skia = "0.12"
+
+# ── User interface ───────────────────────────────────────────────────────────
+# `egui` used as a *library*, never through `eframe` (`research/05 §2.4`): the
+# shell owns winit and wgpu, so the canvas and the panels share one surface.
+# The version is 0.33 rather than the 0.36 of `research/05 §2.2` because 0.36
+# declares `rust-version = 1.95` while this workspace pins stable 1.94 and
+# `rust-version = 1.90`; bumping both is the only thing the upgrade needs.
+# `MIT OR Apache-2.0`.
+egui = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "accesskit",
+    "serde",
+] }
+# `TableBuilder`, the virtualised backing of the layer tree and the galleries.
+egui_extras = { version = "0.33", default-features = false }
+# Docking: nestable tab/linear/grid containers with a serialisable tree.
+# `MIT OR Apache-2.0`.
+egui_tiles = { version = "0.14", default-features = false, features = ["serde"] }
+# Headless widget testing over the AccessKit tree (kittest). The `wgpu` and
+# `snapshot` features are deliberately off: CI has no adapter.
+egui_kittest = { version = "0.33", default-features = false }
+# Accessibility tree types. Pinned to the version `egui 0.33` itself
+# depends on, so the dependency graph holds exactly one AccessKit and a
+# node built here is the same type egui publishes — `xarast-ui` reaches it
+# through `egui::accesskit` rather than depending on it directly.
+#
+# This version has to agree with whatever `accesskit_winit` the shell
+# picks: the adapter carries egui's tree to AT-SPI, and a mismatched major
+# puts two AccessKits in the graph and two incompatible `TreeUpdate`
+# types at the boundary. `MIT OR Apache-2.0`.
+accesskit = "0.21"
+# Layout and preference persistence. Both `MIT OR Apache-2.0`.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ── Shell and platform integration ───────────────────────────────────────────
+# `winit` is pinned at the 0.30 stable line, not the 0.31 beta. The evaluation
+# that decided it (E1–E7 of `docs/phases/phase-05-shell-and-ui.md`, plus the
+# static evidence that could be gathered without a compositor) is recorded in
+# `docs/memory/ui.md`; the short version is that 0.31 is the only route to
+# upstream stylus pressure but `accesskit_winit` still pins 0.30.13 and none of
+# the seven runtime criteria can be executed yet. `wayland-dlopen` is not
+# optional: the AppImage must start on a host with no Wayland development
+# libraries (`docs/memory/packaging.md` invariant 3). Apache-2.0.
+winit = { version = "0.30", default-features = false, features = [
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita",
+    "x11",
+    "rwh_06",
+] }
+# Blocking adaptor for the handful of `wgpu` futures the shell awaits during
+# start-up. No async runtime reaches the core (`research/05 §10.1`).
+# `MIT OR Apache-2.0`.
+pollster = "1.0"
+# Structured logging. Both `MIT`.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# XDG desktop portals. `rfd` is built with `xdg-portal` only and with its
+# `wayland` and `gtk3` backends off on purpose: the portal path is the one that
+# works inside an AppImage and a Flatpak sandbox, and the GTK backend would
+# drag a C toolkit into the image. `ashpd` covers the settings portal
+# (`org.freedesktop.appearance`). `async-io` rather than `tokio`: the services
+# thread runs a single blocking executor and no async leaks past it. Both MIT.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "settings",
+] }
+# Clipboard. `wayland-data-control` gives copy/paste that survives focus loss
+# where the compositor implements `wlr-data-control`. `MIT OR Apache-2.0`.
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "warn"
