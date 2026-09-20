@@ -18,6 +18,19 @@ alto rendimiento, Linux/Wayland primero (AppImage), luego Windows y macOS.
 - **Formato `.xar`**: definido en `Kernel/cxf*.{cpp,h}`; **211 tags** en
   `Kernel/cxftags.h`. Corpus de validación real en `xara-xtreme/testfiles/` y
   `xara-xtreme/Designs/`.
+- **Licencia: `MIT OR Apache-2.0`** (decidida 2026-09-20, ver
+  `docs/11-licencia-y-sala-limpia.md`). El original es **GPL-2.0-only** (no "or
+  later"), lo que hace GPL-3 *incompatible* con él; MIT es compatible con
+  GPL-2.0-only y además permisiva, y Apache-2.0 aporta concesión de patentes.
+- **SALA LIMPIA — regla dura.** La licencia permisiva solo es válida si Xarast
+  **no es obra derivada**. Se lee el original para *entender y documentar*; se
+  implementa desde `docs/research/*`, **nunca** copiando ni traduciendo código.
+  Se pueden tomar hechos (tags, layouts binarios, semántica, referencias
+  `fichero:línea`); **no** cuerpos de función, definiciones de clase,
+  comentarios ni recursos con copyright. Las marcas "Xara*" son de Xara Group
+  Ltd: nada de sugerir afiliación.
+- **Dependencias:** prohibidas GPL/AGPL; MPL-2.0 y LGPL solo con justificación.
+  `cargo deny check licenses` en CI es obligatorio.
 - **Formato nativo `.xarast`**: contenedor ZIP con **SVG** dentro + recursos
   binarios deduplicados. Requisito: debe abrirse con degradación elegante en
   navegador/Inkscape y con fidelidad total en Xarast.

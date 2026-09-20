@@ -146,6 +146,7 @@ lectura); edición colaborativa en tiempo real (v1.0+).
 | `research/05-stack-tecnologico.md` | Elección de crates y herramientas |
 | `research/06-formato-xarast.md` | Especificación del formato nativo `.xarast` |
 | `10-arquitectura.md` | Arquitectura de crates y flujo de datos |
+| `11-licencia-y-sala-limpia.md` | Licencia elegida y política de sala limpia |
 | `phases/*` | Plan de ejecución fase a fase |
 | `memory/*` | Notas persistentes de conocimiento por subsistema |
 | `../CLAUDE.md` | Memoria operativa para agentes que trabajen en el repo |
