@@ -164,3 +164,88 @@ output) or published third-party facts. Only the notice was added. In `05` an
 update note about the licence was also added (see "ATTENTION").
 
 ---
+
+## ATTENTION
+
+### 1. Licence contradiction inside `05-technology-stack.md` — **resolved with a note, pending a formal decision**
+
+Document `05` concludes, in its §1 and in its "DECISIONS" section, that
+**Xarast must be released under GPL-3.0-or-later**, and even includes an
+"IMMEDIATE ACTION: replace `/home/user/Xarast/LICENSE` (MIT today) with
+GPL-3.0". That reasoning starts from the assumption that Xarast would be a
+**derivative work** of Xara LX; under clean-room discipline that assumption does
+not hold and the conclusion falls with it.
+
+**What was done:** two notes were added (one at the start of §1 and another
+above the decision block) marking the reasoning as obsolete and fixing
+MIT OR Apache-2.0 as the decision in force. The analysis has **not** been
+deleted, because the per-crate licence comparison remains useful.
+
+**State in the repository:** during this pass, the project has already
+formalised the decision outside `docs/research/`: `docs/11-licensing-and-clean-room.md`,
+`LICENSE-MIT` and `LICENSE-APACHE` exist, and `CLAUDE.md` records
+`MIT OR Apache-2.0` as the licence together with the hard clean-room rule. All
+that remains is to review the `allow` list in `deny.toml` (proposed in `05` §1.4)
+so that it reflects a permissive project rather than a GPL-3 one.
+
+### 1 bis. The language of these documents versus the new rule in `CLAUDE.md`
+
+`CLAUDE.md` now establishes that **the whole repository is written in English,
+with no exceptions**, including file names (and `docs/` has in fact already been
+renamed to English). The six documents in `docs/research/` and this report
+remain in **Spanish**, with Spanish file names, because that is what this task
+explicitly asked for and because their entire content is in Spanish. **This is
+not a clean-room problem**, but it is an outstanding inconsistency: translating
+the ~780 KB of `01`–`06` and renaming them is a separate task, and must be
+planned as such. The clean-room notices that were added would have to be
+translated along with them.
+
+### 2. Residual risk: the density of the original's internal names
+
+Documents `02` and `03` still cite **a great many class, member and method names
+internal** to Xara LX (`NodeRenderableBounded`, `m_LastRequestedPixWidth`,
+`MapTranspTypeToGDraw`…). This is **legitimate**: they are facts needed to read
+the reference tree and to reason about behaviour, and API names are not, on
+their own, protectable expression in the sense that matters here. But the
+practical risk is worth keeping in mind:
+
+* **Operational recommendation:** Xarast's identifiers **must not** be traced
+  from the original's. Where the tables in this report use the original's name,
+  it is as a *cross-reference*, not as a name to adopt. The Rust design in `02`
+  §10 already uses its own nomenclature; keep to that line.
+
+### 3. CDraw headers (`GDraw/*.h`): a **proprietary** licence, not GPL
+
+The signatures and structures that `03` documented did not come from GPL code
+but from the headers of the closed binary library `libCDraw.a`, whose licence
+(`libs/LIBS-LICENSE`) is **more restrictive** than the GPL. Reproducing them
+verbatim was the most delicate point in the whole set. None remain: all of them
+have been turned into descriptive tables. **Rule to maintain:** never paste
+content from `GDraw/*.h` into the documentation or the code again.
+
+### 4. A verbatim quotation kept deliberately
+
+`05` §1.1 reproduces three lines of the original's **licence notice** ("Xara LX
+is free software…"). It is kept on purpose: it is documentary evidence that the
+original is GPL-2.0-**only**, it is the text of a licence (not creative
+expression of the program), and quoting it is the normal, expected use of a
+licence notice. It is not considered a problem.
+
+### 5. Test corpus
+
+The `.xar` validation files cited (`xara-xtreme/testfiles/`, `Designs/`,
+`Templates/`, `TextDesigns/`) are **not** code: they are test data from the
+original tree, also covered by its licence. Using them locally to validate the
+importer is legitimate; **they must not be redistributed inside the Xarast
+repository**. The byte dumps that appear in `01` are minimal header fragments,
+extracted with our own tool, and raise no problem.
+
+---
+
+## Permanent rule for future tasks
+
+> In `docs/research/` and in any new document: **describe, do not transcribe**.
+> If it is necessary to show how something in the original works, write it in
+> English or in our own pseudocode/Rust, with the `file:line` reference so that
+> whoever implements it can check it. Never paste C++ from the reference tree,
+> and **never** content from `GDraw/*.h`.
