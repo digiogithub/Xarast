@@ -262,7 +262,7 @@ pub enum ShellError {
     /// Distinct from every other error on purpose: this one is a fact about
     /// the machine, not a fault, and the caller should skip rather than
     /// report a failure.
-    #[error("no display server: {reason}")]
+    #[error("{reason}")]
     NoDisplay {
         /// What was looked for and not found.
         reason: String,

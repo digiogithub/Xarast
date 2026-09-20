@@ -244,7 +244,7 @@ pub struct KeyEvent {
     /// True when the platform generated this from auto-repeat.
     pub repeat: bool,
     /// The text it produced, if any. `None` while an IME is composing: the
-    /// composed text arrives through [`super::ime`] instead.
+    /// composed text arrives through [`crate::ime`] instead.
     pub text: Option<String>,
     /// The modifiers held at the moment of the event.
     pub modifiers: Modifiers,

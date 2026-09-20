@@ -28,12 +28,12 @@ virtualised `TableBuilder` tree, a 512-swatch palette strip, a
 
 | Axis | Threshold | Measured | Verdict |
 |---|---|---|---|
-| P1 `build_ui_frame()` CPU | p50 ≤ 3 ms, p99 ≤ 8 ms | **p50 1.65 ms, p99 3.40 ms** | **PASS** |
-| P2 main-thread total | ≤ 8 ms every frame | **6.68 ms** = build p99 + tessellate p99; event handling and submit unmeasured | **PARTIAL PASS** |
+| P1 `build_ui_frame()` CPU | p50 ≤ 3 ms, p99 ≤ 8 ms | **p50 1.63–1.65 ms, p99 2.19–3.40 ms** over repeated runs (this container has four slow cores and three build jobs on it) | **PASS** |
+| P2 main-thread total | ≤ 8 ms every frame | **4.71–6.68 ms** = build p99 + tessellate p99; event handling and submit unmeasured | **PARTIAL PASS** |
 | P3 egui GPU pass | ≤ 1.5 ms | **unmeasured** — no adapter in this environment | **UNMEASURED** |
-| P4 5,000-row tree scrolled 10 s | no frame over 16 ms | **worst CPU frame 2.99 ms** over 600 scrolled frames | **PARTIAL PASS** (CPU side only) |
-| P5 partial update (one slider) | within 1 ms of idle | **+0.05 ms** against idle | **PASS** |
-| P6 resident growth, all panels | ≤ 50 MB | **9.3 MB** | **PASS** |
+| P4 5,000-row tree scrolled 10 s | no frame over 16 ms | **worst CPU frame 2.84–2.99 ms** over 600 scrolled frames | **PARTIAL PASS** (CPU side only) |
+| P5 partial update (one slider) | within 1 ms of idle | **+0.00 to +0.05 ms** against idle | **PASS** |
+| P6 resident growth, all panels | ≤ 50 MB | **9.3–9.4 MB** | **PASS** |
 | P7 20 pt rows at 1×/1.25/1.5 | legible, screenshots | rows measure **20 / 25 / 30 device px**; build 1.77–1.79 ms at all three. Legibility itself **unmeasured** (no display) | **PARTIAL** |
 | P8 AT-SPI tree | tree, fields and toggles present and labelled | **2,415 nodes, 1,752 labelled**; list ✓, numeric field ✓, toggle ✓ — *after* the fix below | **PASS** |
 | P9 pointer → handle update | ≤ 2 frames at 60 Hz | **1 frame** of interface latency by construction (a pointer event and the overlay it moves are the same frame); presentation **unmeasured** | **PARTIAL** |

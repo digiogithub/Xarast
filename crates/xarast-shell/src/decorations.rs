@@ -143,8 +143,11 @@ mod tests {
 
     #[test]
     fn xwayland_behaves_like_x11_for_decorations() {
+        // A real XWayland client sees both sockets and is told to use X11.
         let mut e = env(true, "GNOME");
+        e.x11_display = Some(":0".to_owned());
         e.forced_backend = Some("x11".to_owned());
+        assert_eq!(e.server(), crate::display::DisplayServer::XWayland);
         let plan = DecorationPlan::for_environment(&e);
         assert_eq!(plan.expected, DecorationMode::ServerSide);
     }

@@ -12,7 +12,7 @@
 //! reports at roughly 200 Hz and the compositor coalesces to the frame rate;
 //! a tool that only sees the last sample of each frame draws visibly
 //! different strokes at speed. Everything here is built so that *every*
-//! sample survives to the application — see [`SampleQueue`].
+//! sample survives to the application — see [`coalesce::SampleQueue`](super::coalesce::SampleQueue).
 
 use std::time::Instant;
 

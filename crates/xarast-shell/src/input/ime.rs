@@ -7,9 +7,10 @@
 //! build, so they are modelled and tested now, with no text tool in sight.
 //!
 //! The rule the rest of the application depends on: while
-//! [`ImeState::is_composing`] is true, key events are the input method's, not
-//! the application's. A shortcut fired from a key that was really a
-//! composition keystroke is the classic IME bug.
+//! [`ImeState::is_composing`](crate::ime::ImeState::is_composing) is true,
+//! key events belong to the input method, not to the application. A shortcut
+//! fired from a key that was really a composition keystroke is the classic
+//! IME bug.
 
 use crate::scale::{LogicalSize, PhysicalPos};
 
