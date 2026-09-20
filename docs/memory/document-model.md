@@ -1,123 +1,114 @@
 # document-model
 
-Nota de memoria del subsistema **modelo de documento**.
-Investigación completa en [`../research/02-modelo-documento.md`](../research/02-modelo-documento.md).
+Memory note for the **document model** subsystem.
+Full research in [`../research/02-document-model.md`](../research/02-document-model.md).
+Arbitrated decisions in [`../10-architecture.md`](../10-architecture.md) §3.1, §3.2, §3.6.
 
-## Estado actual
+> Crate name: the research note called it `xarast-model`; the architecture
+> document settles on **`xarast-doc`**. Use `xarast-doc`.
 
-- Investigación del modelo de Xara LX **terminada**: jerarquía de nodos, árbol
-  documento/capítulo/spread/página/capa, sistema de atributos, rellenos,
-  compuestos «live», texto, bitmaps, selección y undo.
-- **No hay código Rust escrito todavía.** La propuesta de diseño (§10 del
-  documento de investigación) está lista para implementarse.
+## Current state
 
-## Decisiones tomadas (y por qué)
+- Research on the Xara LX model is **complete**: node hierarchy, the
+  document/chapter/spread/page/layer tree, the attribute system, fills, live
+  composites, text, bitmaps, selection and undo.
+- **No Rust written yet.** The design proposal (§10 of the research document)
+  is ready to implement in phase 2.
 
-1. **Arena `slotmap::SlotMap<NodeId, NodeData>` + `enum NodeKind`**, no herencia,
-   no trait objects, no ECS. El documento es un árbol jerárquico con orden de
-   pintado estricto; el ECS no encaja con el ámbito léxico de atributos ni con
-   el orden. Los ~60 predicados `IsXxx()` virtuales de `node.h:460-504` son la
-   prueba de que la jerarquía estaba supliendo la falta de *sum types*.
-2. **Lista enlazada de hermanos** (`parent/prev/next/first_child/last_child`),
-   no `Vec<NodeId>`: insertar/borrar/mover/reordenar son las operaciones
-   dominantes en un editor vectorial y son O(1). Añadimos `last_child`, que
-   Xara no tiene (recorre), porque el importador hace append masivo.
-3. **`NodeHidden` desaparece.** Borrar = `detach` + flag `DETACHED`; el nodo
-   sigue vivo en la arena y lo retiene la `Transaction` del historial. Esto
-   elimina `HiddenRefCnt`, `FindNextNonHidden`, `IsOrHidesAnAttribute`,
-   `HidingNode/ShowingNode/ComplexHide` y el
-   `KernelBitmapRef::RemoveFromTree/AddtoTree`.
-4. **Los atributos SIGUEN SIENDO NODOS** (`NodeKind::Attr`). Decisión discutida
-   y firme: es la única representación que preserva el ámbito léxico
-   («este atributo afecta a los hermanos siguientes y a sus subárboles»), que es
-   exactamente la semántica de `.xar` **y** de SVG (`<g>` con propiedades de
-   presentación). Un mapa de atributos por nodo rompería el round-trip.
-   Encima se pone un `AttrResolver` con caché, que da consultas O(1).
-5. **`AttrStack` = réplica exacta de `CurrentAttrs` + `RenderStack`**: tabla
-   densa indexada por `AttrSlot`, undo-log de `(slot, valor_anterior)` y marcas
-   de nivel. `push_scope()`/`pop_scope()` al bajar/subir de una lista de hijos.
-   ~60 líneas sustituyen a `rndrgn.cpp:7000-7150` + `rndstack.cpp`.
-6. **Un solo `FillGeometry<S: Stop>` genérico** en vez de la duplicación
-   color/transparencia (≈40 clases en `fillattr2.h` + 20 en `fillval.h`).
-   `Perspective` es `Option<…>`, no dos puntos + un `BOOL IsPersp`.
-7. **Undo = log de acciones inversas** (modelo de Xara), NO estructura
-   persistente como almacén vivo. Ver «discrepancia» abajo.
-8. **La selección sale de los nodos**: `IndexSet<NodeId>` en `EditState`, no un
-   bit en `NodeFlags`. Igual el cursor de texto (`CaretNode` fuera del árbol) y
-   el punto de inserción (`InsertionNode` fuera del árbol).
-9. **La selección de puntos de control sale del `PathData`** a un overlay
-   `HashMap<NodeId, BitVec>`: así la geometría es comparable con `==` y el COW
-   del `Arc<PathData>` no se rompe al seleccionar un punto.
-10. **Cachés unificadas bajo «clave derivada del estado»**: `BoundsCache` con
-    epoch por nodo y propagación hacia arriba con corte temprano; `RasterKey`
-    con `state_hash` en vez de los `m_Last*` de `NodeShadow`/`NodeBevel`.
-11. **`xarast-model` sin dependencias gráficas.** Requisito para testear sin GPU
-    y para el fuzzer del importador en CI.
+## Decisions taken (and why)
 
-## Discrepancia abierta con `research/05-stack-tecnologico.md §9`
+1. **Arena `slotmap::SlotMap<NodeId, NodeData>` + `enum NodeKind`** — not
+   inheritance, not trait objects, not ECS. The document is a hierarchical tree
+   with strict paint order; ECS fits neither the lexical attribute scope nor
+   the ordering. The original's ~60 virtual `IsXxx()` predicates
+   (`node.h:460-504`) are evidence that its hierarchy was standing in for sum
+   types.
+2. **Sibling linked list** (`parent/prev/next/first_child/last_child`) rather
+   than `Vec<NodeId>`: insert, delete, move and reorder dominate in a vector
+   editor and are O(1) this way. We add `last_child`, which Xara lacks (it
+   walks), because the importer appends in bulk.
+3. **`NodeHidden` is gone.** Delete = `detach` + a `DETACHED` flag; the node
+   stays alive in the arena, retained by the history `Transaction`. This
+   removes `HiddenRefCnt`, `FindNextNonHidden`, `IsOrHidesAnAttribute`,
+   `HidingNode`/`ShowingNode`/`ComplexHide` and
+   `KernelBitmapRef::RemoveFromTree`/`AddtoTree`.
+4. **Attributes REMAIN NODES** (`NodeKind::Attr`). Debated and settled: it is
+   the only representation that preserves lexical scope — "this attribute
+   affects the following siblings and their subtrees" — which is exactly the
+   semantics of both `.xar` **and** SVG (`<g>` with presentation properties). A
+   per-node attribute map would break round-tripping. An `AttrResolver` with a
+   cache sits on top and gives O(1) queries.
+5. **`AttrStack` mirrors `CurrentAttrs` + `RenderStack`**: a dense table indexed
+   by `AttrSlot`, an undo log of `(slot, previous_value)`, and level marks.
+   `push_scope()`/`pop_scope()` on descending into and leaving a child list.
+   Roughly 60 lines replace `rndrgn.cpp:7000-7150` plus `rndstack.cpp`.
+6. **One generic `FillGeometry<S: Stop>`** instead of the colour/transparency
+   duplication (~40 classes in `fillattr2.h` plus 20 in `fillval.h`).
+   `Perspective` is an `Option<…>`, not two points and a `BOOL IsPersp`.
+7. **Undo is an inverse-action log** (Xara's model), not a persistent structure
+   as the live store. Settled in architecture §3.1.
+8. **Selection lives outside the nodes**: an `IndexSet<NodeId>` in `EditState`,
+   not a bit in `NodeFlags`. Likewise the text caret (`CaretNode` outside the
+   tree) and the insertion point (`InsertionNode` outside the tree).
+9. **Control-point selection lives outside `PathData`**, in an overlay
+   `HashMap<NodeId, BitVec>`, so geometry stays comparable with `==` and
+   selecting a point does not break `Arc<PathData>` copy-on-write.
+10. **Caches unified under a state-derived key**: `BoundsCache` with a per-node
+    epoch propagating upward with early cut-off; `RasterKey` carrying a
+    `state_hash` instead of the `m_Last*` fields of `NodeShadow`/`NodeBevel`.
+11. **`xarast-doc` has no graphics dependencies.** Required for testing without
+    a GPU and for the importer fuzzer in CI.
 
-05 propone que el documento **vivo** sea la estructura persistente (`imbl`).
-Aquí se propone lo inverso: **arena viva + snapshot persistente periódico**.
+## Invariants that must not be broken
 
-- Motivo: el recorrido de render/hit-test/formateo accede por ID millones de
-  veces por frame; `SlotMap` es indexación directa, un HAMT son 2–5 saltos con
-  fallos de caché.
-- Los objetivos de 05 (undo O(1), ramas de historial, «deshacer tras reabrir»)
-  se cumplen con checkpoints `imbl::HashMap<NodeId, Arc<NodeData>>` cada N
-  transacciones + log de acciones entre ellos, que además permite presupuestar
-  memoria en bytes (como `OperationHistory::MaxSize`).
-- **Acción pendiente:** microbenchmark de recorrido completo de un documento de
-  100 000 nodos en ambas representaciones antes de cerrarlo en
-  `docs/10-arquitectura.md`.
-
-## Invariantes que NO se pueden romper
-
-1. Árbol acíclico; enlaces `next`/`prev` recíprocos; todos los hijos apuntan al
-   mismo padre; `first_child` sin `prev` y `last_child` sin `next`.
-2. `DETACHED` es transitivo hacia abajo (nada bajo un nodo desvinculado es
-   alcanzable desde la raíz).
-3. Todo nodo `LiveRole::Generated` tiene un ancestro `LiveRole::Controller` del
-   mismo `LiveKind`, y cada controlador tiene exactamente un subárbol `Source`.
-4. Bloque de atributos antes del primer nodo ink dentro de una lista de hijos
-   (*deseable*, no obligatorio: **el importador debe aceptar ficheros que lo
-   violen** — hay `.xar` reales así).
-5. Un spread, exactamente una capa activa.
-6. `Tag` único y estable por documento; `by_tag` biyectivo con los nodos vivos.
-7. Si la caja de un nodo es inválida, la de todos sus ancestros también.
-8. Todo `BitmapId`/`PaletteId`/`BrushId` referenciado existe en
+1. The tree is acyclic; `next`/`prev` links are reciprocal; every child points
+   at the same parent; `first_child` has no `prev` and `last_child` has no
+   `next`.
+2. `DETACHED` is transitive downward — nothing under a detached node is
+   reachable from the root.
+3. Every `LiveRole::Generated` node has a `LiveRole::Controller` ancestor of the
+   same `LiveKind`, and every controller has exactly one `Source` subtree.
+4. Attributes come before the first ink node within a child list. This is
+   *desirable, not mandatory*: **the importer must accept files that violate
+   it** — real `.xar` files do.
+5. One spread has exactly one active layer.
+6. `Tag` is unique and stable per document; `by_tag` is bijective with the live
+   nodes.
+7. If a node's bounding box is invalid, so is every ancestor's.
+8. Every referenced `BitmapId`/`PaletteId`/`BrushId` exists in
    `DocumentResources`.
-9. La selección solo contiene nodos alcanzables desde la raíz.
-10. `TextItem` solo bajo `TextLine`; `TextLine` solo bajo `TextStory`.
-11. Coordenadas siempre en millipoints `i32`, nunca `f64`, en el modelo. El
-    único `f32` admitido es el valor de color y la posición `0..1` de las
-    paradas de rampa.
+9. The selection contains only nodes reachable from the root.
+10. `TextItem` only under `TextLine`; `TextLine` only under `TextStory`.
+11. Coordinates are always millipoint `i32` in the model, never `f64`. The only
+    `f32` allowed are colour values and the `0..1` position of ramp stops.
 
-## Callejones sin salida (no volver a intentar)
+## Dead ends (do not retry)
 
-- **Traducir la jerarquía con `Box<dyn Node>` + `Any`**: reproduce el
-  downcasting constante del original y hace imposible el `match` exhaustivo.
-- **`Rc<RefCell<Node>>`**: pánicos por `BorrowMut` en los recorridos que suben
-  y bajan (el render sube al padre después de los hijos), ciclos padre↔hijo,
-  no `Send`.
-- **Mapa de atributos por nodo sin nodos de atributo**: pierde el ámbito de
-  lista y rompe el round-trip con `.xar` y con SVG. Descartado tras análisis.
-- **`Epoch` global para invalidar cajas**: invalida todo en cada edición, peor
-  que el `InvalidateBoundingRect` dirigido de Xara. Usar epoch por nodo con
-  propagación hacia arriba y corte temprano.
-- **Meter el cursor de texto, la selección o el punto de inserción en el
-  árbol** (como hace Xara con `CaretNode`, `NodeFlags::Selected` y
-  `InsertionNode`): contamina undo, serialización, copia y recorridos.
+- **Translating the hierarchy with `Box<dyn Node>` + `Any`**: reproduces the
+  original's constant downcasting and makes exhaustive `match` impossible.
+- **`Rc<RefCell<Node>>`**: `BorrowMut` panics in traversals that go both down
+  and up (rendering returns to the parent after the children), parent/child
+  cycles, and not `Send`.
+- **A per-node attribute map with no attribute nodes**: loses list scope and
+  breaks round-tripping with both `.xar` and SVG. Rejected after analysis.
+- **A global `Epoch` for bounds invalidation**: invalidates everything on every
+  edit, worse than Xara's targeted `InvalidateBoundingRect`. Use a per-node
+  epoch with upward propagation and early cut-off.
+- **Putting the text caret, the selection or the insertion point in the tree**
+  (as Xara does with `CaretNode`, `NodeFlags::Selected` and `InsertionNode`):
+  it contaminates undo, serialisation, copying and traversal.
 
-## Pendiente / TODO
+## Open TODOs
 
-- [ ] Microbenchmark arena vs. `imbl` (ver «discrepancia»).
-- [ ] Cerrar el conjunto exacto de `AttrSlot` cotejándolo con los 211 tags de
-      `Kernel/cxftags.h` (ver `research/01-formato-xar.md`).
-- [ ] Decidir si los pasos intermedios de un blend se materializan como nodos
-      o se generan en el render (Xara hace lo segundo; afecta al hit-test).
-- [ ] Definir `ProceduralSource` (fractal/noise) y su hash de caché.
-- [ ] `Tree::validate()` + property tests con `proptest` sobre secuencias de
-      attach/detach/move — antes de escribir el importador.
-- [ ] Test de tamaño: `size_of::<NodeData>() <= 64`.
-- [ ] Decidir el modelo de `MouldGeometry` (trait vs. enum) al implementar
-      `xarast-live`.
+- [ ] Benchmark arena vs `imbl` over a 100,000-node traversal. Architecture
+      §3.1 chose the arena provisionally; this measurement confirms or
+      overturns it. Record the result here.
+- [ ] Settle the exact `AttrSlot` set against the 211 tags in
+      `Kernel/cxftags.h` (see `research/01-xar-format.md`).
+- [ ] Decide whether blend intermediate steps are materialised as nodes or
+      generated at render time. Xara does the latter; it affects hit-testing.
+- [ ] Define `ProceduralSource` (fractal/noise) and its cache hash.
+- [ ] `Tree::validate()` plus `proptest` property tests over attach/detach/move
+      sequences — before the importer is written.
+- [ ] Size test: `size_of::<NodeData>() <= 64`.
+- [ ] Decide the `MouldGeometry` model (trait vs enum) when live effects land.
