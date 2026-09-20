@@ -147,6 +147,19 @@ offsetting, flattening) work in `f64` and quantise on the way back.
 invites silently corrupt files, and the interoperability need is served by SVG
 and PDF export. Reconsider only if users actually ask for it.
 
+### 3.5b Session state lives in `xarast-app`, not `xarast-doc`
+
+Selection, the text caret, the insertion point, tool state and viewport all
+live in an `EditState` owned by `xarast-app`. They are session state: never
+serialised, never undone, never part of the document's identity. Two documents
+with different selections are the same document.
+
+Putting them in the arena — as the original does, with a `Selected` bit in the
+node flags and a caret node in the tree — contaminates undo, serialisation,
+copying and every traversal. Phase 5's draft placed `EditState` in
+`xarast-doc`; it belongs in `xarast-app`, which is also where the crate table
+already puts selection and viewport.
+
 ### 3.6 Attribute model: lexical scope, kept
 
 The original's attribute scoping — an attribute node applies to its following

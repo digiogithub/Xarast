@@ -466,7 +466,7 @@ pub struct AppState {
 pub struct DocumentSession {
     pub id: DocumentId,
     pub doc: xarast_doc::Document,
-    pub edit: xarast_doc::EditState,
+    pub edit: xarast_app::EditState, // session state: see architecture §3.5b
     pub viewport: Viewport,
     pub path: Option<PathBuf>,
     pub scene: xarast_render::Scene,
