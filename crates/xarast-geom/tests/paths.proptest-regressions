@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e74584b477690f0c7683d6780c6e33b9400fbe85614f95a2b1ed43c1ea0ec24a # shrinks to p = Path { verbs: [MoveTo, CubicTo], points: [Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(94402 = 94.402pt), y: Mp(-26417 = -26.417pt) }, Point { x: Mp(70952 = 70.952pt), y: Mp(-67327 = -67.327pt) }, Point { x: Mp(1313 = 1.313pt), y: Mp(69131 = 69.131pt) }], flags: [] }
+cc 8215290a4ae8d9a67f38c97a3370f4d803ce9a566674bbb8b304825a1e225b0d # shrinks to p = Path { verbs: [MoveTo, CubicTo, MoveTo, CubicTo], points: [Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(-65804 = -65.804pt) }, Point { x: Mp(21892 = 21.892pt), y: Mp(-29982 = -29.982pt) }, Point { x: Mp(8969 = 8.969pt), y: Mp(-12284 = -12.284pt) }, Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(4258 = 4.258pt) }, Point { x: Mp(-49411 = -49.411pt), y: Mp(0 = 0pt) }], flags: [] }
+cc 9c1edaaf4193d68ebcb217e2342b701f91e64c2e027b9fdb1c665a47bbb69621 # shrinks to p = Path { verbs: [MoveTo, LineTo, CubicTo, MoveTo, CubicTo, Close], points: [Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(26404 = 26.404pt) }, Point { x: Mp(0 = 0pt), y: Mp(4089 = 4.089pt) }, Point { x: Mp(0 = 0pt), y: Mp(58135 = 58.135pt) }, Point { x: Mp(-60104 = -60.104pt), y: Mp(22341 = 22.341pt) }, Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(0 = 0pt), y: Mp(1 = 0.001pt) }, Point { x: Mp(-10348 = -10.348pt), y: Mp(3847 = 3.847pt) }], flags: [] }

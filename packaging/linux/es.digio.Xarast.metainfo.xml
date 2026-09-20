@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>es.digio.Xarast</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+
+  <name>Xarast</name>
+  <summary>Vector illustration and photo editing</summary>
+
+  <description>
+    <p>
+      Xarast is a vector illustration program with integrated photo editing,
+      built for speed: instant redraw, high-quality antialiasing, and direct
+      on-canvas manipulation of fills, transparencies and effects.
+    </p>
+    <p>
+      It opens legacy Xara Xtreme drawings and saves to an open native format
+      that wraps SVG in a compressed container, so files stay readable by other
+      tools.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">xarast.desktop</launchable>
+
+  <categories>
+    <category>Graphics</category>
+    <category>VectorGraphics</category>
+  </categories>
+
+  <keywords>
+    <keyword>vector</keyword>
+    <keyword>illustration</keyword>
+    <keyword>drawing</keyword>
+    <keyword>svg</keyword>
+    <keyword>design</keyword>
+  </keywords>
+
+  <provides>
+    <binary>xarast</binary>
+    <mediatype>application/vnd.xarast+zip</mediatype>
+    <mediatype>image/x-xar</mediatype>
+    <mediatype>image/svg+xml</mediatype>
+  </provides>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>tablet</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <url type="homepage">https://github.com/digiogithub/Xarast</url>
+  <url type="bugtracker">https://github.com/digiogithub/Xarast/issues</url>
+
+  <developer id="es.digio">
+    <name>The Xarast contributors</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.0.1" date="2026-09-20" type="development">
+      <description>
+        <p>Pre-release scaffolding. Not yet usable as an editor.</p>
+      </description>
+    </release>
+  </releases>
+</component>

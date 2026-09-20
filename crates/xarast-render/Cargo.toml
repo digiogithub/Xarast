@@ -1,0 +1,40 @@
+[package]
+name = "xarast-render"
+description = "The Xarast render engine: scene, display list and CPU/GPU backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The GPU backend. Off by default: CI has no adapter, and the CPU backend is
+# the deterministic reference that export and the golden tests go through.
+# `wgpu` only: `vello` joins when the WGSL compositing pass lands (R5.1),
+# which is also when it would first be executed. See `backend::gpu`.
+gpu = ["dep:wgpu"]
+
+[dependencies]
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+kurbo = { workspace = true }
+vello_cpu = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+png = { workspace = true }
+sha2 = { workspace = true }
+wgpu = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+tiny-skia = { workspace = true }
+
+[[bench]]
+name = "render"
+harness = false

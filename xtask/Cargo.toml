@@ -1,0 +1,19 @@
+[package]
+name = "xtask"
+description = "Development tasks for Xarast: asset generation and packaging helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# resvg is MPL-2.0: per-file copyleft, used unmodified and only in this
+# development tool, which never ships. Justified in deny.toml.
+resvg = "0.45"
+png = "0.18"

@@ -1,0 +1,179 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/digiogithub/Xarast"
+authors = ["The Xarast contributors"]
+
+# ── Shared dependency versions ───────────────────────────────────────────────
+# Every crate references these with `workspace = true`, so a version bump
+# happens in exactly one place and `cargo deny` sees a single graph.
+[workspace.dependencies]
+# Geometry. `kurbo` is the f64 curve library the whole stack (peniko, vello,
+# parley) is built around; `i_overlay` supplies polygon booleans with a
+# fixed-grid, bit-reproducible mode. Both are `MIT OR Apache-2.0`.
+kurbo = "0.13"
+i_overlay = "9.0"
+bitflags = "2.9"
+thiserror = "2.0"
+slotmap = "1.0"
+smallvec = "1.16"
+# Persistent HAMT, used ONLY for history checkpoints (a snapshot *over* the
+# arena) and for the arena-vs-persistent benchmark of
+# `docs/10-architecture.md` §3.1. MPL-2.0, used unmodified: see deny.toml.
+imbl = "7.0"
+
+# `.xar` physical layer. flate2 gives raw DEFLATE (`windowBits = -15`) and the
+# zlib CRC-32 the format's compressed blocks are checksummed with. Default
+# backend is pure-Rust miniz_oxide, so there is no C dependency and no `unsafe`
+# of ours. `MIT OR Apache-2.0`.
+flate2 = "1.1"
+
+# SHA-256: corpus lock verification in tests, `Document::canonical_digest()`
+# and content-hash deduplication of bitmap resources. RustCrypto,
+# `MIT OR Apache-2.0`.
+sha2 = "0.10"
+
+# ── Render engine ────────────────────────────────────────────────────────────
+# `vello_cpu` is the coverage rasteriser the Phase 4 W0 spike selected; see
+# `docs/memory/render.md` for the measurements. We use it as a rasteriser
+# only: the scene, the display list, the paints, the compositor and the blend
+# families are ours. `Apache-2.0 OR MIT`.
+#
+# Features: `std` and `u8_pipeline` are the production path, `f32_pipeline`
+# is the higher-precision path used for `RenderQuality::Final` and for the
+# golden oracle, `multithreading` gives the band parallelism. `text` and
+# `png` are off: glyph rasterisation is Phase 9's and image I/O is Phase 10's.
+vello_cpu = { version = "0.2", default-features = false, features = [
+    "std",
+    "u8_pipeline",
+    "f32_pipeline",
+    "multithreading",
+] }
+# The GPU backend, behind the `gpu` feature of `xarast-render`. Never built
+# in CI's default job, because CI has no adapter. Both `Apache-2.0 OR MIT`.
+vello = { version = "0.10", default-features = false, features = ["wgpu", "wgpu_default"] }
+# Default features on purpose: with none, no backend is compiled in and
+# `Instance::new` panics outright rather than reporting no adapter.
+wgpu = "30"
+# Golden-image encoding and decoding. `MIT OR Apache-2.0`.
+png = "0.18"
+# Band and tile parallelism. `MIT OR Apache-2.0`.
+rayon = "1.12"
+
+# ── Application core ─────────────────────────────────────────────────────────
+# Insertion-ordered set/map. The selection is an ordered set: "the first
+# object selected" and "the last" are both user-visible, and iteration order
+# has to be stable or the scene walker's overlay order flickers.
+# `MIT OR Apache-2.0`.
+indexmap = "2.14"
+
+# Test and benchmark tooling.
+proptest = "1.7"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tiny-skia = "0.12"
+
+# ── User interface ───────────────────────────────────────────────────────────
+# `egui` used as a *library*, never through `eframe` (`research/05 §2.4`): the
+# shell owns winit and wgpu, so the canvas and the panels share one surface.
+# The version is 0.33 rather than the 0.36 of `research/05 §2.2` because 0.36
+# declares `rust-version = 1.95` while this workspace pins stable 1.94 and
+# `rust-version = 1.90`; bumping both is the only thing the upgrade needs.
+# `MIT OR Apache-2.0`.
+egui = { version = "0.33", default-features = false, features = [
+    "default_fonts",
+    "accesskit",
+    "serde",
+] }
+# `TableBuilder`, the virtualised backing of the layer tree and the galleries.
+egui_extras = { version = "0.33", default-features = false }
+# Docking: nestable tab/linear/grid containers with a serialisable tree.
+# `MIT OR Apache-2.0`.
+egui_tiles = { version = "0.14", default-features = false, features = ["serde"] }
+# Headless widget testing over the AccessKit tree (kittest). The `wgpu` and
+# `snapshot` features are deliberately off: CI has no adapter.
+egui_kittest = { version = "0.33", default-features = false }
+# Accessibility tree types. Pinned to the version `egui 0.33` itself
+# depends on, so the dependency graph holds exactly one AccessKit and a
+# node built here is the same type egui publishes — `xarast-ui` reaches it
+# through `egui::accesskit` rather than depending on it directly.
+#
+# This version has to agree with whatever `accesskit_winit` the shell
+# picks: the adapter carries egui's tree to AT-SPI, and a mismatched major
+# puts two AccessKits in the graph and two incompatible `TreeUpdate`
+# types at the boundary. `MIT OR Apache-2.0`.
+accesskit = "0.21"
+# Layout and preference persistence. Both `MIT OR Apache-2.0`.
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# ── Shell and platform integration ───────────────────────────────────────────
+# `winit` is pinned at the 0.30 stable line, not the 0.31 beta. The evaluation
+# that decided it (E1–E7 of `docs/phases/phase-05-shell-and-ui.md`, plus the
+# static evidence that could be gathered without a compositor) is recorded in
+# `docs/memory/ui.md`; the short version is that 0.31 is the only route to
+# upstream stylus pressure but `accesskit_winit` still pins 0.30.13 and none of
+# the seven runtime criteria can be executed yet. `wayland-dlopen` is not
+# optional: the AppImage must start on a host with no Wayland development
+# libraries (`docs/memory/packaging.md` invariant 3). Apache-2.0.
+winit = { version = "0.30", default-features = false, features = [
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita",
+    "x11",
+    "rwh_06",
+] }
+# Blocking adaptor for the handful of `wgpu` futures the shell awaits during
+# start-up. No async runtime reaches the core (`research/05 §10.1`).
+# `MIT OR Apache-2.0`.
+pollster = "1.0"
+# Structured logging. Both `MIT`.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# XDG desktop portals. `rfd` is built with `xdg-portal` only and with its
+# `wayland` and `gtk3` backends off on purpose: the portal path is the one that
+# works inside an AppImage and a Flatpak sandbox, and the GTK backend would
+# drag a C toolkit into the image. `ashpd` covers the settings portal
+# (`org.freedesktop.appearance`). `async-io` rather than `tokio`: the services
+# thread runs a single blocking executor and no async leaks past it. Both MIT.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "settings",
+] }
+# Clipboard. `wayland-data-control` gives copy/paste that survives focus loss
+# where the compositor implements `wlr-data-control`. `MIT OR Apache-2.0`.
+arboard = { version = "3.6", default-features = false, features = [
+    "image-data",
+    "wayland-data-control",
+] }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+# Fast iteration on a large workspace: optimise dependencies even in dev so that
+# rasterising a real document in a debug build stays interactive.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+# Unwinding, not aborting. cargo-fuzz needs it to catch a panic as a finding
+# rather than losing the process, and the .xar importer is fuzzed from day one.
+panic = "unwind"
+
+# Used by the golden-image and corpus tests, which are unbearably slow otherwise.
+[profile.test]
+opt-level = 2

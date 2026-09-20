@@ -1,0 +1,105 @@
+name: AppImage
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Containers have no FUSE. Every AppImage tool honours this, and using it
+  # everywhere keeps the CI path identical to the local one.
+  APPIMAGE_EXTRACT_AND_RUN: 1
+
+concurrency:
+  group: appimage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+
+    # The glibc baseline is the whole point of this job. Building inside an
+    # explicit ubuntu:22.04 container pins it at 2.35 — covering Debian 12,
+    # Ubuntu 22.04+, Fedora 36+, RHEL 9, openSUSE 15.5+ and SteamOS 3.5+ — and
+    # keeps it pinned when GitHub rotates its runner images. Building on the
+    # runner directly produced a binary needing GLIBC_2.39, which would not
+    # start on any of those distributions.
+    container:
+      image: ubuntu:22.04
+
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates git file desktop-file-utils \
+            libwayland-dev libxkbcommon-dev zsync
+
+      - uses: actions/checkout@v4
+
+      # The checkout runs as a different user than the container's root; git
+      # refuses to describe a repository it thinks someone else owns, and the
+      # build script uses git describe for the version.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the icons are up to date with their source
+        run: |
+          cargo xtask icons
+          git diff --exit-code assets/icons \
+            || { echo "assets/icons is stale; run 'cargo xtask icons' and commit"; exit 1; }
+
+      - name: Validate the desktop entry and AppStream metadata
+        run: |
+          desktop-file-validate packaging/linux/xarast.desktop
+
+      - name: Build the AppImage
+        run: ARCH=${{ matrix.arch }} bash packaging/linux/build-appimage.sh
+
+      # An AppImage that builds but does not start is worse than no AppImage,
+      # because nothing else in CI would catch it.
+      - name: Smoke test
+        run: |
+          ./dist/Xarast-${{ matrix.arch }}.AppImage --version
+          ./dist/Xarast-${{ matrix.arch }}.AppImage --selftest
+
+      - name: Report the glibc baseline
+        run: |
+          echo "Highest glibc symbol version required:"
+          objdump -T target/release/xarast | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Xarast-${{ matrix.arch }}.AppImage
+          path: |
+            dist/Xarast-${{ matrix.arch }}.AppImage
+            dist/Xarast-${{ matrix.arch }}.AppImage.zsync
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Xarast-${{ matrix.arch }}.AppImage
+            dist/Xarast-${{ matrix.arch }}.AppImage.zsync

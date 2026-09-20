@@ -1,0 +1,30 @@
+[package]
+name = "xarast-doc"
+description = "The Xarast document model: node arena, attributes, layers, commands and undo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+bitflags = { workspace = true }
+imbl = { workspace = true }
+sha2 = { workspace = true }
+slotmap = { workspace = true }
+smallvec = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+
+[[bench]]
+name = "doc"
+harness = false

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f5bda1b4d7da877652e04501cef20cf7c7ec06b9afff5d60ebad443d364addfc # shrinks to a = Path { verbs: [MoveTo, LineTo, LineTo, LineTo, Close], points: [Point { x: Mp(0 = 0pt), y: Mp(0 = 0pt) }, Point { x: Mp(1 = 0.001pt), y: Mp(0 = 0pt) }, Point { x: Mp(1 = 0.001pt), y: Mp(1 = 0.001pt) }, Point { x: Mp(0 = 0pt), y: Mp(1 = 0.001pt) }], flags: [] }

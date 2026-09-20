@@ -1,0 +1,78 @@
+# License policy for Xarast. Enforced in CI with `cargo deny check licenses`.
+#
+# Xarast ships as MIT OR Apache-2.0, which only holds if no copyleft dependency
+# leaks into the binary. See docs/11-licensing-and-clean-room.md.
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unlicense",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    # MPL-2.0 is deliberately NOT allowed globally. It is per-file copyleft,
+    # so every use needs its own justified entry under [licenses.exceptions]
+    # below. Listing it here would make those entries decorative.
+]
+confidence-threshold = 0.9
+
+# Every MPL-2.0 or otherwise non-trivial crate must be listed here with a
+# reason, so that adding one is a deliberate, reviewable act.
+#
+# resvg, usvg and their siblings are MPL-2.0: per-file copyleft. They are used
+# unmodified, and only by `xtask`, which generates committed assets and never
+# ships. Nothing in the distributed binary links them.
+exceptions = [
+    # `imbl` and its two support crates are MPL-2.0 (declared as the
+    # deprecated `MPL-2.0+` spelling). They are used **unmodified** and only
+    # for history checkpoints — a persistent snapshot taken *over* the arena,
+    # never the live store — and for the arena-versus-persistent benchmark
+    # that settled `docs/10-architecture.md` §3.1. Per-file copyleft on
+    # sources we never touch does not reach our own code, which stays
+    # `MIT OR Apache-2.0`. See `docs/11-licensing-and-clean-room.md` §4.
+    { name = "imbl", allow = ["MPL-2.0"] },
+    { name = "imbl-sized-chunks", allow = ["MPL-2.0"] },
+    { name = "bitmaps", allow = ["MPL-2.0"] },
+
+    { name = "resvg", allow = ["MPL-2.0"] },
+    { name = "usvg", allow = ["MPL-2.0"] },
+    { name = "svgtypes", allow = ["MPL-2.0"] },
+    { name = "simplecss", allow = ["MPL-2.0"] },
+    { name = "svgfilters", allow = ["MPL-2.0"] },
+
+    # egui bundles default typefaces in `epaint_default_fonts`, declared
+    # `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`. Both extra terms
+    # are **font licences covering font data, not code**: they place no
+    # condition on our own source, which stays `MIT OR Apache-2.0`, and both
+    # permit redistribution inside an application. Allowed narrowly, to this
+    # one crate.
+    #
+    # Caveat worth remembering: the Ubuntu Font Licence requires renaming on
+    # modification, which some distributions treat as non-free. That does not
+    # affect the AppImage we ship ourselves, but it would be a snag for Debian
+    # packaging. The clean exit is to turn egui's `default_fonts` feature off
+    # and supply our own faces through `xarast-text`, which phase 9 builds
+    # anyway. Revisit there.
+    { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+
+[bans]
+# Nothing in the GPL family may ever reach the dependency graph.
+deny = []
+multiple-versions = "warn"
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

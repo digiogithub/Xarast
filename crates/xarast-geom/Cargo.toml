@@ -1,0 +1,27 @@
+[package]
+name = "xarast-geom"
+description = "Geometry primitives for Xarast: millipoints, paths, transforms, boolean operations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kurbo = { workspace = true }
+i_overlay = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tiny-skia = { workspace = true }
+
+[[bench]]
+name = "geom"
+harness = false

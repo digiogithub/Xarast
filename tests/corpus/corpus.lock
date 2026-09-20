@@ -1,0 +1,72 @@
+# Xarast .xar corpus lock
+#
+# The 59 files of testfiles/, Designs/, Templates/ and TextDesigns/ in the
+# Xara Xtreme fork. They are Xara's artwork: they are used locally and never
+# copied into this repository (docs/11-licensing-and-clean-room.md 3.2).
+# A hash is a fact, not expression, so recording one is clean-room safe and
+# it is how a corpus that has drifted is detected before the acceptance
+# counts silently change.
+#
+# Point XARAST_XAR_CORPUS at the fork (default /home/user/xara-xtreme).
+# XARAST_CORPUS_REQUIRED=1 turns "corpus absent, skip" into a failure.
+#
+# sha256  size  path
+f458cf52108a14f40dcccf74ec9388a60d95d23d3347c7a101def06dc68ee590  240035  testfiles/10000GradFilledShapes.xar
+ba9a26f6b86313ef17bcaeb8a7e401b6fdeda0fe08283cd1d5bfdc249651e595  331360  testfiles/20000GradFilledShapes.xar
+f790cff67799bffad1a22748f332ae04004b3a65c1b1943014a8a5fe5819ac78  334528  testfiles/20000GradFilledShapes50PCtransparent.xar
+c2246fc1de21b6a599f09b69fa301c6ae1a8152bf0ba9368d3e3586c0dca35d7  2664  testfiles/Broken Butt Cap.xar
+4b3efcaafb259e8da867fd779c19364fe1277d1755fa78d28a889f6a1028593d  6767  testfiles/Brush Test.xar
+7979ac97c92225c8053fe4318949f032dab7dfb6eec83aaedcf8a01651857039  2376  testfiles/OneCurve.xar
+0d2abbddf723bf0007ced0d7a11f8436751087cfe12b1b25f4682d40d9ee2ea9  2261  testfiles/OneLine.xar
+7ac1baf230847ec6b0d82df87754fcfccd0c98006fce4b5846fe3583929b241d  7369847  testfiles/ProbeX16.xar
+72abac362869236d2b0d0c63d038a7326dcbe4d6c3c2208fef4f959b9ab8ca39  2988  testfiles/RedStar.xar
+e997843c83074451b5dd31893dd6d5fe8d838c28901a870b0b29fba754821a74  11167  testfiles/ScaleTest.xar
+9d576b9f340f2df4d7405cf0cec2205020117610e974b3cf65c3c14c6c30b3b3  11229  testfiles/ScaleTest2.xar
+77d0ff50e8bde2a33119171141da65605a29e2f35ff6e0243f287323774189a8  2433  testfiles/Test00.xar
+dbcf5df3dbf1168db616b862b5ac35d8f81983b034608e0d64df6bad4bde320f  2665  testfiles/Test01.xar
+770ba1eb7b5f114269603fc4c34645c5dc0e45f35ce9edbc116c607d7fdb5773  2653  testfiles/Test02.xar
+86e3e3ef9962e387b8bfffe2be7da58e451543a53f8350b1b3c01a9a157de7ed  5721  testfiles/TestBitmapFill.xar
+752ef0663c562fb6565b886209e89d28c89d73c8f23f31d434f886822cdd4fa8  2432  testfiles/sortcrash.xar
+a1ea5dadd2a6b7711bf88dc22220c6f2fe67b01c539328d9e2d24895ec94d399  7580  testfiles/testimp1.xar
+771bbe0a71f618110e50300dce0cf3b6710ad0036dc48575b8fd12ef9b9c074c  1745  testfiles/testsmooth.xar
+70b70201e04a400968de46f223ee823a05101206e20e32ad00923e3e7fdf23f9  53788  Designs/BLUECAR.xar
+dce6ca6fab695a44a2a3a40f6712118d0c19e7677bd03467ea097d6ae3c664a1  35842  Designs/CatWoman graphs.xar
+8532858c406161a5f859cb14b2536f406711b2b7ad506b10b3258cf8dbafad20  39629  Designs/EngineTimings.xar
+0a13f4a27f724aa524622b653b3b0a802e2e053a49fdbb1219cb784c79379675  68506  Designs/Fill Types simple.xar
+3832e35079228caefdbe2f30a51c62f47b1d7669b4f39b42eb9012aaa2934cfc  135702  Designs/GardenPlan.xar
+66d219c2746fbf1a3c798400b30f555e3e838b71ef873dc821fe1833248d9464  132679  Designs/Girard_simple.xar
+533ae327425837870e614bb38d1b29967eab5f1218f60c4434189566ccd9a6c1  578811  Designs/Groucho2.xar
+88c07d0460677d0a745882c7e99c164f2fe0412e69eed4f5a51894a995abeaa1  51999  Designs/JagSS100 simple.xar
+944abaea02e912bda55433ba1ec44bd8880fc0a439649c2f7dafd92626471840  267281  Designs/SimpleSphere.xar
+dc08641926805139b69febfdd34ff167e3f8ec1e390812ff2a343544741357f5  153595  Designs/SoftShadow.xar
+ac6eab0d059eb96c8ba1745831ecaa2c9cdea8099fb81534a3ffc9b8d1e46147  646635  Designs/Spitfire.xar
+9baa3cdbc686bcfe6ec0951a19fae73771729a895c99ba6866db0e186f4cb13e  9708  Designs/TextCurve.xar
+6aed41ea98f3d676836cea4ea6319ac3fe6adef979844b63c9100d4f11f567de  171884  Designs/WATCH.xar
+ff50541da3d14065eb758eb9eef088c15c1b6f36f0f2c7f9f15f917cd86ba61f  71355  Designs/WATCH2.xar
+a7027f78e5a16d5b5ad5317b5480f938cb7ef49ab66787706036f7dc532ee16c  154303  Designs/Watch4.xar
+1489e66a93537a69d217edf059b65df7d94d8d5cf67f839ae07cead6578cd740  283048  Designs/amurdove.xar
+0e6f3029aa075b382fedcf9f4d7e4623356c17d4a300580a0d6304b13acc24a3  36836  Designs/feathers.xar
+376bf282b6523edf78b8b849710e28d24fbee1a3277f37dfe79536bf07a84d72  167450  Designs/leafgirl.xar
+a2cdff4e21ce3311fdbc41e9c5a96b6d035a08188d957947b8caf8b2a8b53ed1  226792  Designs/scope3 simple.xar
+69c26924f441a051d84c079f22223a9d211df571c55f8c65512fb130d37be565  2155  Templates/1024 by 768 drawing.xar
+64b87483868a5fb8d1193db79f0ed6ea5bbd5cb199c7ae5169309debacd236f1  2135  Templates/640 by 480 drawing.xar
+f43a8966adec6ee499ebbc6eae4157b79d6f6076ff1a3e1832cc5e26388ab158  2160  Templates/800 by 600 drawing.xar
+d2e377cc936318ad221f9141ac2dff3f72383d589fe6c1698040fe7218ada264  2160  Templates/A4 Landscape.xar
+f1b0e8c45618055dab5d7dc6e9bec6bd97f2f30113b28ee4a6510599f8c5eb24  2155  Templates/A4 Portrait.xar
+bdc0e81431f8eec4118602749edc8b07853d41e4f9c3ecab6e61b7781c1a5ca9  2154  Templates/A4 double page spread.xar
+4a1a720c7b15a2224c025cddd7a2d39acfe6fe2830cff0c4624a795960bd7198  2183  Templates/U S Letter.xar
+5f04c3fbbe66b9097a192b9f50be23c5d7b5ef25cacdf31ac257ffbb9fba2600  1833  Templates/animation.xar
+384731058b6629ea076aff6a1b015de267bb2beb98cd2ae17ecaa374af8f76af  41653  TextDesigns/AngledText.xar
+c7ed0f7db6a0c61723ed40290e6b702dff2522f7a4d5bb04f66cf9701cb9596c  20482  TextDesigns/BaselineShift.xar
+160286d480e54ab86c403d49ab7c7bfd1206aa67438e3915fa5cf5fac8eac356  9167  TextDesigns/FontChangesInText.xar
+a968c05c5da1312f8a43342488c05e6f1327f614ee3bf91f05831744367427fb  12175  TextDesigns/Kerning.xar
+7607edc2e813f8d04dec7177486f01b18cd74f606176b9978f74a53ffbc83dd5  21122  TextDesigns/LineSpacing.xar
+bd0b45d8b00df95a9f373fe03a25cd7ba7bc07984d5a970c98c7d9b1692e2e43  20554  TextDesigns/ManualKern.xar
+222a105d334a029b935b08f282f6155497f53fc907bfad73ed31642e9f51dd3b  21032  TextDesigns/Paragraph.xar
+cb8f3ca5989f15fc4703b6c356add61fab632794e07af63b0f9a97333ec71cb7  240980  TextDesigns/Rotated.xar
+110ad1cac1e076d5ddac1be120f0b6ac07a2c25ba8ea96a27a600852de05022a  11823  TextDesigns/SimpleText.xar
+cbd8d95d0e524f419d3ad7728b47508a5c792d7f9b73b33518323c54c17b9a63  30312  TextDesigns/SuperSub.xar
+154a2e87148763f2c3b2b7003f4e6b9c9c68a3659671fe5aae8260c8fdbfefff  143468  TextDesigns/TextJust.xar
+71135c06257f3e097283f32aa3da748c86452c1e176d89a4bf79cab175ae724a  20506  TextDesigns/Tracking.xar
+cca8da427be9bcb41a62ca4161574e6603dee4526f70fa9b39b755892dec7e96  3906  TextDesigns/embeddedFonts.xar
+facab57a8ce19eee071c63bc3f7f5450dc635f79174e379fa4074c707375e017  12415  TextDesigns/hebrew.xar

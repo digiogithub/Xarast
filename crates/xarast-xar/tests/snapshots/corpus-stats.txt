@@ -1,0 +1,63 @@
+# Corpus statistics, facts only. No coordinates, colour values or
+# strings taken from the files: see crates/xarast-xar/src/report.rs.
+# Regenerate with XARAST_UPDATE_SNAPSHOTS=1.
+# file | records | tags | down | up | depth | nodes | handled | skipped | stripped | blocks | ok | trailing | colours | paths | points | bitmaps | text
+testfiles/10000GradFilledShapes.xar | 80128 | 49 | 10008 | 10008 | 5 | 60112 | 80120 | 8 | 0 | 1 | 1 | 0 | 36 | 10001 | 310031 | 0 | 0
+testfiles/20000GradFilledShapes.xar | 140120 | 48 | 20007 | 20007 | 5 | 100106 | 140112 | 8 | 0 | 1 | 1 | 0 | 36 | 20000 | 620000 | 0 | 0
+testfiles/20000GradFilledShapes50PCtransparent.xar | 180120 | 49 | 20007 | 20007 | 5 | 140106 | 180112 | 8 | 0 | 1 | 1 | 0 | 36 | 20000 | 620000 | 0 | 0
+testfiles/Broken Butt Cap.xar | 128 | 48 | 8 | 8 | 5 | 112 | 120 | 8 | 0 | 1 | 1 | 0 | 35 | 1 | 7 | 0 | 0
+testfiles/Brush Test.xar | 439 | 67 | 49 | 49 | 6 | 148 | 144 | 30 | 265 | 1 | 1 | 0 | 34 | 2 | 41 | 0 | 0
+testfiles/OneCurve.xar | 88 | 36 | 6 | 6 | 5 | 76 | 86 | 2 | 0 | 1 | 1 | 0 | 35 | 1 | 4 | 0 | 0
+testfiles/OneLine.xar | 88 | 36 | 6 | 6 | 5 | 76 | 86 | 2 | 0 | 1 | 1 | 0 | 35 | 1 | 2 | 0 | 0
+testfiles/ProbeX16.xar | 870433 | 78 | 131881 | 131881 | 13 | 606671 | 869022 | 1411 | 0 | 1 | 1 | 0 | 1619 | 86736 | 1750032 | 0 | 960
+testfiles/RedStar.xar | 88 | 36 | 6 | 6 | 5 | 76 | 86 | 2 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 0
+testfiles/ScaleTest.xar | 1403 | 60 | 282 | 282 | 9 | 839 | 1395 | 8 | 0 | 1 | 1 | 0 | 35 | 235 | 6385 | 0 | 200
+testfiles/ScaleTest2.xar | 1400 | 60 | 282 | 282 | 9 | 836 | 1392 | 8 | 0 | 1 | 1 | 0 | 35 | 235 | 6385 | 0 | 200
+testfiles/Test00.xar | 128 | 48 | 8 | 8 | 5 | 112 | 120 | 8 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 0
+testfiles/Test01.xar | 128 | 47 | 8 | 8 | 5 | 112 | 120 | 8 | 0 | 1 | 1 | 0 | 35 | 1 | 4 | 0 | 0
+testfiles/Test02.xar | 128 | 47 | 8 | 8 | 5 | 112 | 120 | 8 | 0 | 1 | 1 | 0 | 35 | 1 | 4 | 0 | 0
+testfiles/TestBitmapFill.xar | 106 | 39 | 6 | 6 | 5 | 94 | 98 | 8 | 0 | 2 | 2 | 0 | 43 | 0 | 0 | 1 | 0
+testfiles/sortcrash.xar | 90 | 38 | 6 | 6 | 5 | 78 | 88 | 2 | 0 | 1 | 1 | 0 | 35 | 1 | 10 | 0 | 0
+testfiles/testimp1.xar | 324 | 73 | 43 | 43 | 8 | 213 | 264 | 17 | 43 | 2 | 2 | 0 | 38 | 3 | 12 | 1 | 0
+testfiles/testsmooth.xar | 115 | 44 | 8 | 8 | 5 | 99 | 115 | 0 | 0 | 1 | 1 | 0 | 35 | 1 | 253 | 0 | 0
+Designs/BLUECAR.xar | 3014 | 61 | 470 | 470 | 7 | 2074 | 3008 | 6 | 0 | 1 | 1 | 0 | 65 | 401 | 14038 | 0 | 0
+Designs/CatWoman graphs.xar | 1538 | 54 | 336 | 336 | 7 | 866 | 1530 | 8 | 0 | 1 | 1 | 0 | 46 | 277 | 13674 | 0 | 0
+Designs/EngineTimings.xar | 2221 | 54 | 477 | 477 | 7 | 1267 | 2213 | 8 | 0 | 1 | 1 | 0 | 41 | 399 | 19864 | 0 | 0
+Designs/Fill Types simple.xar | 4970 | 79 | 1145 | 1145 | 7 | 2680 | 4959 | 11 | 0 | 2 | 2 | 0 | 51 | 942 | 47065 | 1 | 0
+Designs/GardenPlan.xar | 8526 | 70 | 1407 | 1407 | 7 | 5712 | 8524 | 2 | 0 | 1 | 1 | 0 | 38 | 1064 | 31577 | 0 | 1403
+Designs/Girard_simple.xar | 14955 | 60 | 2243 | 2243 | 8 | 10322 | 14716 | 2 | 237 | 1 | 1 | 0 | 172 | 2084 | 24150 | 0 | 0
+Designs/Groucho2.xar | 3893 | 81 | 628 | 628 | 7 | 1808 | 2507 | 3 | 1383 | 8 | 8 | 0 | 253 | 272 | 29634 | 2 | 0
+Designs/JagSS100 simple.xar | 5239 | 57 | 1135 | 1135 | 10 | 2969 | 5236 | 3 | 0 | 2 | 2 | 0 | 23 | 792 | 9453 | 1 | 0
+Designs/SimpleSphere.xar | 9960 | 57 | 2134 | 2134 | 8 | 5692 | 9958 | 2 | 0 | 1 | 1 | 0 | 53 | 1948 | 82027 | 0 | 0
+Designs/SoftShadow.xar | 374 | 55 | 63 | 63 | 6 | 202 | 292 | 2 | 80 | 2 | 2 | 0 | 43 | 32 | 702 | 0 | 0
+Designs/Spitfire.xar | 9308 | 80 | 1002 | 1002 | 8 | 7304 | 9300 | 8 | 0 | 3 | 3 | 0 | 280 | 986 | 68200 | 2 | 9
+Designs/TextCurve.xar | 531 | 71 | 77 | 77 | 8 | 377 | 521 | 10 | 0 | 1 | 1 | 0 | 39 | 6 | 57 | 0 | 1627
+Designs/WATCH.xar | 1834 | 67 | 393 | 393 | 9 | 1048 | 1804 | 30 | 0 | 2 | 2 | 0 | 44 | 272 | 4909 | 1 | 0
+Designs/WATCH2.xar | 7108 | 61 | 1327 | 1327 | 10 | 4454 | 6862 | 246 | 0 | 1 | 1 | 0 | 71 | 1049 | 15655 | 0 | 0
+Designs/Watch4.xar | 11491 | 99 | 1849 | 1849 | 12 | 7707 | 10594 | 743 | 154 | 1 | 1 | 0 | 250 | 1104 | 42391 | 0 | 233
+Designs/amurdove.xar | 14692 | 58 | 1600 | 1600 | 7 | 11492 | 14689 | 3 | 0 | 1 | 1 | 0 | 1051 | 1585 | 46411 | 0 | 0
+Designs/feathers.xar | 623 | 56 | 122 | 122 | 7 | 379 | 615 | 8 | 0 | 2 | 2 | 0 | 35 | 97 | 4702 | 1 | 0
+Designs/leafgirl.xar | 1818 | 62 | 399 | 399 | 7 | 1020 | 1808 | 10 | 0 | 3 | 3 | 0 | 42 | 379 | 29309 | 2 | 0
+Designs/scope3 simple.xar | 8281 | 81 | 1266 | 1266 | 10 | 5749 | 7986 | 295 | 0 | 6 | 6 | 0 | 180 | 1080 | 25622 | 5 | 0
+Templates/1024 by 768 drawing.xar | 121 | 46 | 7 | 7 | 4 | 107 | 113 | 8 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 0
+Templates/640 by 480 drawing.xar | 115 | 45 | 7 | 7 | 4 | 101 | 113 | 2 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 0
+Templates/800 by 600 drawing.xar | 121 | 46 | 7 | 7 | 4 | 107 | 113 | 8 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 0
+Templates/A4 Landscape.xar | 120 | 45 | 7 | 7 | 4 | 106 | 112 | 8 | 0 | 1 | 1 | 0 | 36 | 0 | 0 | 0 | 0
+Templates/A4 Portrait.xar | 120 | 45 | 7 | 7 | 4 | 106 | 112 | 8 | 0 | 1 | 1 | 0 | 36 | 0 | 0 | 0 | 0
+Templates/A4 double page spread.xar | 120 | 45 | 7 | 7 | 4 | 106 | 112 | 8 | 0 | 1 | 1 | 0 | 36 | 0 | 0 | 0 | 0
+Templates/U S Letter.xar | 121 | 46 | 7 | 7 | 4 | 107 | 112 | 9 | 0 | 1 | 1 | 0 | 36 | 0 | 0 | 0 | 0
+Templates/animation.xar | 98 | 47 | 7 | 7 | 4 | 84 | 95 | 3 | 0 | 1 | 1 | 0 | 16 | 0 | 0 | 0 | 0
+TextDesigns/AngledText.xar | 396 | 61 | 48 | 48 | 7 | 300 | 388 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 435
+TextDesigns/BaselineShift.xar | 214 | 59 | 23 | 23 | 7 | 168 | 206 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 117
+TextDesigns/FontChangesInText.xar | 166 | 59 | 14 | 14 | 7 | 138 | 158 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 29
+TextDesigns/Kerning.xar | 265 | 60 | 25 | 25 | 6 | 215 | 257 | 8 | 0 | 4 | 4 | 0 | 35 | 3 | 12 | 3 | 28
+TextDesigns/LineSpacing.xar | 194 | 60 | 16 | 16 | 6 | 162 | 186 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 114
+TextDesigns/ManualKern.xar | 191 | 60 | 16 | 16 | 6 | 159 | 183 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 123
+TextDesigns/Paragraph.xar | 173 | 60 | 14 | 14 | 6 | 145 | 165 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 96
+TextDesigns/Rotated.xar | 700 | 67 | 94 | 94 | 7 | 512 | 692 | 8 | 0 | 8 | 8 | 0 | 35 | 0 | 0 | 7 | 1179
+TextDesigns/SimpleText.xar | 167 | 56 | 13 | 13 | 6 | 141 | 159 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 57
+TextDesigns/SuperSub.xar | 237 | 62 | 24 | 24 | 7 | 189 | 229 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 121
+TextDesigns/TextJust.xar | 288 | 59 | 33 | 33 | 6 | 222 | 280 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 640
+TextDesigns/Tracking.xar | 197 | 61 | 18 | 18 | 7 | 161 | 189 | 8 | 0 | 2 | 2 | 0 | 35 | 0 | 0 | 1 | 110
+TextDesigns/embeddedFonts.xar | 172 | 53 | 13 | 13 | 6 | 146 | 164 | 8 | 0 | 1 | 1 | 0 | 35 | 0 | 0 | 0 | 54
+TextDesigns/hebrew.xar | 156 | 59 | 12 | 12 | 7 | 132 | 148 | 8 | 0 | 2 | 2 | 0 | 36 | 0 | 0 | 1 | 4

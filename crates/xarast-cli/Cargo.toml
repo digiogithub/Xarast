@@ -1,0 +1,31 @@
+[package]
+name = "xarast-cli"
+description = "Headless command line tools for Xarast: convert, render and inspect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+xarast-app = { path = "../xarast-app" }
+xarast-xar = { path = "../xarast-xar" }
+xarast-doc = { path = "../xarast-doc" }
+xarast-format = { path = "../xarast-format" }
+xarast-io = { path = "../xarast-io" }
+xarast-render = { path = "../xarast-render" }
+xarast-geom = { path = "../xarast-geom" }
+
+[[bin]]
+name = "xarast-cli"
+path = "src/main.rs"
+
+# `xar-dump` is how the .xar corpus acceptance numbers are produced and how
+# a user reports a file that will not open. See src/bin/xar-dump.rs.
+[[bin]]
+name = "xar-dump"
+path = "src/bin/xar-dump.rs"

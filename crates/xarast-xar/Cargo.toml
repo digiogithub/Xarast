@@ -1,0 +1,31 @@
+[package]
+name = "xarast-xar"
+description = "Read-only importer for the legacy Xara .xar file format"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# Phase 3 was split in two: everything up to a typed, model-independent
+# representation (`reader`, `tree`, `decode`) and, on top of it, `import`,
+# which maps that representation into `xarast-doc`. The lower half still knows
+# nothing about the document model, which is what lets it be fuzzed and
+# snapshot-tested on its own; only `import` reaches for `xarast-doc`, and it
+# does so exclusively through `DocumentBuilder`.
+[dependencies]
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+xarast-doc = { path = "../xarast-doc" }
+bitflags = { workspace = true }
+flate2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+flate2 = { workspace = true }
+proptest = { workspace = true }
+sha2 = { workspace = true }

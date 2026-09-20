@@ -1,0 +1,38 @@
+[package]
+name = "xarast-shell"
+description = "Windowing, GPU surface and platform integration for Xarast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["portals", "clipboard"]
+# XDG portal file dialogs and the settings portal, on the services thread.
+portals = ["dep:rfd", "dep:ashpd"]
+# System clipboard. Off in builds that must not touch a display at all.
+clipboard = ["dep:arboard"]
+
+[dependencies]
+xarast-app = { path = "../xarast-app" }
+xarast-render = { path = "../xarast-render" }
+
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+rfd = { workspace = true, optional = true }
+ashpd = { workspace = true, optional = true }
+arboard = { workspace = true, optional = true }
+
+[[bin]]
+name = "xarast"
+path = "src/main.rs"

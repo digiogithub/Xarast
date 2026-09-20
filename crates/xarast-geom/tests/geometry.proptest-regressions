@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0012a4325e183fa222f9720f9873375b627a45569c44d648e7882f6dfbc376d1 # shrinks to a = Matrix { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: Mp(-419147 = -419.147pt), f: Mp(-14055 = -14.055pt) }, b = Matrix { a: 0.1, b: 0.0, c: 0.0, d: 0.1, e: Mp(0 = 0pt), f: Mp(0 = 0pt) }, c = Matrix { a: 8.697189131720355, b: 0.0, c: 0.0, d: 0.1, e: Mp(0 = 0pt), f: Mp(0 = 0pt) }
+cc c81710bacdf75f987150c177f77ea99346434f55fe345e8350fa3303ec7e2cb8 # shrinks to a = Matrix { a: 0.1, b: 0.0, c: 0.0, d: 0.1, e: Mp(0 = 0pt), f: Mp(0 = 0pt) }, b = Matrix { a: 8.613171672307319, b: 0.0, c: 0.0, d: 0.1, e: Mp(0 = 0pt), f: Mp(0 = 0pt) }, p = Point { x: Mp(-351803 = -351.803pt), y: Mp(0 = 0pt) }

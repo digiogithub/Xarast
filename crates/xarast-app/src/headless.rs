@@ -1,0 +1,169 @@
+//! Rendering a session to pixels with no window, no GPU and no
+//! compositor.
+//!
+//! This is not a convenience for the command line: it is how rendering is
+//! tested. The CPU backend is the deterministic path (`render.md`), so a
+//! headless render of a corpus file is reproducible, diffable and cheap
+//! enough to run in CI on a machine with no `/dev/dri` at all.
+
+use std::path::Path;
+
+use xarast_color::Rgba8;
+use xarast_render::{
+    CpuBackend, CpuConfig, DirtyRect, DisplayList, FrameTimings, RenderQuality, Surface,
+};
+
+use crate::geometry::DeviceSize;
+use crate::session::Session;
+
+/// How a headless render should be set up.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeadlessOptions {
+    /// The output size in pixels.
+    pub size: DeviceSize,
+    /// How hard to work.
+    pub quality: RenderQuality,
+    /// What to clear to before drawing. Opaque white by default:
+    /// a page is white, and a PNG of a drawing on transparency is hard
+    /// to look at.
+    pub background: Rgba8,
+    /// Frame the whole drawing rather than using the session's viewport.
+    pub fit_drawing: bool,
+    /// Use the bit-reproducible backend configuration. On by default,
+    /// because a headless render that is not reproducible is not a test.
+    pub deterministic: bool,
+}
+
+impl Default for HeadlessOptions {
+    fn default() -> HeadlessOptions {
+        HeadlessOptions {
+            size: DeviceSize::new(1024, 768),
+            quality: RenderQuality::Final,
+            background: Rgba8::WHITE,
+            fit_drawing: true,
+            deterministic: true,
+        }
+    }
+}
+
+/// What one headless render did.
+#[derive(Debug, Clone)]
+pub struct HeadlessResult {
+    /// The pixels.
+    pub surface: Surface,
+    /// Where the time went.
+    pub timings: FrameTimings,
+    /// How many commands the display list held.
+    pub commands: usize,
+}
+
+/// Why a headless render failed.
+#[derive(Debug, thiserror::Error)]
+pub enum HeadlessError {
+    /// The scene could not be built.
+    #[error(transparent)]
+    Session(#[from] crate::session::SessionError),
+    /// The walker produced an unbalanced scene.
+    #[error(transparent)]
+    Scene(#[from] xarast_render::SceneError),
+    /// The backend refused the surface.
+    #[error(transparent)]
+    Backend(#[from] xarast_render::BackendError),
+    /// The PNG could not be written.
+    #[error(transparent)]
+    Png(#[from] xarast_render::golden::GoldenError),
+}
+
+/// Renders a session into a fresh surface.
+///
+/// The session's own viewport is left untouched: a headless render must
+/// not move the user's view, and a thumbnailer running on a background
+/// thread must not race one that does.
+///
+/// # Errors
+///
+/// [`HeadlessError`] when the walk, the backend or the surface refuses.
+pub fn render(session: &Session, opts: &HeadlessOptions) -> Result<HeadlessResult, HeadlessError> {
+    let mut view = session.viewport.clone();
+    view.resize(opts.size);
+    if opts.fit_drawing {
+        let drawing = crate::viewport::drawing_rect(&session.doc);
+        if drawing.is_empty() {
+            view.fit_rect(crate::viewport::page_rect(&session.doc));
+        } else {
+            view.fit_rect(drawing);
+        }
+    }
+
+    let mut walker = crate::walker::SceneWalker::new();
+    let mut scene = xarast_render::Scene::new();
+    walker.rebuild(
+        &session.doc,
+        &session.edit,
+        &view,
+        opts.quality,
+        None,
+        &mut scene,
+    )?;
+
+    let params = xarast_render::ViewParams {
+        transform: view.transform(),
+        viewport: opts.size.to_rect(),
+        quality: opts.quality,
+        dpi: view.dpi(),
+    };
+    let dl = DisplayList::build(&scene, &params, &DirtyRect::of(opts.size.to_rect()));
+
+    let mut surface = Surface::filled(
+        opts.size.width.max(1),
+        opts.size.height.max(1),
+        [
+            opts.background.r,
+            opts.background.g,
+            opts.background.b,
+            opts.background.a,
+        ],
+    );
+    let cfg = if opts.deterministic {
+        CpuConfig::deterministic()
+    } else {
+        CpuConfig::interactive()
+    };
+    let mut backend = CpuBackend::new(cfg);
+    let timings = backend.render(&dl, walker.resolver(), &mut surface)?;
+    Ok(HeadlessResult {
+        surface,
+        timings,
+        commands: dl.len(),
+    })
+}
+
+/// Renders a session and writes it to a PNG.
+///
+/// # Errors
+///
+/// As [`render`], plus [`HeadlessError::Png`] when the file cannot be
+/// written.
+pub fn render_to_png(
+    session: &Session,
+    opts: &HeadlessOptions,
+    path: &Path,
+) -> Result<HeadlessResult, HeadlessError> {
+    let out = render(session, opts)?;
+    xarast_render::golden::write_png(&out.surface, path)?;
+    Ok(out)
+}
+
+/// Renders a file straight to a PNG: the whole headless path in one call.
+///
+/// # Errors
+///
+/// As [`render_to_png`], plus whatever opening the document returns.
+pub fn convert_to_png(
+    input: &Path,
+    output: &Path,
+    opts: &HeadlessOptions,
+) -> Result<HeadlessResult, HeadlessError> {
+    let session = Session::open(crate::session::DocumentId(0), input)?;
+    render_to_png(&session, opts, output)
+}
