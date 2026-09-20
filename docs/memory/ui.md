@@ -250,13 +250,33 @@ changelog.
    channel is `Touch { force }`, documented as always `None` on Wayland
    and X11. So the fallback's cost is not "worse pressure", it is *no*
    pressure.
-5. **`accesskit_winit 0.34` depends on `winit 0.30.13`.** Measured, not
-   assumed: adding it to the 0.31 probe resolved a second `winit` into the
-   graph (`cargo tree -i winit@0.30.13` → `accesskit_winit v0.34.0`).
-   Adopting 0.31 today therefore means either two `winit` versions linked
-   into one binary or a hand-written AT-SPI adapter over `accesskit_unix`.
-   That is a cost the changelog does not mention and it is the single
-   biggest reason the beta is not worth taking *this week*.
+5. **No published `accesskit_winit` supports `winit` 0.31.** Every
+   release from 0.29.1 to 0.34.0 requires `winit ^0.30.5` — read straight
+   off the crates.io index, and confirmed by adding `accesskit_winit 0.34`
+   to the 0.31 probe, which resolved a *second* `winit` into the graph
+   (`cargo tree -i winit@0.30.13` → `accesskit_winit v0.34.0`). Adopting
+   0.31 today therefore means either two `winit` versions linked into one
+   binary or a hand-written AT-SPI adapter over `accesskit_unix`. The
+   changelog does not mention this, and it is the single biggest reason
+   the beta is not worth taking now: the accessibility transport (S10 /
+   U4.2) is in scope for this phase and 0.31 removes the only way to
+   build it.
+
+   The version pairing is tight in both directions, so record it here.
+   `xarast-ui` pins `egui 0.33`, which resolves `accesskit 0.21.1`; the
+   `accesskit_winit` that pairs with `accesskit 0.21.1` is **0.29.2**, and
+   it wants `winit ^0.30.5`. That is the combination to use when the
+   transport is wired — *not* `accesskit_winit 0.34`, which pairs with
+   `accesskit 0.25` and would put two incompatible `TreeUpdate` types at
+   the shell↔UI boundary. `xarast-shell` deliberately has **no** AccessKit
+   dependency today, so nothing in this crate constrains that choice yet.
+
+   One loose end, not this crate's to fix: `[workspace.dependencies]`
+   declares `accesskit = "0.25"`, which no crate references, so it does
+   not appear in `Cargo.lock`. The first crate to write
+   `accesskit = { workspace = true }` will pull 0.25 against egui's
+   0.21.1 and fail. The line should become `0.21` when the transport
+   lands, or be removed.
 6. 0.31 is a structural break, not a version bump: the crate is split into
    `winit-core`/`-common`/`-wayland`/`-x11`/…, `ActiveEventLoop` and
    `Window` become `dyn` traits, `create_window` returns
@@ -448,9 +468,11 @@ instrumentation), which was extended rather than replaced.
 - **Live** colour-scheme change notification: the settings portal is read
   once at start-up. `ashpd` exposes a signal stream; wiring it needs a bus
   to test against.
-- AccessKit transport (S10/U4.2) is **not wired**. The blocker is the
-  version pairing the UI note records; resolve it together with the
-  `winit` question, since `accesskit_winit` is what couples them.
+- AccessKit transport (S10/U4.2) is **not wired**. When it is, use
+  `accesskit_winit 0.29.2` (pairs with `accesskit 0.21.1`, which is what
+  `egui 0.33` resolves) and fix the unused `accesskit = "0.25"` line in
+  `[workspace.dependencies]` at the same time. `xarast-shell` has no
+  AccessKit dependency today, so this is an addition, not a migration.
 - The `egui`→`winit` shim (S9/U4.1) is **not written**. It is `xarast-ui`'s
   boundary as much as the shell's, and it should be built directly on
   `ShellEvent` rather than on `winit`, so that phase 14 gets it for free.

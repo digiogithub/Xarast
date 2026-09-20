@@ -229,11 +229,14 @@ locks entirely.
 |---|---|---|
 | 1 | ~~Arena vs persistent store — confirm by measurement~~ **Closed in Phase 2: the arena wins on every measure but memory, where it also wins.** | Phase 2 benchmark |
 | 2 | ~~`egui` immediate mode at professional panel density~~ **Closed in Phase 5: egui is confirmed. The density probe — 1,789 controls, a 5,000-row virtualised tree, 512 swatches, 2,000 thumbnails — builds a frame in 1.6 ms p50 and at worst 3.4 ms p99 against a 3/8 ms bar, a slider drag costs at most +0.05 ms over idle, and resident growth is 9.3 MB of a 50 MB allowance. No fallback taken. Four axes (GPU pass, visual legibility, presented latency, and the presented halves of the main-thread and scrolling budgets) are **unmeasured** for want of a display. The nine numbers are in `docs/memory/ui.md`.** | Phase 5 UI spike |
-| 3 | `winit 0.31-beta` pinning for tablet pressure — is the beta stable enough | Phase 5 |
+| 3 | ~~`winit 0.31-beta` pinning for tablet pressure — is the beta stable enough~~ **Closed in Phase 5: do not pin it. Stay on `winit 0.30.13`.** The phase's rule was "pass E1–E7, then pin", and **E1–E7 are all runtime criteria, none of which could be executed** — this environment has no compositor, no GPU adapter, no tablet and no `uinput`, so every one of them is recorded as *unmeasured*, not as passed. What was checkable was checked: 0.31.0-beta.3 builds cleanly with `wgpu` 30, it genuinely carries `PointerSource::TabletTool` with force, tilt, twist and tangential force, and `winit-wayland` genuinely implements `zwp_tablet_v2` — but `winit-x11` still has no tablet code at all, and **no published `accesskit_winit` (0.29.1 … 0.34.0) supports winit 0.31**, which would remove the accessibility transport that is in scope for this phase. Cost of the fallback, stated plainly: winit 0.30 has *no* tablet API, so Xarast has no stylus pressure today, and no trackpad gestures on Linux. It is a backend swap, not a redesign — the `ToolAxes` → `StrokeSample` pipeline is written and tested against axes no backend yet supplies, and all of `winit` sits behind one module. **Re-open before v0.1.** Evidence in `docs/memory/ui.md`. | Phase 5 |
 | 4 | Whether text on a path needs our own layout pass over `parley` | Phase 9 |
 | 5 | Is a perceptual diff or exact match the right golden-image gate | Phase 4 |
 
 Questions 3 to 5 were originally filed against the wrong phases; the phase
-documents that actually answer them are the ones listed above. Question 1 moved
-from phase 1 to phase 2 because the document model, not the geometry crate, is
+documents that actually answer them are the ones listed above. Question 3 is
+answered but not finished: the verdict is "not yet", and the evaluation has to
+be run again on a machine with a compositor and a tablet before v0.1.
+
+Question 1 moved from phase 1 to phase 2 because the document model, not the geometry crate, is
 what the benchmark measures, and Phase 2 answered it.

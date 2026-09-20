@@ -60,6 +60,24 @@ macOS in phase 14). Specification in
   GLIBC_2.39 binary. Measured, not theoretical.
 - Relying on FUSE being present anywhere in CI.
 
+## Runtime dependencies the shell introduces (phase 5)
+
+Added by `xarast-shell`, and all of them affect what the AppImage may and
+may not bundle. Nothing here changes the exclusion list; it explains why
+two more entries belong under it.
+
+| Dependency | Reached how | Packaging consequence |
+|---|---|---|
+| `libwayland-client` | `winit` with `wayland-dlopen` | **Never bundled**, already excluded. The `dlopen` feature is what lets the binary start on a host with no Wayland library at all, which is why it is not optional. `octotablet 0.1.0` has no equivalent and was rejected partly for that. |
+| `libxkbcommon`, `libX11`/`libxcb` | `winit` X11 backend | Already excluded. |
+| XDG portals over D-Bus | `rfd` (`xdg-portal` only) and `ashpd` | No library to bundle: it is a D-Bus call. The `gtk3` and `wayland` backends of `rfd` are **off**, so no C toolkit and no non-`dlopen` Wayland client enters the image. A machine with no session bus is handled: every request answers with a reason. |
+| `wl-clipboard-rs` / X11 clipboard | `arboard` with `wayland-data-control` | Pure Rust plus the already-excluded system libraries. |
+| Mesa / Vulkan ICDs | `wgpu` | Already excluded, and must stay so. |
+
+The AppImage size has **not** been re-measured since `winit`, `wgpu`,
+`rfd`, `ashpd`, `arboard` and the egui stack were linked in. The 3.9 MB
+figure above is stale; see the open TODO.
+
 ## Open TODOs
 
 - [ ] Distro smoke matrix (W0.4.8): actually boot the image on Debian 12,
@@ -67,5 +85,6 @@ macOS in phase 14). Specification in
 - [ ] AppStream validation in CI — `appstreamcli validate` is not yet wired up;
       only `desktop-file-validate` runs.
 - [ ] GPG signing of the image and the zsync file (phase 12).
-- [ ] Re-measure the size budget once wgpu, egui and the font stack are linked
-      in; 3.9 MB will not survive phase 5.
+- [ ] Re-measure the size budget now that wgpu, egui, winit, the portal and
+      clipboard stacks and the font stack are linked in; 3.9 MB has not
+      survived phase 5 and the 80 MB phase-5 budget is unverified.
