@@ -227,3 +227,136 @@ Three mechanisms produce a variable size:
 
 ```text
 if no handler is registered for the tag that was read:
+    consume the `size` bytes of the payload without interpreting them
+    carry on with the next record
+```
+
+That is: **skip `size` bytes and carry on**. But there are two critical nuances
+(`Kernel/camfiltr.cpp:5293-5312`, `BaseCamelotFilter::UnrecognisedTag`):
+
+* If the tag is in the **essential** list (`TAG_ESSENTIALTAGS`, tag 11) → **abort the
+  import**: the file cannot be represented faithfully.
+* If the tag is in the **atomic** list (`TAG_ATOMICTAGS`, tag 10) → its **entire subtree
+  must be discarded too** (`StripNextSubTree()`, `Kernel/cxfile.cpp:620-632`), that is,
+  ignore every record up to the `TAG_UP` that closes the `TAG_DOWN` following the unknown
+  record. Reason: if you do not understand a composite node (bevel, contour, shadow,
+  ClipView, live effect), its children are *derived* data that must not be inserted loose
+  into the tree.
+* In any other case → ignore only that record and carry on, accumulating a warning for
+  the user.
+
+The atomic list written by Xara LX (`Kernel/camfiltr.cpp:6996-7013`) is:
+
+```
+TAG_BEVEL(4052) TAG_BEVELINK(4057) TAG_CONTOURCONTROLLER(4066) TAG_CONTOUR(4067)
+TAG_SHADOWCONTROLLER(4050) TAG_SHADOW(4051) TAG_CLIPVIEWCONTROLLER(4084) TAG_CLIPVIEW(4085)
+TAG_CURRENTATTRIBUTES(4119) TAG_LIVE_EFFECT(4125) TAG_LOCKED_EFFECT(4126)
+TAG_FEATHER_EFFECT(4127)
+```
+
+In the corpus there are **739 `TAG_ATOMICTAGS` records of 4 bytes each** (one per tag),
+not a single record with the complete list: the reader must accumulate them all
+(`Kernel/cxfile.cpp:2562-2585` iterates over `size/4` entries per record).
+
+### 2.4. Primitive payload data types
+
+All defined in `Kernel/cxfrec.cpp` (writing ~lines 597-1100, reading ~1148-1660).
+
+| CXF name | Bytes | Encoding | Rust |
+|---|---|---|---|
+| `BYTE` | 1 | unsigned integer | `u8` |
+| `UINT16` / `INT16` | 2 | LE | `u16` / `i16` |
+| `UINT32` / `INT32` | 4 | LE | `u32` / `i32` |
+| `REFERENCE` | 4 | LE, **signed**: >0 = record number; <0 = predefined reference; 0 = error/null | `i32` |
+| `FLOAT` | 4 | IEEE-754 binary32 LE | `f32` |
+| `DOUBLE` | 8 | IEEE-754 binary64 LE | `f64` |
+| `FIXED16` | 4 | `i32` with the binary point between bits 15 and 16 → real value = `raw / 65536.0` (`Kernel/ccmaths.h:116`, `Kernel/fixed16.h`) | `i32` + helper |
+| `ANGLE` | 4 | alias of `FIXED16`, in radians (`Kernel/ccmaths.h:120`) | `i32` + helper |
+| `FIXED24` | 4 | `i32` with 24 fractional bits → `raw / 16777216.0` (`Kernel/fixed24.h:157,264`). Appears only in colour components | `i32` + helper |
+| `DocCoord` | 8 | two `INT32`s (x, y) in millipoints (§5) | `(i32,i32)` |
+| interleaved `DocCoord` | 8 | alternating x/y bytes (§7.3) | same |
+| `Matrix` | 24 | `FIXED16 a, b, c, d` + `INT32 e, f` (`Kernel/cxfrec.cpp:1913-1959`) | see §5.4 |
+| `ASCII-Z` | var | ASCII bytes terminated by `0x00` (`Kernel/cxfrec.cpp:1546-1562`) | `CString`-like |
+| `UNICODE-Z` | var | UTF-16 **LE**, terminated by `0x0000` (2 bytes). Constant `SIZEOF_XAR_UTF16 = 2` (`Kernel/cxfile.h:127`) | `Vec<u16>` → `String` |
+| `UTF16STR` | var | identical to `UNICODE-Z` but with no length limit (`Kernel/cxfrec.cpp:1034-1058`) | same |
+| `CCPanose` | 10 | 10 PANOSE bytes (family, serif, weight, proportion, contrast, strokeVar, armStyle, letterform, midline, xHeight) (`Kernel/cxfrec.cpp:1416-1447`) | `[u8;10]` |
+| `RGBTRIPLE` | 3 | R, G, B (only in `TAG_DEFINEBITMAP_JPEG8BPP` palettes) | `[u8;3]` |
+
+> **Caution:** `TAG_TEXT_STRING` (2201) is the only string that carries **no** terminator:
+> its length is `size / 2` UTF-16 characters. Verified in `TextDesigns/SimpleText.xar`
+> (size 38 = 19 characters, "Single line of text", no NUL).
+
+### 2.5. Rust pseudocode for the record reader
+
+```rust
+pub const XAR_MAGIC: [u8; 8] = [0x58, 0x41, 0x52, 0x41, 0xA3, 0xA3, 0x0D, 0x0A];
+
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub number: u32,   // 1..N, order in the file; it is the key used by references
+    pub tag: u32,
+    pub data: Vec<u8>, // length == size
+}
+
+/// Cursor over a record payload: EVERYTHING is little-endian.
+pub struct Cur<'a> { b: &'a [u8], p: usize }
+
+impl<'a> Cur<'a> {
+    pub fn new(b: &'a [u8]) -> Self { Cur { b, p: 0 } }
+    pub fn remaining(&self) -> usize { self.b.len() - self.p }
+    fn take(&mut self, n: usize) -> Result<&'a [u8], Err> {
+        if self.remaining() < n { return Err(Err::Eof); }
+        let s = &self.b[self.p..self.p + n]; self.p += n; Ok(s)
+    }
+    pub fn u8(&mut self)  -> Result<u8, Err>  { Ok(self.take(1)?[0]) }
+    pub fn u16(&mut self) -> Result<u16, Err> { Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap())) }
+    pub fn i16(&mut self) -> Result<i16, Err> { Ok(self.u16()? as i16) }
+    pub fn u32(&mut self) -> Result<u32, Err> { Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap())) }
+    pub fn i32(&mut self) -> Result<i32, Err> { Ok(self.u32()? as i32) }
+    pub fn f32(&mut self) -> Result<f32, Err> { Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap())) }
+    pub fn f64(&mut self) -> Result<f64, Err> { Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap())) }
+
+    pub fn fixed16(&mut self) -> Result<f64, Err> { Ok(self.i32()? as f64 / 65536.0) }
+    pub fn fixed24(&mut self) -> Result<f64, Err> { Ok(self.i32()? as f64 / 16_777_216.0) }
+    pub fn angle(&mut self)   -> Result<f64, Err> { self.fixed16() }          // radians
+    pub fn reference(&mut self) -> Result<i32, Err> { self.i32() }
+
+    pub fn coord(&mut self) -> Result<Coord, Err> { Ok(Coord { x: self.i32()?, y: self.i32()? }) }
+
+    /// 8 bytes with the bytes of X and Y interleaved, from MSB to LSB.
+    pub fn coord_interleaved(&mut self) -> Result<Coord, Err> {
+        let b = self.take(8)?;
+        let x = i32::from_be_bytes([b[0], b[2], b[4], b[6]]);
+        let y = i32::from_be_bytes([b[1], b[3], b[5], b[7]]);
+        Ok(Coord { x, y })
+    }
+
+    pub fn matrix(&mut self) -> Result<Matrix, Err> {
+        Ok(Matrix { a: self.fixed16()?, b: self.fixed16()?, c: self.fixed16()?,
+                    d: self.fixed16()?, e: self.i32()?,     f: self.i32()? })
+    }
+
+    pub fn ascii_z(&mut self) -> Result<String, Err> {
+        let mut v = Vec::new();
+        loop { let c = self.u8()?; if c == 0 { break } v.push(c); }
+        Ok(String::from_utf8_lossy(&v).into_owned())
+    }
+
+    pub fn utf16_z(&mut self) -> Result<String, Err> {
+        let mut v = Vec::new();
+        loop { let c = self.u16()?; if c == 0 { break } v.push(c); }
+        Ok(String::from_utf16_lossy(&v))
+    }
+
+    /// The rest of the record as UTF-16 with no terminator (TAG_TEXT_STRING).
+    pub fn utf16_rest(&mut self) -> Result<String, Err> {
+        let mut v = Vec::new();
+        while self.remaining() >= 2 { let c = self.u16()?; if c == 0 { break } v.push(c); }
+        Ok(String::from_utf16_lossy(&v))
+    }
+}
+```
+
+---
+
+## 3. Compression

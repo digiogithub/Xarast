@@ -88,3 +88,79 @@ gained (ranges, units, invariant notes).
 | 5.x | `enum TranspType` (`fillval.h:144`) | Likewise, with a note on which values are not legal in the document and a pointer to §2.7 of `03`. |
 | 5.x | `RampItem` / `ColRampItem` / `TranspRampItem` / `FillRamp` (`fillramp.h:134-243`) | Class definitions → class/reference/contents table. |
 | 5.x | Profile accessors of `CProfileBiasGain` (`fillval.h:328-332`) | Declarations → one sentence. |
+| 5.x | Interface of `CProfileBiasGain` (`biasgain.h:170-243`) | Declarations → operation/role table. |
+| 5.8 | Fields of `FractalFillAttribute` (`fillval.h:913`) | Declarations → table with ranges and units. |
+| 5.8 | Fields of `NoiseFillAttribute` | Likewise. |
+| 5.8 | Fractal/noise generation and cache (`fillval.h:274-344`) | Declarations → operation/role table. |
+| 5.x | Fill distortion and blending interface (`fillval.h:288-337`) | Declarations → table. |
+| 5.x | Fields of `DocColour` (`doccolor.h`) | Declarations → table. |
+| 6.x | `ObjChangeFlags` flags (`objchge.h`) | Bitfields → flag/what-it-announces table. |
+| 6.x | `enum OpPermissionState` | Enumeration → a sentence with the three values and where they are encoded. |
+| 6.x | Condition in `NodeCompound::OnChildChange` (`nodecomp.cpp:272-320`) | **Function body**: rewritten as the rule it implements, in one sentence. |
+| 6.x | Loop in `Application::RegenerateNodesInList` (`app.cpp:1830-1880`) | **Function body**: neutral pseudocode + an explanation of why it invalidates the box twice. |
+| 6.5 | "Tight groups" (`group.h:204-209`, indented block) | Declarations → prose, keeping the 72,000/dpi formula. |
+| 6.x | Boxes of `NodeRenderableBounded` (`node.h:1425-1440`) | Declarations → table. |
+| 6.x | Bitmap-caching interface (`node.h:1448-1450` and around it) | Declarations → table + a sentence on the three static switches. |
+| 6.x | `CBitmapCacheKey`, `CCachedBitmap`, `CBitmapCache` (`bitmapcachekey.h:104`, `bitmapcache.h:114-161`) | Class definitions → three tables + a description of the maximum-size policy. |
+| 6.6 | State of `NodeBlend` (`nodeblnd.h:129`) | Declarations → table. |
+| 6.6 | `BlendPath` and `BlendRef` (`nodebldr.h:140`, `:287`) | Class definitions → table + prose. |
+| 6.7 | Interface of `MouldGeometry` (`moldshap.h`) | Virtual declarations → operation/role table. |
+| 6.8 | Contour state (`ncntrcnt.h:153` and derivatives) | Declarations → table, highlighting that the sign of the width encodes inside/outside. |
+| 6.9 | Shadow state (`nodecont.h:215` and derivatives) | Declarations → table, grouping the "resolution it was generated at" fields. |
+| 6.10 | Bevel state (`nbevcont.h:125` and derivatives) | Declarations → table. |
+| 6.11 | ClipView state (`ndclpcnt.h:146`) | Declarations → table. |
+| 6.12 | `NodeEffect` / `NodeBitmapEffect` (`nodepostpro.h:130`, `nodeliveeffect.h:163`) | Tree with member declarations → class/base/state table. |
+| 6.13 | `CanBecomeA` / `DoBecomeA` (`node.h:656-657`) | Declarations → prose, explaining what the parameter carries. |
+| 7.2 | State of `TextStory` (`nodetxts.h:456-460` ff.) | Declarations → table, with the units made explicit. |
+| 7.3 | `TextStoryInfo` | Declarations → table. |
+| 7.3 | `TextLineInfo` (`nodetxtl.h:253`) | Declarations → table, keeping the note that the sum of advances excludes the last tracking value. |
+| 7.3 | Character positioning parameters | Declarations → table, marking which ones are input constants. |
+| 7.3 | Cached attributes of `TextLine` | Declarations → table, keeping the note on why they are cached. |
+| 7.4 | `VisibleTextNode` (`nodetext.h:166-201`) | Declarations → table + prose for the predicates. |
+| 7.4 | Metrics of `AbstractTextChar` (`nodetext.h:271-278`) | Declarations → table. |
+| 7.5 | Aborted primitives of `FormatRegion` (`nodetxtl.h:130`) | **Body with `ERROR3`**: rewritten as the sentence "the format region only measures, it never paints". |
+| 7.5 | Accessors of `FormatRegion` (`nodetxtl.h:173` ff.) | Declarations with inline bodies → query/returns/origin table. |
+| 8.1 | Fields of `KernelBitmap` (`bitmap.h:627-634`) | Declarations → table. |
+| 8.2 | Fields of `BitmapInfo` (`bitmpinf.h`) | Declarations → table. |
+| 8.3 | JPEG without recompression: `WritePalette` / `Convert24To8` (`bitmap.h:514-516`, indented block) | Declarations → prose. |
+| 8.3 | `KernelBitmapRef` (`bitmap.h:664-673`) | Declarations → table + a description of reference counting by presence in the tree. |
+| 8.5 | Fields of `NodeBitmap` (`nodebmp.h:180`) | Declarations → table. |
+| 9.1 | `RangeControl` (`range.h:219`) + `Range` / `SelRange` | Bitfields and classes → table + sentence. |
+| 9.1 | Cache of `SelRange` | Declarations → table, keeping the warning that the counter is invalid if the range is not cached. |
+| 9.2 | `Operation` (`ops.h:323-404`) | Class definition → table grouped by families of operation. |
+| 9.2 | Flags of `UndoableOperation` | Bitfields → table. |
+| 9.3 | `Action` (`ops.h:559-608`) | Class definition → member/role/reference table. |
+| 9.3 | `ActionList` (`ops.h:196-208`) | Declarations → prose. |
+| 9.4 | Fields of `OperationHistory` (`ophist.h:219-232`) | Declarations → table, keeping the fact that the budget is **in bytes**. |
+| 9.4 | Interface of `OperationHistory` | Declarations → grouped table. |
+| 9.5 | Enumerations and copy operations (`node.h:245-256`, `:418-787`) | Enumerations and declarations → table + prose. |
+| 9.x | `NodeHidden` (`node.h:1475-1481`, indented block) | Class definition → prose. |
+| 4.2 | Pseudocode of the render traversal (`rndrgn.cpp:7076-7130`) | An untagged block that mixed pseudocode with C++ syntax (`pNode->…`, `;`): neutralised into pure pseudocode in Spanish. |
+
+### `03-render-engine.md` — 10 blocks
+
+| § | Original content | Rationale |
+|---|---|---|
+| 1.2 | `struct GCONTEXT` (`gconsts.h:237`) | Struct definition **from a proprietary header** (CDraw, not GPL): replaced by its description (validation word + opaque block) and the sentinel value. |
+| 1.x (h) | Signature of `GColour_SetTilePattern` (`gdraw.h:351`) | Literal signature from a proprietary header → parameter/type/role table, which additionally explains what each translation table is for. |
+| 1.x (j) | Three `GDraw2_*` signatures (`gdraw2.h`) | Likewise → function/inputs/role table. |
+| 2.1 | `struct GMATRIX` + `const INT32 FX` (`gconsts.h:310`, `:354`) | Struct definition → field/width/meaning table. |
+| 2.1 | Construction of the matrix (`grndrgn.cpp:5297-5340`) | **Function body**: rewritten as a 3-step procedure, keeping the 2.30 fixed point, the 30 fractional bits and the sign change of the translation. |
+| 2.6.2 | Four gradient-table `struct`s (`gconsts.h:248`, `:262`) | Struct definitions → structure/fields/use table. |
+| 2.6.x | Ramp construction loop with a profile (`gradtbl.cpp:1206`) | **Function body**: neutral pseudocode. |
+| 2.6.x | Fixed-point interpolation (`gradtbl.cpp:1562`) | **Function body**: neutral pseudocode, explaining that the added term is the rounding to +0.5. |
+| 2.7 | `GRenderRegion::MapTranspTypeToGDraw` (`grndrgn.cpp:8844`) | **Function body**: rewritten as the rule it implements (a change of base between two contiguous numberings, in two stretches). |
+| 2.8 | `PlasmaFractalFill::Adjust` (`fracfill.cpp:213-262`) | **Function body**: neutral pseudocode with the two components (noise and attraction) named. |
+
+### `04-feature-inventory.md`
+
+No code blocks, as expected. Only the clean-room notice was added.
+
+### `05-technology-stack.md` and `06-xarast-format.md`
+
+No C++ blocks. Everything they contain is our own material (TOML for our
+workspace, CI YAML, `.xarast` XML, RELAX NG schemas, proposed Rust, console
+output) or published third-party facts. Only the notice was added. In `05` an
+update note about the licence was also added (see "ATTENTION").
+
+---

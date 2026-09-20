@@ -129,3 +129,129 @@ Traversals (`node.h:601‑640`):
 - `FindNextNonHidden()` / `FindPrevNonHidden()` — skip `NodeHidden` nodes.
 - `FindParentSpread()`, `FindOwnerDoc()`, `FindFirstChapter()`, `FindParent(CCRuntimeClass*)`.
 - `IsUnder(pTestNode)` — checks precedence in render order.
+
+### 1.4 Render order and the ink/paper "contract"
+
+The central architectural distinction is:
+
+- ***Paper* nodes** (`NodeRenderablePaper`, `npaper.h:125`) are rendered **before** their children (background).
+- ***Ink* nodes** (`NodeRenderableInk`, `ink.h:139`) are rendered **after** their children (the children are its attributes, which must be active when the object is drawn).
+
+The actual loop lives in `RenderRegion::RenderTree()`, `rndrgn.cpp:~7000‑7150`. The skeleton:
+
+```
+for each node in order:
+    state := ask the node what to do with its subtree        # node.h:390 (virtual)
+    if state == ROOTANDCHILDREN and the node has children:
+        save the attribute context                           # rndrgn.cpp:7076  (descending)
+        descend to the first child and repeat
+    if state ∈ {ROOTONLY, ROOTANDCHILDREN, RUNTO}:
+        render the node                                      # draws, or pushes an attribute
+    tell the node its subtree has finished
+    on returning to the parent:
+        render the parent                                    # the composite's ink is drawn HERE
+        restore the attribute context                        # rndrgn.cpp:7130  (ascending)
+```
+
+`SubtreeRenderState` (`node.h:203`):
+
+| Value | Meaning |
+|---|---|
+| `SUBTREE_NORENDER` | Skip the node and its subtree (invisible layer, locked layer during hit-testing…). |
+| `SUBTREE_ROOTONLY` | Render only the node (the `NodeAttribute` case, `nodeattr.cpp:477`). |
+| `SUBTREE_ROOTANDCHILDREN` | Descend. |
+| `SUBTREE_JUMPTO` | Jump to another node (caches, effects). |
+| `SUBTREE_RUNTO` | Advance without drawing but **keeping the attribute stack** correct. |
+
+> **Key semantic consequence (§4):** `SaveContext()`/`RestoreContext()` are emitted **on entering and leaving a child list**. Therefore the scope of an attribute node is *the sibling list it lives in, from its position to the end of that list, including the subtrees of those siblings and the parent node*.
+
+---
+
+## 2. Node class hierarchy
+
+### 2.1 General diagram
+
+```mermaid
+graph TD
+    CCObject["CCObject (bespoke RTTI)"]
+    Node["Node<br/><i>node.h:344</i><br/>links, flags, tag"]
+    NR["NodeRenderable<br/><i>node.h:1214</i><br/>transformable, selectable, blobs"]
+    NRB["NodeRenderableBounded<br/><i>node.h:1317</i><br/>bounding box + bitmap cache + snap"]
+    NRI["NodeRenderableInk<br/><i>ink.h:139</i><br/>drawing object (rendered AFTER children)"]
+    NRP["NodeRenderablePaper<br/><i>npaper.h:125</i><br/>structure/paper (rendered BEFORE children)"]
+    NA["NodeAttribute<br/><i>nodeattr.h:185</i><br/>container of an AttributeValue"]
+    NH["NodeHidden<br/><i>node.h:1475</i><br/>hidden-node marker (undo)"]
+
+    CCObject --> Node
+    Node --> NR
+    Node --> NH
+    Node --> Others["InsertionNode · StartDocument · EndDocument<br/>NodeSetSentinel · NodeSetProperty · NodeBarProperty"]
+    NR --> NRB
+    NR --> NA
+    NRB --> NRI
+    NRB --> NRP
+    NRB --> NBB["NodeBevelBegin <i>nodebev.h:430</i>"]
+    NRP --> Paper["NodeDocument · Chapter · Spread · Page · Layer · NodeGrid"]
+    NRI --> Ink["(see breakdown)"]
+```
+
+### 2.2 Breakdown of `NodeRenderableInk`
+
+```mermaid
+graph TD
+    NRI["NodeRenderableInk<br/><i>ink.h:139</i>"]
+
+    NRI --> NP["NodePath <i>nodepath.h:128</i>"]
+    NRI --> NSS["NodeSimpleShape <i>nodeshap.h:129</i>"]
+    NRI --> NRS["NodeRegularShape <i>nodershp.h:145</i>"]
+    NRI --> NC["NodeCompound <i>nodecomp.h:165</i>"]
+    NRI --> NGL["NodeGuideline <i>guides.h:130</i>"]
+    NRI --> NBL["NodeBlender <i>nodebldr.h:360</i>"]
+    NRI --> NCT["NodeContour <i>nodecntr.h:121</i>"]
+    NRI --> NSH["NodeShadow <i>nodeshad.h:138</i>"]
+    NRI --> NBV["NodeBevel <i>nodebev.h:132</i>"]
+    NRI --> NCV["NodeClipView <i>nodeclip.h:123</i>"]
+    NRI --> NMB["NodeMouldBitmap <i>ndmldink.h:124</i>"]
+    NRI --> NBM["NodeBrushMaker <i>ndbrshmk.h:154</i>"]
+    NRI --> BTC["BaseTextClass <i>nodetxts.h:125</i>"]
+
+    NP --> NBP["NodeBlendPath <i>ndbldpth.h:119</i>"]
+    NP --> NMP["NodeMouldPath <i>ndmldpth.h:117</i>"]
+    NBP --> NBrP["NodeBrushPath <i>ndbrshpt.h:121</i>"]
+
+    NSS --> NRect["NodeRect <i>noderect.h:122</i>"]
+    NSS --> NElip["NodeEllipse <i>nodeelip.h:120</i>"]
+    NRect --> NBmp["NodeBitmap <i>nodebmp.h:124</i>"]
+    NBmp --> NABmp["NodeAnimatingBitmap <i>nodeabmp.h:111</i>"]
+    NBmp --> NCBmp["NodeCacheBitmap <i>ndcchbmp.h:111</i>"]
+
+    NC --> NG["NodeGroup <i>group.h:122</i>"]
+    NC --> NE["NodeEffect <i>nodepostpro.h:130</i>"]
+    NG --> NBlend["NodeBlend <i>nodeblnd.h:129</i>"]
+    NG --> NMould["NodeMould <i>nodemold.h:161</i>"]
+    NG --> NMoulder["NodeMoulder <i>nodemldr.h:134</i>"]
+    NG --> NMG["NodeMouldGroup <i>ndmldgrp.h:147</i>"]
+    NG --> NBrush["NodeBrush <i>nodebrsh.h:121</i>"]
+    NG --> NCC["NodeContourController <i>ncntrcnt.h:153</i>"]
+    NG --> NBC["NodeBevelController <i>nbevcont.h:125</i>"]
+    NG --> NCVC["NodeClipViewController <i>ndclpcnt.h:146</i>"]
+    NE --> NSC["NodeShadowController <i>nodecont.h:215</i>"]
+    NE --> NBE["NodeBitmapEffect <i>nodeliveeffect.h:163</i>"]
+    NBE --> NLE["NodeLiveEffect <i>nodeliveeffect.h:293</i>"]
+    NBE --> NLckE["NodeLockedEffect <i>nodeliveeffect.h:376</i>"]
+    NLE --> NFE["NodeFeatherEffect <i>nodeliveeffect.h:463</i>"]
+
+    BTC --> TS["TextStory <i>nodetxts.h:260</i>"]
+    BTC --> TL["TextLine <i>nodetxtl.h:287</i>"]
+    BTC --> VTN["VisibleTextNode <i>nodetext.h:126</i>"]
+    VTN --> ATC["AbstractTextChar <i>nodetext.h:214</i>"]
+    VTN --> Caret["CaretNode <i>nodetext.h:423</i>"]
+    ATC --> TChar["TextChar <i>nodetext.h:289</i>"]
+    ATC --> Kern["KernCode <i>nodetext.h:349</i>"]
+    ATC --> HTab["HorizontalTab <i>nodetext.h:387</i>"]
+    ATC --> EOL["EOLNode <i>nodetext.h:474</i>"]
+```
+
+### 2.3 Complete catalogue of node types
+
+#### 2.3.1 Infrastructure (derive directly from `Node`, not renderable)
