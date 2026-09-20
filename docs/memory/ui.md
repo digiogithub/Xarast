@@ -194,3 +194,272 @@ invent them.
   landed its API: `UiCommand` → `Intent` is a one-function translation,
   and `Unit`, `ZoomTarget` and the theme preference exist on both sides
   and should converge on the `xarast-app` spelling.
+
+---
+
+## Shell and platform integration
+
+> Owner: the Phase 5 `xarast-shell` workstream (W2 shell foundations, W3
+> Wayland/portals/clipboard/DnD, W4 input and tablet). The toolkit and
+> panel findings above are the `xarast-ui` workstream's; nothing here
+> rewrites them.
+
+### Architecture §7 question 3 — **closed: do not pin the `winit` 0.31 beta yet**
+
+**Verdict: stay on `winit 0.30.13`.** Deferred, not rejected — and it must
+be re-opened before v0.1, because a drawing application without stylus
+pressure is not finishable.
+
+The phase document's decision rule is "pass E1–E7 → pin". **E1–E7 are all
+runtime criteria and not one of them can be executed in this
+environment**: there is no Wayland socket, no X11 socket, no GPU adapter,
+no tablet and no `uinput`. Pinning a beta on the strength of evidence that
+does not include running it would be exactly the claim this phase is not
+allowed to make. What *could* be checked was checked, and is recorded
+below so the next attempt starts from facts rather than from the
+changelog.
+
+**E1–E7: what was and was not measured.**
+
+| ID | Criterion | Result |
+|---|---|---|
+| E1 | Build and run on GNOME/mutter, KDE/kwin, sway | **Builds**: `winit 0.31.0-beta.3` with `wgpu 30.0.1` on rustc 1.94.1, clean, 55 s, in a throwaway probe crate. **Running on any compositor: unmeasured.** |
+| E2 | Pressure, tilt, twist on all three, real device or `uinput` | **Unmeasured.** The API and the Wayland implementation are present (see below); no device, no `uinput`, no compositor here. |
+| E3 | Fractional scaling at 1.25 / 1.5 / 2.0 | **Unmeasured.** |
+| E4 | CSD on GNOME via SCTK + `sctk-adwaita` | **Unmeasured.** The `wayland-csd-adwaita` feature still exists in 0.31 and compiles. |
+| E5 | Redesigned `DragEntered`/`DragMoved`/`DragDropped`/`DragLeft` with `SendData::Uris` | **Unmeasured.** The events exist in `winit-core` 0.31. |
+| E6 | `PinchGesture`, `PanGesture`, `RotationGesture` reach the viewport | **Unmeasured**, but the Wayland implementation exists: `winit-wayland-0.31.0-beta.3/src/seat/pointer/pointer_gesture.rs`. |
+| E7 | Eight-hour soak, no leak, no protocol error | **Unmeasured.** |
+
+**What the source says, which is the part that could be checked.**
+
+1. `winit-core-0.31.0-beta.3/src/event.rs` really does carry
+   `PointerSource::TabletTool { kind: TabletToolKind, data: TabletToolData }`,
+   and `TabletToolData` really does carry `force: Option<Force>`,
+   `tangential_force: Option<f32>`, `twist: Option<u16>`,
+   `tilt: Option<TabletToolTilt>` and `angle: Option<TabletToolAngle>`.
+2. The Wayland backend implements it for real, not as a stub:
+   `winit-wayland-0.31.0-beta.3/src/types/wp_tablet_input_v2.rs` dispatches
+   `zwp_tablet_tool_v2`, maps every `ToolType` onto a `TabletToolKind`, and
+   fills tilt and the tool buttons.
+3. **X11 gains nothing.** `winit-x11-0.31.0-beta.3/src` contains no tablet
+   code at all — a grep for `TabletTool` finds one unrelated comment. X11
+   pressure needs `octotablet` in 0.31 exactly as much as in 0.30, so the
+   beta is not the answer to the X11 half of the problem.
+4. **`winit 0.30` has no tablet API whatsoever.** Its richest pressure
+   channel is `Touch { force }`, documented as always `None` on Wayland
+   and X11. So the fallback's cost is not "worse pressure", it is *no*
+   pressure.
+5. **`accesskit_winit 0.34` depends on `winit 0.30.13`.** Measured, not
+   assumed: adding it to the 0.31 probe resolved a second `winit` into the
+   graph (`cargo tree -i winit@0.30.13` → `accesskit_winit v0.34.0`).
+   Adopting 0.31 today therefore means either two `winit` versions linked
+   into one binary or a hand-written AT-SPI adapter over `accesskit_unix`.
+   That is a cost the changelog does not mention and it is the single
+   biggest reason the beta is not worth taking *this week*.
+6. 0.31 is a structural break, not a version bump: the crate is split into
+   `winit-core`/`-common`/`-wayland`/`-x11`/…, `ActiveEventLoop` and
+   `Window` become `dyn` traits, `create_window` returns
+   `Box<dyn Window>`, `inner_size` becomes `surface_size`, window creation
+   moves from `resumed` to a new `can_create_surfaces` callback, and the
+   `rwh_06` Cargo feature is gone (raw-window-handle 0.6 is now
+   unconditional). Migrating blind — with no way to run the result — while
+   two sibling crates are being written against the 0.30 loop is the
+   highest-risk change available in this phase.
+
+**What the fallback costs us, precisely.**
+
+| Loss | Consequence today | When it is paid back |
+|---|---|---|
+| No tablet axes at all | `StrokeSample::pressure` is always `None`; tools draw at full width through `pressure_or_full()` | A backend swap. The whole pipeline — `ToolAxes` → `normalise` → `SampleQueue` — is written and unit-tested against axes that no backend yet supplies |
+| No trackpad gestures on Linux | `winit 0.30`'s `PinchGesture`/`PanGesture`/`RotationGesture` are documented **macOS and iOS only**; on Wayland they never fire. Pinch-zoom degrades to the scroll wheel | Same swap; `GestureEvent` already exists and the translator already routes them |
+| No drop position, no multi-file grouping | `winit 0.30` emits one `HoveredFile`/`DroppedFile` **per file, with no coordinates** | `DragEvent` already carries `paths: Vec<PathBuf>` and `at: Option<PhysicalPos2>`; the newer backends simply fill them |
+| No `file:` URI payloads | Nothing today; the decoder exists and is tested | `input::translate::parse_uri_list` is already written and covered, because X11 XDND and `winit` 0.31 both hand over `text/uri-list` |
+
+**The fallback that was *not* taken, and why.** `winit 0.30 + vendored
+octotablet` is the phase document's pre-planned answer to a failed E2. It
+is not adopted now, for a measured reason on top of the known one
+(crates.io frozen at 0.1.0 since 2024, bus factor 1): **`octotablet 0.1.0`
+has no `dlopen` path for `wayland-client`.** Building it here fails in
+`wayland-sys`'s build script demanding `wayland-client.pc`, because
+`octotablet` exposes no feature that turns `wayland-sys/dlopen` on. That
+hard-links `libwayland-client.so` into the binary, which collides with
+`packaging.md` decision 2 and invariant 3 — the AppImage must start on a
+host that has no Wayland client library. Vendoring it therefore means
+vendoring *and patching* it, not just copying it. That is a real cost and
+it should be paid deliberately, when someone can also run E1–E7.
+
+**Re-open this when** any of the following happens, and before v0.1 in any
+case: a machine with a compositor and a tablet is available to run E1–E7;
+`winit` 0.31 reaches stable; or `accesskit_winit` and `egui` adopt 0.31.
+All of `winit` is behind `xarast-shell` and, within it, behind
+`input::translate` — criterion 16 holds and the switch is one module plus
+a version line.
+
+### Current state
+
+`crates/xarast-shell`, building on the phase 0 walking skeleton (window,
+surface, resize, scale change, `--selftest-window`, cold-start
+instrumentation), which was extended rather than replaced.
+
+| Module | What it owns | State |
+|---|---|---|
+| `scale` | `ScaleFactor`, `PhysicalSize`, `LogicalSize`, `PhysicalPos` | Done; the single owner of the fractional scale |
+| `display` | `DisplayServer`, `DisplayEnvironment`, `PlatformCapabilities`, `headless_skip_reason` | Done; the X11-versus-Wayland difference table in executable form |
+| `decorations` | `DecorationPlan`, `DecorationMode` | Done; GNOME ⇒ CSD mandatory, KDE/wlroots ⇒ SSD expected, XWayland ⇒ SSD |
+| `input::event` | `ShellEvent` and everything under it | Done; the platform-neutral contract |
+| `input::keyboard` | `Modifiers` with the Xara roles, `Key`, `KeyEvent`, `ModifierTracker`, `Shortcut`, `ShortcutMap<C>` | Done |
+| `ime` | `ImeEvent`, `ImeState`, `ImeCursorArea` | Seam only, fully tested; phase 9 fills it |
+| `input::tablet` | `ToolAxes`, `StrokeSample`, `normalise`, `TabletSource`, `MouseOnlySource`, `ScriptedSource` | Done; no backend supplies real axes yet (see the verdict above) |
+| `input::coalesce` | `SampleQueue` | Done; never drops a sample |
+| `input::translate` | `winit` 0.30 → `ShellEvent`, `parse_uri_list` | Done; **the only module phase 14 rewrites** |
+| `portal` | `PortalService` on a services thread, `PortalHandle`, `rfd`+`ashpd` | Done; **the dialogs themselves are unmeasured** — no D-Bus session bus here |
+| `clipboard` | `Clipboard` trait, `SystemClipboard` (`arboard`), `NullClipboard` | Done; **unmeasured** — no display server here |
+| `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest` | Done; **the GPU path is unmeasured** — `wgpu` enumerates zero adapters here |
+
+100 unit tests, all passing with no compositor and no GPU.
+
+### Decisions taken (and why)
+
+1. **`winit 0.30.13`, not the 0.31 beta.** Above.
+2. **One `ScaleFactor` owner.** `scale::ScaleFactor` is constructed in the
+   translator from the window and handed downwards; the canvas never reads
+   the window and the UI never computes its own `pixels_per_point`. Its
+   constructor is validating — a non-finite or non-positive factor
+   collapses to 1.0 and anything outside 0.25–8.0 is clamped, because a
+   poisoned scale divides into every later coordinate. Sizes **round**,
+   they do not truncate: at 1.5× a 801-unit window truncates to 1201 px
+   and leaves an unpainted column.
+3. **`ShellEvent` is the contract, `input::translate` is the only thing
+   phase 14 replaces.** No type above the shell mentions `winit`. The
+   model is shaped to the *richer* platform — `DragEvent` carries a path
+   list and an optional position even though 0.30 supplies neither — so
+   the newer backends fill fields rather than change signatures.
+4. **`ToolAxes` is the tablet seam, not a `winit` type.** A backend
+   reports raw axes; `tablet::normalise` is the one place that decides
+   what they mean. That is what makes pressure testable with no device:
+   `ScriptedSource` replays a stroke through the real pipeline.
+5. **The sample queue grows; it is not a ring.** Every pointer sample of a
+   frame must reach the application (a Wacom samples at ~200 Hz and the
+   compositor coalesces to frame rate). A fixed ring would make sample
+   loss silent and load-dependent, which is the worst failure mode
+   available to a drawing tool. `SampleQueue` records a high-water mark
+   instead, so an unreasonable burst shows up in diagnostics rather than
+   in the geometry.
+6. **Modifiers are sampled, never latched.** `ModifierTracker` publishes a
+   change even when no pointer event accompanies it, because `Ctrl`,
+   `Shift` and `Alt` change what a drag is doing *while* it happens
+   (`research/04 §4.9` item 4). Losing focus clears them: a stale `Ctrl`
+   silently constrains the next drag. Xara's names are used for the roles
+   — `constrain()`, `adjust()`, `alternative()` — so the code reads as the
+   feature inventory does and macOS can remap one function in phase 14.
+7. **`Shortcut::works_in_drag` is opt-in.** Everything else is suppressed
+   mid-drag, so a stray keystroke cannot run a command in the middle of
+   one; the numeric-keypad snapping toggles are the reason the exception
+   exists.
+8. **The shortcut *table* is not the shell's.** `ShortcutMap<C>` is
+   generic over the command type. The command vocabulary belongs to
+   `xarast-app`; the shell owns only the matching rule.
+9. **Portals on a services thread, and no `async` above it.** `rfd` with
+   `xdg-portal` only — its `gtk3` and `wayland` backends are off, so the
+   portal path is the one taken inside an AppImage or a Flatpak, and no C
+   toolkit reaches the image. `ashpd` with `async-io`, not `tokio`:
+   nothing needs a full runtime and `research/05 §10.1` says no async in
+   the core. The main thread posts a `PortalRequestId` and later receives
+   a `PortalEvent`; a dialog can never wedge the frame loop.
+10. **Portal availability is decided before the first request.** If
+    `DBUS_SESSION_BUS_ADDRESS` is unset and `$XDG_RUNTIME_DIR/bus` is
+    absent, every request answers `Failed` with that reason immediately,
+    instead of a forty-second D-Bus timeout.
+11. **The clipboard's Wayland caveat is modelled, not hidden.**
+    `Clipboard::persists_after_focus_loss()` is `false` on Wayland and
+    `true` on X11, and the status bar is meant to say so. A copy followed
+    by a quit loses the data unless a data-control manager is present;
+    `arboard`'s `wayland-data-control` feature is on so that the cases
+    where it *can* persist do.
+12. **Nothing fails for want of a display.** `run` returns
+    `ShellError::NoDisplay` with a reason and `is_missing_display()` says
+    so; `--selftest-window` prints "skipped" and exits **0**;
+    `system_clipboard()` returns a `NullClipboard` that explains itself.
+    A red CI result on a machine that simply has no compositor teaches
+    everyone to ignore the check.
+13. **`ShellApp` has defaults on every method.** The self-tests and the
+    cold-start measurement implement nothing, and the default
+    `FrameRequest` is `Idle`, so an application with no opinion parks the
+    loop rather than spinning it.
+14. **No `unsafe` anywhere in the crate.** None was needed: `winit` and
+    `wgpu` are safe interfaces and the platform-specific setters are
+    behind `cfg`, not behind pointers.
+
+### Invariants that must not be broken
+
+1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
+   phase criterion 16). Nothing else may name them, and within the crate
+   `winit` types appear only in `input::translate` and `window`.
+2. **The app id, the desktop entry basename and `StartupWMClass` are all
+   `xarast`** (`packaging.md` invariant 1). `lib.rs`'s
+   `app_id_matches_the_desktop_entry` test enforces it; it reads the real
+   `packaging/linux/xarast.desktop`.
+3. **One `ScaleFactor` per frame, computed by the shell.** A surface size
+   and the scale it was computed under always travel together —
+   `ShellEvent::Resized` carries both — so no consumer can pair a new size
+   with a stale factor.
+4. **Every pointer sample of a frame reaches the application.**
+   `SampleQueue::received() == delivered()` after a drain, asserted.
+5. **No `async` outside the services thread.**
+6. **A missing display, a missing session bus or a missing adapter is a
+   diagnosis, never a panic.** Every public entry point either returns an
+   error naming the cause or returns a working object that explains
+   itself.
+7. **A surface is never configured at zero size.** `PhysicalSize::new`
+   clamps to 1×1 and `PhysicalSize::is_degenerate` is what the resize path
+   checks; a minimised window reports 0×0 on Wayland.
+
+### Dead ends (do not retry)
+
+- **Adding `accesskit_winit 0.34` alongside `winit 0.31`.** It resolves a
+  second `winit 0.30.13` into the graph. Measured with `cargo tree -i`.
+- **`winit`'s `rwh_06` feature on 0.31.** It no longer exists; passing it
+  fails resolution outright. raw-window-handle 0.6 is unconditional there.
+- **`octotablet 0.1.0` as a drop-in.** Its `wayland-client` has no
+  `dlopen` feature, so it needs `wayland-client.pc` to build and links
+  `libwayland-client.so` hard. Vendor *and patch*, or not at all.
+- **`rfd` with default features.** They include the `wayland` backend,
+  which drags in the same non-`dlopen` `wayland-client`; `xdg-portal`
+  alone is what builds and what belongs in the AppImage.
+- **`arboard` without `image-data`.** `get_image`/`set_image` simply do
+  not exist; the feature is what compiles them in.
+- **A fixed-capacity ring buffer for stroke samples.** See decision 5.
+
+### Open TODOs
+
+- **Run E1–E7 for real.** The whole verdict above is provisional on a
+  machine with a compositor. Nothing in this phase measured a compositor
+  behaviour, and nothing here should be quoted as if it had.
+- **Hardware tablet validation is outstanding** (phase risk K6), and so is
+  the `uinput` virtual tablet: neither exists in this environment.
+  `ScriptedSource` covers the pipeline; it does not cover the driver.
+- Portal dialogs, clipboard round-trips and drag-and-drop are **written
+  and unmeasured**. They need a session bus and a compositor.
+- `wgpu` adapter selection, the four-level capability ladder (S4/U2.5) and
+  frame pacing beyond `Wait`/`WaitUntil` are still the walking skeleton's:
+  one adapter request, one clear pass. They need an adapter to develop
+  against.
+- **Live** colour-scheme change notification: the settings portal is read
+  once at start-up. `ashpd` exposes a signal stream; wiring it needs a bus
+  to test against.
+- AccessKit transport (S10/U4.2) is **not wired**. The blocker is the
+  version pairing the UI note records; resolve it together with the
+  `winit` question, since `accesskit_winit` is what couples them.
+- The `egui`→`winit` shim (S9/U4.1) is **not written**. It is `xarast-ui`'s
+  boundary as much as the shell's, and it should be built directly on
+  `ShellEvent` rather than on `winit`, so that phase 14 gets it for free.
+- **Bridge `ShellEvent` to `xarast_app::Intent`.** `xarast-app` landed its
+  `Intent`/`Changed` contract while this crate was being written, so the
+  shell still defines its own `Modifiers` and `PointerButton` at the
+  platform boundary. That is correct layering — the shell's are physical,
+  the app's are semantic — but the translation from one to the other has
+  to be written, and it belongs in `xarast-app` or in a thin adapter, not
+  in `input::translate`.
+- X11 pressure via `octotablet` remains deferred; X11 is a documented
+  degradation (`PlatformCapabilities::X11`), not a target.
