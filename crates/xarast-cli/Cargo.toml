@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 xarast-app = { path = "../xarast-app" }
 xarast-xar = { path = "../xarast-xar" }
+xarast-doc = { path = "../xarast-doc" }
 xarast-format = { path = "../xarast-format" }
 xarast-io = { path = "../xarast-io" }
 xarast-render = { path = "../xarast-render" }

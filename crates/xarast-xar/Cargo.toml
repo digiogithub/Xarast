@@ -11,14 +11,16 @@ authors.workspace = true
 [lints]
 workspace = true
 
-# NOTE: this crate deliberately does **not** depend on `xarast-doc`. Phase 3 is
-# split in two: everything up to a typed, model-independent representation
-# lives here, and the mapping into the document model is added on top once
-# `xarast-doc` lands. Keeping the dependency out until then is what lets the
-# importer be fuzzed and snapshot-tested on its own.
+# Phase 3 was split in two: everything up to a typed, model-independent
+# representation (`reader`, `tree`, `decode`) and, on top of it, `import`,
+# which maps that representation into `xarast-doc`. The lower half still knows
+# nothing about the document model, which is what lets it be fuzzed and
+# snapshot-tested on its own; only `import` reaches for `xarast-doc`, and it
+# does so exclusively through `DocumentBuilder`.
 [dependencies]
 xarast-geom = { path = "../xarast-geom" }
 xarast-color = { path = "../xarast-color" }
+xarast-doc = { path = "../xarast-doc" }
 bitflags = { workspace = true }
 flate2 = { workspace = true }
 thiserror = { workspace = true }

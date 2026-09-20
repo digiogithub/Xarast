@@ -581,3 +581,417 @@ fn the_corpus_parses_within_its_time_budget() {
     // tests build at opt-level 2.
     assert!(elapsed.as_secs() < 30, "corpus parse took {elapsed:?}");
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// The mapping stage: records into a `xarast_doc::Document`.
+// ════════════════════════════════════════════════════════════════════════════
+
+use xarast_xar::{ImportOptions, ImportReport};
+
+fn imports(c: &XarCorpus) -> Vec<(String, xarast_doc::Document, ImportReport)> {
+    c.files
+        .iter()
+        .map(|f| {
+            let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+            let (doc, report) = xarast_xar::import(&bytes, &ImportOptions::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", f.rel));
+            (f.rel.clone(), doc, report)
+        })
+        .collect()
+}
+
+/// Criteria 10 and 11: every file becomes a document that passes
+/// `validate()`, with at least one spread, one layer and one ink node.
+#[test]
+fn every_corpus_file_imports_into_a_valid_document() {
+    use xarast_doc::NodeKind;
+    let c = corpus_or_skip!();
+    let mut warnings = 0usize;
+    for (label, doc, report) in imports(&c) {
+        let check = doc.validate();
+        assert!(
+            check.errors.is_empty(),
+            "{label}: {} validation error(s): {:?}",
+            check.errors.len(),
+            check.errors.first()
+        );
+        // Every warning a real file produces must be the one the model
+        // documents as expected; anything else is news.
+        for w in &check.warnings {
+            assert!(
+                matches!(w, xarast_doc::Invariant::AttrAfterInk { .. }),
+                "{label}: unexpected validation warning {w:?}"
+            );
+        }
+        warnings += check.warnings.len();
+
+        let mut spreads = 0usize;
+        let mut layers = 0usize;
+        let mut ink = 0usize;
+        for id in doc.tree.preorder(doc.tree.root()) {
+            match doc.tree.kind(id) {
+                Some(NodeKind::Spread(_)) => spreads += 1,
+                Some(NodeKind::Layer(_)) => layers += 1,
+                Some(k) if k.is_ink() && !k.is_attr() => ink += 1,
+                _ => {}
+            }
+        }
+        assert!(spreads >= 1, "{label}: no spread");
+        assert!(layers >= 1, "{label}: no layer");
+        // The phase document's criterion 11 asks for at least one ink node
+        // in every file. That is wrong for the eight `Templates/` files,
+        // which are empty documents by definition: they carry a spread, a
+        // layer and a palette and no drawing at all. What must hold is the
+        // implication — a file that contains an object record must produce
+        // an ink node.
+        let objects: u32 = report
+            .distinct_tags
+            .iter()
+            .filter(|(t, _)| xarast_xar::class_of(**t) == Some(xarast_xar::TagClass::Object))
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(
+            objects > 0,
+            ink > 0,
+            "{label}: {objects} object records but {ink} ink nodes"
+        );
+        assert_eq!(report.validation_errors, 0, "{label}");
+        assert_eq!(
+            report.records_mapped + report.records_skipped + report.records_stripped,
+            report.records_read,
+            "{label}: every record is mapped, skipped or stripped"
+        );
+    }
+    println!("{warnings} AttrAfterInk warnings across the corpus, all expected");
+}
+
+/// The spread coordinate origin, confirmed against the files rather than
+/// asserted.
+///
+/// `TAG_CURRENTATTRIBUTEBOUNDS` is written by subtracting the coordinate
+/// origin from an empty `DocRect`, so a degenerate one must decode back to
+/// exactly `(0, 0)` once the origin is added; `TAG_VIEWPORT`, which the
+/// format reads untranslated, must hold `-origin` in the same case. If the
+/// origin were `(0, 0)` — as it was before the mapping stage derived it —
+/// both of these would be off by the pasteboard margin, which is 566 931 or
+/// 576 000 millipoints in 57 of the 59 files.
+#[test]
+fn the_spread_origin_is_the_one_the_files_imply() {
+    use xarast_geom::Point;
+    use xarast_xar::{Decoded, DiagSink, decode, spread_origin};
+
+    let c = corpus_or_skip!();
+    let mut degenerate_bounds = 0usize;
+    let mut degenerate_viewports = 0usize;
+    let mut non_zero_origins = 0usize;
+    for f in &c.files {
+        let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+        let a = analyse(&bytes, ReaderLimits::default()).unwrap();
+        let mut diags = DiagSink::new();
+        let mut rows: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        a.tree.walk(&mut |node, _| {
+            let r = &node.record;
+            if matches!(r.tag, 45 | 80 | 4120) {
+                rows.push((r.number, r.tag, r.data.clone()));
+            }
+        });
+        // The writer had one origin for the whole file — it is set before
+        // anything is written — even though `TAG_VIEWPORT` is emitted
+        // before the spread the origin comes from. So the origin is found
+        // first and then everything is checked against it.
+        let mut origin = Point::ORIGIN;
+        for (number, tag, data) in &rows {
+            if let Ok(Decoded::SpreadInformation(i)) =
+                decode(*tag, data, Point::ORIGIN, &mut diags, (*number, *tag))
+                && i.width.raw() > 0
+                && i.height.raw() > 0
+            {
+                origin = spread_origin(&i);
+            }
+        }
+        if origin != Point::ORIGIN {
+            non_zero_origins += 1;
+        }
+        for (number, tag, data) in &rows {
+            match decode(*tag, data, origin, &mut diags, (*number, *tag)) {
+                Ok(Decoded::Viewport(r)) if r.lo == r.hi => {
+                    degenerate_viewports += 1;
+                    assert_eq!(
+                        r.lo,
+                        Point::new(origin.x.saturating_neg(), origin.y.saturating_neg()),
+                        "{}: an empty viewport must hold minus the coordinate origin",
+                        f.rel
+                    );
+                }
+                Ok(Decoded::Bounds(r)) if r.lo == r.hi => {
+                    degenerate_bounds += 1;
+                    assert_eq!(
+                        r.lo,
+                        Point::ORIGIN,
+                        "{}: an empty attribute-bounds rectangle must translate to (0, 0)",
+                        f.rel
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        non_zero_origins >= 50,
+        "only {non_zero_origins} files have a non-zero origin; \
+         the corpus should make (0, 0) obviously wrong"
+    );
+    assert!(degenerate_viewports > 0 && degenerate_bounds > 0);
+    println!(
+        "{non_zero_origins} spreads with a non-zero origin, \
+         confirmed by {degenerate_viewports} empty viewports and \
+         {degenerate_bounds} empty attribute-bounds rectangles"
+    );
+}
+
+/// What survives the mapping must be what the reader decoded.
+///
+/// Path geometry and the colour palette are the two things that exist on
+/// both sides of the boundary in comparable form, so they are compared
+/// element by element, in order.
+#[test]
+fn geometry_and_colours_round_trip_through_the_mapping() {
+    use xarast_doc::NodeKind;
+    use xarast_geom::Point;
+    use xarast_xar::{Decoded, DiagSink, decode, spread_origin};
+
+    let c = corpus_or_skip!();
+    let mut compared_paths = 0usize;
+    let mut compared_colours = 0usize;
+    for f in &c.files {
+        let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+        let a = analyse(&bytes, ReaderLimits::default()).unwrap();
+
+        // What the reader decoded, in record order, with the origin the
+        // mapping stage derives.
+        let mut rows: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        a.tree.walk(&mut |node, _| {
+            let r = &node.record;
+            rows.push((r.number, r.tag, r.data.clone()));
+        });
+        let mut origin = Point::ORIGIN;
+        let mut diags = DiagSink::new();
+        let mut read_paths: Vec<Vec<Point>> = Vec::new();
+        let mut read_colours: Vec<[u8; 3]> = Vec::new();
+        for (number, tag, data) in &rows {
+            match decode(*tag, data, origin, &mut diags, (*number, *tag)) {
+                Ok(Decoded::SpreadInformation(i)) if i.width.raw() > 0 && i.height.raw() > 0 => {
+                    origin = spread_origin(&i);
+                }
+                Ok(Decoded::Path { path, .. }) => read_paths.push(path.points().to_vec()),
+                Ok(Decoded::ColourDefinition(col)) => {
+                    read_colours.push([col.rgb.r, col.rgb.g, col.rgb.b]);
+                }
+                _ => {}
+            }
+        }
+
+        // What the document holds.
+        let (doc, _) = xarast_xar::import(&bytes, &ImportOptions::default()).unwrap();
+        let built_paths: Vec<Vec<Point>> = doc
+            .tree
+            .preorder(doc.tree.root())
+            .filter_map(|id| match doc.tree.kind(id) {
+                Some(NodeKind::Path(p)) => Some(p.data.points().to_vec()),
+                _ => None,
+            })
+            .collect();
+        let built_colours: Vec<[u8; 3]> = doc
+            .resources
+            .colours
+            .iter()
+            .map(|(_, d)| [d.cached_rgb.r, d.cached_rgb.g, d.cached_rgb.b])
+            .collect();
+
+        assert_eq!(
+            read_paths.len(),
+            built_paths.len(),
+            "{}: every decoded path reaches the document",
+            f.rel
+        );
+        assert_eq!(read_paths, built_paths, "{}: path geometry", f.rel);
+        assert_eq!(read_colours, built_colours, "{}: colour palette", f.rel);
+        compared_paths += built_paths.len();
+        compared_colours += built_colours.len();
+    }
+    println!("{compared_paths} paths and {compared_colours} colours compared equal");
+}
+
+/// Embedded bitmap bytes survive the mapping verbatim and are not
+/// deduplicated onto one another.
+#[test]
+fn embedded_bitmaps_reach_the_document_byte_for_byte() {
+    use xarast_geom::Point;
+    use xarast_xar::{Decoded, DiagSink, decode};
+
+    let c = corpus_or_skip!();
+    let mut total = 0usize;
+    for f in &c.files {
+        let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+        let a = analyse(&bytes, ReaderLimits::default()).unwrap();
+        let mut diags = DiagSink::new();
+        let mut originals: Vec<Vec<u8>> = Vec::new();
+        let mut rows: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        a.tree.walk(&mut |node, _| {
+            let r = &node.record;
+            rows.push((r.number, r.tag, r.data.clone()));
+        });
+        for (number, tag, data) in &rows {
+            if let Ok(Decoded::BitmapDefinition(b)) =
+                decode(*tag, data, Point::ORIGIN, &mut diags, (*number, *tag))
+            {
+                originals.push(data.get(b.image.clone()).unwrap_or(&[]).to_vec());
+            }
+        }
+        if originals.is_empty() {
+            continue;
+        }
+        let (doc, _) = xarast_xar::import(&bytes, &ImportOptions::default()).unwrap();
+        let stored: Vec<Vec<u8>> = doc
+            .resources
+            .bitmaps()
+            .filter_map(|(_, b)| b.original.as_ref().map(|o| o.bytes.to_vec()))
+            .collect();
+        assert_eq!(
+            originals.len(),
+            stored.len(),
+            "{}: one resource per definition, no accidental deduplication",
+            f.rel
+        );
+        for o in &originals {
+            assert!(stored.contains(o), "{}: a bitmap's bytes changed", f.rel);
+        }
+        total += stored.len();
+    }
+    assert!(total > 0);
+    println!("{total} bitmaps preserved byte for byte");
+}
+
+/// The mapping snapshot: per file, how many records mapped versus were
+/// skipped, and what the document came out as. Facts only.
+///
+/// Regenerate with `XARAST_UPDATE_SNAPSHOTS=1`.
+#[test]
+fn the_import_snapshot_matches() {
+    let c = corpus_or_skip!();
+    let mut out = String::from(
+        "# What the mapping stage made of each corpus file. Facts only: counts,\n\
+         # never a coordinate, a colour value or a string taken from a file.\n\
+         # Regenerate with XARAST_UPDATE_SNAPSHOTS=1.\n\
+         # file | records | mapped | skipped | stripped | opaque | nodes | \
+         colours | bitmaps | originX | originY | defaultsSet | defaultsDiffering | \
+         validateErrors | validateWarnings | ",
+    );
+    out.push_str(&xarast_xar::NODE_KIND_NAMES.join(" | "));
+    out.push('\n');
+    for (label, _doc, r) in imports(&c) {
+        out.push_str(&format!(
+            "{} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}",
+            label,
+            r.records_read,
+            r.records_mapped,
+            r.records_skipped,
+            r.records_stripped,
+            r.records_opaque,
+            r.nodes_built,
+            r.colours,
+            r.bitmaps,
+            r.spread_origin.x.raw(),
+            r.spread_origin.y.raw(),
+            r.defaults_set,
+            r.defaults_differing,
+            r.validation_errors,
+            r.validation_warnings,
+        ));
+        for n in r.node_counts {
+            out.push_str(&format!(" | {n}"));
+        }
+        out.push('\n');
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/snapshots/import-model.txt");
+    if std::env::var("XARAST_UPDATE_SNAPSHOTS").as_deref() == Ok("1") {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &out).unwrap();
+        println!("wrote {}", path.display());
+        return;
+    }
+    let want = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        out, want,
+        "the import snapshot changed; XARAST_UPDATE_SNAPSHOTS=1 to accept"
+    );
+}
+
+/// The import budget of the phase document, over the whole corpus.
+#[test]
+fn the_corpus_imports_within_its_time_budget() {
+    let c = corpus_or_skip!();
+    let files: Vec<Vec<u8>> = c
+        .files
+        .iter()
+        .map(|f| std::fs::read(f.path(&c.root)).unwrap_or_default())
+        .collect();
+    let start = std::time::Instant::now();
+    let mut nodes = 0usize;
+    for bytes in &files {
+        if let Ok((_, r)) = xarast_xar::import(bytes, &ImportOptions::default()) {
+            nodes += r.nodes_built;
+        }
+    }
+    let elapsed = start.elapsed();
+    println!("whole corpus imported: {elapsed:?}, {nodes} nodes");
+    assert!(elapsed.as_secs() < 60, "corpus import took {elapsed:?}");
+}
+
+/// Two questions `docs/memory/document-model.md` left for this phase: does
+/// `TAG_ENDCAP` (175) ever disagree with `TAG_STARTCAP` (174), and which of
+/// the overprint pair 3500–3505 is "on"?
+///
+/// The model, like the original, has one cap style, so a file that set the
+/// two differently would be unrepresentable. Facts only: the test prints
+/// counts.
+#[test]
+fn the_two_attribute_questions_phase_two_left_open() {
+    let c = corpus_or_skip!();
+    let mut pairs = 0usize;
+    let mut disagreements = 0usize;
+    let mut overprints = 0usize;
+    for f in &c.files {
+        let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+        let a = analyse(&bytes, ReaderLimits::default()).unwrap();
+        let mut caps: Vec<(u32, u8)> = Vec::new();
+        a.tree.walk(&mut |n, _| {
+            let r = &n.record;
+            match r.tag {
+                174 | 175 => caps.push((r.tag, r.data.first().copied().unwrap_or(0))),
+                3500..=3505 => overprints += 1,
+                _ => {}
+            }
+        });
+        for w in caps.windows(2) {
+            let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
+                continue;
+            };
+            if a.0 == 174 && b.0 == 175 {
+                pairs += 1;
+                if a.1 != b.1 {
+                    disagreements += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "{pairs} start/end cap pairs, {disagreements} disagreeing; \
+         {overprints} overprint records"
+    );
+    assert_eq!(
+        disagreements, 0,
+        "a file sets the start and end caps differently; the model has one \
+         cap style and would have to grow a second"
+    );
+}

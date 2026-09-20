@@ -353,7 +353,11 @@ pub(crate) const TAG_TABLE: &[(u32, &str, TagClass)] = &[
     (4116, "TAG_DOCUMENTBITMAPSMOOTHING", TagClass::Ignorable),
     (4117, "TAG_XPE_BITMAP_PROPERTIES", TagClass::Ignorable),
     (4118, "TAG_DEFINEBITMAP_XPE", TagClass::Definition),
-    (4119, "TAG_CURRENTATTRIBUTES", TagClass::Object),
+    // Not an object, whatever its position in the tree suggests: its
+    // subtree is the document's *default* attribute block, and treating it
+    // as a drawing object puts a phantom node in every file. Structural,
+    // because misreading it corrupts what is and is not in the drawing.
+    (4119, "TAG_CURRENTATTRIBUTES", TagClass::Structural),
     (4120, "TAG_CURRENTATTRIBUTEBOUNDS", TagClass::Ignorable),
     (4121, "TAG_LINEARFILL3POINT", TagClass::Attribute),
     (4122, "TAG_LINEARFILLMULTISTAGE3POINT", TagClass::Attribute),

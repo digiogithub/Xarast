@@ -1318,11 +1318,39 @@ Predefined units referenced by a negative number (`Kernel/cxfunits.h:104-116`):
   The origin is set in `BaseCamelotFilter::SetCoordOrigin()` (`Kernel/camfiltr.cpp:5539`),
   and during import it is updated when `TAG_SPREADINFORMATION` is processed
   (`Kernel/rechdoc.cpp:640-644`).
-* **Practical consequence**: in a single-spread file whose pasteboard starts at the
-  document origin, `CoordOrigin == (0,0)` and the file coordinates are directly page
-  coordinates with Y pointing up, with `(0,0)` at the bottom-left corner of the page.
-  Verified in `testfiles/OneLine.xar`: a page of 600 000 × 450 000 mp and the path at
-  (112 101, 178 899) → (283 101, 321 399), inside the page.
+* **How to compute that corner** — this is what an importer actually needs, and the
+  paragraph above does not say it. A spread lays its first page out with its `lo`
+  corner at `(PageMargin, PageMargin)` in spread coordinates, where
+
+  ```
+  PageMargin = if Margin < Bleed { Margin + Bleed } else { Margin }
+  ```
+
+  with `Margin` and `Bleed` the two fields of `TAG_SPREADINFORMATION`
+  (`Spread::SetSizeOfAllPages`, `Kernel/spread.cpp:2506-2530`, called from
+  `Spread::SetPageSize`, `:2196-2290`). A double page spread puts the second page one
+  page-width to the right of the first, so the union's `lo` corner is the first page's
+  either way. Therefore
+
+  ```
+  CoordOrigin = (PageMargin, PageMargin)
+  ```
+
+  **It is not `(0,0)` in a normal file.** `Margin` is 576 000 or 566 931 millipoints in
+  57 of the 59 corpus files and 0 only in `Templates/animation.xar`. Two records make
+  the value checkable without any rendering: an empty document writes `TAG_VIEWPORT`
+  (the drawing's bounding box, written with the origin subtracted) as the degenerate
+  rectangle `(-Margin, -Margin, -Margin, -Margin)`, and every
+  `TAG_CURRENTATTRIBUTEBOUNDS` in the corpus is `(-Margin, -Margin)` — both an empty
+  `DocRect` at spread coordinate `(0,0)`. `animation.xar`, whose margin is 0, writes
+  `(0,0,0,0)` for the same records.
+* **Practical consequence**: file coordinates are page coordinates with Y pointing up
+  and `(0,0)` at the bottom-left corner of the page; the origin translation places that
+  page inside the spread's pasteboard, whose own `lo` corner is `(0,0)`.
+  In `testfiles/OneLine.xar` the page is 600 000 × 450 000 mp with a 576 000 mp margin,
+  and the path at file coordinates (112 101, 178 899) → (283 101, 321 399) sits at spread
+  coordinates (688 101, 754 899) → (859 101, 897 399): inside the page either way, which
+  is why this file alone does not distinguish the two.
 * **When exporting to SVG/PDF/any system with Y pointing down**, apply
   `y' = page_height - y`.
 
@@ -1332,6 +1360,14 @@ Predefined units referenced by a negative number (`Kernel/cxfunits.h:104-116`):
 axes of regular shapes) are written with `WriteCoordTrans(...,0,0)`, that is **without
 translation** (`Kernel/cxfrgshp.cpp:347-348`). When implementing, that distinction must be
 respected: points → translated; vectors → not.
+
+⚠️ **`TAG_VIEWPORT` (80) is the exception that does not round trip.** It is *written*
+with the origin subtracted (`CamelotFileRecord::WriteCoord`, `Kernel/viewcomp.cpp:512-515`)
+and *read* without the translation (`ReadCoordTrans(...,0,0)`,
+`Kernel/viewcomp.cpp:849-851`). The original is inconsistent here and only uses the record
+for the minimal-web format and for import-at-position, so nothing depends on it; read it
+untranslated, as the handler does. `TAG_DOCUMENTVIEW` (82) uses plain `ReadCoord` and *is*
+translated.
 
 ### 5.4. Matrices
 

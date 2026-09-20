@@ -368,10 +368,11 @@ fn fill(r: &mut FileReport, a: &FileAnalysis) {
 ///
 /// The coordinate origin is tracked here because the point/vector
 /// distinction is a decoding concern: `TAG_SPREADINFORMATION` is where the
-/// original sets it. For every file in the corpus it stays `(0, 0)` — the
-/// spread's page rectangle starts at the document origin — and the worked
-/// example in `research/01 §5.3` confirms it, so the plumbing exists and
-/// carries zero.
+/// original sets it, and [`crate::import::spread_origin`] is where we
+/// derive it. It is the pasteboard margin, which is non-zero in 57 of the
+/// 59 corpus files; nothing in this report depends on its value, but a
+/// decode pass that used the wrong one would be a lie about what the file
+/// says.
 #[derive(Default)]
 struct DecodePass {
     origin: Point,
@@ -427,11 +428,10 @@ impl DecodePass {
                     .text_code_units
                     .saturating_add(s.encode_utf16().count() as u64);
             }
-            Decoded::SpreadInformation(_) => {
-                // The origin the original derives here is the `lo` corner of
-                // the spread's page rectangle, which is the document origin
-                // in every file measured. Left at zero until the mapping
-                // stage has a spread to derive it from.
+            Decoded::SpreadInformation(info) => {
+                if info.width.raw() > 0 && info.height.raw() > 0 {
+                    self.origin = crate::import::spread_origin(info);
+                }
             }
             _ => {}
         }

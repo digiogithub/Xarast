@@ -795,7 +795,16 @@ pub fn decode(
         },
         60..=64 => Decoded::PreviewBitmap(0..payload.len()),
         65..=69 | 71 => Decoded::BitmapDefinition(Box::new(bitmap_definition(tag, &mut c)?)),
-        80 => Decoded::Viewport(rect(&mut c, origin)?),
+        // `TAG_VIEWPORT` is the one rectangle the format does **not**
+        // translate on the way in. The writer subtracts the coordinate
+        // origin (`Kernel/viewcomp.cpp:512-515`) but the reader takes the
+        // numbers as they stand (`ReadCoordTrans(..., 0, 0)`,
+        // `Kernel/viewcomp.cpp:849-851`), so the record does not round trip
+        // and we follow the reader. It is also what makes an empty
+        // template's viewport read as `(-margin, -margin)`, which is the
+        // corpus evidence for the spread origin — see
+        // [`crate::import::spread_origin`].
+        80 => Decoded::Viewport(rect(&mut c, Point::ORIGIN)?),
         82 => Decoded::DocumentView {
             scale: c.fixed16()?,
             area: rect(&mut c, origin)?,

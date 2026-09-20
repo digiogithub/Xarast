@@ -80,6 +80,7 @@ pub mod decode;
 pub mod diag;
 pub mod error;
 pub mod header;
+pub mod import;
 pub mod paths;
 pub mod reader;
 pub mod report;
@@ -95,9 +96,13 @@ pub use decode::{
     FontDefinition, FractalParams, GradientFill, GradientTransparency, LayerFlags, RegularShape,
     ShapeFlags, SpreadInformation, TextAttr, TextPlacement, TextStory, decode, has_decoder,
 };
-pub use diag::{DiagCode, DiagSink, Diagnostic, Severity};
+pub use diag::{DiagCode, DiagSink, Diagnostic, Severity, severity_str};
 pub use error::XarError;
 pub use header::{FileHeader, FileType, XAR_MAGIC, has_magic};
+pub use import::{
+    ImportOptions, ImportReport, NODE_KIND_COUNT, NODE_KIND_NAMES, import, pages_rect,
+    spread_origin,
+};
 pub use paths::{PathStyleBits, apply_path_flags, decode_absolute, decode_relative};
 pub use reader::{BlockReport, ReaderLimits, Record, RecordReader, probe};
 pub use report::{FileReport, xar_dump_report};

@@ -12,28 +12,44 @@
 //! `u64` of numeric detail. Every field is a fact about the file rather than
 //! anything taken out of it, which makes the clean-room rule structural
 //! instead of a review item.
+//!
+//! # Where each of the three types lives, now that `xarast-doc` exists
+//!
+//! * [`Severity`] is **`xarast-doc`'s**, re-exported. One three-valued enum
+//!   serves every importer and the model alike.
+//! * [`DiagCode`] stays here. Its members name conditions of this wire
+//!   format — a CRC, a deflate block, a nine-byte path stride — that would be
+//!   noise in a crate which also serves SVG and `.xarast`.
+//!   [`DiagCode::shared`] projects it onto [`xarast_doc::DiagCode`], the
+//!   shared vocabulary Phase 2 defined.
+//! * [`Diagnostic`] stays here too, and deliberately stays `Copy` and
+//!   text-free. [`xarast_doc::Diagnostic`] carries a `String` message, which
+//!   is right for a model that has to explain a repair to a user and wrong
+//!   for a value a committed snapshot is generated from. `From<Diagnostic>`
+//!   converts at the boundary, building the message out of constants and
+//!   numbers.
 
 use core::fmt;
 
 /// How bad a [`Diagnostic`] is.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum Severity {
-    /// Worth reporting, harmless. An unknown tag we skipped.
-    Info,
-    /// The file is readable but something was lost or repaired.
-    Warning,
-    /// Part of the file could not be read at all.
-    Error,
-}
+///
+/// **Defined once, in `xarast-doc`**, and re-exported here. Phase 2 made
+/// [`DiagCode`](xarast_doc::DiagCode) "the shared vocabulary of every
+/// importer"; a three-valued severity is even more obviously shared, and two
+/// identical enums that had to be converted at the crate boundary would have
+/// been a translation step with no content.
+pub use xarast_doc::Severity;
 
-impl fmt::Display for Severity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Severity::Info => "info",
-            Severity::Warning => "warning",
-            Severity::Error => "error",
-        };
-        f.write_str(s)
+/// The lower-case name of a severity, for reports.
+///
+/// A free function rather than a `Display` impl, because [`Severity`] is a
+/// foreign type here.
+#[must_use]
+pub const fn severity_str(s: Severity) -> &'static str {
+    match s {
+        Severity::Info => "info",
+        Severity::Warning => "warning",
+        Severity::Error => "error",
     }
 }
 
@@ -143,6 +159,39 @@ impl DiagCode {
             _ => Severity::Warning,
         }
     }
+
+    /// The same finding in the model's shared vocabulary.
+    ///
+    /// [`xarast_doc::DiagCode`] names conditions any importer can hit; the
+    /// codes here name conditions of *this wire format*, several of which
+    /// (a CRC, a deflate block, a nine-byte path stride) would be noise in a
+    /// crate that also serves SVG and `.xarast`. So the detailed code stays
+    /// here, and this is the projection onto the shared set that a
+    /// [`Document`](xarast_doc::Document)'s diagnostics are reported in.
+    #[must_use]
+    pub const fn shared(self) -> xarast_doc::DiagCode {
+        use xarast_doc::DiagCode as D;
+        match self {
+            DiagCode::UnbalancedScope => D::UnbalancedScope,
+            DiagCode::UnknownTag => D::UnknownTag,
+            DiagCode::AtomicSubtreeDropped => D::AtomicSubtreeDropped,
+            DiagCode::EssentialTagMissing => D::EssentialTagMissing,
+            DiagCode::TruncatedRecord
+            | DiagCode::TrailingRecordBytes
+            | DiagCode::BadRelativePathSize
+            | DiagCode::MalformedPath
+            | DiagCode::PathFlagsMismatch
+            | DiagCode::UnconsumedBlockBytes
+            | DiagCode::TrailingBytes => D::TruncatedRecord,
+            DiagCode::LimitExceeded | DiagCode::DepthLimit => D::LimitExceeded,
+            DiagCode::CoordinateClamped => D::CoordinateClamped,
+            DiagCode::DanglingReference => D::DanglingReference,
+            DiagCode::CrcMismatch | DiagCode::BlockLengthMismatch => D::ChecksumMismatch,
+            DiagCode::UnknownCompressionType
+            | DiagCode::UnexpectedCompressionRecord
+            | DiagCode::UnknownEnumValue => D::UnsupportedFeature,
+        }
+    }
 }
 
 impl fmt::Display for DiagCode {
@@ -205,7 +254,7 @@ impl Diagnostic {
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.severity, self.code)?;
+        write!(f, "{}: {}", severity_str(self.severity), self.code)?;
         if let Some(r) = self.record {
             write!(f, " at record {r}")?;
         }
@@ -216,6 +265,28 @@ impl fmt::Display for Diagnostic {
             write!(f, " [{}]", self.detail)?;
         }
         Ok(())
+    }
+}
+
+impl From<Diagnostic> for xarast_doc::Diagnostic {
+    /// Projects a `.xar` finding into the model's shared form.
+    ///
+    /// The message is assembled from constants and numbers only, which is
+    /// what keeps a `Document`'s diagnostic list as free of file content as
+    /// this crate's own (see the module documentation).
+    fn from(d: Diagnostic) -> xarast_doc::Diagnostic {
+        let mut out = xarast_doc::Diagnostic::new(
+            d.severity,
+            d.code.shared(),
+            match (d.record, d.tag) {
+                (Some(r), Some(t)) => {
+                    format!("{}: record {r}, tag {t}, detail {}", d.code, d.detail)
+                }
+                _ => format!("{}: detail {}", d.code, d.detail),
+            },
+        );
+        out.location = d.record.map(u64::from);
+        out
     }
 }
 

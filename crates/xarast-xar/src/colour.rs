@@ -164,9 +164,41 @@ impl ColourRegistry {
     /// [`DanglingReference`](crate::DiagCode::DanglingReference) diagnostic
     /// and a parentless colour, which still paints as its cached RGB.
     pub fn define(&mut self, record: u32, def: &ColourRecord, diags: &mut DiagSink) -> ColourId {
-        let parent = match def.parent {
-            Ref::None => None,
-            Ref::Builtin(_) => None,
+        let parent = self.parent_of(record, def, diags);
+        let id = self.table.insert(def.to_colour_def(parent));
+        self.by_record.insert(record, id);
+        id
+    }
+
+    /// Registers a definition whose palette entry lives **somewhere else**.
+    ///
+    /// The mapping stage needs the palette to end up in the document's own
+    /// [`ColourTable`], and the only way to put it there is
+    /// [`DocumentBuilder::define_colour`](xarast_doc::DocumentBuilder::define_colour),
+    /// which allocates the [`ColourId`]. So the registry keeps doing the part
+    /// that is genuinely its own — resolving the parent chain from record
+    /// numbers, and diagnosing a parent the file never defined — and `insert`
+    /// supplies the entry.
+    ///
+    /// In this mode [`ColourRegistry::table`] stays empty; the ids in
+    /// [`ColourRegistry::resolve`]'s results belong to whatever table
+    /// `insert` wrote to.
+    pub fn define_external(
+        &mut self,
+        record: u32,
+        def: &ColourRecord,
+        diags: &mut DiagSink,
+        insert: impl FnOnce(xarast_color::ColourDef) -> ColourId,
+    ) -> ColourId {
+        let parent = self.parent_of(record, def, diags);
+        let id = insert(def.to_colour_def(parent));
+        self.by_record.insert(record, id);
+        id
+    }
+
+    fn parent_of(&self, record: u32, def: &ColourRecord, diags: &mut DiagSink) -> Option<ColourId> {
+        match def.parent {
+            Ref::None | Ref::Builtin(_) => None,
             Ref::Record(n) => {
                 let found = self.by_record.get(&n).copied();
                 if found.is_none() {
@@ -178,10 +210,7 @@ impl ColourRegistry {
                 }
                 found
             }
-        };
-        let id = self.table.insert(def.to_colour_def(parent));
-        self.by_record.insert(record, id);
-        id
+        }
     }
 
     /// Resolves a colour reference read from a fill or line attribute.

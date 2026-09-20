@@ -2,14 +2,17 @@
 
 A legacy binary format parser is attack surface, so fuzzing is part of
 Phase 3 rather than a follow-up (`docs/phases/phase-03-xar-importer.md`
-W3.11). These targets run against `xarast-xar` only: the crate has no
-document model behind it yet, which is what makes them fast.
+W3.11). Five of the six targets run against the byte and decoding layers
+alone, which is what makes them fast; `fuzz_xar_import` drives the whole
+pipeline into `xarast-doc`.
 
 ```sh
 cargo +nightly fuzz run fuzz_xar_records -- -runs=5000000 -timeout=5 \
     -rss_limit_mb=2048 -malloc_limit_mb=512
 cargo +nightly fuzz run fuzz_xar_tree    -- -runs=5000000 -timeout=5
 cargo +nightly fuzz run fuzz_xar_decode  -- -runs=2000000 -timeout=5
+cargo +nightly fuzz run fuzz_xar_import  -- -runs=2000000 -timeout=5 \
+    -rss_limit_mb=2048
 cargo +nightly fuzz run fuzz_xar_path    -- -runs=5000000 -timeout=5
 cargo +nightly fuzz run fuzz_xar_colour  -- -runs=5000000 -timeout=5
 ```
@@ -32,10 +35,17 @@ cargo +nightly fuzz run fuzz_xar_colour  -- -runs=5000000 -timeout=5
 5. **Valid or nothing.** Anything the decoders produce is well formed:
    every decoded path passes `xarast_geom::Path::validate`, every bitmap
    range lies inside its payload, every resolved colour channel is finite.
+   At the level of a whole file, `fuzz_xar_import` asserts the stronger
+   form the phase document asks for: either `import` fails, or the
+   `Document` it returns has **zero** `validate()` errors. It also checks
+   that the record accounting balances — mapped plus skipped plus
+   stripped is every record read — which is how a handler that visits a
+   node twice, or not at all, shows up as a finding rather than as a
+   quietly wrong document.
 
-`fuzz_xar_decode` stands in for the `fuzz_xar_import` of the phase
-document until the mapping into `xarast-doc` exists; it exercises the same
-handlers and the same reference resolution.
+`fuzz_xar_decode` remains as the narrower target: it exercises the same
+handlers with no document model behind them, so a crash in it points at
+the decoders rather than at the builder.
 
 ## The seed corpus is synthetic, and must stay that way
 

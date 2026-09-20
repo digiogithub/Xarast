@@ -52,6 +52,17 @@ Tests: 82 crate-internal (`src/tests/`), 5 size gates, 5 public-API
 integration, 1 compile-fail doctest. Benchmarks: `benches/doc.rs` (the budget
 table) and `examples/arena_vs_persistent.rs` (the §3.1 benchmark).
 
+**First real consumer, Phase 3.** The `.xar` importer
+(`crates/xarast-xar/src/import.rs`) now builds documents from all 59 corpus
+files — 830 533 nodes, zero `validate()` errors — through `DocumentBuilder`
+and nothing else. It needed exactly one change to this crate:
+`BitmapResource::content_hash` (decision 27 below). It did **not** need the
+arena, `Tree`'s mutating methods, or an "amend the node I just made"
+builder method: where `.xar` describes a node from its children, the
+importer reads ahead instead. Keep it that way. What the importer found
+that this crate should grow is listed in `xar-import.md` finding 10 — a
+three-point linear fill, an "extra" tiling — and neither is urgent.
+
 ## The arena benchmark — verdict
 
 Run: `cargo run --release -p xarast-doc --example arena_vs_persistent -- time`
@@ -238,10 +249,17 @@ New in Phase 2:
     20 000 000, bytes 2 GiB, points per path 16 000 000.
 26. **`DiagCode` is the shared vocabulary of every importer**, extended from
     the phase list with `IllegalNesting` and `Repaired`.
-27. **Deduplication is by SHA-256 of the decoded payload**; liveness is
-    `collect_unused`, a sweep over everything alive in the arena — which
-    automatically includes what the history retains, so an undone deletion
-    still finds its resources.
+27. **Deduplication is by SHA-256 of the decoded payload *and the encoded
+    original***; liveness is `collect_unused`, a sweep over everything alive
+    in the arena — which automatically includes what the history retains, so
+    an undone deletion still finds its resources.
+    *Changed in Phase 3.* Hashing only the decoded payload was wrong in two
+    ways. The immediate one: the `.xar` importer stores the encoded bytes and
+    leaves `pixels` empty until Phase 10 decodes them, so every bitmap in a
+    file hashed identically and `insert_bitmap` returned one id for all of
+    them. The deeper one: two bitmaps with the same pixels but different
+    encodings really are two resources, because `original` is emitted
+    verbatim on save and collapsing them throws one encoding away.
 28. **`canonical_digest()` excludes `NodeId` *and* `Tag`.** Both are allocation
     ordered. Resources are hashed in content order so that the order they were
     inserted in does not change the digest. Colour and bitmap *references* are
@@ -305,11 +323,16 @@ Slots no attribute tag reaches, and where they come from instead:
 `BevelType`, `BevelContrast`, `BevelLightAngle`, `BevelLightTilt`,
 `ClipRegion`, `ClipView` (§4.8, containers and effects). Phase 3 wires them up.
 
-Two things to check in Phase 3 against the corpus, because the research does
-not pin them down: which of 3500–3505 is the "on" and which the "off" of each
-overprint pair, and whether the format's separate `ENDCAP` (175) ever
-disagrees with `STARTCAP` (174) in a real file — the model, like the original,
-has one cap style.
+Two things Phase 3 was asked to check against the corpus, **now answered**
+(`the_two_attribute_questions_phase_two_left_open` in
+`crates/xarast-xar/tests/corpus.rs`):
+
+- **`ENDCAP` never disagrees with `STARTCAP`.** 26 257 start/end pairs in the
+  corpus, zero of them different. One cap slot is enough, and the test fails
+  if a future file proves otherwise rather than silently losing the end cap.
+- **The overprint pair 3500–3505 cannot be answered from this corpus**: not
+  one of those records occurs in any of the 59 files. Leave it open until a
+  file that uses them turns up; nothing renders them yet.
 
 ## Invariants that must not be broken
 
@@ -389,8 +412,10 @@ Plus, from this phase:
 - [x] `Tree::validate()` plus `proptest` property tests over attach/detach/move
       sequences. **Done, before the importer.**
 - [x] Size test `size_of::<NodeData>() <= 64`. **Done; it is exactly 64.**
-- [ ] Confirm the 3500–3505 overprint on/off pairing, and whether `ENDCAP`
-      (175) ever disagrees with `STARTCAP` (174), against the corpus (Phase 3).
+- [x] Confirm whether `ENDCAP` (175) ever disagrees with `STARTCAP` (174)
+      against the corpus. **Done: 26 257 pairs, zero disagreements.**
+- [ ] The 3500–3505 overprint on/off pairing: **unanswerable from this
+      corpus**, which contains none of those records.
 - [ ] Decide whether blend intermediate steps are materialised as nodes or
       generated at render time. The original does the latter; it affects
       hit-testing (Phase 13).

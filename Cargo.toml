@@ -39,6 +39,31 @@ flate2 = "1.1"
 # `MIT OR Apache-2.0`.
 sha2 = "0.10"
 
+# ── Render engine ────────────────────────────────────────────────────────────
+# `vello_cpu` is the coverage rasteriser the Phase 4 W0 spike selected; see
+# `docs/memory/render.md` for the measurements. We use it as a rasteriser
+# only: the scene, the display list, the paints, the compositor and the blend
+# families are ours. `Apache-2.0 OR MIT`.
+#
+# Features: `std` and `u8_pipeline` are the production path, `f32_pipeline`
+# is the higher-precision path used for `RenderQuality::Final` and for the
+# golden oracle, `multithreading` gives the band parallelism. `text` and
+# `png` are off: glyph rasterisation is Phase 9's and image I/O is Phase 10's.
+vello_cpu = { version = "0.2", default-features = false, features = [
+    "std",
+    "u8_pipeline",
+    "f32_pipeline",
+    "multithreading",
+] }
+# The GPU backend, behind the `gpu` feature of `xarast-render`. Never built
+# in CI's default job, because CI has no adapter. Both `Apache-2.0 OR MIT`.
+vello = { version = "0.10", default-features = false, features = ["wgpu", "wgpu_default"] }
+wgpu = { version = "30", default-features = false }
+# Golden-image encoding and decoding. `MIT OR Apache-2.0`.
+png = "0.18"
+# Band and tile parallelism. `MIT OR Apache-2.0`.
+rayon = "1.12"
+
 # Test and benchmark tooling.
 proptest = "1.7"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

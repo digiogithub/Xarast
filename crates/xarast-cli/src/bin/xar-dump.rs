@@ -21,8 +21,8 @@ use std::process::ExitCode;
 
 use xarast_geom::Point;
 use xarast_xar::{
-    Decoded, DiagSink, ReaderLimits, RecordNode, RecordReader, analyse, decode, name_of,
-    xar_dump_report,
+    Decoded, DiagSink, ImportOptions, ReaderLimits, RecordNode, RecordReader, analyse, decode,
+    import, name_of, xar_dump_report,
 };
 
 const USAGE: &str = "\
@@ -30,14 +30,17 @@ xar-dump — inspect a legacy Xara .xar file
 
 USAGE:
     xar-dump <FILE>...      [--records] [--tree] [--tags] [--stats]
-                            [--json] [--max-depth N] [--limit N] [--quiet]
-    xar-dump --corpus <DIR> [--json] [--fail-on warning|error]
+                            [--model] [--validate] [--json]
+                            [--max-depth N] [--limit N] [--quiet]
+    xar-dump --corpus <DIR> [--json] [--validate] [--fail-on warning|error]
 
 MODES
     --stats       counts, blocks, diagnostics                (default)
     --tags        the tag histogram, with classes and names
     --records     every record: number, tag, size, offset
     --tree        the DOWN/UP tree, with decoded payloads
+    --model       the imported document tree
+    --validate    import the file and check the document's invariants
     --json        machine-readable output
 
 OPTIONS
@@ -50,13 +53,14 @@ EXIT CODES
     0  clean
     1  parsed with findings, and --fail-on said that counts
     2  a file failed to parse
-    3  reserved for a document that failed validation
+    3  the file parsed but the document failed validation
 
 CLEAN ROOM
-    --records and --tree print the FILE'S CONTENT and are for interactive
-    use: do not commit their output. --stats, --tags and --corpus print
-    only facts about a file — counts, histograms, depths, diagnostics —
-    and that output is safe to commit. See docs/11-licensing-and-clean-room.md.
+    --records, --tree and --model print the FILE'S CONTENT and are for
+    interactive use: do not commit their output. --stats, --tags,
+    --validate and --corpus print only facts about a file — counts,
+    histograms, depths, diagnostics — and that output is safe to commit.
+    See docs/11-licensing-and-clean-room.md.
 ";
 
 #[derive(Default)]
@@ -67,6 +71,8 @@ struct Args {
     tree: bool,
     tags: bool,
     stats: bool,
+    model: bool,
+    validate: bool,
     json: bool,
     quiet: bool,
     max_depth: Option<usize>,
@@ -103,14 +109,10 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--tree" => a.tree = true,
             "--tags" => a.tags = true,
             "--stats" => a.stats = true,
+            "--model" => a.model = true,
+            "--validate" => a.validate = true,
             "--json" => a.json = true,
             "--quiet" => a.quiet = true,
-            "--model" | "--validate" => {
-                return Err(
-                    "--model and --validate need the document model, which is not wired up yet"
-                        .into(),
-                );
-            }
             "--corpus" => {
                 a.corpus = Some(PathBuf::from(
                     it.next().ok_or("--corpus needs a directory")?,
@@ -143,7 +145,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             other => a.files.push(PathBuf::from(other)),
         }
     }
-    if !(a.records || a.tree || a.tags) {
+    if !(a.records || a.tree || a.tags || a.model || a.validate) {
         a.stats = true;
     }
     Ok(a)
@@ -183,8 +185,97 @@ fn run_files(args: &Args) -> ExitCode {
         if args.tree {
             print_tree(&bytes, args);
         }
+        if args.model || args.validate {
+            worst = worst.max(run_model(&bytes, args));
+        }
     }
     ExitCode::from(worst)
+}
+
+/// Imports the file, prints the document and checks its invariants.
+///
+/// `--model` prints the tree, which is **file content**: interactive use
+/// only. `--validate` prints only facts.
+fn run_model(bytes: &[u8], args: &Args) -> u8 {
+    let (doc, report) = match import(bytes, &ImportOptions::default()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("xar-dump: {e}");
+            return 2;
+        }
+    };
+    let check = doc.validate();
+    if args.quiet {
+        return u8::from(!check.errors.is_empty()) * 3;
+    }
+    if args.model {
+        print!(
+            "{}",
+            doc.dump(xarast_doc::DumpOptions {
+                max_depth: args.max_depth,
+                ..xarast_doc::DumpOptions::default()
+            })
+        );
+    }
+    if args.validate {
+        if args.json {
+            println!(
+                "{}",
+                model_json(&report, check.errors.len(), check.warnings.len())
+            );
+        } else {
+            println!(
+                "model          {} nodes, {} mapped, {} skipped, {} opaque, {} colours, {} bitmaps",
+                report.nodes_built,
+                report.records_mapped,
+                report.records_skipped,
+                report.records_opaque,
+                report.colours,
+                report.bitmaps,
+            );
+            for (i, name) in xarast_xar::NODE_KIND_NAMES.iter().enumerate() {
+                let n = report.node_counts.get(i).copied().unwrap_or(0);
+                if n > 0 {
+                    println!("  {name:<10} {n}");
+                }
+            }
+            println!(
+                "validate       {} error(s), {} warning(s)",
+                check.errors.len(),
+                check.warnings.len()
+            );
+        }
+    }
+    if check.errors.is_empty() { 0 } else { 3 }
+}
+
+/// Facts only: counts, never a coordinate or a name from the file.
+fn model_json(report: &xarast_xar::ImportReport, errors: usize, warnings: usize) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::from("{\"nodes\":");
+    let _ = write!(s, "{}", report.nodes_built);
+    let _ = write!(s, ",\"mapped\":{}", report.records_mapped);
+    let _ = write!(s, ",\"skipped\":{}", report.records_skipped);
+    let _ = write!(s, ",\"opaque\":{}", report.records_opaque);
+    let _ = write!(s, ",\"colours\":{}", report.colours);
+    let _ = write!(s, ",\"bitmaps\":{}", report.bitmaps);
+    let _ = write!(s, ",\"validateErrors\":{errors}");
+    let _ = write!(s, ",\"validateWarnings\":{warnings}");
+    s.push_str(",\"nodeCounts\":{");
+    let mut first = true;
+    for (i, name) in xarast_xar::NODE_KIND_NAMES.iter().enumerate() {
+        let n = report.node_counts.get(i).copied().unwrap_or(0);
+        if n == 0 {
+            continue;
+        }
+        if !first {
+            s.push(',');
+        }
+        first = false;
+        let _ = write!(s, "\"{name}\":{n}");
+    }
+    s.push_str("}}");
+    s
 }
 
 fn failed_on(args: &Args, errors: u64, warnings: u64) -> bool {
@@ -267,6 +358,11 @@ fn run_corpus(dir: &Path, args: &Args) -> ExitCode {
     files.sort();
     let mut worst = 0u8;
     let mut rows = Vec::new();
+    // With `--validate`, each file is also built into a document and the
+    // model facts join the table. Off by default, because a `.xar` that
+    // holds no drawing at all is a perfectly good file to report on and
+    // not a document.
+    let mut models: Vec<Option<(usize, usize, usize)>> = Vec::new();
     for path in &files {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
@@ -278,6 +374,27 @@ fn run_corpus(dir: &Path, args: &Args) -> ExitCode {
         } else if failed_on(args, r.errors(), r.warnings()) {
             worst = worst.max(1);
         }
+        if args.validate {
+            match import(&bytes, &ImportOptions::default()) {
+                Ok((doc, report)) => {
+                    let check = doc.validate();
+                    if !check.errors.is_empty() {
+                        worst = worst.max(3);
+                    }
+                    models.push(Some((
+                        report.nodes_built,
+                        check.errors.len(),
+                        check.warnings.len(),
+                    )));
+                }
+                Err(_) => {
+                    worst = worst.max(2);
+                    models.push(None);
+                }
+            }
+        } else {
+            models.push(None);
+        }
         rows.push(r);
     }
     if args.quiet {
@@ -286,18 +403,31 @@ fn run_corpus(dir: &Path, args: &Args) -> ExitCode {
     if args.json {
         println!("{{\"files\":[");
         for (i, r) in rows.iter().enumerate() {
-            println!("{}{}", if i > 0 { "," } else { "" }, r.to_json());
+            let model = match models.get(i).copied().flatten() {
+                Some((nodes, errors, warnings)) => format!(
+                    ",\"model\":{{\"nodes\":{nodes},\"validateErrors\":{errors},\
+                     \"validateWarnings\":{warnings}}}"
+                ),
+                None => String::new(),
+            };
+            let json = r.to_json();
+            let body = json.strip_suffix('}').unwrap_or(&json);
+            println!("{}{body}{model}}}", if i > 0 { "," } else { "" });
         }
         println!("],\"count\":{}}}", rows.len());
         return ExitCode::from(worst);
     }
     println!(
-        "{:<44} {:>9} {:>5} {:>6} {:>7} {:>8} {:>6}",
-        "file", "records", "tags", "depth", "blocks", "handled", "status"
+        "{:<44} {:>9} {:>5} {:>6} {:>7} {:>8} {:>8} {:>6}",
+        "file", "records", "tags", "depth", "blocks", "handled", "nodes", "status"
     );
-    for r in &rows {
+    for (i, r) in rows.iter().enumerate() {
+        let (nodes, bad) = match models.get(i).copied().flatten() {
+            Some((n, errors, _)) => (n.to_string(), errors > 0),
+            None => ("-".to_owned(), false),
+        };
         println!(
-            "{:<44} {:>9} {:>5} {:>6} {:>3}/{:<3} {:>8} {:>6}",
+            "{:<44} {:>9} {:>5} {:>6} {:>3}/{:<3} {:>8} {:>8} {:>6}",
             truncate(&r.label, 44),
             r.records,
             r.distinct_tags,
@@ -305,7 +435,14 @@ fn run_corpus(dir: &Path, args: &Args) -> ExitCode {
             r.blocks_ok,
             r.blocks,
             r.handled,
-            if r.ok() { "ok" } else { "FAIL" }
+            nodes,
+            if !r.ok() {
+                "FAIL"
+            } else if bad {
+                "INVALID"
+            } else {
+                "ok"
+            }
         );
     }
     let ok = rows.iter().filter(|r| r.ok()).count();

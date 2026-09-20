@@ -51,4 +51,9 @@ pub enum XarError {
     /// names which one; it never carries anything read from the file.
     #[error("limit exceeded: {0}")]
     Limit(&'static str),
+    /// The document model refused to build the document the records
+    /// describe. Only the mapping stage
+    /// ([`crate::import::import`]) can produce this.
+    #[error(transparent)]
+    Build(#[from] xarast_doc::BuildError),
 }

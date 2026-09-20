@@ -71,6 +71,7 @@ pub struct BitmapData {
 
 /// The container format encoded bytes arrived in.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum ImageFormat {
     /// PNG.
     Png,
@@ -127,7 +128,16 @@ pub struct BitmapResource {
 }
 
 impl BitmapResource {
-    /// The SHA-256 of the decoded payload: the deduplication key.
+    /// The SHA-256 of the payload: the deduplication key.
+    ///
+    /// It covers the decoded pixels **and the encoded original**. Two
+    /// bitmaps that decode to the same pixels but arrived as different bytes
+    /// are still two resources, because the writer emits `original`
+    /// verbatim and collapsing them would silently discard one of the two
+    /// encodings. It also matters while a decoder does not exist yet: the
+    /// `.xar` importer stores the encoded bytes and leaves `pixels` empty
+    /// until Phase 10, and without the original in the hash every bitmap in
+    /// a file would deduplicate onto the first.
     #[must_use]
     pub fn content_hash(&self) -> [u8; 32] {
         let mut h = Sha256::new();
@@ -137,6 +147,13 @@ impl BitmapResource {
         h.update(&*self.pixels.pixels);
         for c in self.pixels.palette.iter() {
             h.update([c.r, c.g, c.b, c.a]);
+        }
+        match &self.original {
+            Some(o) => {
+                h.update([1u8, o.format as u8]);
+                h.update(&*o.bytes);
+            }
+            None => h.update([0u8]),
         }
         h.finalize().into()
     }

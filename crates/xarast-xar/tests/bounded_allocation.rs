@@ -7,9 +7,11 @@
 //! direct measurement finds it now, and says which field.
 //!
 //! Every length-bearing field in the format gets one case here. The
-//! measurement is a counting global allocator, so the whole test binary
-//! holds exactly one `#[test]`: two running concurrently would measure each
-//! other.
+//! measurement is a counting global allocator, which is process-wide, so
+//! **the tests in this file must not run at the same time**: one would
+//! measure the other's allocations and the failure would look like a
+//! regression in the parser. [`SERIAL`] is what stops that; it is not
+//! optional and not a performance detail.
 
 // A counting global allocator is the only way to measure peak allocation,
 // and `GlobalAlloc` is an unsafe trait. Every method here forwards straight
@@ -68,6 +70,9 @@ fn bump(n: usize) {
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
+/// Serialises the tests in this file. See the module documentation.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Runs `f` and returns the peak live allocation during it, in bytes.
 fn peak_of(f: impl FnOnce()) -> usize {
     let before = LIVE.load(Ordering::Relaxed);
@@ -97,6 +102,7 @@ fn tiny_file_with_lying_size(tag: u32) -> Vec<u8> {
 
 #[test]
 fn no_declared_length_can_drive_an_allocation() {
+    let _serial = SERIAL.lock();
     let limits = ReaderLimits::default();
     let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
 
@@ -167,6 +173,7 @@ fn no_declared_length_can_drive_an_allocation() {
 /// refused, and refusing it stays cheap.
 #[test]
 fn a_decompression_bomb_is_refused_within_its_cap() {
+    let _serial = SERIAL.lock();
     use std::io::Write as _;
     use xarast_xar::{RecordReader, XarError};
 

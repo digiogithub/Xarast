@@ -77,13 +77,85 @@ fn exit_code_two_for_a_missing_file() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// A minimal *drawing*: the header plus one spread, one layer and one
+/// two-point path, so that there is something to build a document from.
+fn minimal_drawing() -> Vec<u8> {
+    let mut v = vec![0x58, 0x41, 0x52, 0x41, 0xA3, 0xA3, 0x0D, 0x0A];
+    let mut header = b"CXN".to_vec();
+    header.extend_from_slice(&[0u8; 12]);
+    header.extend_from_slice(b"t\0v\0b\0");
+    let mut rec = |tag: u32, payload: &[u8]| {
+        v.extend_from_slice(&tag.to_le_bytes());
+        v.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        v.extend_from_slice(payload);
+    };
+    rec(2, &header);
+    let mut spread = Vec::new();
+    for n in [600_000i32, 450_000, 576_000, 0] {
+        spread.extend_from_slice(&n.to_le_bytes());
+    }
+    spread.push(2);
+    let mut layer = vec![0x01 | 0x04 | 0x08];
+    for u in "L".encode_utf16() {
+        layer.extend_from_slice(&u.to_le_bytes());
+    }
+    layer.extend_from_slice(&0u16.to_le_bytes());
+    let mut path = vec![0x06u8];
+    path.extend_from_slice(&[0, 0, 0, 0, 0x03, 0xE8, 0x07, 0xD0]);
+    path.push(0x02);
+    path.extend_from_slice(&[0, 0, 0, 0, 0x01, 0xF4, 0x01, 0xF4]);
+    rec(40, &[]);
+    rec(1, &[]);
+    rec(42, &[]);
+    rec(1, &[]);
+    rec(45, &spread);
+    rec(43, &[]);
+    rec(1, &[]);
+    rec(48, &layer);
+    rec(116, &path);
+    rec(0, &[]);
+    rec(0, &[]);
+    rec(0, &[]);
+    rec(3, &[]);
+    v
+}
+
 #[test]
-fn the_model_modes_say_they_are_not_wired_up_yet() {
-    let p = write_temp("model", &minimal_xar());
+fn exit_code_zero_and_a_node_census_from_validate() {
+    let p = write_temp("validate", &minimal_drawing());
+    let out = Command::new(bin())
+        .arg("--validate")
+        .arg(&p)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("validate       0 error(s)"), "{text}");
+    assert!(text.contains("Path       1"), "{text}");
+}
+
+#[test]
+fn the_model_mode_prints_the_document() {
+    let p = write_temp("model", &minimal_drawing());
     let out = Command::new(bin()).arg("--model").arg(&p).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Document"), "{text}");
+    assert!(text.contains("Spread"), "{text}");
+    assert!(text.contains("Path"), "{text}");
+}
+
+#[test]
+fn exit_code_two_when_the_model_cannot_be_built() {
+    // A header and an end-of-file record and nothing else: there is no
+    // document to build.
+    let p = write_temp("nodoc", &minimal_xar());
+    let out = Command::new(bin())
+        .arg("--validate")
+        .arg(&p)
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("document model"), "{err}");
 }
 
 #[test]
