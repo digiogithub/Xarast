@@ -322,12 +322,7 @@ impl<'a> SceneBuilder<'a> {
     }
 
     /// Opens a group with its own transform.
-    pub fn push_group(
-        &mut self,
-        id: SceneNodeId,
-        xf: Transform2D,
-        hint: CacheHint,
-    ) -> SceneNodeId {
+    pub fn push_group(&mut self, id: SceneNodeId, xf: Transform2D, hint: CacheHint) -> SceneNodeId {
         self.open.push((id, self.scene.ops.len()));
         self.scene.ops.push(SceneOp::PushGroup { id, xf, hint });
         self.stack.push(Frame::Group);
@@ -390,8 +385,9 @@ impl<'a> SceneBuilder<'a> {
     /// Restores the previous transparency.
     pub fn pop_transparency(&mut self) {
         if self.stack.pop() != Some(Frame::Transparency) {
-            self.error
-                .get_or_insert(SceneError::Underflow { kind: "transparency" });
+            self.error.get_or_insert(SceneError::Underflow {
+                kind: "transparency",
+            });
             return;
         }
         self.transparency.pop();
@@ -403,7 +399,9 @@ impl<'a> SceneBuilder<'a> {
     /// capture, and it is what a transparent *group* means, as opposed to a
     /// transparency applied per object.
     pub fn push_layer(&mut self, kind: LayerKind, transparency: Transparency) {
-        self.scene.ops.push(SceneOp::PushLayer { kind, transparency });
+        self.scene
+            .ops
+            .push(SceneOp::PushLayer { kind, transparency });
         self.stack.push(Frame::Layer);
         self.stats.layers += 1;
     }

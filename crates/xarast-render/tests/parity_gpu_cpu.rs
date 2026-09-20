@@ -42,10 +42,8 @@ fn the_two_backends_agree_within_the_parity_band() {
     let mut failures = Vec::new();
     for case in all_cases() {
         let cpu = render_case(&case);
-        let mut gpu_target = xarast_render::Surface::new(
-            case.view.viewport.width(),
-            case.view.viewport.height(),
-        );
+        let mut gpu_target =
+            xarast_render::Surface::new(case.view.viewport.width(), case.view.viewport.height());
         let dl = xarast_render::DisplayList::build(
             &case.scene,
             &case.view,
@@ -69,13 +67,12 @@ fn the_two_backends_agree_within_the_parity_band() {
     );
 }
 
-fn create_device() -> Option<(
-    std::sync::Arc<wgpu::Device>,
-    std::sync::Arc<wgpu::Queue>,
-)> {
+fn create_device() -> Option<(std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
-    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+    let adapter =
+        block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+    let (device, queue) =
+        block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     Some((std::sync::Arc::new(device), std::sync::Arc::new(queue)))
 }
 

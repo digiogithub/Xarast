@@ -24,9 +24,7 @@ use crate::paint::{
 use crate::path::PathRef;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::{EffectSpace, Profile, RampLength, Stop, TranspStop, build_transparency_ramp};
-use crate::scene::{
-    CacheHint, LayerKind, RenderQuality, Scene, SceneBuilder, SceneNodeId,
-};
+use crate::scene::{CacheHint, LayerKind, RenderQuality, Scene, SceneBuilder, SceneNodeId};
 
 /// The edge length of every corpus scene, in pixels.
 pub const CASE_SIZE: u32 = 96;
@@ -613,7 +611,10 @@ fn layer_cases() -> Vec<Case> {
                 Paint::Solid(rgb(240, 220, 60)),
             );
             if name == "layer_nested" {
-                b.push_layer(LayerKind::Isolated, Transparency::flat(BlendFamily::Mix, 64));
+                b.push_layer(
+                    LayerKind::Isolated,
+                    Transparency::flat(BlendFamily::Mix, 64),
+                );
                 b.fill(
                     SceneNodeId(11),
                     &rect_path(40.0, 40.0, 88.0, 88.0),
@@ -704,7 +705,11 @@ fn image_cases() -> Vec<Case> {
 /// The antialiasing probes, which are also the cases the AA report reads.
 fn aa_cases() -> Vec<Case> {
     let mut out = Vec::new();
-    for (name, deg) in [("aa_edge_0p5", 0.5f64), ("aa_edge_2", 2.0), ("aa_edge_45", 45.0)] {
+    for (name, deg) in [
+        ("aa_edge_0p5", 0.5f64),
+        ("aa_edge_2", 2.0),
+        ("aa_edge_45", 45.0),
+    ] {
         let mut scene = Scene::new();
         {
             let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
@@ -714,12 +719,18 @@ fn aa_cases() -> Vec<Case> {
                 FillRule::NonZero,
                 Paint::Solid(white()),
             );
-            let t = deg.to_radians().tan();
+            // The half-plane below a line through the centre at `deg`.
+            // Constructing it from the centre outwards keeps the edge on
+            // the canvas at every angle; extending it to the right by the
+            // tangent would put a 45 degree edge off the top.
+            let (dx, dy) = (deg.to_radians().cos(), deg.to_radians().sin());
+            let (cx, cy) = (48.0, 48.0);
+            let far = 400.0;
             let mut p = Path::builder();
-            p.move_to(pt(-8.0, 48.0));
-            p.line_to(pt(104.0, 48.0 - 112.0 * t));
-            p.line_to(pt(104.0, 120.0));
-            p.line_to(pt(-8.0, 120.0));
+            p.move_to(pt(cx - far * dx, cy - far * dy));
+            p.line_to(pt(cx + far * dx, cy + far * dy));
+            p.line_to(pt(cx + far * dx - far * dy, cy + far * dy + far * dx));
+            p.line_to(pt(cx - far * dx - far * dy, cy - far * dy + far * dx));
             p.close();
             b.fill(
                 SceneNodeId(1),

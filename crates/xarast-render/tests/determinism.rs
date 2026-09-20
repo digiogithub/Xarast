@@ -65,6 +65,14 @@ fn the_band_height_does_not_change_the_pixels() {
 #[test]
 fn the_interactive_configuration_is_not_claimed_to_be_deterministic() {
     use xarast_render::CpuBackend;
-    assert!(CpuBackend::new(CpuConfig::deterministic()).capabilities().deterministic);
-    assert!(!CpuBackend::new(CpuConfig::interactive()).capabilities().deterministic);
+    assert!(
+        CpuBackend::new(CpuConfig::deterministic())
+            .capabilities()
+            .deterministic
+    );
+    assert!(
+        !CpuBackend::new(CpuConfig::interactive())
+            .capabilities()
+            .deterministic
+    );
 }

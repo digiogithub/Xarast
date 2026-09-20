@@ -30,7 +30,9 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use vello_cpu::color::{AlphaColor, PremulRgba8, Srgb};
-use vello_cpu::kurbo::{Affine, Cap as KCap, Join as KJoin, Stroke as KStroke};
+use vello_cpu::kurbo::{
+    Affine, BezPath, Cap as KCap, Join as KJoin, Stroke as KStroke, StrokeOpts,
+};
 use vello_cpu::peniko::Fill;
 use vello_cpu::{Level, Pixmap, PixmapMut, RenderContext, RenderMode, RenderSettings, Resources};
 use xarast_color::Rgba8;
@@ -263,7 +265,10 @@ struct Layer {
 
 /// Renders one horizontal band. `y0` is the band's first row in device
 /// space, `rows` is the band's slice of the target.
-#[allow(clippy::too_many_arguments, reason = "a band's state is genuinely this wide")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
 fn render_band(
     dl: &DisplayList,
     res: &Resolver,
@@ -293,6 +298,7 @@ fn render_band(
         return stats;
     }
 
+    let tol_doc = dl.view().tolerance();
     let settings = RenderSettings {
         level: cfg.level(),
         num_threads: 0,
@@ -319,6 +325,7 @@ fn render_band(
                     *rule,
                     *xf,
                     band,
+                    tol_doc,
                 );
                 let merged = match clips.last() {
                     Some(prev) => prev
@@ -371,6 +378,7 @@ fn render_band(
                     *bounds,
                     band,
                     draw,
+                    tol_doc,
                     width,
                     clips.last().map(Vec::as_slice),
                     dst,
@@ -404,6 +412,7 @@ fn render_band(
                     *bounds,
                     band,
                     draw,
+                    tol_doc,
                     width,
                     clips.last().map(Vec::as_slice),
                     dst,
@@ -423,9 +432,18 @@ fn render_band(
             } => {
                 let (dst, _) = split_target(&mut layers, rows);
                 stats.pixels += draw_image_cmd(
-                    *image, mapping, paint, transparency, bounds.intersection(draw), band, width,
+                    *image,
+                    mapping,
+                    paint,
+                    transparency,
+                    bounds.intersection(draw),
+                    band,
+                    width,
                     clips.last().map(Vec::as_slice),
-                    dst, luts, res, cfg,
+                    dst,
+                    luts,
+                    res,
+                    cfg,
                 );
                 stats.drew = true;
             }
@@ -448,7 +466,7 @@ fn render_band(
 
 /// The destination the next primitive draws into: the innermost layer, or
 /// the target rows.
-fn split_target<'a>(layers: &'a mut Vec<Layer>, rows: &'a mut [u8]) -> (&'a mut [u8], bool) {
+fn split_target<'a>(layers: &'a mut [Layer], rows: &'a mut [u8]) -> (&'a mut [u8], bool) {
     match layers.last_mut() {
         Some(l) => (&mut l.pixels, true),
         None => (rows, false),
@@ -502,10 +520,15 @@ fn rasterise_coverage(
     resources: &mut Resources,
     prim: &Primitive<'_>,
     rect: DeviceRect,
+    tol_doc: f64,
 ) -> bool {
     let (w, h) = (rect.width(), rect.height());
-    let Ok(w16) = u16::try_from(w) else { return false };
-    let Ok(h16) = u16::try_from(h) else { return false };
+    let Ok(w16) = u16::try_from(w) else {
+        return false;
+    };
+    let Ok(h16) = u16::try_from(h) else {
+        return false;
+    };
     if w16 == 0 || h16 == 0 {
         return false;
     }
@@ -513,11 +536,17 @@ fn rasterise_coverage(
     scratch.resize(w16, h16);
     ctx.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
     let to_origin = Affine::translate((-f64::from(rect.x0), -f64::from(rect.y0)));
+    // Flatness is **ours**, not the rasteriser's. The original sets it too
+    // (`grndrgn.cpp:5626`), and it is what `RenderQuality` actually
+    // controls: Draft multiplies the tolerance by five, Final does not.
+    // Leaving it to the rasteriser's internal default would make the two
+    // quality levels identical and would cap curve fidelity at whatever
+    // that default happens to be.
     match prim {
         Primitive::Fill { path, rule, xf } => {
             ctx.set_fill_rule(to_fill(*rule));
             ctx.set_transform(to_origin * xf.to_affine());
-            ctx.fill_path(path.bez());
+            ctx.fill_path(&flatten(path.bez(), tol_doc));
         }
         Primitive::Stroke { path, style, xf } => {
             let scale = xf.max_scale().max(1e-12);
@@ -532,16 +561,20 @@ fn rasterise_coverage(
             let mut stroke = KStroke::new(width_doc)
                 .with_caps(to_cap(style.cap_start))
                 .with_join(to_join(style.join))
-                .with_miter_limit(style.mitre_limit);
+                .with_miter_limit(style.mitre_limit.max(1.0));
             if let Some(d) = &style.dash {
                 let pattern = d.resolved(style.width);
                 if !pattern.is_empty() {
                     stroke = stroke.with_dashes(0.0, pattern);
                 }
             }
-            ctx.set_stroke(stroke);
+            // Expanded to an outline at our tolerance and filled, rather
+            // than handed to the rasteriser's stroker, so that the same
+            // flatness rule governs strokes and fills.
+            let outline = kurbo_stroke(path.bez(), &stroke, tol_doc);
+            ctx.set_fill_rule(Fill::NonZero);
             ctx.set_transform(to_origin * xf.to_affine());
-            ctx.stroke_path(path.bez());
+            ctx.fill_path(&flatten(&outline, tol_doc));
         }
     }
     ctx.flush();
@@ -549,7 +582,23 @@ fn rasterise_coverage(
     true
 }
 
+/// Flattens a path to line segments within `tol` document units.
+fn flatten(path: &BezPath, tol: f64) -> BezPath {
+    let mut out = BezPath::new();
+    vello_cpu::kurbo::flatten(path.iter(), tol.max(1e-6), |el| out.push(el));
+    out
+}
+
+/// Expands a stroke into its outline at our tolerance.
+fn kurbo_stroke(path: &BezPath, style: &KStroke, tol: f64) -> BezPath {
+    vello_cpu::kurbo::stroke(path.iter(), style, &StrokeOpts::default(), tol.max(1e-6))
+}
+
 /// Rasterises a clip path into a band-sized coverage mask.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
 fn rasterise_clip(
     ctx: &mut RenderContext,
     scratch: &mut Pixmap,
@@ -558,16 +607,12 @@ fn rasterise_clip(
     rule: FillRule,
     xf: Transform2D,
     band: DeviceRect,
+    tol_doc: f64,
 ) -> Vec<u8> {
     let mut mask = vec![0u8; band.area() as usize];
-    let guarded = DeviceRect::new(
-        band.x0,
-        band.y0 - BAND_GUARD,
-        band.x1,
-        band.y1 + BAND_GUARD,
-    );
+    let guarded = DeviceRect::new(band.x0, band.y0 - BAND_GUARD, band.x1, band.y1 + BAND_GUARD);
     let prim = Primitive::Fill { path, rule, xf };
-    if !rasterise_coverage(ctx, scratch, resources, &prim, guarded) {
+    if !rasterise_coverage(ctx, scratch, resources, &prim, guarded, tol_doc) {
         return mask;
     }
     let w = band.width() as usize;
@@ -579,7 +624,10 @@ fn rasterise_clip(
 }
 
 /// Composites one primitive.
-#[allow(clippy::too_many_arguments, reason = "a band's state is genuinely this wide")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
 fn draw_primitive(
     ctx: &mut RenderContext,
     scratch: &mut Pixmap,
@@ -590,6 +638,7 @@ fn draw_primitive(
     bounds: DeviceRect,
     band: DeviceRect,
     area: DeviceRect,
+    tol_doc: f64,
     width: u32,
     clip: Option<&[u8]>,
     dst: &mut [u8],
@@ -608,7 +657,7 @@ fn draw_primitive(
         rect.x1,
         rect.y1 + BAND_GUARD,
     ));
-    if !rasterise_coverage(ctx, scratch, resources, &prim, guarded) {
+    if !rasterise_coverage(ctx, scratch, resources, &prim, guarded, tol_doc) {
         return 0;
     }
     composite_coverage(
@@ -627,7 +676,10 @@ fn draw_primitive(
     )
 }
 
-#[allow(clippy::too_many_arguments, reason = "a band's state is genuinely this wide")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
 fn draw_image_cmd(
     image: ImageId,
     mapping: &GradMapping,
@@ -679,14 +731,29 @@ fn draw_image_cmd(
             }
             let src = eval_paint(&paint, &res.ramps, &res.images, p);
             let t = level_at(transparency, res, p);
-            blend_into(dst, band, width, x, y, src, t, cov, transparency.family, luts, cfg);
+            blend_into(
+                dst,
+                band,
+                width,
+                x,
+                y,
+                src,
+                t,
+                cov,
+                transparency.family,
+                luts,
+                cfg,
+            );
             touched += 1;
         }
     }
     touched
 }
 
-#[allow(clippy::too_many_arguments, reason = "a band's state is genuinely this wide")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
 fn composite_coverage(
     coverage: &[PremulRgba8],
     coverage_rect: DeviceRect,
@@ -734,7 +801,19 @@ fn composite_coverage(
                 Some(t) => t,
                 None => level_at(transparency, res, p),
             };
-            blend_into(dst, band, width, x, y, src, t, cov, transparency.family, luts, cfg);
+            blend_into(
+                dst,
+                band,
+                width,
+                x,
+                y,
+                src,
+                t,
+                cov,
+                transparency.family,
+                luts,
+                cfg,
+            );
             touched += 1;
         }
     }
@@ -767,7 +846,9 @@ fn level_at(t: &Transparency, res: &Resolver, p: Point64) -> u8 {
                 return 0;
             };
             let s = crate::paint::apply_repeat(s, *repeat);
-            let idx = (s * (table.len() - 1) as f64).round().clamp(0.0, (table.len() - 1) as f64);
+            let idx = (s * (table.len() - 1) as f64)
+                .round()
+                .clamp(0.0, (table.len() - 1) as f64);
             table[idx as usize]
         }
         TranspSource::Image {
@@ -792,7 +873,10 @@ fn level_at(t: &Transparency, res: &Resolver, p: Point64) -> u8 {
 
 /// Reads a straight colour out of a premultiplied band buffer, blends, and
 /// writes it back premultiplied.
-#[allow(clippy::too_many_arguments, reason = "the pixel address is four of these")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the pixel address is four of these"
+)]
 fn blend_into(
     dst: &mut [u8],
     band: DeviceRect,
@@ -958,7 +1042,9 @@ impl Rasterizer for CpuRasterizer {
 
     fn fill_path(&mut self, path: &PathRef, rule: FillRule, paint: &Paint, xf: &Transform2D) {
         let bounds = crate::display_list::device_bounds_of(path, *xf, 0.0);
-        self.dirty = self.dirty.union(DirtyRect::of(bounds.intersection(self.clip)));
+        self.dirty = self
+            .dirty
+            .union(DirtyRect::of(bounds.intersection(self.clip)));
         self.cmds.push(DrawCmd::Fill {
             node: crate::scene::SceneNodeId(0),
             path: path.clone(),
@@ -970,10 +1056,18 @@ impl Rasterizer for CpuRasterizer {
         });
     }
 
-    fn stroke_path(&mut self, path: &PathRef, style: &StrokeStyle, paint: &Paint, xf: &Transform2D) {
+    fn stroke_path(
+        &mut self,
+        path: &PathRef,
+        style: &StrokeStyle,
+        paint: &Paint,
+        xf: &Transform2D,
+    ) {
         let pad = style.width.to_f64() * 0.5 * style.mitre_limit.max(1.0);
         let bounds = crate::display_list::device_bounds_of(path, *xf, pad).inflated(1);
-        self.dirty = self.dirty.union(DirtyRect::of(bounds.intersection(self.clip)));
+        self.dirty = self
+            .dirty
+            .union(DirtyRect::of(bounds.intersection(self.clip)));
         self.cmds.push(DrawCmd::Stroke {
             node: crate::scene::SceneNodeId(0),
             path: path.clone(),

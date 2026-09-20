@@ -46,7 +46,12 @@ impl DeviceRect {
     /// The whole of a surface of this size.
     #[must_use]
     pub fn from_size(width: u32, height: u32) -> DeviceRect {
-        DeviceRect::new(0, 0, i32::try_from(width).unwrap_or(i32::MAX), i32::try_from(height).unwrap_or(i32::MAX))
+        DeviceRect::new(
+            0,
+            0,
+            i32::try_from(width).unwrap_or(i32::MAX),
+            i32::try_from(height).unwrap_or(i32::MAX),
+        )
     }
 
     /// Rounds a continuous `kurbo` rectangle outwards to whole pixels, with
@@ -265,7 +270,12 @@ impl Surface {
     #[must_use]
     pub fn pixel(&self, x: i32, y: i32) -> Option<[u8; 4]> {
         let o = self.offset(x, y)?;
-        Some([self.data[o], self.data[o + 1], self.data[o + 2], self.data[o + 3]])
+        Some([
+            self.data[o],
+            self.data[o + 1],
+            self.data[o + 2],
+            self.data[o + 3],
+        ])
     }
 
     /// Writes one pixel; out-of-bounds writes are dropped.
@@ -329,7 +339,11 @@ pub fn scroll_surface(s: &mut Surface, dx: i32, dy: i32) -> [DirtyRect; 2] {
     };
     for y in rows {
         let (src_y, dst_y) = if dy > 0 { (y, y + dy) } else { (y - dy, y) };
-        let (src_x, dst_x) = if dx > 0 { (0usize, dx as usize) } else { ((-dx) as usize, 0usize) };
+        let (src_x, dst_x) = if dx > 0 {
+            (0usize, dx as usize)
+        } else {
+            ((-dx) as usize, 0usize)
+        };
         let src = src_y as usize * stride + src_x * 4;
         let dst = dst_y as usize * stride + dst_x * 4;
         s.data_mut().copy_within(src..src + copy_w, dst);

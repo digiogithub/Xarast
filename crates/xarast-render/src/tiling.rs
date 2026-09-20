@@ -234,8 +234,9 @@ mod tests {
         let area = DeviceRect::new(0, 0, 1024, 1024);
         let plan = plan_bands(&dl, area, 1024);
         assert!(
-            plan.tiles.iter().all(|t| t.rect.height() >= MIN_BAND_SCANLINES
-                || t.rect.y1 == area.y1),
+            plan.tiles
+                .iter()
+                .all(|t| t.rect.height() >= MIN_BAND_SCANLINES || t.rect.y1 == area.y1),
             "every band but possibly the last has at least 16 lines"
         );
         let total: u64 = plan.tiles.iter().map(|t| t.rect.area()).sum();

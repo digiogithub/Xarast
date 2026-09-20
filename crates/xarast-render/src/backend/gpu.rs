@@ -183,7 +183,12 @@ impl GpuBackend {
     /// Returns [`BackendError::WrongTargetFormat`] for anything but
     /// `Rgba8Unorm`, and [`BackendError::SurfaceTooLarge`] beyond the
     /// device's limits.
-    pub fn check_target(&self, format: wgpu::TextureFormat, width: u32, height: u32) -> Result<(), BackendError> {
+    pub fn check_target(
+        &self,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Result<(), BackendError> {
         if format != TARGET_FORMAT {
             return Err(BackendError::WrongTargetFormat);
         }
@@ -225,6 +230,12 @@ impl GpuBackend {
 /// test with no GPU and no windowing system present.
 #[must_use]
 pub fn adapter_available() -> bool {
+    // `Instance::new` panics outright when no backend is compiled in, so
+    // ask first. A backend-less build is a fact about the build, not a
+    // reason to abort a test run.
+    if wgpu::Instance::enabled_backend_features().is_empty() {
+        return false;
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     !pollster_block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty()
 }

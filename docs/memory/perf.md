@@ -49,6 +49,45 @@ the build, is still owed — the phase documents assume it.
 The arena wins against the pre-registered decision rule. Full reasoning in
 [`document-model.md`](document-model.md).
 
+## Phase 4 — render engine
+
+`cargo bench -p xarast-render`, on the same development container the W0 spike
+used: **Intel Xeon @ 2.10 GHz, 4 vCPU, 15 GiB, no GPU**. The phase's budget
+table assumes eight cores and an integrated GPU, so the overruns below are
+partly the machine. `docs/memory/render.md` has the full spike table and the
+gate verdicts.
+
+| Budget | Target | Measured | Verdict |
+|---|---|---|---|
+| CPU full frame, 1920 × 1080, Final, 8 cores | ≤ 25 ms at 100 000 objects | **24.6 ms at 20 000 objects** on 4 cores | ~5× over, machine-adjusted ~1.5× over |
+| CPU full frame, 960 × 540, 20 000 objects | — | 38.4 ms | slower than 1080p: four times the overdraw |
+| Incremental 64 × 64 dirty rect | ≤ 0.3 ms | **0.258 ms** | **under** |
+| Display-list build, warm scene | ≤ 3 ms at 100 000 nodes | 2.12 ms at 20 000 nodes (≈ 10.6 ms extrapolated) | **3.5× over**; `DrawCmd` is large |
+| Ramp build, 2048 entries, 8 stops, with profile | ≤ 40 µs | 86.6 µs | 2.2× over (was 126 µs before the RGB fast path) |
+| Ramp cache hit | — | 0.52 ns | noise |
+| Blend LUT set, 12 families | ≤ 15 ms once at startup | **0.56 ms** | **27× under** |
+| Resident LUT memory | ≤ 768 KiB | **768 KiB exactly** | at budget |
+| GPU full frame | ≤ 8 ms | **unmeasured** | no adapter on this machine |
+
+Cache-admission sweep, 512 × 512, one group of N primitives per frame — the
+measurement behind the threshold of 64:
+
+| Group size | 8 | 32 | 64 | 128 | 512 |
+|---|---|---|---|---|---|
+| Frame | 4.41 ms | 4.52 ms | 4.82 ms | 5.69 ms | 10.08 ms |
+
+### What the spike says about where the time goes
+
+Recording a scene into the rasteriser costs more than filling the pixels:
+273 ms of a 442 ms 100 000-object frame. `vello_cpu` has no scene-reuse API,
+so that cost recurs every frame, which is the argument for a per-node cache
+that holds **pixels** rather than encodings.
+
+A naive bounding-box scan over 100 000 objects costs 36.5 ms — forty times the
+0.81 ms it takes to render a 64 × 64 dirty rect out of them. The display list
+therefore carries precomputed bounds and the tile planner bins by them; an
+incremental redraw that rediscovers its own geometry is not incremental.
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape
@@ -70,7 +109,9 @@ that will recur:
 
 ## Open TODOs
 
-- [ ] Establish a reference machine and pin the budget table to it.
+- [ ] Establish a reference machine and pin the budget table to it. Phase 4
+      needed one badly: G1 and G2 of its rasteriser spike are both unsettled
+      because the container has 4 slow cores and no GPU at all.
 - [ ] Wire the budgets into CI so that a regression fails the build, rather
       than being noticed later.
 - [ ] Measure bytes per node excluding payloads, so the 160 B budget can

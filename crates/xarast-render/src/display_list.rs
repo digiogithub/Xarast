@@ -27,6 +27,11 @@ use crate::precision::Transform2D;
 use crate::scene::{LayerKind, RenderQuality, Scene, SceneNodeId, SceneOp};
 use crate::surface::{DeviceRect, DirtyRect};
 
+/// The chord error a `Final` render allows, in device pixels.
+///
+/// A tenth of a pixel, which is the original's antialiased flatness.
+pub const FINAL_FLATNESS_DEVICE_PX: f64 = 0.1;
+
 /// Everything the renderer needs to know about the view being drawn.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewParams {
@@ -54,7 +59,12 @@ impl Default for ViewParams {
 impl ViewParams {
     /// A view of a whole surface at 96 dpi with the given document scale.
     #[must_use]
-    pub fn new(width: u32, height: u32, transform: Transform2D, quality: RenderQuality) -> ViewParams {
+    pub fn new(
+        width: u32,
+        height: u32,
+        transform: Transform2D,
+        quality: RenderQuality,
+    ) -> ViewParams {
         ViewParams {
             transform,
             viewport: DeviceRect::from_size(width, height),
@@ -65,15 +75,21 @@ impl ViewParams {
 
     /// The flattening tolerance in **document** units for this view.
     ///
-    /// A quarter of a device pixel at the current scale, multiplied by the
-    /// quality's flatness factor. The original computes the same quantity
-    /// and divides it by five when antialiasing is on; Xarast is always
-    /// antialiased, so the tight value is the baseline and Draft multiplies
-    /// it back up.
+    /// The original sets flatness to half a device pixel and divides it by
+    /// five when antialiasing is on (`research/03 §2.2`), so its
+    /// antialiased flatness is a tenth of a pixel. Xarast is *always*
+    /// antialiased, so a tenth of a pixel is the Final baseline and Draft
+    /// multiplies it back up by five — which lands Draft exactly on the
+    /// original's non-antialiased flatness.
+    ///
+    /// This is the crate's only flatness rule: the backends flatten with
+    /// it rather than leaving the choice to whatever the rasteriser's
+    /// internal default happens to be, because otherwise `RenderQuality`
+    /// would control nothing.
     #[must_use]
     pub fn tolerance(&self) -> f64 {
         let scale = self.transform.max_scale().max(1e-9);
-        0.25 / scale * self.quality.flatness_multiplier()
+        FINAL_FLATNESS_DEVICE_PX / scale * self.quality.flatness_multiplier()
     }
 }
 
@@ -436,7 +452,12 @@ pub fn device_bounds_of(path: &PathRef, xf: Transform2D, pad_doc: f64) -> Device
     if r.x1 < r.x0 || r.y1 < r.y0 {
         return DeviceRect::EMPTY;
     }
-    let r = kurbo::Rect::new(r.x0 - pad_doc, r.y0 - pad_doc, r.x1 + pad_doc, r.y1 + pad_doc);
+    let r = kurbo::Rect::new(
+        r.x0 - pad_doc,
+        r.y0 - pad_doc,
+        r.x1 + pad_doc,
+        r.y1 + pad_doc,
+    );
     let a = xf.to_affine();
     let corners = [
         a * kurbo::Point::new(r.x0, r.y0),
@@ -593,7 +614,10 @@ mod tests {
         b.finish().unwrap();
         let dl = DisplayList::build(&scene, &view(), &DirtyRect::NONE);
         let bounds = dl.commands()[0].bounds().unwrap();
-        assert!(bounds.x0 >= 48, "the group translation moved it: {bounds:?}");
+        assert!(
+            bounds.x0 >= 48,
+            "the group translation moved it: {bounds:?}"
+        );
     }
 
     #[test]

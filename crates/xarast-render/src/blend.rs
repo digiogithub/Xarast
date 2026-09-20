@@ -612,7 +612,10 @@ fn hue(src: Rgba8, t: u8, dst: Rgba8) -> Rgba8 {
         (
             ColourValue::Hsvt { h: hs, .. },
             ColourValue::Hsvt {
-                h: hd, s: sd, v: vd, ..
+                h: hd,
+                s: sd,
+                v: vd,
+                ..
             },
         ) => (hs, hd, sd, vd),
         _ => return dst,
@@ -736,7 +739,14 @@ mod tests {
     fn stained_glass_at_full_opacity_is_a_multiply() {
         let luts = BlendLuts::default();
         let (s, d) = (rgb(128, 64, 255), rgb(200, 100, 50));
-        let out = blend_pixel(BlendFamily::StainedGlass, &luts, LumaWeights::BT601, s, 0, d);
+        let out = blend_pixel(
+            BlendFamily::StainedGlass,
+            &luts,
+            LumaWeights::BT601,
+            s,
+            0,
+            d,
+        );
         assert_eq!(out.r, mul(s.r, d.r));
         assert_eq!(out.g, mul(s.g, d.g));
         assert_eq!(out.b, mul(s.b, d.b));
@@ -796,7 +806,14 @@ mod tests {
     fn hue_takes_the_source_hue_and_keeps_the_destination_value() {
         let luts = BlendLuts::default();
         let w = LumaWeights::BT601;
-        let out = blend_pixel(BlendFamily::Hue, &luts, w, rgb(0, 0, 255), 0, rgb(200, 40, 40));
+        let out = blend_pixel(
+            BlendFamily::Hue,
+            &luts,
+            w,
+            rgb(0, 0, 255),
+            0,
+            rgb(200, 40, 40),
+        );
         assert!(out.b > out.r, "the result should be blue-dominant: {out:?}");
     }
 
@@ -826,10 +843,7 @@ mod tests {
         let w = LumaWeights::BT601;
         let (s, d) = (rgb(0, 0, 0), rgb(255, 255, 255));
         assert_eq!(composite(BlendFamily::Mix, &luts, w, s, 0, 0, d), d);
-        assert_eq!(
-            composite(BlendFamily::Mix, &luts, w, s, 0, 255, d).r,
-            0
-        );
+        assert_eq!(composite(BlendFamily::Mix, &luts, w, s, 0, 255, d).r, 0);
         let half = composite(BlendFamily::Mix, &luts, w, s, 0, 128, d);
         assert!(half.r > 120 && half.r < 135, "{half:?}");
     }

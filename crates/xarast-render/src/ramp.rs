@@ -41,7 +41,11 @@ impl Stop {
     #[must_use]
     pub fn new(offset: f32, color: Rgba8) -> Stop {
         Stop {
-            offset: if offset.is_nan() { 0.0 } else { offset.clamp(0.0, 1.0) },
+            offset: if offset.is_nan() {
+                0.0
+            } else {
+                offset.clamp(0.0, 1.0)
+            },
             color,
         }
     }
@@ -123,6 +127,23 @@ fn sample_stops(stops: &[Stop], f: f32, space: EffectSpace) -> Rgba8 {
     } else {
         (f - a.offset) / span
     };
+    if space == EffectSpace::Rgb {
+        // The overwhelmingly common case, and the one a 2048-entry table
+        // is built 2048 times for: interpolate the bytes directly instead
+        // of going through two colour-model conversions per entry. The
+        // result is identical to the general path for RGB stops, which
+        // `the_fast_rgb_path_matches_the_general_one` checks.
+        let lerp = |x: u8, y: u8| -> u8 {
+            let v = f32::from(x) + (f32::from(y) - f32::from(x)) * t;
+            v.round().clamp(0.0, 255.0) as u8
+        };
+        return Rgba8 {
+            r: lerp(a.color.r, b.color.r),
+            g: lerp(a.color.g, b.color.g),
+            b: lerp(a.color.b, b.color.b),
+            a: lerp(a.color.a, b.color.a),
+        };
+    }
     let mixed = xarast_color::interpolate(
         ColourValue::from_rgba8(a.color),
         ColourValue::from_rgba8(b.color),
@@ -152,7 +173,11 @@ pub fn build_ramp(
         return vec![Rgba8::TRANSPARENT; n];
     }
     let mut sorted: Vec<Stop> = stops.to_vec();
-    sorted.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.offset
+            .partial_cmp(&b.offset)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let d = (n - 1) as f64;
     let identity = profile.map(0.25) == 0.25 && profile.map(0.75) == 0.75;
     (0..n)
@@ -181,17 +206,17 @@ pub struct TranspStop {
 ///
 /// The `+ 2^21` in the seed is a round-to-nearest, not a fudge factor.
 #[must_use]
-pub fn build_transparency_ramp(
-    stops: &[TranspStop],
-    profile: Profile,
-    len: RampLength,
-) -> Vec<u8> {
+pub fn build_transparency_ramp(stops: &[TranspStop], profile: Profile, len: RampLength) -> Vec<u8> {
     let n = len.len();
     if stops.is_empty() {
         return vec![0; n];
     }
     let mut sorted: Vec<TranspStop> = stops.to_vec();
-    sorted.sort_by(|a, b| a.offset.partial_cmp(&b.offset).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.offset
+            .partial_cmp(&b.offset)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // The profile is applied to the parameter, so the fixed-point stretch
     // walk happens over the profiled index.
@@ -350,8 +375,16 @@ mod tests {
 
     #[test]
     fn a_two_stop_linear_ramp_ends_at_its_stops() {
-        let stops = [Stop::new(0.0, rgb(0, 0, 0)), Stop::new(1.0, rgb(255, 255, 255))];
-        let t = build_ramp(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
+        let stops = [
+            Stop::new(0.0, rgb(0, 0, 0)),
+            Stop::new(1.0, rgb(255, 255, 255)),
+        ];
+        let t = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
         assert_eq!(t.len(), 256);
         assert_eq!(t[0], rgb(0, 0, 0));
         assert_eq!(t[255], rgb(255, 255, 255));
@@ -361,7 +394,12 @@ mod tests {
     #[test]
     fn a_long_ramp_is_monotone_where_the_stops_are() {
         let stops = [Stop::new(0.0, rgb(0, 0, 0)), Stop::new(1.0, rgb(255, 0, 0))];
-        let t = build_ramp(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Long);
+        let t = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Long,
+        );
         assert_eq!(t.len(), 2048);
         for w in t.windows(2) {
             assert!(w[1].r >= w[0].r);
@@ -375,7 +413,12 @@ mod tests {
             Stop::new(0.5, rgb(0, 255, 0)),
             Stop::new(1.0, rgb(0, 0, 255)),
         ];
-        let t = build_ramp(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
+        let t = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
         assert_eq!(t[0], rgb(255, 0, 0));
         assert_eq!(t[255], rgb(0, 0, 255));
         let mid = t[127];
@@ -384,8 +427,16 @@ mod tests {
 
     #[test]
     fn the_profile_reshapes_the_ramp_without_moving_its_ends() {
-        let stops = [Stop::new(0.0, rgb(0, 0, 0)), Stop::new(1.0, rgb(255, 255, 255))];
-        let flat = build_ramp(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
+        let stops = [
+            Stop::new(0.0, rgb(0, 0, 0)),
+            Stop::new(1.0, rgb(255, 255, 255)),
+        ];
+        let flat = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
         let biased = build_ramp(
             &stops,
             Profile::new(0.6, 0.0),
@@ -394,14 +445,30 @@ mod tests {
         );
         assert_eq!(flat[0], biased[0]);
         assert_eq!(flat[255], biased[255]);
-        assert!(biased[128].r > flat[128].r, "a positive bias lifts the middle");
+        assert!(
+            biased[128].r > flat[128].r,
+            "a positive bias lifts the middle"
+        );
     }
 
     #[test]
     fn hsv_short_and_long_take_opposite_ways_round() {
-        let stops = [Stop::new(0.0, rgb(255, 0, 0)), Stop::new(1.0, rgb(0, 255, 0))];
-        let short = build_ramp(&stops, Profile::IDENTITY, EffectSpace::HsvShort, RampLength::Short);
-        let long = build_ramp(&stops, Profile::IDENTITY, EffectSpace::HsvLong, RampLength::Short);
+        let stops = [
+            Stop::new(0.0, rgb(255, 0, 0)),
+            Stop::new(1.0, rgb(0, 255, 0)),
+        ];
+        let short = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::HsvShort,
+            RampLength::Short,
+        );
+        let long = build_ramp(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::HsvLong,
+            RampLength::Short,
+        );
         // Halfway, the short way is yellow and the long way is cyan-ish.
         assert!(short[128].r > 128 && short[128].g > 128 && short[128].b < 64);
         assert!(long[128].b > 128);
@@ -410,8 +477,14 @@ mod tests {
     #[test]
     fn the_fixed_point_transparency_path_matches_the_float_one() {
         let stops = [
-            TranspStop { offset: 0.0, level: 0 },
-            TranspStop { offset: 1.0, level: 255 },
+            TranspStop {
+                offset: 0.0,
+                level: 0,
+            },
+            TranspStop {
+                offset: 1.0,
+                level: 255,
+            },
         ];
         let table = build_transparency_ramp(&stops, Profile::IDENTITY, RampLength::Long);
         assert_eq!(table.len(), 2048);
@@ -425,12 +498,53 @@ mod tests {
     }
 
     #[test]
+    fn the_fast_rgb_path_matches_the_general_one() {
+        // The fast path exists for speed, not for a different answer.
+        for (a, b) in [
+            (rgb(0, 0, 0), rgb(255, 255, 255)),
+            (rgb(13, 200, 7), rgb(240, 3, 199)),
+            (rgb(128, 128, 128), rgb(129, 127, 130)),
+        ] {
+            for i in 0..=64 {
+                // f32-ok: a ramp parameter in 0..=1, never a coordinate.
+                let f = i as f32 / 64.0;
+                let fast =
+                    sample_stops(&[Stop::new(0.0, a), Stop::new(1.0, b)], f, EffectSpace::Rgb);
+                let general = xarast_color::interpolate(
+                    ColourValue::from_rgba8(a),
+                    ColourValue::from_rgba8(b),
+                    f,
+                    FillEffect::Fade,
+                )
+                .to_rgba8();
+                let d = i32::from(fast.r) - i32::from(general.r);
+                assert!(d.abs() <= 1, "fast {fast:?} vs general {general:?} at {f}");
+            }
+        }
+    }
+
+    #[test]
     fn the_cache_interns_and_reuses() {
         let mut c = RampCache::new();
         let stops = [Stop::new(0.0, rgb(1, 2, 3)), Stop::new(1.0, rgb(4, 5, 6))];
-        let a = c.intern(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
-        let b = c.intern(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
-        let d = c.intern(&stops, Profile::IDENTITY, EffectSpace::Rgb, RampLength::Long);
+        let a = c.intern(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
+        let b = c.intern(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
+        let d = c.intern(
+            &stops,
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Long,
+        );
         assert_eq!(a, b);
         assert_ne!(a, d);
         assert_eq!(c.len(), 2);
@@ -442,6 +556,9 @@ mod tests {
     fn an_empty_stop_list_does_not_panic() {
         let t = build_ramp(&[], Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
         assert_eq!(t.len(), 256);
-        assert_eq!(build_transparency_ramp(&[], Profile::IDENTITY, RampLength::Short).len(), 256);
+        assert_eq!(
+            build_transparency_ramp(&[], Profile::IDENTITY, RampLength::Short).len(),
+            256
+        );
     }
 }

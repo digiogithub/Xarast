@@ -51,7 +51,7 @@ pub fn within_rescale_tolerance(cached: f64, wanted: f64) -> bool {
         return false;
     }
     let ratio = wanted / cached;
-    ratio <= 1.0 + RESCALE_TOLERANCE && ratio >= 1.0 / (1.0 + RESCALE_TOLERANCE)
+    (1.0 / (1.0 + RESCALE_TOLERANCE)..=1.0 + RESCALE_TOLERANCE).contains(&ratio)
 }
 
 /// What identifies a cached rendering of a node.
@@ -188,7 +188,13 @@ impl RenderCache {
     ///
     /// A surface larger than the whole budget is not stored at all, which
     /// is better than evicting everything for something that cannot help.
-    pub fn insert(&mut self, key: CacheKey, node: SceneNodeId, surface: CachedSurface, cost_us: u32) {
+    pub fn insert(
+        &mut self,
+        key: CacheKey,
+        node: SceneNodeId,
+        surface: CachedSurface,
+        cost_us: u32,
+    ) {
         let size = surface.bytes();
         if size > self.budget {
             return;
@@ -432,7 +438,10 @@ mod tests {
     fn the_admission_policy_keeps_the_cheap_out() {
         let p = AdmissionPolicy::default();
         assert!(!p.admits(CacheHint::Auto, 3, false, false));
-        assert!(p.admits(CacheHint::Auto, 3, true, false), "transparent groups");
+        assert!(
+            p.admits(CacheHint::Auto, 3, true, false),
+            "transparent groups"
+        );
         assert!(p.admits(CacheHint::Auto, 3, false, true), "live effects");
         assert!(p.admits(CacheHint::Auto, 64, false, false), "big groups");
         assert!(!p.admits(CacheHint::Never, 10_000, true, true));

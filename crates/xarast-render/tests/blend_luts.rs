@@ -8,9 +8,9 @@
 //! original is checked here, and `docs/memory/render.md` records which four
 //! families remain unverified against it.
 
-use xarast_render::blend::{blend_pixel, blend_level, composite, imul, mul};
-use xarast_render::{ALL_FAMILIES, BlendFamily, BlendLuts, LumaWeights};
 use xarast_color::Rgba8;
+use xarast_render::blend::{blend_level, blend_pixel, composite, imul, mul};
+use xarast_render::{ALL_FAMILIES, BlendFamily, BlendLuts, LumaWeights};
 
 fn rgb(r: u8, g: u8, b: u8) -> Rgba8 {
     Rgba8 { r, g, b, a: 255 }
@@ -56,10 +56,7 @@ fn every_family_is_the_identity_at_full_transparency() {
                 let dst = rgb(d, d / 2, 255 - d);
                 let out = blend_pixel(family, &luts, w, rgb(s, s, s), 255, dst);
                 let delta = i32::from(out.r) - i32::from(dst.r);
-                assert!(
-                    delta.abs() <= 1,
-                    "{family:?} at t=255 moved {d} by {delta}"
-                );
+                assert!(delta.abs() <= 1, "{family:?} at t=255 moved {d} by {delta}");
             }
         }
     }
@@ -71,7 +68,14 @@ fn mix_is_exactly_a_lerp() {
     let w = LumaWeights::BT601;
     for t in 0..=255u8 {
         for v in [0u8, 1, 127, 254, 255] {
-            let out = blend_pixel(BlendFamily::Mix, &luts, w, rgb(v, v, v), t, rgb(255 - v, 0, 0));
+            let out = blend_pixel(
+                BlendFamily::Mix,
+                &luts,
+                w,
+                rgb(v, v, v),
+                t,
+                rgb(255 - v, 0, 0),
+            );
             assert_eq!(out.r, imul(t, v).saturating_add(mul(t, 255 - v)));
         }
     }
@@ -83,7 +87,10 @@ fn none_draws_nothing_whatever_the_coverage() {
     let w = LumaWeights::BT601;
     let d = rgb(1, 2, 3);
     for cov in [0u8, 1, 128, 255] {
-        assert_eq!(composite(BlendFamily::None, &luts, w, rgb(9, 9, 9), 0, cov, d), d);
+        assert_eq!(
+            composite(BlendFamily::None, &luts, w, rgb(9, 9, 9), 0, cov, d),
+            d
+        );
     }
 }
 

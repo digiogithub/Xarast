@@ -6,9 +6,7 @@
 #![allow(dead_code, reason = "each test binary uses a different subset")]
 
 use xarast_render::corpus::Case;
-use xarast_render::{
-    CpuBackend, CpuConfig, DirtyRect, DisplayList, Surface,
-};
+use xarast_render::{CpuBackend, CpuConfig, DirtyRect, DisplayList, Surface};
 
 /// Renders one corpus case with the deterministic CPU configuration.
 pub fn render_case(case: &Case) -> Surface {

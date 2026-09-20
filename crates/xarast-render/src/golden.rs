@@ -356,6 +356,69 @@ pub fn delta_e00(a: [u8; 3], b: [u8; 3]) -> f64 {
         .sqrt()
 }
 
+/// Box-filters a surface down by an integer factor.
+///
+/// Rendering a scene at `n` times the size and averaging `n × n` samples
+/// is the antialiasing reference the W0 spike settled on: a *painter's
+/// model* reference, in which each shape's coverage is resolved exactly
+/// and the shapes are composited in order. Full sub-pixel visibility
+/// supersampling, which resolves overlap between shapes as well, is a
+/// reference no painter's-algorithm compositor can reach — the spike
+/// measured a p99 ΔE₀₀ of 7.8 against it and 0.65 against this one, on the
+/// same renderer. Measuring against the unreachable reference would have
+/// failed a gate for a property nothing has.
+///
+/// # Panics
+///
+/// Panics if `factor` is zero or does not divide both dimensions.
+#[must_use]
+pub fn downsample(s: &Surface, factor: u32) -> Surface {
+    assert!(factor > 0, "the downsampling factor must be positive");
+    assert!(
+        s.width().is_multiple_of(factor) && s.height().is_multiple_of(factor),
+        "the factor must divide both dimensions"
+    );
+    let (w, h) = (s.width() / factor, s.height() / factor);
+    let mut out = Surface::new(w, h);
+    let n = u32::from(u16::try_from(factor * factor).unwrap_or(u16::MAX));
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0u32; 4];
+            for sy in 0..factor {
+                for sx in 0..factor {
+                    let px = s
+                        .pixel((x * factor + sx) as i32, (y * factor + sy) as i32)
+                        .unwrap_or([0; 4]);
+                    for c in 0..4 {
+                        acc[c] += u32::from(px[c]);
+                    }
+                }
+            }
+            let mut px = [0u8; 4];
+            for c in 0..4 {
+                // Round half away from zero, the crate's rounding rule.
+                px[c] = u8::try_from((acc[c] * 2 + n) / (2 * n)).unwrap_or(255);
+            }
+            out.set_pixel(x as i32, y as i32, px);
+        }
+    }
+    out
+}
+
+/// How many distinct grey levels appear in the red channel of a surface.
+///
+/// On an antialiasing ramp this is the effective coverage resolution.
+/// CDraw manages 85 levels in its normal mode and 132 in high quality
+/// (`research/03 §2.3`); 132 is the bar Xarast has to clear.
+#[must_use]
+pub fn coverage_levels(s: &Surface) -> usize {
+    let mut seen = [false; 256];
+    for px in s.data().chunks_exact(4) {
+        seen[px[0] as usize] = true;
+    }
+    seen.iter().filter(|v| **v).count()
+}
+
 /// A SHA-256 digest of a surface, for the determinism test.
 #[must_use]
 pub fn digest(s: &Surface) -> String {

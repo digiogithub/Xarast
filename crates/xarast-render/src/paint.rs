@@ -656,12 +656,7 @@ fn lerp_rgba(a: Rgba8, b: Rgba8, t: f64) -> Rgba8 {
 /// fractal) yields transparent rather than panicking: a corrupt document
 /// must not take the renderer down.
 #[must_use]
-pub fn eval_paint(
-    paint: &Paint,
-    ramps: &RampCache,
-    images: &ImageRegistry,
-    p: Point64,
-) -> Rgba8 {
+pub fn eval_paint(paint: &Paint, ramps: &RampCache, images: &ImageRegistry, p: Point64) -> Rgba8 {
     match paint {
         Paint::Solid(c) => *c,
         Paint::Gradient {
@@ -751,10 +746,7 @@ pub fn eval_paint(
     }
 }
 
-fn apply_contone(
-    c: Rgba8,
-    contone: Option<(Rgba8, Rgba8, crate::ramp::EffectSpace)>,
-) -> Rgba8 {
+fn apply_contone(c: Rgba8, contone: Option<(Rgba8, Rgba8, crate::ramp::EffectSpace)>) -> Rgba8 {
     let Some((start, end, space)) = contone else {
         return c;
     };
@@ -829,9 +821,18 @@ mod tests {
     #[test]
     fn linear_is_the_coordinate_along_the_main_axis() {
         let m = GradMapping::unit();
-        assert_eq!(grad_param(GradShape::Linear, m, Point64::new(0.0, 0.0)), Some(0.0));
-        assert_eq!(grad_param(GradShape::Linear, m, Point64::new(1.0, 0.0)), Some(1.0));
-        assert_eq!(grad_param(GradShape::Linear, m, Point64::new(0.5, 9.0)), Some(0.5));
+        assert_eq!(
+            grad_param(GradShape::Linear, m, Point64::new(0.0, 0.0)),
+            Some(0.0)
+        );
+        assert_eq!(
+            grad_param(GradShape::Linear, m, Point64::new(1.0, 0.0)),
+            Some(1.0)
+        );
+        assert_eq!(
+            grad_param(GradShape::Linear, m, Point64::new(0.5, 9.0)),
+            Some(0.5)
+        );
     }
 
     #[test]
@@ -874,7 +875,10 @@ mod tests {
 
     #[test]
     fn a_mesh_shape_has_no_scalar_parameter() {
-        assert_eq!(grad_param(GradShape::Mesh3, GradMapping::unit(), Point64::ORIGIN), None);
+        assert_eq!(
+            grad_param(GradShape::Mesh3, GradMapping::unit(), Point64::ORIGIN),
+            None
+        );
     }
 
     #[test]
@@ -885,7 +889,10 @@ mod tests {
             c: Point64::new(2.0, 2.0),
         };
         assert!(!m.is_valid());
-        assert_eq!(grad_param(GradShape::Linear, m, Point64::new(1.0, 0.0)), None);
+        assert_eq!(
+            grad_param(GradShape::Linear, m, Point64::new(1.0, 0.0)),
+            None
+        );
     }
 
     #[test]
@@ -927,7 +934,10 @@ mod tests {
     fn a_gradient_paint_evaluates_through_its_ramp() {
         let mut ramps = RampCache::new();
         let id = ramps.intern(
-            &[Stop::new(0.0, rgb(0, 0, 0)), Stop::new(1.0, rgb(255, 255, 255))],
+            &[
+                Stop::new(0.0, rgb(0, 0, 0)),
+                Stop::new(1.0, rgb(255, 255, 255)),
+            ],
             Profile::IDENTITY,
             EffectSpace::Rgb,
             RampLength::Short,
@@ -940,7 +950,10 @@ mod tests {
         };
         paint.validate().unwrap();
         let images = ImageRegistry::new();
-        assert_eq!(eval_paint(&paint, &ramps, &images, Point64::new(0.0, 0.0)), rgb(0, 0, 0));
+        assert_eq!(
+            eval_paint(&paint, &ramps, &images, Point64::new(0.0, 0.0)),
+            rgb(0, 0, 0)
+        );
         assert_eq!(
             eval_paint(&paint, &ramps, &images, Point64::new(1.0, 0.0)),
             rgb(255, 255, 255)
@@ -963,9 +976,18 @@ mod tests {
             ]),
         };
         paint.validate().unwrap();
-        assert_eq!(eval_paint(&paint, &ramps, &images, Point64::new(0.0, 0.0)), rgb(255, 0, 0));
-        assert_eq!(eval_paint(&paint, &ramps, &images, Point64::new(1.0, 0.0)), rgb(0, 255, 0));
-        assert_eq!(eval_paint(&paint, &ramps, &images, Point64::new(0.0, 1.0)), rgb(0, 0, 255));
+        assert_eq!(
+            eval_paint(&paint, &ramps, &images, Point64::new(0.0, 0.0)),
+            rgb(255, 0, 0)
+        );
+        assert_eq!(
+            eval_paint(&paint, &ramps, &images, Point64::new(1.0, 0.0)),
+            rgb(0, 255, 0)
+        );
+        assert_eq!(
+            eval_paint(&paint, &ramps, &images, Point64::new(0.0, 1.0)),
+            rgb(0, 0, 255)
+        );
     }
 
     #[test]

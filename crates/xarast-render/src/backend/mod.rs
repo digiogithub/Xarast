@@ -100,13 +100,7 @@ pub trait Rasterizer {
 
     /// Strokes a path. A zero width is a hairline: one device pixel at any
     /// zoom.
-    fn stroke_path(
-        &mut self,
-        path: &PathRef,
-        style: &StrokeStyle,
-        paint: &Paint,
-        xf: &Transform2D,
-    );
+    fn stroke_path(&mut self, path: &PathRef, style: &StrokeStyle, paint: &Paint, xf: &Transform2D);
 
     /// Draws an image into a parallelogram or quadrilateral.
     fn draw_image(&mut self, image: ImageId, mapping: &GradMapping, paint: &Paint);

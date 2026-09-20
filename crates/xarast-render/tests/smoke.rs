@@ -32,11 +32,21 @@ fn a_red_square_on_white_lands_where_it_should() {
             SceneNodeId(1),
             &rect_path(16.0, 16.0, 48.0, 48.0),
             FillRule::NonZero,
-            Paint::Solid(Rgba8 { r: 255, g: 0, b: 0, a: 255 }),
+            Paint::Solid(Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            }),
         );
         b.finish().unwrap();
     }
-    let view = ViewParams::new(64, 64, Transform2D::scale(1.0 / 1000.0), RenderQuality::Final);
+    let view = ViewParams::new(
+        64,
+        64,
+        Transform2D::scale(1.0 / 1000.0),
+        RenderQuality::Final,
+    );
     let dl = DisplayList::build(&scene, &view, &DirtyRect::NONE);
     let mut target = Surface::new(64, 64);
     let mut backend = CpuBackend::new(CpuConfig::deterministic());

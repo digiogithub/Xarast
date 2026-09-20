@@ -28,7 +28,10 @@ fn a_repeated_frame_with_no_changes_does_no_work() {
     }
     let before = c.stats();
     for i in 0..32u64 {
-        assert!(c.get(key(i, 1.0)).is_some(), "node {i} should still be cached");
+        assert!(
+            c.get(key(i, 1.0)).is_some(),
+            "node {i} should still be cached"
+        );
     }
     let after = c.stats();
     assert_eq!(after.misses, before.misses, "a warm frame must not miss");
@@ -85,7 +88,10 @@ fn a_zoom_inside_the_tolerance_reuses_the_same_key() {
 fn admission_keeps_the_cheap_out_and_the_expensive_in() {
     let p = AdmissionPolicy::default();
     assert!(!p.admits(CacheHint::Auto, 1, false, false), "a single path");
-    assert!(p.admits(CacheHint::Auto, 1, true, false), "a transparent group");
+    assert!(
+        p.admits(CacheHint::Auto, 1, true, false),
+        "a transparent group"
+    );
     assert!(p.admits(CacheHint::Auto, 1, false, true), "a live effect");
     assert!(
         p.admits(CacheHint::Auto, p.group_primitive_threshold, false, false),

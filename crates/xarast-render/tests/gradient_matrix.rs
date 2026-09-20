@@ -24,7 +24,10 @@ fn every_cell_of_shape_by_repeat_by_mapping_is_covered() {
 fn no_gradient_cell_renders_a_single_flat_colour() {
     // A cell that comes out flat is a cell whose maths silently did
     // nothing, which is exactly the failure a matrix test exists to catch.
-    for case in all_cases().iter().filter(|c| c.name.starts_with("gradient_")) {
+    for case in all_cases()
+        .iter()
+        .filter(|c| c.name.starts_with("gradient_"))
+    {
         let s = render_case(case);
         let mut distinct = std::collections::HashSet::new();
         for px in s.data().chunks_exact(4) {
