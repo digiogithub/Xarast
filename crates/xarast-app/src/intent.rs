@@ -233,6 +233,10 @@ pub enum Intent {
     /// Turn the selected rectangles, ellipses and quick shapes into
     /// editable paths.
     ConvertToShapes,
+    /// A caret movement key for the text being edited (arrows, Home, End,
+    /// Page Up, Page Down, with Ctrl and Shift). The shell sends these
+    /// instead of panning while [`crate::Session::text_editing`] is true.
+    TextNav(crate::tool::TextNav),
 
     // ── rendering ─────────────────────────────────────────────────────
     /// Set the render quality. The shell drops to

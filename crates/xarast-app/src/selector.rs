@@ -237,7 +237,7 @@ pub fn skew_matrix(
 }
 
 /// The tool that creates a node, which a double click on it opens:
-/// rectangles and ellipses so far.
+/// rectangles, ellipses, paths (the shape editor) and text.
 #[must_use]
 pub fn creating_tool(doc: &Document, node: NodeId) -> Option<ToolId> {
     match doc.tree.kind(node)? {
@@ -248,6 +248,7 @@ pub fn creating_tool(doc: &Document, node: NodeId) -> Option<ToolId> {
             xarast_doc::ShapeKind::Ellipse => ToolId::Ellipse,
         }),
         NodeKind::Path(_) => Some(ToolId::ShapeEditor),
+        NodeKind::TextStory(_) => Some(ToolId::Text),
         _ => None,
     }
 }

@@ -94,6 +94,8 @@ pub mod snap;
 pub mod structure;
 pub mod svg_text;
 mod text;
+pub mod text_edit;
+pub mod text_tool;
 pub mod thumbnail;
 pub mod tool;
 pub mod tools;
@@ -122,8 +124,8 @@ pub use render_thread::{
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use tool::{
     Anchor, CursorKind, GestureEvent, HandleShape, HitResult, Infobar, InfobarField, InfobarItem,
-    InfobarValue, InteractionState, OverlayShape, Preview, Tool, ToolAction, ToolCtx, ToolMachine,
-    ToolView,
+    InfobarValue, InteractionState, OverlayShape, Preview, TextKey, TextNav, Tool, ToolAction,
+    ToolCtx, ToolMachine, ToolView,
 };
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};
 pub use walker::{SceneWalker, WalkStats};

@@ -204,10 +204,13 @@ impl ToolId {
     }
 
     /// Whether the tool can be chosen in this build. The reserved tools
-    /// of later phases cannot; the palette greys them out.
+    /// of later phases cannot; the palette greys them out. Every tool the
+    /// enum names today can be chosen; the predicate stays for the tools
+    /// later phases add.
     #[must_use]
     pub const fn is_available(self) -> bool {
-        !matches!(self, ToolId::Text)
+        let _ = self;
+        true
     }
 
     /// Whether the tool does anything on the canvas yet. A tool that can be
@@ -226,6 +229,7 @@ impl ToolId {
                 | ToolId::Freehand
                 | ToolId::Fill
                 | ToolId::Transparency
+                | ToolId::Text
         )
     }
 
@@ -242,8 +246,8 @@ impl ToolId {
             | ToolId::Pen
             | ToolId::Freehand
             | ToolId::Fill
-            | ToolId::Transparency => None,
-            ToolId::Text => Some(9),
+            | ToolId::Transparency
+            | ToolId::Text => None,
         }
     }
 

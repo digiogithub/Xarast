@@ -1090,6 +1090,27 @@ impl Viewer {
                     redraw |= self.apply(vec![intent]).needs_redraw();
                 }
             }
+            ShellEvent::Key(k)
+                if k.state == KeyState::Pressed && !self.text_input && self.text_caret_up() =>
+            {
+                // A text caret is up on the canvas (phase 9, W9.4): the
+                // navigation keys move it, and plain character keys are the
+                // text's (typing, T9.4.6), never tool keys or momentary
+                // switches. Named keys (Delete, Esc, Enter, F-keys) and
+                // Ctrl chords still run their commands.
+                if let Some(nav) = self.text_nav(k) {
+                    redraw |= self.apply(vec![Intent::TextNav(nav)]).needs_redraw();
+                } else if !(matches!(k.key, Key::Character(_))
+                    && !k.modifiers.ctrl
+                    && !k.modifiers.alt)
+                    && let Some(command) = self.shortcut(k)
+                {
+                    let changed = self.run_command(command);
+                    redraw |= changed.needs_redraw()
+                        || changed.contains(Changed::ACTIVE)
+                        || !self.requests.is_empty();
+                }
+            }
             ShellEvent::Key(k) if k.state == KeyState::Pressed && !self.text_input => {
                 if !k.modifiers.constrain()
                     && let Some(pan) = self.arrow_pan(&k.key)
@@ -1128,6 +1149,38 @@ impl Viewer {
 }
 
 impl Viewer {
+    /// Whether the active document's tool has a text caret up.
+    fn text_caret_up(&self) -> bool {
+        self.app.active().is_some_and(Session::text_editing)
+    }
+
+    /// The caret movement a key asks for, when the canvas has the keyboard
+    /// (or nothing does): arrows, Home, End, Page Up and Page Down; Ctrl
+    /// moves by word (or to the story's ends), Shift extends.
+    fn text_nav(&self, k: &KeyEvent) -> Option<xarast_app::TextNav> {
+        use xarast_app::TextKey as T;
+        let nothing_focused = self.egui.memory(|m| m.focused().is_none());
+        if !(self.canvas_focused || nothing_focused) {
+            return None;
+        }
+        let key = match k.key {
+            Key::Named(NamedKey::ArrowLeft) => T::Left,
+            Key::Named(NamedKey::ArrowRight) => T::Right,
+            Key::Named(NamedKey::ArrowUp) => T::Up,
+            Key::Named(NamedKey::ArrowDown) => T::Down,
+            Key::Named(NamedKey::Home) => T::Home,
+            Key::Named(NamedKey::End) => T::End,
+            Key::Named(NamedKey::PageUp) => T::PageUp,
+            Key::Named(NamedKey::PageDown) => T::PageDown,
+            _ => return None,
+        };
+        Some(xarast_app::TextNav {
+            key,
+            word: k.modifiers.ctrl,
+            extend: k.modifiers.shift,
+        })
+    }
+
     /// Arrow keys pan the view when the canvas has the keyboard, or when
     /// nothing does; otherwise they belong to the focused widget.
     fn arrow_pan(&self, key: &Key) -> Option<Intent> {
@@ -1451,6 +1504,20 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     });
                 }
             }
+            OverlayShape::Caret {
+                from,
+                to,
+                primary,
+                moved,
+            } => out.push(OverlayItem::Caret {
+                from: (from.x, from.y),
+                to: (to.x, to.y),
+                primary,
+                moved,
+            }),
+            OverlayShape::Highlight { corners } => out.push(OverlayItem::Highlight {
+                corners: corners.map(|c| (c.x, c.y)),
+            }),
         }
     }
     out
@@ -1469,6 +1536,7 @@ const fn tool_cursor(c: xarast_app::CursorKind) -> CursorShape {
         K::Grabbing => CursorShape::Grabbing,
         K::ZoomIn => CursorShape::ZoomIn,
         K::NotAllowed => CursorShape::NotAllowed,
+        K::Text => CursorShape::Text,
     }
 }
 
@@ -2755,9 +2823,49 @@ mod tests {
         assert!(format!("{infobar:?}").contains("rub it out"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
         assert_eq!(tool(&v), xarast_app::ToolId::Selector);
-        // A tool of a later phase is published, greyed out, and inert.
         activate(&mut v, "Text");
-        assert_eq!(tool(&v), xarast_app::ToolId::Selector);
+        assert_eq!(tool(&v), xarast_app::ToolId::Text);
+        press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
+        // A tool of a later phase is published, greyed out, and inert.
+        if let Some(later) = xarast_app::ToolId::ALL
+            .into_iter()
+            .find(|t| !t.is_available())
+        {
+            activate(&mut v, later.label());
+            assert_eq!(tool(&v), xarast_app::ToolId::Selector);
+        }
+    }
+
+    #[test]
+    fn a_text_caret_takes_the_navigation_and_character_keys() {
+        let (mut v, _) = viewer_with_square();
+        let at = |v: &Viewer| {
+            v.app
+                .active()
+                .unwrap()
+                .viewport
+                .doc_to_device(xarast_geom::Point::raw(0, 0))
+        };
+        // F8: the text tool. A click on empty canvas puts up the caret of
+        // a new story.
+        press(&mut v, Key::Named(NamedKey::Function(8)), Modifiers::NONE);
+        assert_eq!(tool(&v), xarast_app::ToolId::Text);
+        let (x, y) = window_at(&v, 400_000, 500_000);
+        click(&mut v, x, y);
+        assert!(v.app.active().unwrap().text_editing());
+        let view = at(&v);
+        // The arrows no longer pan, and "d" is not Fit drawing: both are
+        // the text's.
+        press(&mut v, Key::Named(NamedKey::ArrowLeft), Modifiers::NONE);
+        press(&mut v, Key::char('d'), Modifiers::NONE);
+        press(&mut v, Key::Named(NamedKey::Home), Modifiers::NONE);
+        assert_eq!(at(&v), view);
+        assert_eq!(tool(&v), xarast_app::ToolId::Text);
+        // Esc leaves the text; then the arrows pan again.
+        press(&mut v, Key::Named(NamedKey::Escape), Modifiers::NONE);
+        assert!(!v.app.active().unwrap().text_editing());
+        press(&mut v, Key::Named(NamedKey::ArrowLeft), Modifiers::NONE);
+        assert_ne!(at(&v), view);
     }
 
     #[test]

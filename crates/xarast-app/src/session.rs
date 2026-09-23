@@ -809,6 +809,21 @@ impl Session {
         self.tools.infobar(self.view())
     }
 
+    /// Whether the tool in force has a text caret up: arrows, Home, End and
+    /// the page keys then move it ([`Intent::TextNav`]) rather than the
+    /// view, and plain character keys are the text's, not shortcuts.
+    #[must_use]
+    pub fn text_editing(&self) -> bool {
+        self.tools.text_editing().is_some()
+    }
+
+    /// The text the tool in force is editing: a caret and selection in a
+    /// story, or where a new story will start.
+    #[must_use]
+    pub fn text_state(&self) -> Option<crate::text_tool::TextEditing> {
+        self.tools.text_editing()
+    }
+
     /// The pointer shape the tool in force wants over the canvas.
     #[must_use]
     pub fn cursor(&self) -> CursorKind {
@@ -1071,6 +1086,9 @@ impl Session {
             Intent::ToolAction(action) => {
                 changed |= self.cancel_gesture();
                 changed |= self.tool_action(action)?.0;
+            }
+            Intent::TextNav(nav) => {
+                changed |= self.run_tool(|m, cx| m.text_nav(nav, cx))?.0;
             }
             Intent::ConvertToShapes => {
                 changed |= self.cancel_gesture();

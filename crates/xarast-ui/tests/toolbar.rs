@@ -95,8 +95,12 @@ fn clicking_a_tool_raises_its_command_and_a_later_phase_tool_does_nothing() {
     let mut h = harness(&m, &commands);
     h.get_by_role_and_label(BUTTON, "Rectangle").click();
     h.run();
-    h.get_by_role_and_label(BUTTON, "Text").click();
-    h.run();
+    // A tool of a later phase, greyed out, raises nothing.
+    // ("Fill" also names a panel button, so the palette's last one.)
+    if let Some(later) = ToolId::ALL.into_iter().rfind(|t| !t.is_available()) {
+        h.get_by_role_and_label(BUTTON, later.label()).click();
+        h.run();
+    }
     // The chosen tool again is not a new command.
     h.get_by_role_and_label(BUTTON, "Selector").click();
     h.run();

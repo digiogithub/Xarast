@@ -35,6 +35,7 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Snapping: `SnapSource`, resolver, grid, guides, objects (corners, then outlines), NumPad toggles, marker | `snap.rs`, `ToolCtx::snap_point`/`snap_move` | done (XARA-US-0036, T-0153) |
 | Guides/grid as undoable document edits; ruler guides and grid settings wired | `snap.rs` `GuideCommand`, shell `ui_intent` | done |
 | `--probe snap|arrange|paste` | `xarast-shell` | done |
+| Text tool (F8): caret, selection, visual/logical bidi navigation, pending point/column story; `Intent::TextNav`; text stories pickable by their line box; selector double click on text → text tool | `text_edit.rs`, `text_tool.rs`, `picking.rs` | done (XARA-US-0047, T9.4.1–T9.4.4 + the T9.4.5 gestures); typing/IME/clipboard are T9.4.6–T9.4.8 |
 
 Tests: `crates/xarast-app/tests/transforms.rs` (18: dual state, scale
 corner/aspect/centre, live Ctrl mid-scale, line widths, rotate with
@@ -381,6 +382,48 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     (`TRANSP_MODES`); phase 8 lists Hue as a tenth, which `TranspMode` does
     not have yet.
 
+## Phase 9: the text tool (XARA-US-0047)
+
+53. **The text tool (XARA-US-0047)** is a state machine over two states
+    (`text_tool.rs` module docs): **Story** (a `TextSelection { story,
+    anchor, head }` of byte offsets with affinity, tool state only; the
+    model's `TextCursor` is derived on demand with `cursor(doc)`) and
+    **Pending** (`{ at, column }`: where typing *will* create a point
+    story or a column). No story is created by a click or a column drag:
+    the first typed character will (T9.4.6), so a stray click leaves no
+    empty story and no undo step (the original creates the story at once
+    and deletes it if left empty). Gestures: click text → caret at the
+    nearest stop (Shift+click extends in the same story); drag on text →
+    select; double click → word (UAX #29 segment, spaces included);
+    triple click → the laid-out line; click empty canvas → pending point
+    story at the click (the baseline origin); drag on empty canvas →
+    pending column of the drag's width, first line hanging from the drag's
+    top (narrower than 8 px → point story); Esc mid-drag restores the
+    caret as it was. Esc with no drag leaves the text, story still
+    selected. Ctrl+A selects the story's text. Delete, Backspace and
+    Enter are taken and ignored while a caret is up, so they never delete
+    the story object (until T9.4.6 gives them meaning). Choosing the tool
+    with one story selected enters it with the caret at the end; the
+    selector's double click on a story does that (decision 27).
+54. **The tool lays stories out itself**, through the walker's bridge
+    (`text::story_input`, `layout_text`) with the attributes resolved at
+    the story (`resolve_inherited`), cached per story and dropped
+    wholesale when `Document::epoch` moves. Hit testing walks every story
+    on a visible, unlocked, non-guide layer (topmost wins), inverse-maps
+    the point with the story matrix and tests the line boxes with a 4 px
+    tolerance. Fonts are the process's shared service
+    (`TextTool::with_fonts` for pinned fonts).
+55. **Text is picked by its line box.** The pick index adds each
+    `TextStory` as one `Geometry::Bounds` leaf (the `story_rect` of its
+    laid-out lines, with the attribute stack in force) and skips its
+    subtree: before this, the selector could not click text at all (text
+    items have no geometry and no cached bounds).
+56. **Navigation keys are an intent, not `ToolAction`s**: `Intent::TextNav(
+    TextNav { key: TextKey, word, extend })` → `Tool::text_nav`, offered
+    only while `Tool::text_editing()` is `Some`. Ctrl = by word
+    (arrows), to the story's ends (Home/End); Shift = extend. Mapping and
+    shell routing: `ui.md` decision 40.
+
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
 | Keys | Command | Note |
@@ -397,6 +440,7 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
 | `#` | Show grid | |
 | NumPad 1 | Show guides | keypad only (`ChordKey::NumPad`), so `1` stays 100 % |
 | F5 / F6 | Fill tool / Transparency tool | `research/04 §4.4` line 640 |
+| F8 | Text tool | `research/04` (`TOOL21`, F8); arrows/Home/End/PgUp/PgDn (+Ctrl, +Shift) move the caret while one is up |
 
 Clashes: none with the path tools' plain L/C/S/Z/B/J/Enter, Backspace and
 Ctrl+Shift+S (XARA-US-0034), checked by `no_two_commands_share_a_key`.
@@ -435,6 +479,11 @@ duplicate while plain `D` is fit drawing — different chords.
 10. A fill or transparency drag emits nothing before release; the release
     is one `EditCommand::Fill` step, and what the preview drew is what the
     commit renders (pixel-identical, `tests/fill_tool.rs`).
+11. The text tool never mutates the document: entering, selecting,
+    navigating and preparing a new story leave the canonical digest and
+    the undo history as they were (`tests/text_tool.rs`).
+12. While a text caret is up, Delete/Backspace/Enter never reach the
+    object-level commands.
 
 ## Dead ends (do not retry)
 

@@ -29,6 +29,7 @@ pub fn builtin() -> Vec<Box<dyn Tool>> {
         Box::new(crate::freehand::FreehandTool::default()),
         Box::new(crate::fill_tool::GradFillTool::default()),
         Box::new(crate::fill_tool::TransparencyTool::default()),
+        Box::new(crate::text_tool::TextTool::default()),
     ];
     for id in ToolId::ALL {
         if id.is_available() && !id.is_implemented() {

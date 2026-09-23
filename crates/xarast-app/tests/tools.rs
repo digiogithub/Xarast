@@ -341,9 +341,11 @@ fn tools_switch_and_the_reserved_ones_are_refused() {
     up(&mut s, offset(p, 40.0, 40.0), 1);
     assert_eq!(s.doc.canonical_digest(), before);
 
-    // Phase 8 and 9 tools cannot be chosen yet.
-    s.apply(Intent::ChooseTool(ToolId::Text)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Zoom);
+    // Tools of later phases cannot be chosen yet.
+    if let Some(later) = ToolId::ALL.into_iter().find(|t| !t.is_available()) {
+        s.apply(Intent::ChooseTool(later)).unwrap();
+        assert_eq!(s.tools().current(), ToolId::Zoom);
+    }
 
     // A momentary switch restores the chosen tool on release.
     s.apply(Intent::MomentaryTool(Some(ToolId::Selector)))

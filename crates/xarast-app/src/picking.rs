@@ -314,11 +314,28 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
             stroke,
         });
     };
-    for ev in tree.walk_render(top) {
+    let mut walk = tree.walk_render(top);
+    while let Some(ev) = walk.next() {
         match ev {
             WalkEvent::EnterScope { .. } => stack.push_scope(),
             WalkEvent::Visit { node } => match tree.kind(node) {
                 Some(NodeKind::Attr(a)) => stack.push(Arc::new(a.value.clone())),
+                Some(NodeKind::TextStory(_)) => {
+                    // A story has no outline the picker keeps: it is picked
+                    // by the box of its laid-out lines (phase 9, T9.4.1).
+                    let fonts = crate::fonts::shared();
+                    let bounds = crate::text::story_rect(&fonts, tree, node, stack);
+                    if !bounds.is_empty() {
+                        out.push(Found {
+                            node,
+                            bounds,
+                            geometry: Geometry::Bounds,
+                            fill: None,
+                            stroke: None,
+                        });
+                    }
+                    walk.control(xarast_doc::Descend::Skip);
+                }
                 k if own_ink(k) && tree.links(node).first_child.is_none() => {
                     add(node, stack, &mut out);
                 }

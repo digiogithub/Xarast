@@ -100,6 +100,53 @@ pub enum OverlayItem {
         /// Drawn dashed, for a rubber band.
         dashed: bool,
     },
+    /// A text caret between two document points (bottom, top). It blinks
+    /// (see [`caret_blink`]).
+    Caret {
+        /// The bottom end, document coordinates.
+        from: (Mp, Mp),
+        /// The top end.
+        to: (Mp, Mp),
+        /// The primary caret; the secondary half of a split caret is drawn
+        /// thinner.
+        primary: bool,
+        /// Changes whenever the caret moves: the blink restarts "on".
+        moved: u64,
+    },
+    /// Selected text: a filled quadrilateral, document coordinates.
+    Highlight {
+        /// The corners, in order around the shape.
+        corners: [(Mp, Mp); 4],
+    },
+}
+
+/// Half a blink period of the text caret, in seconds: on this long, then
+/// off this long. The common desktop rate (about a second a cycle).
+pub const CARET_BLINK_HALF_PERIOD: f64 = 0.53;
+
+/// After this many seconds without moving, the caret stops blinking and
+/// stays on, so an idle window does not repaint twice a second forever.
+pub const CARET_BLINK_TIMEOUT: f64 = 10.0;
+
+/// Whether a caret that last moved `elapsed` seconds ago is showing, and in
+/// how many seconds that changes (`None` once it has stopped blinking).
+#[must_use]
+pub fn caret_blink(elapsed: f64) -> (bool, Option<f64>) {
+    if !elapsed.is_finite() || elapsed < 0.0 {
+        return (true, Some(CARET_BLINK_HALF_PERIOD));
+    }
+    if elapsed >= CARET_BLINK_TIMEOUT {
+        return (true, None);
+    }
+    let phase = (elapsed / CARET_BLINK_HALF_PERIOD).floor();
+    let visible = phase % 2.0 == 0.0;
+    let next = (phase + 1.0) * CARET_BLINK_HALF_PERIOD - elapsed;
+    let next = if elapsed + next >= CARET_BLINK_TIMEOUT {
+        CARET_BLINK_TIMEOUT - elapsed
+    } else {
+        next
+    };
+    (visible, Some(next.max(0.0)))
 }
 
 /// Draws the overlay items over a canvas region.
@@ -164,8 +211,65 @@ impl OverlayPainter<'_> {
                     self.paint_line(painter, r.right_bottom(), r.left_bottom(), *dashed);
                     self.paint_line(painter, r.left_bottom(), r.left_top(), *dashed);
                 }
+                OverlayItem::Highlight { corners } => {
+                    let pts: Vec<egui::Pos2> =
+                        corners.iter().map(|c| self.to_screen(c.0, c.1)).collect();
+                    painter.add(egui::Shape::convex_polygon(
+                        pts,
+                        self.tokens.accent.gamma_multiply(0.35),
+                        egui::Stroke::NONE,
+                    ));
+                }
+                OverlayItem::Caret {
+                    from,
+                    to,
+                    primary,
+                    moved,
+                } => self.paint_caret(painter, *from, *to, *primary, *moved),
             }
         }
+    }
+
+    /// A caret: a black line with a white halo, visible on any artwork,
+    /// blinking from the moment it last moved.
+    fn paint_caret(
+        &self,
+        painter: &egui::Painter,
+        from: (Mp, Mp),
+        to: (Mp, Mp),
+        primary: bool,
+        moved: u64,
+    ) {
+        let ctx = painter.ctx();
+        let now = ctx.input(|i| i.time);
+        let id = egui::Id::new("xarast-text-caret-blink");
+        let since = ctx.data_mut(|d| {
+            let (m, t) = d
+                .get_temp::<(u64, f64)>(id)
+                .unwrap_or((moved.wrapping_add(1), now));
+            if m == moved {
+                t
+            } else {
+                d.insert_temp(id, (moved, now));
+                now
+            }
+        });
+        let (visible, next) = caret_blink(now - since);
+        if let Some(dt) = next {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(dt));
+        }
+        if !visible {
+            return;
+        }
+        let a = self.snap_point(self.to_screen(from.0, from.1));
+        let b = self.snap_point(self.to_screen(to.0, to.1));
+        let w = self.scale.hairline_width() as f32;
+        let core = if primary { 1.5 * w } else { w };
+        painter.line_segment(
+            [a, b],
+            egui::Stroke::new(core + 2.0 * w, egui::Color32::from_white_alpha(200)),
+        );
+        painter.line_segment([a, b], egui::Stroke::new(core, egui::Color32::BLACK));
     }
 
     fn snap_point(&self, p: egui::Pos2) -> egui::Pos2 {
@@ -416,6 +520,21 @@ mod tests {
     }
 
     #[test]
+    fn the_caret_blinks_from_on_then_stops_blinking() {
+        assert!(caret_blink(0.0).0);
+        let (on, next) = caret_blink(0.1);
+        assert!(on);
+        assert!((next.unwrap() - (CARET_BLINK_HALF_PERIOD - 0.1)).abs() < 1e-9);
+        assert!(!caret_blink(CARET_BLINK_HALF_PERIOD + 0.01).0);
+        assert!(caret_blink(2.0 * CARET_BLINK_HALF_PERIOD + 0.01).0);
+        // Idle: on for good, no more repaints asked for.
+        assert_eq!(caret_blink(CARET_BLINK_TIMEOUT + 1.0), (true, None));
+        let (_, next) = caret_blink(CARET_BLINK_TIMEOUT - 0.01);
+        assert!(next.unwrap() <= 0.01 + 1e-9);
+        assert!(caret_blink(f64::NAN).0);
+    }
+
+    #[test]
     fn a_line_is_dashed_into_segments_and_never_loops_forever() {
         let segs = dashes(egui::pos2(0.0, 0.0), egui::pos2(20.0, 0.0), 4.0);
         assert_eq!(segs.len(), 3);
@@ -489,6 +608,26 @@ mod tests {
                         y: Mp::from_pt(10.0),
                         kind: HandleKind::FillCentre,
                         active: false,
+                    },
+                    OverlayItem::Caret {
+                        from: (Mp::ZERO, Mp::ZERO),
+                        to: (Mp::ZERO, Mp::from_pt(12.0)),
+                        primary: true,
+                        moved: 1,
+                    },
+                    OverlayItem::Caret {
+                        from: (Mp::from_pt(5.0), Mp::ZERO),
+                        to: (Mp::from_pt(5.0), Mp::from_pt(6.0)),
+                        primary: false,
+                        moved: 1,
+                    },
+                    OverlayItem::Highlight {
+                        corners: [
+                            (Mp::ZERO, Mp::ZERO),
+                            (Mp::from_pt(20.0), Mp::ZERO),
+                            (Mp::from_pt(20.0), Mp::from_pt(12.0)),
+                            (Mp::ZERO, Mp::from_pt(12.0)),
+                        ],
                     },
                 ];
                 p.paint(ui.painter(), &items);

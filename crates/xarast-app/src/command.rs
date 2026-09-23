@@ -232,7 +232,7 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 51] = [
+    pub const ALL: [AppCommand; 52] = [
         AppCommand::Open,
         AppCommand::Save,
         AppCommand::SaveAs,
@@ -276,6 +276,7 @@ impl AppCommand {
         AppCommand::Tool(ToolId::Freehand),
         AppCommand::Tool(ToolId::Zoom),
         AppCommand::Tool(ToolId::Pan),
+        AppCommand::Tool(ToolId::Text),
         AppCommand::Action(ToolAction::Finish),
         AppCommand::Action(ToolAction::MakeLine),
         AppCommand::Action(ToolAction::MakeCurve),
@@ -381,6 +382,7 @@ impl AppCommand {
         // `research/04 §4.4`: F5 graduated fill, F6 transparency.
         const FILL_TOOL: &[KeyChord] = &[KeyChord::f(5)];
         const TRANSP_TOOL: &[KeyChord] = &[KeyChord::f(6)];
+        const TEXT: &[KeyChord] = &[KeyChord::f(8)];
         // The shape editor's keys (`research/04 §4.11`).
         const FINISH: &[KeyChord] = &[KeyChord::plain(ChordKey::Enter)];
         const MAKE_LINE: &[KeyChord] = &[KeyChord::char('l')];
@@ -442,7 +444,7 @@ impl AppCommand {
                 ToolId::Pan => PUSH,
                 ToolId::Fill => FILL_TOOL,
                 ToolId::Transparency => TRANSP_TOOL,
-                ToolId::Text => NONE,
+                ToolId::Text => TEXT,
             },
             AppCommand::Action(a) => match a {
                 ToolAction::Finish => FINISH,
@@ -592,6 +594,7 @@ mod tests {
             (ToolId::Pan, "Shift+F8"),
             (ToolId::Fill, "F5"),
             (ToolId::Transparency, "F6"),
+            (ToolId::Text, "F8"),
         ] {
             assert_eq!(key(AppCommand::Tool(tool)), k, "{tool:?}");
             assert_eq!(
@@ -599,7 +602,6 @@ mod tests {
                 Intent::ChooseTool(tool)
             );
         }
-        assert!(AppCommand::Tool(ToolId::Text).shortcuts().is_empty());
     }
 
     #[test]

@@ -117,6 +117,10 @@ pub struct LaidLine {
     pub descent: Mp,
     /// Largest font size on the line.
     pub size: Mp,
+    /// The paragraph's base direction is right to left (UAX #9 P2-P3, or
+    /// forced by [`ParagraphStyle::base_direction`]): which end of the line
+    /// is its logical start, for carets and line-end navigation.
+    pub base_rtl: bool,
     /// x of the line's first (leftmost) cluster.
     pub x: Mp,
     /// Width used for alignment: the advances up to the last non-space
@@ -669,6 +673,7 @@ impl Shaper {
             ascent,
             descent,
             size,
+            base_rtl: bidi.paragraph_level.is_rtl(),
             x: x_start,
             width: sum_to_last,
             runs: out_runs,
