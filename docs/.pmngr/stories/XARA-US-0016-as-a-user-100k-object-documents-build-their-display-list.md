@@ -2,15 +2,16 @@
 id: XARA-US-0016
 type: story
 title: As a user, 100k-object documents build their display list within budget
-status: in_progress
+status: done
 priority: high
 parent: XARA-EP-0018
 author: mcp
 labels: [render, perf]
 estimate: 3
 created: 2026-09-23T09:40:52Z
-updated: 2026-09-23T11:08:01Z
+updated: 2026-09-23T12:01:26Z
 started: 2026-09-23T11:08:01Z
+closed: 2026-09-23T12:01:26Z
 ---
 
 ## Description

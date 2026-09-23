@@ -2,13 +2,14 @@
 id: XARA-T-0033
 type: task
 title: DisplayList::build scans every scene op even when the dirty rect culls almost all of them
-status: backlog
+status: done
 priority: high
 parent: XARA-US-0016
 author: mcp
 labels: [render, perf, phase-5]
 created: 2026-09-23T11:20:26Z
-updated: 2026-09-23T11:20:26Z
+updated: 2026-09-23T11:57:29Z
+closed: 2026-09-23T11:57:29Z
 ---
 
 ## Description

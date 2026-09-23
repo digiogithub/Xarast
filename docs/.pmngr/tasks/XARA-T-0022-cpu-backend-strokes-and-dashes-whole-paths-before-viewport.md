@@ -2,13 +2,14 @@
 id: XARA-T-0022
 type: task
 title: "CPU backend strokes and dashes whole paths before viewport clipping: memory exhaustion at deep zoom"
-status: in_progress
+status: done
 parent: XARA-US-0016
 author: mcp
 labels: [fuzz, render, perf]
 created: 2026-09-23T10:24:19Z
-updated: 2026-09-23T11:08:11Z
+updated: 2026-09-23T11:57:09Z
 started: 2026-09-23T11:08:11Z
+closed: 2026-09-23T11:57:09Z
 ---
 
 ## Description
