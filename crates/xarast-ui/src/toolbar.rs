@@ -467,44 +467,50 @@ pub fn parse_angle(text: &str) -> Option<f64> {
 /// The 9-anchor grid: three rows of three small buttons, the chosen one
 /// filled.
 fn anchor_grid(ui: &mut egui::Ui, value: Anchor, tokens: &ThemeTokens, out: &mut CommandSink) {
-    const CELL: f32 = 7.0;
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
-        for row in Anchor::ALL.chunks(3) {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = vec2(1.0, 1.0);
-                for &a in row {
-                    let (rect, response) =
-                        ui.allocate_exact_size(vec2(CELL, CELL), egui::Sense::click());
-                    let chosen = a == value;
-                    let fill = if chosen {
-                        tokens.accent
-                    } else if response.hovered() {
-                        tokens.text_muted
-                    } else {
-                        tokens.surface_sunken
-                    };
-                    ui.painter().rect_filled(rect, 1.0, fill);
-                    crate::a11y::set_label(
-                        ui.ctx(),
-                        response.id,
-                        format!(
-                            "Anchor: {}{}",
-                            a.label(),
-                            if chosen { " (chosen)" } else { "" }
-                        ),
-                    );
-                    if response.clicked() && !chosen {
-                        out.push(UiCommand::InfobarEdit {
-                            field: InfobarField::Anchor,
-                            value: InfobarValue::Anchor(a),
-                        });
-                    }
-                    response.on_hover_text(a.label());
-                }
+    // One allocation for the whole grid, so it never grows the row: nested
+    // horizontal layouts would each take a full interaction height.
+    const CELL: f32 = 6.0;
+    const GAP: f32 = 1.5;
+    let side = CELL * 3.0 + GAP * 2.0;
+    let (grid, _) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    for (i, &a) in Anchor::ALL.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let (col, row) = ((i % 3) as f32, (i / 3) as f32);
+        let rect = Rect::from_min_size(
+            grid.min + vec2(col * (CELL + GAP), row * (CELL + GAP)),
+            vec2(CELL, CELL),
+        );
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id(("xarast_anchor", i)),
+            egui::Sense::click(),
+        );
+        let chosen = a == value;
+        let fill = if chosen {
+            tokens.accent
+        } else if response.hovered() {
+            tokens.text_muted
+        } else {
+            tokens.text_muted.gamma_multiply(0.45)
+        };
+        ui.painter().rect_filled(rect, 1.0, fill);
+        crate::a11y::set_label(
+            ui.ctx(),
+            response.id,
+            format!(
+                "Anchor: {}{}",
+                a.label(),
+                if chosen { " (chosen)" } else { "" }
+            ),
+        );
+        if response.clicked() && !chosen {
+            out.push(UiCommand::InfobarEdit {
+                field: InfobarField::Anchor,
+                value: InfobarValue::Anchor(a),
             });
         }
-    });
+        response.on_hover_text(a.label());
+    }
 }
 
 #[cfg(test)]
