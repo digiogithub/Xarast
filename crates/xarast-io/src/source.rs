@@ -48,6 +48,20 @@ pub trait ExportSource {
     ///
     /// [`ExportError::Scene`].
     fn build_scene(&self, quality: RenderQuality) -> Result<SourceScene, ExportError>;
+
+    /// The document itself, for exporters that map the model rather than
+    /// draw a scene (SVG shares the `.xarast` profile's mapper, W11.3).
+    /// `None` when the source only has a scene; such exporters then refuse.
+    fn document(&self) -> Option<&xarast_doc::Document> {
+        None
+    }
+
+    /// Where the application lays text out, so that SVG text sits where
+    /// Xarast draws it (`xarast_format::svg::TextPlacer`). `None`: each
+    /// text line starts at its story's origin.
+    fn svg_text_placer(&self) -> Option<xarast_format::svg::Placer> {
+        None
+    }
 }
 
 /// A prebuilt scene with a fixed area: tests, benchmarks, and callers that

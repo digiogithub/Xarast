@@ -9,6 +9,7 @@ use crate::pdf::PdfExporter;
 use crate::raster::{JpegExporter, PngExporter, WebPExporter};
 use crate::report::{ExportError, ExportReport};
 use crate::source::{ExportSource, Progress};
+use crate::svg::SvgExporter;
 
 /// Why `.xar` cannot be exported, word for word what the CLI prints.
 pub const XAR_EXPORT_REFUSAL: &str = "writing .xar is permanently out of scope: \
@@ -74,7 +75,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// PNG, JPEG, WebP and PDF.
+    /// PNG, JPEG, WebP, PDF and SVG.
     #[must_use]
     pub fn with_builtin() -> Registry {
         Registry {
@@ -83,6 +84,7 @@ impl Registry {
                 Box::new(JpegExporter),
                 Box::new(WebPExporter),
                 Box::new(PdfExporter),
+                Box::new(SvgExporter),
             ],
         }
     }
@@ -141,8 +143,14 @@ mod tests {
     #[test]
     fn lookup_by_id_and_extension() {
         let r = Registry::with_builtin();
-        assert_eq!(r.all().count(), 4);
-        for id in [FormatId::Png, FormatId::Jpeg, FormatId::WebP, FormatId::Pdf] {
+        assert_eq!(r.all().count(), 5);
+        for id in [
+            FormatId::Png,
+            FormatId::Jpeg,
+            FormatId::WebP,
+            FormatId::Pdf,
+            FormatId::Svg,
+        ] {
             assert_eq!(r.get(id).map(Exporter::id), Some(id));
             assert_eq!(r.for_extension(id.extension()).map(Exporter::id), Some(id));
         }
@@ -184,5 +192,7 @@ mod tests {
         assert_eq!(webp.max_side, crate::webp::MAX_WEBP_SIDE);
         let pdf = r.get(FormatId::Pdf).unwrap().capabilities();
         assert!(pdf.vector && pdf.alpha && pdf.deterministic && !pdf.lossy && !pdf.has_dpi);
+        let svg = r.get(FormatId::Svg).unwrap().capabilities();
+        assert!(svg.vector && svg.alpha && svg.deterministic && !svg.lossy && !svg.has_dpi);
     }
 }

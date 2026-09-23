@@ -11,6 +11,7 @@
 //! | [`source`] | [`ExportSource`], the seam the application implements, and [`Progress`] |
 //! | [`raster`] | PNG, JPEG and WebP through the deterministic CPU rasteriser |
 //! | [`pdf`] | PDF 1.7, vector, with the fidelity ladder (T11.4) |
+//! | [`svg`] | SVG 1.1: the `.xarast` profile's mapper in its interchange dialect (W11.3) |
 //! | [`report`] | [`ExportReport`], [`Compromise`], [`ExportError`] |
 //!
 //! # Three rules
@@ -41,6 +42,7 @@ pub mod raster;
 pub mod registry;
 pub mod report;
 pub mod source;
+pub mod svg;
 pub mod webp;
 
 pub use model::{
@@ -49,10 +51,12 @@ pub use model::{
 };
 pub use options::{
     BlendFidelity, FormatId, FormatOptions, JpegOptions, PDF_RASTERISE_DPI, PdfOptions, PdfVersion,
-    PngColour, PngCompression, PngDepth, PngOptions, Subsampling, WebPMode, WebPOptions,
+    PngColour, PngCompression, PngDepth, PngOptions, Subsampling, SvgOptions, SvgResources,
+    WebPMode, WebPOptions,
 };
 pub use pdf::PdfExporter;
 pub use raster::{JpegExporter, PngExporter, WebPExporter};
 pub use registry::{Capabilities, Exporter, Registry, XAR_EXPORT_REFUSAL};
 pub use report::{Compromise, ExportError, ExportReport};
 pub use source::{CancelFlag, ExportSource, NoProgress, Progress, SceneSource, SourceScene, Stage};
+pub use svg::SvgExporter;

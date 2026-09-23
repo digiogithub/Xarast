@@ -1,6 +1,6 @@
 [package]
 name = "xarast-io"
-description = "Import and export filters for Xarast (SVG, PNG, JPEG, PDF)"
+description = "Import and export filters for Xarast (SVG, PNG, JPEG, WebP, PDF)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -23,6 +23,7 @@ xarast-image = { path = "../xarast-image" }
 xarast-render = { path = "../xarast-render" }
 xarast-geom = { path = "../xarast-geom" }
 xarast-color = { path = "../xarast-color" }
+xarast-format = { path = "../xarast-format" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 flate2 = { workspace = true }
@@ -34,6 +35,7 @@ kurbo = { workspace = true }
 oxipng = { workspace = true, optional = true }
 
 [dev-dependencies]
+quick-xml = { workspace = true }
 png = { workspace = true }
 image = { workspace = true }
 serde_json = { workspace = true }
