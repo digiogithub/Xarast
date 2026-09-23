@@ -138,3 +138,12 @@ path = "fuzz_targets/fuzz_xarast_manifest.rs"
 test = false
 doc = false
 bench = false
+
+# The SVG profile reader: hostile XML, CSS, path data, paint servers,
+# foreign data; and the read–save–read fixed point of what it accepts.
+[[bin]]
+name = "fuzz_xarast_svg_read"
+path = "fuzz_targets/fuzz_xarast_svg_read.rs"
+test = false
+doc = false
+bench = false
