@@ -262,6 +262,7 @@ mod tests {
                 zoom: 2.0,
                 origin_x: 10.0,
                 origin_y: 20.0,
+                y_up: false,
             },
             ThemeTokens::of(ResolvedTheme::Dark),
         )

@@ -36,9 +36,11 @@
 //! | [`scale`] | The single owner of the fractional scale factor |
 //! | [`decorations`] | Who draws the window frame |
 //! | [`input`] | The platform-neutral event model and its translation |
+//! | [`egui_input`] | [`ShellEvent`]s to `egui` input, and who owns the canvas's input |
 //! | [`intents`] | Physical [`ShellEvent`]s to semantic `xarast_app::Intent`s |
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
+//! | [`gpu_errors`] | `wgpu` errors logged and recovered from, never a panic |
 //!
 //! See `docs/phases/phase-05-shell-and-ui.md` and `docs/memory/ui.md`.
 
@@ -50,6 +52,8 @@ use std::time::{Duration, Instant};
 pub mod clipboard;
 pub mod decorations;
 pub mod display;
+pub mod egui_input;
+pub mod gpu_errors;
 pub mod input;
 pub mod intents;
 mod paint;
@@ -71,6 +75,7 @@ pub use decorations::{DecorationMode, DecorationPlan};
 pub use display::{
     Desktop, DisplayEnvironment, DisplayServer, PlatformCapabilities, headless_skip_reason,
 };
+pub use gpu_errors::GpuErrorReport;
 pub use input::event::{
     ColorScheme, DragEvent, GestureEvent, PointerButton, PointerEvent, PointerId, PointerPhase,
     ScrollUnit, ShellEvent,
@@ -82,7 +87,7 @@ pub use portal::{
     FileFilter, OpenFileRequest, PortalEvent, PortalHandle, PortalRequestId, SaveFileRequest,
 };
 pub use scale::{LogicalSize, PhysicalPos, PhysicalSize, ScaleFactor};
-pub use window::{ShellCtx, ShellWaker};
+pub use window::{CursorShape, ShellCtx, ShellWaker};
 
 /// The Wayland and X11 application identifier.
 ///

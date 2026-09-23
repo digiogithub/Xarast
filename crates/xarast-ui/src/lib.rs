@@ -56,7 +56,7 @@ pub mod workspace;
 
 mod serde_mp;
 
-pub use canvas::{CanvasInput, CanvasResponse, CanvasWidget};
+pub use canvas::{CanvasInput, CanvasNavigation, CanvasResponse, CanvasWidget};
 pub use grid::GridSettings;
 pub use guides::{Axis, Guide};
 pub use model::{

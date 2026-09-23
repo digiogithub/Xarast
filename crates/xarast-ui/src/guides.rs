@@ -139,6 +139,7 @@ mod tests {
             zoom: 2.0,
             origin_x: 50.0,
             origin_y: 30.0,
+            y_up: false,
         }
     }
 

@@ -23,6 +23,9 @@ pub const ID: PanelId = PanelId("layers");
 #[derive(Debug, Default)]
 pub struct LayerPanel {
     renaming: Option<(LayerKey, String)>,
+    /// The rename field has just appeared and must take the keyboard, or
+    /// the double-click that opened it leaves nowhere to type.
+    focus_rename: bool,
 }
 
 impl LayerPanel {
@@ -192,6 +195,9 @@ impl LayerPanel {
                             .desired_width(f32::INFINITY)
                             .hint_text("Layer name"),
                     );
+                    if std::mem::take(&mut self.focus_rename) {
+                        response.request_focus();
+                    }
                     if response.lost_focus() {
                         let name = std::mem::take(text);
                         if !name.is_empty() && name != layer.name {
@@ -213,6 +219,7 @@ impl LayerPanel {
                     }
                     if response.double_clicked() {
                         self.renaming = Some((layer.key, layer.name.clone()));
+                        self.focus_rename = true;
                     }
                 }
             }

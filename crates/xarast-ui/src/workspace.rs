@@ -91,6 +91,13 @@ impl Workspace {
         self.host.load_layout(state)
     }
 
+    /// Chooses who navigates the canvas; see
+    /// [`crate::canvas::CanvasNavigation`]. A host that translates wheel
+    /// and drag into pan and zoom itself must pass `External`.
+    pub fn set_canvas_navigation(&mut self, navigation: crate::canvas::CanvasNavigation) {
+        self.canvas.set_navigation(navigation);
+    }
+
     /// The status bar, for a transient note.
     pub fn status_bar(&mut self) -> &mut StatusBar {
         &mut self.status

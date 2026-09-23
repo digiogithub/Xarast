@@ -221,6 +221,19 @@ pub enum ShellEvent {
     Drag(DragEvent),
     /// An answer from a portal request.
     Portal(crate::portal::PortalEvent),
+    /// The GPU raised errors during the last frame. The shell has already
+    /// logged them and is recovering; this is for the status bar.
+    GpuError(crate::gpu_errors::GpuErrorReport),
+    /// An assistive technology (a screen reader, say) started listening.
+    /// From now on the application should publish its accessibility tree
+    /// with [`crate::ShellCtx::update_accessibility`], the first time in
+    /// full and no later than the next frame.
+    AccessibilityActivated,
+    /// The assistive technology stopped listening; publishing may stop.
+    AccessibilityDeactivated,
+    /// An assistive technology asked for an action: focus this node, press
+    /// that button, set this value.
+    AccessibilityAction(egui::accesskit::ActionRequest),
     /// The user asked to close the window.
     CloseRequested,
 }

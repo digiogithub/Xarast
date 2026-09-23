@@ -14,6 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::clipboard::{Clipboard, system_clipboard};
 use crate::decorations::DecorationPlan;
 use crate::display::{DisplayEnvironment, PlatformCapabilities};
+use crate::gpu_errors::{GpuErrorSink, GpuRecovery, Recovery};
 use crate::input::event::ShellEvent;
 use crate::input::translate::EventTranslator;
 use crate::paint::{CanvasFrame, Painter, UiFrame};
@@ -68,6 +69,47 @@ impl ShellWaker {
     }
 }
 
+/// A pointer shape, named by what it means rather than by any toolkit's
+/// spelling. The shell maps it onto the platform's cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// The platform's arrow.
+    #[default]
+    Default,
+    /// No cursor at all.
+    Hidden,
+    /// A text caret, over editable text.
+    Text,
+    /// A pointing hand, over a link.
+    Hand,
+    /// An open hand: something can be dragged.
+    Grab,
+    /// A closed hand: something is being dragged.
+    Grabbing,
+    /// Four arrows: something moves freely.
+    Move,
+    /// Crosshair, for precise placement.
+    Crosshair,
+    /// The action is not allowed here.
+    NotAllowed,
+    /// Resize left–right.
+    ResizeHorizontal,
+    /// Resize up–down.
+    ResizeVertical,
+    /// Resize along the top-left/bottom-right diagonal.
+    ResizeNwSe,
+    /// Resize along the top-right/bottom-left diagonal.
+    ResizeNeSw,
+    /// Busy.
+    Wait,
+    /// Help is available.
+    Help,
+    /// Zoom in.
+    ZoomIn,
+    /// Zoom out.
+    ZoomOut,
+}
+
 /// What the application handed over for the next present.
 #[derive(Debug, Default)]
 pub(crate) struct PendingFrame {
@@ -75,6 +117,8 @@ pub(crate) struct PendingFrame {
     ui: Option<UiFrame>,
     /// Read the next presented frame back into a PNG, then maybe exit.
     capture: Option<(std::path::PathBuf, bool)>,
+    /// The accessibility tree to publish after this frame.
+    a11y: Option<egui::accesskit::TreeUpdate>,
 }
 
 #[derive(Debug)]
@@ -140,6 +184,47 @@ impl ShellCtx<'_> {
         }
     }
 
+    /// Tells the input method where the caret is, in device pixels, so
+    /// the candidate window opens next to it rather than at the corner.
+    pub fn set_ime_cursor_area(&self, x: f64, y: f64, width: f64, height: f64) {
+        if let Some(w) = self.window {
+            w.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x, y),
+                winit::dpi::PhysicalSize::new(width.max(1.0), height.max(1.0)),
+            );
+        }
+    }
+
+    /// Sets the pointer's shape over the window.
+    pub fn set_cursor(&self, shape: CursorShape) {
+        use winit::window::CursorIcon as C;
+        let Some(w) = self.window else { return };
+        let icon = match shape {
+            CursorShape::Hidden => {
+                w.set_cursor_visible(false);
+                return;
+            }
+            CursorShape::Default => C::Default,
+            CursorShape::Text => C::Text,
+            CursorShape::Hand => C::Pointer,
+            CursorShape::Grab => C::Grab,
+            CursorShape::Grabbing => C::Grabbing,
+            CursorShape::Move => C::Move,
+            CursorShape::Crosshair => C::Crosshair,
+            CursorShape::NotAllowed => C::NotAllowed,
+            CursorShape::ResizeHorizontal => C::EwResize,
+            CursorShape::ResizeVertical => C::NsResize,
+            CursorShape::ResizeNwSe => C::NwseResize,
+            CursorShape::ResizeNeSw => C::NeswResize,
+            CursorShape::Wait => C::Wait,
+            CursorShape::Help => C::Help,
+            CursorShape::ZoomIn => C::ZoomIn,
+            CursorShape::ZoomOut => C::ZoomOut,
+        };
+        w.set_cursor_visible(true);
+        w.set_cursor(icon);
+    }
+
     /// A handle another thread can use to wake the loop.
     #[must_use]
     pub fn waker(&self) -> ShellWaker {
@@ -189,6 +274,15 @@ impl ShellCtx<'_> {
         self.frame.capture = Some((path, exit_after));
     }
 
+    /// Publishes an accessibility tree update to the platform's assistive
+    /// technologies. Only the latest update of a frame is kept; after
+    /// [`ShellEvent::AccessibilityActivated`] it must be a full tree. A
+    /// no-op when nothing is listening or the `accessibility` feature is
+    /// off.
+    pub fn update_accessibility(&mut self, update: egui::accesskit::TreeUpdate) {
+        self.frame.a11y = Some(update);
+    }
+
     /// Asks the shell to quit after this callback.
     pub const fn exit(&mut self) {
         self.exit = true;
@@ -219,6 +313,122 @@ macro_rules! ctx_of {
     };
 }
 
+/// What the AccessKit handlers leave for the event loop. They run on the
+/// adapter's own thread; the loop drains this on the main thread.
+#[cfg(feature = "accessibility")]
+#[derive(Debug, Default)]
+struct A11yInbox {
+    activated: bool,
+    deactivated: bool,
+    actions: Vec<egui::accesskit::ActionRequest>,
+}
+
+/// The AccessKit adapter bound to the window: the interface's tree on
+/// AT-SPI (and, in phase 14, UIA and NSAccessibility).
+///
+/// The handlers never touch the interface: they record what was asked in
+/// an [`A11yInbox`] and wake the loop, which turns it into
+/// [`ShellEvent`]s. The application answers with
+/// [`ShellCtx::update_accessibility`], published after the frame.
+#[cfg(feature = "accessibility")]
+struct A11y {
+    adapter: accesskit_winit::Adapter,
+    inbox: Arc<std::sync::Mutex<A11yInbox>>,
+}
+
+#[cfg(feature = "accessibility")]
+impl std::fmt::Debug for A11y {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("A11y").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "accessibility")]
+mod a11y_handlers {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use egui::accesskit::{
+        ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, TreeUpdate,
+    };
+
+    use super::{A11yInbox, ShellWaker};
+
+    pub(super) struct Handler {
+        pub(super) inbox: Arc<Mutex<A11yInbox>>,
+        pub(super) waker: ShellWaker,
+    }
+
+    impl Handler {
+        fn with(&self, f: impl FnOnce(&mut A11yInbox)) {
+            f(&mut self.inbox.lock().unwrap_or_else(PoisonError::into_inner));
+            self.waker.wake();
+        }
+    }
+
+    impl ActivationHandler for Handler {
+        fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+            // The tree comes from the next interface frame, which the wake
+            // below schedules; AccessKit shows a placeholder until then.
+            self.with(|i| {
+                i.activated = true;
+                i.deactivated = false;
+            });
+            None
+        }
+    }
+
+    impl ActionHandler for Handler {
+        fn do_action(&mut self, request: ActionRequest) {
+            self.with(|i| i.actions.push(request));
+        }
+    }
+
+    impl DeactivationHandler for Handler {
+        fn deactivate_accessibility(&mut self) {
+            self.with(|i| {
+                i.deactivated = true;
+                i.activated = false;
+            });
+        }
+    }
+}
+
+#[cfg(feature = "accessibility")]
+impl A11y {
+    /// Must run before the window is first shown: the adapter refuses a
+    /// visible window.
+    fn new(event_loop: &ActiveEventLoop, window: &Window, waker: &ShellWaker) -> A11y {
+        let inbox = Arc::new(std::sync::Mutex::new(A11yInbox::default()));
+        let handler = || a11y_handlers::Handler {
+            inbox: inbox.clone(),
+            waker: waker.clone(),
+        };
+        let adapter = accesskit_winit::Adapter::with_direct_handlers(
+            event_loop,
+            window,
+            handler(),
+            handler(),
+            handler(),
+        );
+        A11y { adapter, inbox }
+    }
+
+    fn drain(&self, out: &mut Vec<ShellEvent>) {
+        let mut inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::mem::take(&mut inbox.deactivated) {
+            out.push(ShellEvent::AccessibilityDeactivated);
+        }
+        if std::mem::take(&mut inbox.activated) {
+            tracing::info!("an assistive technology is listening; publishing the interface");
+            out.push(ShellEvent::AccessibilityActivated);
+        }
+        out.extend(inbox.actions.drain(..).map(ShellEvent::AccessibilityAction));
+    }
+}
+
 /// The GPU state bound to one window.
 #[derive(Debug)]
 pub(crate) struct Gpu {
@@ -227,6 +437,8 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     painter: Painter,
+    /// Where `wgpu` reports the errors it would otherwise panic on.
+    errors: GpuErrorSink,
     pub(crate) report: AdapterReport,
 }
 
@@ -284,6 +496,19 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| ShellError::Surface(e.to_string()))?;
+        // Before anything else touches the device: from here on a
+        // validation error is logged and recovered from, never a panic
+        // (`ui.md` shell invariant 6).
+        let errors = GpuErrorSink::new();
+        errors.install(&device);
+        let lost = errors.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            // Dropping the device at exit reports `Destroyed`; that is not
+            // a fault.
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                lost.record("device lost", &message);
+            }
+        });
 
         let size = window.inner_size();
         let mut config = surface
@@ -322,6 +547,7 @@ impl Gpu {
             queue,
             config,
             painter,
+            errors,
             report,
         })
     }
@@ -498,6 +724,17 @@ impl Gpu {
         xarast_render::golden::write_png(&surface, path).map_err(|e| e.to_string())
     }
 
+    /// Raises a validation error on purpose, for `XARAST_INJECT_GPU_ERRORS`:
+    /// the only way to watch the recovery path in a real window.
+    fn inject_error(&self) {
+        let _ = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("injected error"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: false,
+        });
+    }
+
     /// Re-applies the current configuration, which is how a lost, outdated or
     /// suboptimal swapchain is recovered.
     fn reconfigure(&mut self) {
@@ -546,6 +783,16 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     events: Vec<ShellEvent>,
     frames: u32,
     consecutive_failures: u32,
+    #[cfg(feature = "accessibility")]
+    a11y: Option<A11y>,
+    /// What to do about GPU errors, frame by frame.
+    recovery: GpuRecovery,
+    /// While set, frames are neither drawn nor presented: the GPU is being
+    /// left alone after a run of errors.
+    backoff_until: Option<std::time::Instant>,
+    /// Frames still to raise a deliberate GPU error in
+    /// (`XARAST_INJECT_GPU_ERRORS`); zero in normal use.
+    inject_errors: u32,
     pub(crate) report: Option<AdapterReport>,
     pub(crate) error: Option<ShellError>,
 }
@@ -563,13 +810,26 @@ impl<A: ShellApp> ShellLoop<A> {
             gpu: None,
             translator: EventTranslator::new(),
             clipboard: system_clipboard(),
-            portals: PortalService::start(),
+            portals: {
+                // A portal answer, or the desktop changing colour scheme,
+                // must reach a loop that is parked with nothing to do.
+                let waker = waker.clone();
+                PortalService::start_with_waker(move || waker.wake())
+            },
             app,
             pending: PendingFrame::default(),
             waker,
             events: Vec::new(),
             frames: 0,
             consecutive_failures: 0,
+            #[cfg(feature = "accessibility")]
+            a11y: None,
+            recovery: GpuRecovery::new(),
+            backoff_until: None,
+            inject_errors: std::env::var("XARAST_INJECT_GPU_ERRORS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             report: None,
             error: None,
         }
@@ -578,6 +838,9 @@ impl<A: ShellApp> ShellLoop<A> {
     fn window_attributes(&self) -> winit::window::WindowAttributes {
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
+            // Shown once the accessibility adapter is attached, which it
+            // must be before the first map (`A11y::new`).
+            .with_visible(false)
             .with_decorations(self.decorations.request_decorations)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.size.0,
@@ -614,11 +877,62 @@ impl<A: ShellApp> ShellLoop<A> {
         }
     }
 
+    /// Acts on the GPU errors the last frame raised, if any: reconfigure,
+    /// or back off. Never exits — a failing GPU leaves the document open
+    /// (`ui.md` shell invariant 6). The application hears of it as a
+    /// [`ShellEvent::GpuError`].
+    fn recover_from_gpu_errors(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let report = gpu.errors.take_report();
+        match self.recovery.after_frame(report.is_some()) {
+            Recovery::Continue => {}
+            Recovery::Reconfigure => {
+                tracing::warn!(
+                    streak = self.recovery.streak(),
+                    "GPU error; reconfiguring the surface"
+                );
+                gpu.reconfigure();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Recovery::Backoff(delay) => {
+                tracing::warn!(
+                    streak = self.recovery.streak(),
+                    delay_ms = delay.as_millis(),
+                    "GPU errors persist; pausing presentation"
+                );
+                let until = std::time::Instant::now() + delay;
+                self.backoff_until = Some(until);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            }
+        }
+        if let Some(report) = report {
+            self.events.push(ShellEvent::GpuError(report));
+        }
+    }
+
     fn collect_portal_answers(&mut self) {
         let mut answers = Vec::new();
         self.portals.poll(&mut answers);
         self.events
             .extend(answers.into_iter().map(ShellEvent::Portal));
+        #[cfg(feature = "accessibility")]
+        if let Some(a11y) = &self.a11y {
+            a11y.drain(&mut self.events);
+        }
+    }
+
+    /// Hands the application's latest tree to the adapter, which forwards
+    /// it only while an assistive technology is listening.
+    fn publish_accessibility(&mut self) {
+        let update = self.pending.a11y.take();
+        #[cfg(feature = "accessibility")]
+        if let (Some(update), Some(a11y)) = (update, self.a11y.as_mut()) {
+            a11y.adapter.update_if_active(|| update);
+        }
+        #[cfg(not(feature = "accessibility"))]
+        drop(update);
     }
 }
 
@@ -635,6 +949,11 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 return;
             }
         };
+        #[cfg(feature = "accessibility")]
+        {
+            self.a11y = Some(A11y::new(event_loop, &window, &self.waker));
+        }
+        window.set_visible(true);
         match Gpu::new(window.clone(), self.config.backends) {
             Ok(gpu) => {
                 self.report = Some(gpu.report.clone());
@@ -657,6 +976,11 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // AccessKit sees every window event first (focus, above all).
+        #[cfg(feature = "accessibility")]
+        if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
+            a11y.adapter.process_event(window, &event);
+        }
         // Translate first, so that the application sees the event before the
         // shell acts on it and there is exactly one interpretation of each.
         self.translator.translate(&event, &mut self.events);
@@ -681,6 +1005,16 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 if event_loop.exiting() {
                     return;
                 }
+                // Backing off after GPU errors: the application's state
+                // waits in `pending` (texture deltas merge there), and the
+                // loop sleeps until the deadline instead of spinning.
+                if let Some(until) = self.backoff_until {
+                    if std::time::Instant::now() < until {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+                        return;
+                    }
+                    self.backoff_until = None;
+                }
 
                 let mut ctx = ctx_of!(self);
                 let request = self.app.on_frame(&mut ctx);
@@ -690,8 +1024,13 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                     return;
                 }
                 apply_frame_request(event_loop, self.window.as_ref(), request);
+                self.publish_accessibility();
 
                 let Some(gpu) = self.gpu.as_mut() else { return };
+                if self.inject_errors > 0 {
+                    self.inject_errors -= 1;
+                    gpu.inject_error();
+                }
                 // Applied whether or not this present succeeds: texture
                 // deltas must reach the GPU exactly once and in order.
                 gpu.apply(&mut self.pending);
@@ -703,6 +1042,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 } else if let Some((_, true)) = capture {
                     event_loop.exit();
                 }
+                self.recover_from_gpu_errors(event_loop);
                 match outcome {
                     FrameOutcome::Presented => self.frames += 1,
                     // A skipped frame is normal: the window is occluded, or the
@@ -752,6 +1092,12 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_portal_answers();
         self.dispatch(event_loop);
+        if let Some(until) = self.backoff_until
+            && std::time::Instant::now() >= until
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

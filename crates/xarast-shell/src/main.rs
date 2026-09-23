@@ -39,6 +39,9 @@ ENVIRONMENT:
     WGPU_BACKEND            Force a wgpu backend, e.g. `vulkan`, `gl`
     WINIT_UNIX_BACKEND      Force `wayland` or `x11`; X11 loses fractional
                             scaling, trackpad gestures and tablet axes
+    XARAST_INJECT_GPU_ERRORS
+                            Diagnostic: raise a GPU validation error in each of
+                            the first N frames, to exercise the recovery path
 ";
 
 fn main() -> ExitCode {
