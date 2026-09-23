@@ -316,6 +316,40 @@ fn export_writes_a_vector_pdf_page_the_size_of_the_area() {
     }
 }
 
+#[test]
+fn export_writes_a_plain_svg_framing_the_area() {
+    let dir = scratch("export-svg");
+    let input = write(&dir, "square.xar", &square_xar());
+    let out = dir.join("sq.svg");
+    let o = run(&[
+        "export",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--area",
+        "72,72,144,180",
+        "--minify",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("72x108 pt page"), "{}", stdout(&o));
+    let svg = std::fs::read_to_string(&out).unwrap();
+    assert!(svg.starts_with("<?xml"), "{svg}");
+    assert!(svg.contains(" width=\"25.4mm\" height=\"38.1mm\""), "{svg}");
+    assert!(!svg.contains("xarast"), "{svg}");
+    // SVG options on another format, and raster options on SVG, are refused.
+    for args in [
+        vec!["--minify", "-o", "x.png"],
+        vec!["--resources", "sidecar", "-o", "x.pdf"],
+        vec!["--quality", "50", "-o", "x.svg"],
+        vec!["--resources", "zip", "-o", "x.svg"],
+    ] {
+        let mut a = vec!["export", input.to_str().unwrap()];
+        a.extend(args);
+        let o = run(&a);
+        assert_ne!(o.status.code(), Some(0), "{a:?}");
+    }
+}
+
 fn image_size(path: &Path) -> (u32, u32) {
     let bytes = std::fs::read(path).unwrap();
     if bytes.starts_with(b"\x89PNG") {
@@ -369,7 +403,7 @@ fn export_refuses_xar_with_the_architecture_reason() {
 fn export_is_byte_identical_across_processes() {
     let dir = scratch("export-determinism");
     let input = write(&dir, "square.xar", &square_xar());
-    for ext in ["png", "jpg", "webp", "pdf"] {
+    for ext in ["png", "jpg", "webp", "pdf", "svg"] {
         let a = dir.join(format!("a.{ext}"));
         let b = dir.join(format!("b.{ext}"));
         for out in [&a, &b] {
@@ -459,7 +493,7 @@ fn corpus_renders_small_with_no_failure() {
 #[test]
 fn corpus_exports_to_every_format_with_no_failure() {
     let root = corpus_or_skip!();
-    for fmt in ["png", "jpeg", "webp", "pdf"] {
+    for fmt in ["png", "jpeg", "webp", "pdf", "svg"] {
         let out = scratch(&format!("corpus-export-{fmt}"));
         let mut args = vec![
             "export".to_owned(),
@@ -480,5 +514,14 @@ fn corpus_exports_to_every_format_with_no_failure() {
         assert_eq!(o.status.code(), Some(0), "{fmt}: {}", stderr(&o));
         let text = stdout(&o);
         assert!(text.contains("59 files: 59 exported, 0 failed"), "{text}");
+        if fmt == "svg" {
+            // The interchange dialect carries none of the profile's
+            // private vocabulary (phase 11 W11.3).
+            for f in std::fs::read_dir(&out).unwrap() {
+                let svg = std::fs::read_to_string(f.unwrap().path()).unwrap();
+                assert!(!svg.contains("xarast:"));
+                assert!(!svg.contains("xmlns:xarast"));
+            }
+        }
     }
 }
