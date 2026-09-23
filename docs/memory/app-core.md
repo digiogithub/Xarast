@@ -515,8 +515,16 @@ be better run once at `Tx::commit` than after every call.
       (`WalkStats::shapes_pending`). Generating the path from the
       parameters is Phase 7; `testfiles/RedStar.xar` and
       `testfiles/Test00.xar` are the corpus files that show it.
-- [ ] **Text draws nothing** (`WalkStats::text_pending`). Phase 9. That
-      is 13 of the 21 blank corpus files.
+- [x] **Text draws** (phase 9 round 2). A story is painted whole at its
+      visit (`walker::paint_story`, `text.rs`, `fonts.rs`; contract in
+      `text.md`, "Walker integration"). `text_pending` is 0 on the corpus;
+      `text_on_path_pending` is 1 (`Designs/TextCurve.xar`, drawn straight
+      until W9.5). `WalkStats::text_stories` counts drawn stories.
+      `SceneWalker::with_fonts` / `headless::render_with_fonts` pin fonts;
+      `viewport::drawing_rect_with` and `Session::scene_ink` include text,
+      which has no cached bounds. Font substitutions flow walker →
+      `Session::take_font_substitutions` → `AppState::
+      collect_font_substitutions` (problem list + status bar).
 - [ ] **Live effects draw nothing** (`WalkStats::live_pending`).
       Phase 13.
 - [x] **`ContentHash` is per node** (phase 7): tag + `content_rev` + a
