@@ -137,6 +137,52 @@ fn escape_mid_drag_leaves_document_and_history_untouched() {
 }
 
 #[test]
+fn escape_mid_drag_brings_back_the_redo_branch() {
+    let (mut s, nodes) = fixture(2, Colour::Direct(ColourValue::rgb(0.0, 0.0, 1.0)));
+    op(&mut s, Op::Set(comps([0.0, 0.5, 1.0, 0.0])));
+    let edited = s.doc.canonical_digest();
+    s.apply(Intent::Undo).unwrap();
+    let digest = s.doc.canonical_digest();
+    let labels = s.bus.history().labels();
+    let serial = s.bus.history().state_serial();
+    assert_eq!(s.redo_label(), Some("Set Fill Colour"));
+
+    for i in 0..20 {
+        op(&mut s, Op::Preview(comps([i as f32 / 20.0, 0.0, 0.0, 0.0])));
+    }
+    assert_ne!(s.doc.canonical_digest(), digest);
+    op(&mut s, Op::Cancel);
+
+    assert_eq!(s.doc.canonical_digest(), digest);
+    assert_eq!(s.bus.history().labels(), labels, "undo and redo lists");
+    assert_eq!(s.bus.history().state_serial(), serial);
+    s.apply(Intent::Redo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), edited, "redo re-applies the edit");
+    assert_eq!(resolved(&s, nodes[0]), ColourValue::rgb(0.0, 0.5, 1.0));
+
+    // A committed drag drops the branch, as any new edit does.
+    s.apply(Intent::Undo).unwrap();
+    op(&mut s, Op::Preview(comps([1.0, 0.0, 0.0, 0.0])));
+    op(&mut s, Op::Commit);
+    assert!(!s.bus.history().can_redo());
+    assert_eq!(s.bus.history().len(), 1);
+
+    // A drag that left the document alone (nothing selected: it sets the
+    // current attribute) keeps it.
+    s.apply(Intent::Undo).unwrap();
+    s.apply(Intent::Select {
+        nodes: Vec::new(),
+        mode: xarast_app::SelectMode::Replace,
+    })
+    .unwrap();
+    assert_eq!(s.redo_label(), Some("Set Fill Colour"));
+    op(&mut s, Op::Preview(comps([0.0, 1.0, 0.0, 0.0])));
+    assert!(!s.bus.history().can_redo(), "set aside while dragging");
+    op(&mut s, Op::Commit);
+    assert_eq!(s.redo_label(), Some("Set Fill Colour"));
+}
+
+#[test]
 fn a_typed_value_is_one_step_per_entry() {
     let (mut s, nodes) = fixture(1, Colour::Direct(ColourValue::BLACK));
     op(&mut s, Op::Set(comps([0.2, 0.0, 0.0, 0.0])));
