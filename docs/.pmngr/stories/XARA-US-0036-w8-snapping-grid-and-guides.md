@@ -2,12 +2,13 @@
 id: XARA-US-0036
 type: story
 title: W8 — Snapping, grid and guides
-status: backlog
+status: in_progress
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, tools]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T09:42:03Z
+updated: 2026-09-23T18:17:47Z
+started: 2026-09-23T18:17:47Z
 ---
 
 ## Tasks (full table: phase-07 §W8)

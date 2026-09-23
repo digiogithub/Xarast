@@ -2,13 +2,15 @@
 id: XARA-T-0155
 type: task
 title: .xarast round trip turns a duotone (contone) bitmap fill into a flat colour
-status: backlog
+status: done
 priority: low
 parent: XARA-US-0052
 author: mcp
 labels: [phase-10, bitmap, xarast-format]
 created: 2026-09-23T17:48:11Z
-updated: 2026-09-23T17:48:11Z
+updated: 2026-09-23T18:39:43Z
+started: 2026-09-23T18:39:28Z
+closed: 2026-09-23T18:39:43Z
 ---
 
 ## Description
