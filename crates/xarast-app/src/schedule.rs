@@ -202,6 +202,7 @@ pub struct Canvas {
     rt: RenderThread,
     sched: QualityScheduler,
     backdrop: Backdrop,
+    cpu_rescale: bool,
 }
 
 impl Canvas {
@@ -212,6 +213,7 @@ impl Canvas {
             rt,
             sched: QualityScheduler::default(),
             backdrop,
+            cpu_rescale: true,
         }
     }
 
@@ -229,6 +231,15 @@ impl Canvas {
     pub fn with_scheduler(mut self, sched: QualityScheduler) -> Canvas {
         self.sched = sched;
         self
+    }
+
+    /// Whether a `Draft` zoom is resampled on the render thread
+    /// ([`crate::render_thread::FrameJob::cpu_rescale`]). A presenter that
+    /// composites retained tiles at input time turns it off: the zoom is
+    /// already on screen, and the render thread's resample would be
+    /// thrown away.
+    pub fn set_cpu_rescale(&mut self, on: bool) {
+        self.cpu_rescale = on;
     }
 
     /// Records what a batch of intents changed, at `now`. Cancels a Final
@@ -270,6 +281,7 @@ impl Canvas {
             // Never above what the session asks for: a user who chose
             // Draft gets Draft at rest too.
             job.view.quality = q.min(session.quality);
+            job.cpu_rescale = self.cpu_rescale;
             let g = self.rt.submit(job);
             self.sched.submitted(q, g);
         }

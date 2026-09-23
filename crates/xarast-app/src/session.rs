@@ -462,6 +462,7 @@ impl Session {
                 page,
             )),
             generation: 0,
+            cpu_rescale: true,
         }
     }
 
