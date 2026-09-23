@@ -5,9 +5,9 @@ mod corpus;
 use corpus::small_corpus;
 use proptest::prelude::*;
 use xarast_geom::{
-    Cap, DashPattern, FillRule, HitIndex, Join, Mp, Path, Point, Rect, StrokeError, StrokeStyle,
-    Tolerance, arclen, dash, hit_fill, hit_stroke, nearest_point, offset, point_at_arclen,
-    self_union, stroke_to_path,
+    Cap, DashPattern, FillRule, HitTolerance, Join, Mp, Path, PathHitIndex, Point, Rect,
+    StrokeError, StrokeStyle, Tolerance, arclen, dash, fill_contains, hit_stroke, nearest_point,
+    offset, point_at_arclen, self_union, stroke_to_path,
 };
 
 const TOL: Tolerance = Tolerance::BOOLEAN;
@@ -130,9 +130,9 @@ fn mismatched_caps_are_handled() {
     let got = out.signed_area().abs();
     assert!((got - want).abs() < want * 0.005, "area {got}, want {want}");
     // The start's square corner is outside the round start cap...
-    assert!(!hit_fill(&out, Point::raw(-90, 90), FillRule::NonZero));
+    assert!(!fill_contains(&out, Point::raw(-90, 90), FillRule::NonZero));
     // ...and the end's square corner is inside the square end cap.
-    assert!(hit_fill(&out, Point::raw(1090, 90), FillRule::NonZero));
+    assert!(fill_contains(&out, Point::raw(1090, 90), FillRule::NonZero));
 }
 
 #[test]
@@ -335,13 +335,13 @@ fn hit_fill_respects_the_winding_rule() {
     let inside = Point::raw(5_000, 5_000);
     let ring = Point::raw(1_000, 1_000);
     let outside = Point::raw(-1, -1);
-    assert!(hit_fill(&p, inside, FillRule::NonZero));
-    assert!(!hit_fill(&p, inside, FillRule::EvenOdd));
-    assert!(hit_fill(&p, ring, FillRule::NonZero));
-    assert!(hit_fill(&p, ring, FillRule::EvenOdd));
-    assert!(!hit_fill(&p, outside, FillRule::NonZero));
-    assert!(!hit_fill(&p, outside, FillRule::EvenOdd));
-    assert!(!hit_fill(&Path::new(), inside, FillRule::NonZero));
+    assert!(fill_contains(&p, inside, FillRule::NonZero));
+    assert!(!fill_contains(&p, inside, FillRule::EvenOdd));
+    assert!(fill_contains(&p, ring, FillRule::NonZero));
+    assert!(fill_contains(&p, ring, FillRule::EvenOdd));
+    assert!(!fill_contains(&p, outside, FillRule::NonZero));
+    assert!(!fill_contains(&p, outside, FillRule::EvenOdd));
+    assert!(!fill_contains(&Path::new(), inside, FillRule::NonZero));
 }
 
 #[test]
@@ -349,20 +349,30 @@ fn hit_fill_positive_and_negative_rules() {
     let ccw = square(0, 0, 1_000, 1_000);
     let cw = ccw.reversed();
     let p = Point::raw(500, 500);
-    assert!(hit_fill(&ccw, p, FillRule::Positive));
-    assert!(!hit_fill(&ccw, p, FillRule::Negative));
-    assert!(hit_fill(&cw, p, FillRule::Negative));
-    assert!(!hit_fill(&cw, p, FillRule::Positive));
+    assert!(fill_contains(&ccw, p, FillRule::Positive));
+    assert!(!fill_contains(&ccw, p, FillRule::Negative));
+    assert!(fill_contains(&cw, p, FillRule::Negative));
+    assert!(!fill_contains(&cw, p, FillRule::Positive));
 }
 
 #[test]
-fn hit_stroke_measures_distance_to_the_centreline() {
+fn hit_stroke_tests_the_stroke_band() {
     let p = line(0, 0, 1_000, 0);
-    assert!(hit_stroke(&p, Point::raw(500, 40), Mp::new(50), TOL));
-    assert!(!hit_stroke(&p, Point::raw(500, 60), Mp::new(50), TOL));
+    let s = width_style(100);
+    let t = HitTolerance::EXACT;
+    assert!(hit_stroke(&p, &s, Point::raw(500, 40), t));
+    assert!(!hit_stroke(&p, &s, Point::raw(500, 60), t));
     // Far outside the bounds is rejected by the cheap test first.
-    assert!(!hit_stroke(&p, Point::raw(500, 100_000), Mp::new(50), TOL));
-    assert!(!hit_stroke(&Path::new(), Point::ORIGIN, Mp::new(50), TOL));
+    assert!(!hit_stroke(&p, &s, Point::raw(500, 100_000), t));
+    assert!(!hit_stroke(&Path::new(), &s, Point::ORIGIN, t));
+}
+
+fn width_style(w: i32) -> StrokeStyle {
+    StrokeStyle {
+        width: Mp::new(w),
+        join: Join::Round,
+        ..StrokeStyle::default()
+    }
 }
 
 #[test]
@@ -381,7 +391,7 @@ fn hit_index_agrees_with_the_exact_test() {
         if case.path.is_empty() {
             continue;
         }
-        let idx = HitIndex::build(&case.path);
+        let idx = PathHitIndex::build(&case.path);
         let b = case.path.bounds().inflated(Mp::new(1_000));
         if b.is_empty() {
             continue;
@@ -403,7 +413,7 @@ fn hit_index_agrees_with_the_exact_test() {
                 }
                 assert_eq!(
                     idx.hit_fill(&case.path, p, rule),
-                    hit_fill(&case.path, p, rule),
+                    fill_contains(&case.path, p, rule),
                     "{} at {:?} under {rule:?}",
                     case.name,
                     p
@@ -416,7 +426,7 @@ fn hit_index_agrees_with_the_exact_test() {
 #[test]
 fn hit_index_stroke_agrees_with_the_direct_test() {
     let p = square(0, 0, 10_000, 10_000);
-    let idx = HitIndex::build(&p);
+    let idx = PathHitIndex::build(&p);
     assert!(idx.edge_count() >= 4);
     for (q, hw, want) in [
         (Point::raw(5_000, 40), 50, true),
@@ -425,7 +435,8 @@ fn hit_index_stroke_agrees_with_the_direct_test() {
         (Point::raw(-40, 5_000), 50, true),
     ] {
         assert_eq!(idx.hit_stroke(&p, q, Mp::new(hw), TOL), want, "{q:?}");
-        assert_eq!(hit_stroke(&p, q, Mp::new(hw), TOL), want, "direct {q:?}");
+        let direct = hit_stroke(&p, &width_style(2 * hw), q, HitTolerance::EXACT);
+        assert_eq!(direct, want, "direct {q:?}");
     }
 }
 
@@ -466,11 +477,11 @@ proptest! {
         let inner = r.inflated(Mp::new(-2));
         let outer = r.inflated(Mp::new(2));
         if inner.contains(q) {
-            prop_assert!(hit_fill(&p, q, FillRule::NonZero));
-            prop_assert!(hit_fill(&p, q, FillRule::EvenOdd));
+            prop_assert!(fill_contains(&p, q, FillRule::NonZero));
+            prop_assert!(fill_contains(&p, q, FillRule::EvenOdd));
         } else if !outer.contains(q) {
-            prop_assert!(!hit_fill(&p, q, FillRule::NonZero));
-            prop_assert!(!hit_fill(&p, q, FillRule::EvenOdd));
+            prop_assert!(!fill_contains(&p, q, FillRule::NonZero));
+            prop_assert!(!fill_contains(&p, q, FillRule::EvenOdd));
         }
     }
 

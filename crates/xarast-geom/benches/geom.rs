@@ -4,14 +4,14 @@
 //! `docs/memory/perf.md`: `bounds` 30 us, `tight_bounds` 400 us, `flatten`
 //! 2 ms, `flatten_traced` at most 1.3x `flatten`, `stroke_to_path` 8 ms,
 //! `dash` 6 ms, `boolean` union 3 ms / 40 ms / 600 ms at 1 k / 10 k / 100 k
-//! segments, `HitIndex::build` 500 us, `hit_fill` via the index 15 us, and
+//! segments, `PathHitIndex::build` 500 us, `hit_fill` via the index 15 us, and
 //! `arclen` 200 us for a thousand cubics.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use xarast_geom::{
-    BoolOp, DashPattern, FillRule, HitIndex, Mp, Path, Point, StrokeStyle, Tolerance, arclen,
-    boolean, dash, flatten, flatten_traced, hit_fill, stroke_to_path,
+    BoolOp, DashPattern, FillRule, Mp, Path, PathHitIndex, Point, StrokeStyle, Tolerance, arclen,
+    boolean, dash, fill_contains, flatten, flatten_traced, stroke_to_path,
 };
 
 /// A wobbly closed blob of `n` cubic segments, which is the shape of real
@@ -119,17 +119,17 @@ fn bench_boolean(c: &mut Criterion) {
 
 fn bench_hit(c: &mut Criterion) {
     let p = blob(10_000, 500_000.0);
-    let idx = HitIndex::build(&p);
+    let idx = PathHitIndex::build(&p);
     let q = Point::raw(1_000, 2_000);
     let mut g = c.benchmark_group("hit");
-    g.bench_function("HitIndex::build/10k", |b| {
-        b.iter(|| black_box(HitIndex::build(&p)))
+    g.bench_function("PathHitIndex::build/10k", |b| {
+        b.iter(|| black_box(PathHitIndex::build(&p)))
     });
     g.bench_function("hit_fill_indexed/10k", |b| {
         b.iter(|| black_box(idx.hit_fill(&p, q, FillRule::NonZero)))
     });
     g.bench_function("hit_fill_exact/10k", |b| {
-        b.iter(|| black_box(hit_fill(&p, q, FillRule::NonZero)))
+        b.iter(|| black_box(fill_contains(&p, q, FillRule::NonZero)))
     });
     g.finish();
 }
