@@ -2,12 +2,12 @@
 id: XARA-US-0041
 type: story
 title: W8.6 — Colour editor
-status: in_progress
+status: in_review
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, ui]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T22:30:00Z
+updated: 2026-09-23T22:49:16Z
 started: 2026-09-23T22:30:00Z
 ---
 
