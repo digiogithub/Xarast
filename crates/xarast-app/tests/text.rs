@@ -1,0 +1,132 @@
+//! Text in the scene walker (phase 9): stories become glyph outlines,
+//! painted with each run's own attributes, laid out with pinned fonts.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use xarast_app::fonts::FontService;
+use xarast_app::{DeviceSize, EditState, SceneWalker, Viewport};
+use xarast_doc::builder::{BuildLimits, skeleton};
+use xarast_doc::{AttrValue, NodeKind, TextItem, TextLayout, TextStoryNode, TypefaceRef};
+use xarast_geom::{Matrix, Mp, Vector};
+use xarast_render::{RenderQuality, Scene};
+
+fn fonts() -> Arc<FontService> {
+    FontService::from_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"))
+}
+
+/// One point story at (100 pt, 200 pt): "Hi" in a family nobody has, then
+/// " there" at twice the size.
+fn doc(layout: TextLayout) -> xarast_doc::Document {
+    let mut b = skeleton(BuildLimits::default()).unwrap();
+    b.node(NodeKind::TextStory(Box::new(TextStoryNode {
+        transform: Matrix::translate(Vector::new(Mp::new(100_000), Mp::new(200_000))),
+        layout,
+        ..TextStoryNode::default()
+    })))
+    .unwrap();
+    b.push_scope().unwrap();
+    b.attribute(AttrValue::FontTypeface(Arc::new(TypefaceRef {
+        full_name: Arc::from("No Such Face"),
+        family: Arc::from("No Such Face"),
+        panose: None,
+    })))
+    .unwrap();
+    b.attribute(AttrValue::FontSize(Mp::new(10_000))).unwrap();
+    b.node(NodeKind::TextLine(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    for c in "Hi".chars() {
+        b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+    }
+    b.attribute(AttrValue::FontSize(Mp::new(20_000))).unwrap();
+    for c in " there".chars() {
+        b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+    }
+    b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+        .unwrap();
+    b.pop_scope();
+    b.pop_scope();
+    b.finish().unwrap().0
+}
+
+fn walk(doc: &xarast_doc::Document) -> (SceneWalker, Scene) {
+    let mut w = SceneWalker::with_fonts(fonts());
+    let mut scene = Scene::new();
+    let edit = EditState::for_document(doc);
+    let vp = Viewport::new(DeviceSize::new(800, 600));
+    w.rebuild(doc, &edit, &vp, RenderQuality::Final, None, &mut scene)
+        .unwrap();
+    (w, scene)
+}
+
+#[test]
+fn a_story_draws_one_outline_per_attribute_run() {
+    let d = doc(TextLayout::AtPoint);
+    let (w, scene) = walk(&d);
+    let stats = w.stats();
+    assert_eq!(stats.text_stories, 1);
+    assert_eq!(stats.text_pending, 0);
+    assert!(stats.is_complete(), "{stats:?}");
+    // Two runs (10 pt and 20 pt). With the factory defaults — no fill, a
+    // black outline — each run is one stroke of its glyph outlines.
+    let ss = w.scene_stats();
+    assert_eq!((ss.fills, ss.strokes), (0, 2), "{ss:?}");
+    assert!(!scene.is_empty());
+    // The text sits on the story's baseline, to its right.
+    let ink = w.text_ink();
+    assert!(
+        ink.lo.x >= Mp::new(100_000) && ink.lo.x < Mp::new(102_000),
+        "{ink:?}"
+    );
+    assert!(
+        ink.lo.y < Mp::new(200_000) && ink.hi.y > Mp::new(206_000),
+        "{ink:?}"
+    );
+    // The larger run makes the text wider than 8 characters at 10 pt.
+    assert!(ink.width() > Mp::new(40_000), "{ink:?}");
+}
+
+#[test]
+fn a_missing_family_is_substituted_and_recorded() {
+    let d = doc(TextLayout::AtPoint);
+    let (w, _) = walk(&d);
+    let subs = w.font_substitutions();
+    assert_eq!(subs.len(), 1, "{subs:?}");
+    assert_eq!(&*subs[0].requested, "No Such Face");
+    assert_eq!(&*subs[0].used, "Noto Sans");
+}
+
+#[test]
+fn text_on_a_path_is_drawn_straight_and_reported() {
+    let d = doc(TextLayout::OnPath {
+        reversed: false,
+        tangential: true,
+        left_indent: Mp::ZERO,
+        right_indent: Mp::ZERO,
+    });
+    let (w, _) = walk(&d);
+    let stats = w.stats();
+    assert_eq!(stats.text_stories, 1);
+    assert_eq!(stats.text_on_path_pending, 1);
+    assert!(!stats.is_complete());
+}
+
+#[test]
+fn the_text_walk_is_stable_and_leaves_the_document_alone() {
+    let d = doc(TextLayout::InColumn {
+        width: Mp::new(30_000),
+        word_wrap: true,
+    });
+    let before = d.canonical_digest();
+    let (w1, s1) = walk(&d);
+    let (w2, s2) = walk(&d);
+    assert_eq!(format!("{s1:?}"), format!("{s2:?}"));
+    assert_eq!(w1.text_ink(), w2.text_ink());
+    assert_eq!(d.canonical_digest(), before);
+    // Wrapped at 30 pt: taller than one 20 pt line.
+    assert!(
+        w1.text_ink().height() > Mp::new(25_000),
+        "{:?}",
+        w1.text_ink()
+    );
+}

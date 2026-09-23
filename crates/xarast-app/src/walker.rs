@@ -43,15 +43,21 @@ use std::sync::Arc;
 
 use xarast_doc::fill::Tiling;
 use xarast_doc::resources::BitmapId;
-use xarast_doc::{AttrSlot, AttrStack, AttrValue, Document, Epoch, NodeId, NodeKind, WalkEvent};
+use xarast_doc::{
+    AttrSlot, AttrStack, AttrValue, Document, Epoch, NodeId, NodeKind, ResolvedAttrs, StoryText,
+    WalkEvent,
+};
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Rect, StrokeStyle, Vector};
 use xarast_render::{
     CacheHint, ContentHash, DeviceRect, ImageId, ImageRef, PathRef, RenderQuality, Resolver, Scene,
     SceneBuilder, SceneError, SceneNodeId, SceneStats, Transparency,
 };
+use xarast_text::FontSubstitution;
 
 use crate::edit::EditState;
+use crate::fonts::FontService;
 use crate::paint::PaintCtx;
+use crate::text::StoryGeometry;
 use crate::tool::Preview;
 use crate::viewport::Viewport;
 
@@ -73,8 +79,14 @@ pub struct WalkStats {
     /// `ClipView` nodes whose "keep the outside" mode the renderer cannot
     /// express yet, so the clip was dropped.
     pub clips_unsupported: usize,
-    /// Text nodes skipped: shaping is Phase 9.
+    /// Text stories drawn.
+    pub text_stories: usize,
+    /// Text that could not be drawn: a story whose visible characters found
+    /// no font at all, or a line or item outside any story.
     pub text_pending: usize,
+    /// Stories on a path, drawn along a straight baseline: fitting text to
+    /// its path is W9.5.
+    pub text_on_path_pending: usize,
     /// Live effects skipped: regeneration is Phase 13.
     pub live_pending: usize,
     /// Quick shapes — stars and polygons — with no cached path, so
@@ -91,6 +103,7 @@ impl WalkStats {
             && self.images_failed == 0
             && self.clips_unsupported == 0
             && self.text_pending == 0
+            && self.text_on_path_pending == 0
             && self.live_pending == 0
             && self.shapes_pending == 0
     }
@@ -112,6 +125,17 @@ pub struct SceneWalker {
     attr_epoch: Epoch,
     stats: WalkStats,
     scene_stats: SceneStats,
+    /// The fonts stories are laid out with; the process's shared service
+    /// unless [`SceneWalker::with_fonts`] chose one.
+    fonts: Option<Arc<FontService>>,
+    /// Laid-out stories by node, dropped when the document's epoch moves:
+    /// the derived text cache, outside the arena.
+    stories: HashMap<NodeId, Arc<StoryGeometry>>,
+    /// Every font substitution any walk made, in the order first seen.
+    substitutions: Vec<FontSubstitution>,
+    /// The union of the text the last walk drew, document space: text has
+    /// no cached bounds, so whoever needs the ink extent adds this.
+    text_ink: Rect,
     /// The attribute-scope fingerprint in force at the node being painted:
     /// a fold of the tag and content revision of every attribute node
     /// pushed in the enclosing scopes, in order. See [`content_hash`].
@@ -135,6 +159,24 @@ impl SceneWalker {
         SceneWalker::default()
     }
 
+    /// A walker that lays text out with `fonts` rather than the process's
+    /// shared service: tests and golden renders pass pinned fonts.
+    #[must_use]
+    pub fn with_fonts(fonts: Arc<FontService>) -> SceneWalker {
+        SceneWalker {
+            fonts: Some(fonts),
+            ..SceneWalker::default()
+        }
+    }
+
+    /// Every font substitution the walks so far made, each once, in the
+    /// order first seen. The UI reports them; they are never written back
+    /// into the document.
+    #[must_use]
+    pub fn font_substitutions(&self) -> &[FontSubstitution] {
+        &self.substitutions
+    }
+
     /// The ramps and images the last scene refers to.
     ///
     /// A [`Scene`] is not self-contained: its paints hold ids into this
@@ -151,6 +193,14 @@ impl SceneWalker {
     #[must_use]
     pub fn into_resolver(self) -> Resolver {
         self.resolver
+    }
+
+    /// The document-space box of the text the last walk drew (empty when
+    /// it drew none). Text stories have no cached bounds, so a caller that
+    /// needs the drawing's extent unions this in.
+    #[must_use]
+    pub const fn text_ink(&self) -> Rect {
+        self.text_ink
     }
 
     /// What the last walk found.
@@ -172,6 +222,9 @@ impl SceneWalker {
         self.failed.clear();
         self.attr_cache.clear();
         self.attr_epoch = Epoch::default();
+        // Substitutions are kept: they are a history the UI reports once,
+        // not a cache.
+        self.stories.clear();
     }
 
     /// Walks the document into `scene`.
@@ -232,6 +285,7 @@ impl SceneWalker {
         let mut preview_open: Vec<NodeId> = Vec::new();
         self.sync_caches(doc);
         self.stats = WalkStats::default();
+        self.text_ink = Rect::EMPTY;
 
         let clip = dirty.map(|d| doc_rect_of(vp, d));
         let mut b = SceneBuilder::begin(scene, quality);
@@ -288,7 +342,10 @@ impl SceneWalker {
                         walk.control(xarast_doc::Descend::Skip);
                         continue;
                     }
-                    let leaf = doc.tree.links(node).first_child.is_none();
+                    // A story is painted whole at its visit: its lines and
+                    // items are laid out together, not walked one by one.
+                    let story = matches!(kind, NodeKind::TextStory(_));
+                    let leaf = story || doc.tree.links(node).first_child.is_none();
                     let previewed = !moved.is_empty() && moved.contains(&node);
                     if previewed && let Some(xf) = preview_xf {
                         b.push_group(preview_id(doc, node), xf, CacheHint::Never);
@@ -296,7 +353,13 @@ impl SceneWalker {
                             preview_open.push(node);
                         }
                     }
-                    if leaf {
+                    if story {
+                        self.paint_story(doc, node, &mut attrs, quality, &mut b);
+                        walk.control(xarast_doc::Descend::Skip);
+                        if previewed && preview_xf.is_some() {
+                            b.pop_group();
+                        }
+                    } else if leaf {
                         self.paint(doc, edit, node, &attrs, quality, &mut b);
                         if previewed && preview_xf.is_some() {
                             b.pop_group();
@@ -340,6 +403,7 @@ impl SceneWalker {
     fn sync_caches(&mut self, doc: &Document) {
         if self.attr_epoch != doc.epoch {
             self.attr_cache.clear();
+            self.stories.clear();
             self.attr_epoch = doc.epoch;
         }
         self.register_images(doc);
@@ -547,6 +611,101 @@ impl SceneWalker {
         b.finish_node(id, content_hash(doc, node, self.scope));
     }
 
+    /// Lays a story out (or takes it from the cache) and paints each
+    /// attribute run's glyphs with that run's fill, stroke and transparency.
+    fn paint_story(
+        &mut self,
+        doc: &Document,
+        node: NodeId,
+        attrs: &mut AttrStack,
+        quality: RenderQuality,
+        b: &mut SceneBuilder<'_>,
+    ) {
+        let Some(NodeKind::TextStory(story)) = doc.tree.kind(node) else {
+            return;
+        };
+        let geom = if let Some(g) = self.stories.get(&node) {
+            Arc::clone(g)
+        } else {
+            let cache = &mut self.attr_cache;
+            let Some(st) = StoryText::collect(&doc.tree, node, attrs, &mut |id, a| {
+                cache
+                    .entry(id)
+                    .or_insert_with(|| Arc::new(a.value.clone()))
+                    .clone()
+            }) else {
+                return;
+            };
+            let fonts = self.fonts.get_or_insert_with(crate::fonts::shared).clone();
+            let g = Arc::new(crate::text::build_story(&fonts, &doc.tree, &st, story));
+            for s in &g.substitutions {
+                if !self.substitutions.contains(s) {
+                    self.substitutions.push(s.clone());
+                }
+            }
+            self.stories.insert(node, Arc::clone(&g));
+            g
+        };
+        if geom.unrendered {
+            self.stats.text_pending += 1;
+            return;
+        }
+        self.stats.text_stories += 1;
+        if !geom.bounds.is_empty() {
+            self.text_ink = if self.text_ink.is_empty() {
+                geom.bounds
+            } else {
+                self.text_ink.union(geom.bounds)
+            };
+        }
+        if geom.on_path {
+            self.stats.text_on_path_pending += 1;
+        }
+        let id = scene_id(doc, node);
+        for run in &geom.runs {
+            let a = &run.attrs;
+            if let AttrValue::Fill(xarast_doc::fill::FillGeometry::Bitmap { image, .. }) =
+                a.get(AttrSlot::FillGeometry)
+                && !self.images.contains_key(image)
+            {
+                self.image_missing(*image);
+            }
+            let mut ctx = PaintCtx {
+                colours: &doc.resources.colours,
+                ramp_length: quality.ramp_length(),
+                filter: quality.image_filter(),
+                resolver: &mut self.resolver,
+                images: &self.images,
+            };
+            // Glyph outlines wind by the non-zero rule whatever the winding
+            // attribute says: that is how fonts are drawn.
+            if let AttrValue::Fill(fill) = a.get(AttrSlot::FillGeometry)
+                && let Some(paint) = crate::paint::colour_paint(
+                    fill,
+                    resolved_tiling(a, AttrSlot::FillMapping),
+                    resolved_effect(a),
+                    &mut ctx,
+                )
+            {
+                let t = resolved_transparency(a, AttrSlot::TranspFillGeometry, &mut ctx);
+                emit(b, t, |b| {
+                    b.fill(id, &run.path, FillRule::NonZero, paint.clone())
+                });
+            }
+            if let AttrValue::StrokeColour(stroke) = a.get(AttrSlot::StrokeColour)
+                && let Some(paint) =
+                    crate::paint::colour_paint(stroke, Tiling::None, resolved_effect(a), &mut ctx)
+            {
+                let style = stroke_style_of(|s| a.get(s));
+                let t = resolved_transparency(a, AttrSlot::StrokeTransp, &mut ctx);
+                emit(b, t, |b| {
+                    b.stroke(id, &run.path, style.clone(), paint.clone())
+                });
+            }
+        }
+        b.finish_node(id, content_hash(doc, node, mix64(self.scope, geom.version)));
+    }
+
     fn shapes_pending_inc(&mut self) {
         self.stats.shapes_pending += 1;
     }
@@ -690,6 +849,33 @@ fn object_transparency(attrs: &AttrStack, slot: AttrSlot, ctx: &mut PaintCtx<'_>
     }
 }
 
+fn resolved_transparency(
+    attrs: &ResolvedAttrs,
+    slot: AttrSlot,
+    ctx: &mut PaintCtx<'_>,
+) -> Transparency {
+    match attrs.get(slot) {
+        AttrValue::TranspFill(t) | AttrValue::StrokeTransp(t) => {
+            crate::paint::transparency(t, resolved_tiling(attrs, AttrSlot::TranspFillMapping), ctx)
+        }
+        _ => Transparency::OPAQUE,
+    }
+}
+
+fn resolved_tiling(attrs: &ResolvedAttrs, slot: AttrSlot) -> Tiling {
+    match attrs.get(slot) {
+        AttrValue::FillMapping(t) | AttrValue::TranspFillMapping(t) => *t,
+        _ => Tiling::None,
+    }
+}
+
+fn resolved_effect(attrs: &ResolvedAttrs) -> xarast_color::FillEffect {
+    match attrs.get(AttrSlot::FillEffect) {
+        AttrValue::FillEffect(e) => *e,
+        _ => xarast_color::FillEffect::Fade,
+    }
+}
+
 fn tiling(attrs: &AttrStack, slot: AttrSlot) -> Tiling {
     match attrs.get(slot) {
         AttrValue::FillMapping(t) | AttrValue::TranspFillMapping(t) => *t,
@@ -712,23 +898,27 @@ fn winding(attrs: &AttrStack) -> FillRule {
 }
 
 fn stroke_style(attrs: &AttrStack) -> StrokeStyle {
-    let width = match attrs.get(AttrSlot::LineWidth) {
+    stroke_style_of(|s| attrs.get(s))
+}
+
+fn stroke_style_of<'a>(get: impl Fn(AttrSlot) -> &'a AttrValue) -> StrokeStyle {
+    let width = match get(AttrSlot::LineWidth) {
         AttrValue::LineWidth(w) => *w,
         _ => Mp::ZERO,
     };
-    let cap = match attrs.get(AttrSlot::StartCap) {
+    let cap = match get(AttrSlot::StartCap) {
         AttrValue::LineCap(c) => *c,
         _ => Cap::Butt,
     };
-    let join = match attrs.get(AttrSlot::JoinType) {
+    let join = match get(AttrSlot::JoinType) {
         AttrValue::JoinType(j) => *j,
         _ => Join::Mitre,
     };
-    let mitre_limit = match attrs.get(AttrSlot::MitreLimit) {
+    let mitre_limit = match get(AttrSlot::MitreLimit) {
         AttrValue::MitreLimit(m) => (m.to_f64() / f64::from(Mp::PER_PT)).max(1.0),
         _ => 4.0,
     };
-    let dash = match attrs.get(AttrSlot::DashPattern) {
+    let dash = match get(AttrSlot::DashPattern) {
         AttrValue::DashPattern(d) if !d.elements.is_empty() => Some((**d).clone()),
         _ => None,
     };

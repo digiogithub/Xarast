@@ -266,6 +266,34 @@ impl AppState {
         Ok(id)
     }
 
+    /// Moves every font substitution the open documents' walks made since
+    /// the last call into the problem list, as warnings, and returns their
+    /// messages (the newest is what a status bar shows). Call it after
+    /// rebuilding scenes: substitutions are only known once text is laid
+    /// out, and they are never silent.
+    pub fn collect_font_substitutions(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        let ids: Vec<DocumentId> = self.docs.iter().map(|s| s.id).collect();
+        for id in ids {
+            let Some(session) = self.docs.get_mut(id) else {
+                continue;
+            };
+            for s in session.take_font_substitutions() {
+                let message = format!(
+                    "Font \"{}\" is not installed; \"{}\" is used instead",
+                    s.requested, s.used
+                );
+                self.diagnostics.push(DiagnosticEntry {
+                    severity: Severity::Warning,
+                    message: message.clone(),
+                    document: Some(id),
+                });
+                out.push(message);
+            }
+        }
+        out
+    }
+
     /// Closes a document, activating the one before it.
     pub fn close(&mut self, id: DocumentId) -> bool {
         let closed = self.docs.close(id);

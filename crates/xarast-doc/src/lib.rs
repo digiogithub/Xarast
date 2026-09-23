@@ -65,6 +65,7 @@ pub mod snapshot;
 pub mod structure;
 pub mod synth;
 pub mod text;
+pub mod text_model;
 pub mod tree;
 pub mod validate;
 pub mod walk;
@@ -108,6 +109,9 @@ pub use structure::{
 pub use synth::{SynthSpec, synthetic_document};
 pub use text::{
     Justification, LineSpacing, Script, TabStop, TextItem, TextLayout, TextLineNode, TextStoryNode,
+};
+pub use text_model::{
+    CharRun, ItemEntry, KernAt, LineEntry, StoryFlow, StoryText, TextCursor, TextPos,
 };
 pub use tree::{Attach, Links, NodeData, NodeFlags, NodeId, Tag, Tree, TreeError};
 pub use validate::{Invariant, ValidationReport};

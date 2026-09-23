@@ -26,6 +26,10 @@ pub struct FaceMetrics {
     pub x_height: Option<f32>,
     /// Underline position (negative is below the baseline) and thickness.
     pub underline: Option<(f32, f32)>,
+    /// Advance of `'M'` in font units, when the face has one: the "em
+    /// width" the original measures tracking and manual kerns in
+    /// (`wxOil/textfuns.h:114`, `wxOil/fontbase.cpp:945-956`).
+    pub em_char_advance: Option<f32>,
 }
 
 /// [`FaceMetrics`] at a size, in millipoints.
@@ -52,6 +56,10 @@ impl FaceMetrics {
             .map(|&c| NormalizedCoord::from_bits(c))
             .collect();
         let m = font.metrics(Size::unscaled(), LocationRef::new(&norm));
+        let em_char_advance = font.charmap().map('M').and_then(|g| {
+            font.glyph_metrics(Size::unscaled(), LocationRef::new(&norm))
+                .advance_width(g)
+        });
         Some(FaceMetrics {
             units_per_em: m.units_per_em.max(1),
             ascent: m.ascent,
@@ -60,7 +68,18 @@ impl FaceMetrics {
             cap_height: m.cap_height,
             x_height: m.x_height,
             underline: m.underline.map(|d| (d.offset, d.thickness)),
+            em_char_advance,
         })
+    }
+
+    /// The width of `'M'` as a fraction of the em, 1.0 when the face has no
+    /// `'M'`: what [`StyleRange::em_width`](crate::StyleRange::em_width)
+    /// is multiplied by to get the unit of tracking and manual kerns.
+    #[must_use]
+    pub fn em_char_ratio(&self) -> f64 {
+        self.em_char_advance
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .map_or(1.0, |a| f64::from(a) / f64::from(self.units_per_em.max(1)))
     }
 
     /// The metrics at font size `size`, rounded half away from zero.

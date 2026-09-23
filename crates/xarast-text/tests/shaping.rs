@@ -325,7 +325,8 @@ fn char_metrics_scale_with_size_and_aspect() {
     assert_eq!(m10.advance, Mp::new(6390));
     assert_eq!(m20.advance, Mp::new(12780));
     assert_eq!(wide.advance, Mp::new(12780));
-    assert_eq!(wide.em_width, Mp::new(20_000));
+    // The width of Noto Sans' "M" (907 units) at 20 pt of stretched em.
+    assert_eq!(wide.em_width, Mp::new(18_140));
     assert_eq!(m10.ascent, Mp::new(10690));
     assert_eq!(m10.descent, Mp::new(2930));
     assert_eq!(m10.glyph, 34);

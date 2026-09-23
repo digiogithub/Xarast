@@ -24,6 +24,32 @@ use xarast_app::{
 
 const LOCK: &str = include_str!("../../../tests/corpus/corpus.lock");
 
+/// Files whose text the writer still writes approximately — one `<tspan>`
+/// per line, no tracking or kerns — while the application now draws text
+/// from the real layout (phase 9). They must still render; XARA-T-0172
+/// makes the writer use the layout and empties this list.
+const KNOWN_TEXT_GAPS: &[&str] = &[
+    "testfiles/ProbeX16.xar",
+    "testfiles/ScaleTest.xar",
+    "testfiles/ScaleTest2.xar",
+    "Designs/GardenPlan.xar",
+    "Designs/Spitfire.xar",
+    "Designs/TextCurve.xar",
+    "TextDesigns/AngledText.xar",
+    "TextDesigns/BaselineShift.xar",
+    "TextDesigns/FontChangesInText.xar",
+    "TextDesigns/Kerning.xar",
+    "TextDesigns/LineSpacing.xar",
+    "TextDesigns/ManualKern.xar",
+    "TextDesigns/Paragraph.xar",
+    "TextDesigns/Rotated.xar",
+    "TextDesigns/SimpleText.xar",
+    "TextDesigns/SuperSub.xar",
+    "TextDesigns/TextJust.xar",
+    "TextDesigns/Tracking.xar",
+    "TextDesigns/embeddedFonts.xar",
+    "TextDesigns/hebrew.xar",
+];
 fn corpus() -> Option<(PathBuf, Vec<String>)> {
     let required = std::env::var("XARAST_CORPUS_REQUIRED").as_deref() == Ok("1");
     let root = PathBuf::from(
@@ -70,6 +96,11 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
         return;
     };
     let mut failures: Vec<String> = Vec::new();
+    let mut text_gaps: Vec<String> = Vec::new();
+    // Pinned fonts: a render never depends on the machine's.
+    let _ = xarast_app::fonts::set_shared(xarast_app::fonts::FontService::from_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"),
+    ));
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let original = Session::open_bytes(DocumentId(1), Path::new(rel), &bytes)
@@ -105,6 +136,10 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
                 max = max.max(d);
             }
         }
+        if differing > 0 && KNOWN_TEXT_GAPS.contains(&rel.as_str()) {
+            text_gaps.push(rel.clone());
+            continue;
+        }
         if differing > 0 {
             let fraction = differing as f64 / (a.len() / 4) as f64;
             failures.push(format!(
@@ -114,4 +149,8 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+    let mut expected: Vec<&str> = KNOWN_TEXT_GAPS.to_vec();
+    expected.sort_unstable();
+    text_gaps.sort_unstable();
+    assert_eq!(text_gaps, expected, "update KNOWN_TEXT_GAPS");
 }

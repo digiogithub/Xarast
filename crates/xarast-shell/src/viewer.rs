@@ -407,6 +407,10 @@ impl Viewer {
     }
 
     fn ui_model(&mut self, scale: f64) -> UiModel {
+        // A substituted font is reported, never silent (phase 9, W9.1).
+        if let Some(last) = self.app.collect_font_substitutions().pop() {
+            self.message = Some(last);
+        }
         self.layer_keys.clear();
         let document = self
             .app

@@ -5,15 +5,22 @@ contract with the document model. Phase 9 (`docs/phases/phase-09-text.md`).
 
 ## Current state
 
-Round 1 of phase 9 (2026-09-23) built `xarast-text` in isolation. Nothing
-outside the crate uses it yet; the renderer, the document layer and the text
-tool are later rounds.
+Round 1 of phase 9 (2026-09-23) built `xarast-text` in isolation. Round 2
+(the same day, text integration) made **imported text render**: the text
+model in `xarast-doc` (W9.2, read side), the attribute bridge and the
+walker's text path in `xarast-app`, font service and substitution reporting.
+`text_pending` is 0 on the whole corpus; only `Designs/TextCurve.xar` is
+approximate (text on a path drawn straight, `text_on_path_pending`). Edit
+commands (T9.2.4), `format_story` writing lines back (T9.3.12), the text
+tool (W9.4) and text on a path (W9.5) are later rounds.
 
 | Story | Tasks | State |
 |---|---|---|
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
+| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4) and story invariants (T9.2.5) open | in review |
+| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); golden images and the `.xarast` text writer (XARA-T-0172) open | in progress |
 
 Public API (`crates/xarast-text/src/lib.rs`):
 
@@ -146,7 +153,101 @@ Public API (`crates/xarast-text/src/lib.rs`):
   later ones negative; x = 0 is the column's left edge (column mode) or the
   anchor (point mode). Glyph y offsets from parley (y down) are negated.
 
+## Walker integration (as built, round 2)
+
+- **Model (`xarast-doc/src/text_model.rs`).** `StoryText::collect(tree,
+  story, &mut AttrStack, attr_value)` walks one story with the render
+  walk's attribute stack (so each character resolves exactly as it would
+  paint) and returns `text`, `runs: Vec<CharRun { range, attrs:
+  ResolvedAttrs }>` (a new run only when an attribute node was pushed or a
+  scope popped), `lines: Vec<LineEntry>` (line-level attributes = the
+  snapshot at the line's first item), `items` (the `TextPos` index),
+  `kerns: Vec<KernAt { at, amount }>`. `byte_of(TextPos)` / `pos_of(byte)`
+  are binary searches. `StoryFlow::of(story)` reduces `TextLayout`. An
+  item's own attribute children apply to it (painted at the end of their
+  scope). Nothing is written to the tree.
+- **Bridge (`xarast-app/src/text.rs`).** `story_input` is the table above;
+  the typeface's PANOSE now travels in `StyleRange::panose` so the ladder's
+  PANOSE rung works during layout. The **last** `'\n'` of a story is not
+  given to layout: every `.xar` line ends in an EOL, and a trailing break
+  would open an empty paragraph the original never measures (it made
+  `hebrew.xar`'s frame twice as tall).
+- **Geometry.** `build_story` lays out, then per glyph applies
+  `story.transform × glyph_transform` (plus a shear for faux italic when
+  `FontMatch::synthesis.skew` says so) and appends the outline to **one
+  `BezPath` per style run**, then converts to a millipoint `Path`. Glyph
+  outlines fill **non-zero**, whatever the winding attribute. Underline is
+  a rectangle a tenth of the size below the baseline, a twentieth thick
+  (not the font's `post` values yet).
+- **Walker.** A `TextStory` is painted whole at its `Visit` and its
+  subtree skipped. Each run emits fill / stroke / transparency like any
+  object, so gradients (document-space geometry) span the story as in the
+  original. The `StoryGeometry` is cached per `NodeId` and dropped when
+  `Document::epoch` moves; its content hash folds every node version in the
+  story. `WalkStats` gains `text_stories`, `text_on_path_pending`;
+  `text_pending` now means "visible text with no inked glyph" (no font at
+  all). `SceneWalker::text_ink()` is the drawn text's box: `Session` adds
+  it to `scene_ink`, and `viewport::drawing_rect_with` lays stories out for
+  framing (text has no cached bounds).
+- **Fonts (`xarast-app/src/fonts.rs`).** `FontService { FontDb, Shaper,
+  OnceLock<usize> }`; `ready()` enumerates once (on the caller's thread if
+  nobody started it). `fonts::shared()` is the process service: system
+  fonts, or `XARAST_FONT_DIR` / `set_shared(FontService::from_dir(dir))`
+  for pinned fonts (all generics → "Noto Sans", every family a fallback for
+  Hebrew/Arabic/Han/kana). The shell calls `fonts::prewarm()` before the
+  window. Tests pin fonts: `xarast-app/tests/{corpus,text,xarast_roundtrip}.rs`
+  and `xarast-cli/tests/cli.rs` (env var).
+- **Substitutions are never silent.** The walker records each once
+  (`font_substitutions()`); `Session::take_font_substitutions` hands out the
+  new ones; `AppState::collect_font_substitutions` puts them in the problem
+  list as warnings and the viewer shows the newest in the status bar; the
+  CLI prints `font substituted: A -> B` on stderr.
+- **Importer (`xarast-xar`).** A string's/character's attribute children
+  apply to **it alone** (`Kernel/cxftext.cpp:1260-1300`: a string is a run
+  of characters with identical attribute children; `Kernel/impstr.cpp`
+  copies them to every character). They were emitted after the characters,
+  which handed each string's style to the next one (visible in
+  `FontChangesInText.xar`). Now they go before, and what they overrode is
+  restored before the next text record that does not set the slot; the
+  mapper mirrors the emitted attribute state (`AttrStack`) to know that
+  value. Non-BMP characters written as two `TAG_TEXT_CHAR` records pair.
+  A story that relies on the original's default size gets an explicit 16 pt
+  attribute (below).
+
+### The acceptance fixture, round 2 (pinned: this machine's fonts)
+
+Every `TextDesigns` file carries a **bitmap of the original's own
+rendering** under the text (the "red/green ghost" in our renders), which
+makes each file a visual oracle. With the host's metric-compatible fonts
+(Arial → Liberation Sans) `SimpleText`, `Paragraph`, `TextJust`,
+`LineSpacing`, `BaselineShift`, `SuperSub`, `Tracking`, `ManualKern` and
+`Kerning` overlay their reference within about a pixel at 250 %.
+`FontChangesInText`, `Rotated` and `AngledText` differ only where Calisto MT
+/ Book Antiqua were substituted (Noto Serif is wider). `hebrew.xar`'s story
+has no typeface (default Times New Roman); Windows' Times New Roman has
+Hebrew, Liberation Serif does not, so the fallback face is larger and
+serif. `embeddedFonts.xar` embeds **no** font data: its Calligraphic,
+Margaret and Myriad Web are substituted.
+
+Missing on this machine: Arial, Times New Roman, Courier New (metric
+aliases used: Liberation Sans/Serif/Mono), Calisto MT, Book Antiqua (→
+Noto Serif via PANOSE), Calligraphic, Margaret, Myriad Web (→ Noto Sans),
+KirbysHand and Swis721 Blk BT (defined in files, never reached a laid-out
+run).
+
 ## Facts about the original's formatter (read, not copied)
+
+- **The em of tracking and manual kerns is the advance of `'M'`**, not the
+  point size: `FontEmWidth` is the cached width of `FONTEMCHAR`
+  (`wxOil/textfuns.h:114`, `wxOil/fontbase.cpp:945-956`), scaled by the
+  aspect. About 0.83 em for Arial, 0.907 for Noto Sans. `FaceMetrics::
+  em_char_advance` reads it; layout scales `StyleRange::em_width()` by it.
+  Before this, `Tracking.xar` was ~20 % too wide; now it overlays.
+- **The default font size is 16 pt** (`Kernel/txtattr.cpp:449-452`); the
+  default typeface is "Times New Roman" (`Kernel/fontman.h:111`). The
+  model's `default_for(TxtFontSize)` is still 12 pt, because the `.xarast`
+  writer and reader elide defaults with 12 000 mp fallbacks of their own
+  (XARA-T-0172); the importer writes 16 pt explicitly instead.
 
 Taken from the original to fix semantics; implemented from these notes.
 
@@ -352,7 +453,41 @@ outlines. `xarast` itself declares `xarast-text` (through `xarast-app`) but
 uses none of it yet: +1.2 KB today. The cost arrives when the app first
 calls `Shaper`.
 
+**Binary size, shipped (round 2, 2026-09-23).** Stripped release `xarast`
+(`lto = "thin"`), before the walker called `Shaper` (1fa7fef) → after:
+**21 981 784 → 27 689 320 bytes (+5 707 536, +5.44 MiB, +26 %)** with the
+default `complex-scripts`; **23 897 192 (+1 915 408, +1.83 MiB)** without
+it. The ICU4X Thai/Lao/Khmer/Myanmar dictionaries are therefore
+**3 792 128 bytes (3.62 MiB, 14 % of the binary)**. Recommendation:
+**keep** `complex-scripts` — without it a Thai, Lao, Khmer or Burmese
+column (no spaces between words) can only break by emergency, which is a
+correctness loss in a text tool; if the AppImage size budget bites, load
+the dictionaries as data at run time (ICU4X `DataProvider`) rather than
+drop them. `ldd` still shows no libwayland, GL, EGL, Vulkan or
+fontconfig (fontique dlopens it).
+
+**Start-up (window, `cold_start_ms` to first presented frame, 3 runs,
+release, this machine, GPU tiles).** Text-free `Designs/BLUECAR.xar`:
+368–427 ms before, 349–421 ms after (noise). Text-heavy
+`TextDesigns/Rotated.xar`: 383–390 → 393–403 ms (+≈10 ms: layout and
+outlines of 7 stories; enumeration runs in the background from
+`fonts::prewarm`). `Designs/GardenPlan.xar` (text + 1 700 objects):
+373–403 → 384–399 ms. The 400 ms cold-start budget (XARA-T-0010) is
+unchanged in its status: at the edge with or without text. Headless, the
+first story of a process waits for enumeration when nothing prewarmed
+(CLI: `AngledText.xar` first walk 48 ms, of which ≈ 40 ms fontconfig).
+
 ## Dead ends (do not retry)
+
+- **Changing the model's default font size to 16 pt.** Correct for Xara,
+  but the `.xarast` reader/writer use their own 12 000 mp fallbacks, and
+  the normal-form round trip (`svg_roundtrip.rs`) broke on GardenPlan. The
+  importer supplies the value instead until XARA-T-0172 aligns them.
+- **A `HeadlessOptions::fonts` field**: the struct is `Copy + PartialEq`;
+  use `headless::render_with_fonts`.
+- **Emitting a text record's attributes after its characters** (the
+  structural importer's choice): the model scopes attributes to the
+  *following* siblings.
 
 - **Parley's line breaking and `Alignment::Justify`** for Xara-compatible
   layout: CSS semantics, `f32` positions, justification on spaces only.
@@ -366,6 +501,14 @@ calls `Shaper`.
 - **"Roman" as a style suffix**: it strips "Times New Roman" to "Times New".
 
 ## Open TODOs
+
+- Round 2 leftovers: faux **bold** is not synthesised (skew is); underline
+  uses fixed proportions, not the font's `post` table; `TabStop` decimal
+  character still not in the model; the layer bounds cache (when warm)
+  ignores text, so `drawing_rect` misses text once `update_bounds` has run;
+  `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
+  embedded-font overlay; W9.5 text on a path; the `.xarast` writer's text
+  (XARA-T-0172); golden images of `TextDesigns` with pinned fonts (W9.7).
 
 - W9.1: T9.1.6 background enumeration (the API is ready; the app must call
   `load_system_fonts` on its I/O thread), T9.1.7 gallery, T9.1.8 Windows and

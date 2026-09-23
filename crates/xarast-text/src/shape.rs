@@ -58,6 +58,9 @@ pub(crate) struct ShapedRun {
     pub style: u32,
     /// Normalised variation coordinates (F2Dot14 bits).
     pub coords: Arc<[i16]>,
+    /// The face's `'M'` width over its em: scales the style's em width
+    /// into the unit of tracking and manual kerns.
+    pub em_ratio: f64,
 }
 
 /// The smallest unit layout moves: a grapheme-ish cluster (a character, a
@@ -265,13 +268,13 @@ pub(crate) fn resolve_families(
     runs: &[StyleRange],
     subs: &mut Vec<FontSubstitution>,
 ) -> Vec<Arc<str>> {
-    let mut cache: HashMap<FontQuery, Arc<str>> = HashMap::new();
+    let mut cache: HashMap<(FontQuery, Option<[u8; 10]>), Arc<str>> = HashMap::new();
     runs.iter()
         .map(|r| {
-            if let Some(f) = cache.get(&r.font) {
+            if let Some(f) = cache.get(&(r.font.clone(), r.panose)) {
                 return f.clone();
             }
-            let fam = match db.query(&r.font, None) {
+            let fam = match db.query(&r.font, r.panose) {
                 Some(m) => {
                     // Warm the blob map, so the faces parley loads through the
                     // same source cache are recognised as ours.
@@ -285,7 +288,7 @@ pub(crate) fn resolve_families(
                 }
                 None => r.font.family.clone(),
             };
-            cache.insert(r.font.clone(), fam.clone());
+            cache.insert((r.font.clone(), r.panose), fam.clone());
             fam
         })
         .collect()
@@ -425,6 +428,7 @@ pub(crate) fn shape_paragraph(
         for run in line.runs() {
             let face = db.face_for_parley(run.font());
             let coords: Arc<[i16]> = Arc::from(run.normalized_coords());
+            let em_ratio = face_metrics(st, db, face, &coords).map_or(1.0, |m| m.em_char_ratio());
             let rtl = run.is_rtl();
             let mut last_char_cluster: Option<usize> = None;
             let mut pending: Option<(Range<usize>, f32)> = None;
@@ -440,6 +444,7 @@ pub(crate) fn shape_paragraph(
                         face,
                         style,
                         coords: coords.clone(),
+                        em_ratio,
                     });
                     u32::try_from(out.runs.len() - 1).unwrap_or(u32::MAX)
                 });
@@ -503,7 +508,9 @@ pub(crate) fn shape_paragraph(
                     glyphs: g0..g1,
                     advance: to_mp(cluster.advance() + lig_extra, em),
 
-                    tracking: style_ref.map_or(Mp::ZERO, StyleRange::tracking_mp),
+                    tracking: style_ref.map_or(Mp::ZERO, |s| {
+                        s.em_width().scale(em_ratio).mul_ratio(s.tracking, 1000)
+                    }),
                     kern_before: Mp::ZERO,
                     kind,
                     break_after: false,
@@ -559,8 +566,12 @@ pub(crate) fn shape_paragraph(
             let em = out
                 .runs
                 .get(c.run as usize)
-                .and_then(|r| req.runs.get(r.style as usize))
-                .map_or(Mp::new(12_000), StyleRange::em_width);
+                .and_then(|r| {
+                    req.runs
+                        .get(r.style as usize)
+                        .map(|s| s.em_width().scale(r.em_ratio))
+                })
+                .unwrap_or(Mp::new(12_000));
             c.kern_before += em.mul_ratio(k.amount, 1000);
         }
     }
@@ -619,14 +630,15 @@ impl FontMetrics for Shaper {
             .glyphs
             .get(cl.glyphs.start as usize)
             .map_or(0, |g| g.id);
-        let m = face_metrics(&mut st, &mut db, r.face, &r.coords)?.scaled(size);
+        let fm = face_metrics(&mut st, &mut db, r.face, &r.coords)?;
+        let m = fm.scaled(size);
         Some(CharMetrics {
             face: r.face,
             glyph,
             advance: cl.advance,
             ascent: m.ascent,
             descent: m.descent,
-            em_width: runs[0].em_width(),
+            em_width: runs[0].em_width().scale(fm.em_char_ratio()),
         })
     }
 

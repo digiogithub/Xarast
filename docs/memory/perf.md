@@ -438,6 +438,30 @@ dictionaries for Thai, Lao, Khmer and Myanmar). `xarast` declares
 1.2 KB (23 170 560 → 23 171 752 bytes, unstripped); the real cost lands
 with the first call to `Shaper`.
 
+**Binary size, shipped (round 2, 2026-09-23).** Stripped release `xarast`
+(`lto = "thin"`), before the walker called `Shaper` (1fa7fef) → after:
+**21 981 784 → 27 689 320 bytes (+5 707 536, +5.44 MiB, +26 %)** with the
+default `complex-scripts`; **23 897 192 (+1 915 408, +1.83 MiB)** without
+it. The ICU4X Thai/Lao/Khmer/Myanmar dictionaries are therefore
+**3 792 128 bytes (3.62 MiB, 14 % of the binary)**. Recommendation:
+**keep** `complex-scripts` — without it a Thai, Lao, Khmer or Burmese
+column (no spaces between words) can only break by emergency, which is a
+correctness loss in a text tool; if the AppImage size budget bites, load
+the dictionaries as data at run time (ICU4X `DataProvider`) rather than
+drop them. `ldd` still shows no libwayland, GL, EGL, Vulkan or
+fontconfig (fontique dlopens it).
+
+**Start-up (window, `cold_start_ms` to first presented frame, 3 runs,
+release, this machine, GPU tiles).** Text-free `Designs/BLUECAR.xar`:
+368–427 ms before, 349–421 ms after (noise). Text-heavy
+`TextDesigns/Rotated.xar`: 383–390 → 393–403 ms (+≈10 ms: layout and
+outlines of 7 stories; enumeration runs in the background from
+`fonts::prewarm`). `Designs/GardenPlan.xar` (text + 1 700 objects):
+373–403 → 384–399 ms. The 400 ms cold-start budget (XARA-T-0010) is
+unchanged in its status: at the edge with or without text. Headless, the
+first story of a process waits for enumeration when nothing prewarmed
+(CLI: `AngledText.xar` first walk 48 ms, of which ≈ 40 ms fontconfig).
+
 ### Picking (phase 7 W3, 2026-09-23)
 
 `crates/xarast-geom/benches/hit_index.rs`,

@@ -576,6 +576,18 @@ when everything is reachable. Result: **329–343 ms** (budget 350), and
 record decode ~37 ms, builder `node()` ~60 ms, `validate()` ~47 ms,
 dropping the analysis ~28 ms, and quick-shape outlines ~12 ms.
 
+### 14. A text record's attributes apply to that record only (phase 9)
+
+`TAG_TEXT_STRING`/`TAG_TEXT_CHAR`/`TAG_TEXT_EOL`/`TAG_TEXT_KERN` children
+are the attributes of those characters alone (`Kernel/cxftext.cpp:1260-1300`,
+`Kernel/impstr.cpp`). The mapper emits them **before** the items and
+restores what they overrode before the next text record; it mirrors the
+emitted attribute state in an `AttrStack` (`Mapper::attrs`) seeded with the
+original's defaults where they differ (text size 16 pt,
+`Kernel/txtattr.cpp:449-452`), and gives a story that relies on that
+default an explicit size attribute. Surrogate pairs split over two
+`TAG_TEXT_CHAR` records join; a lone half is U+FFFD.
+
 ## Dead ends (do not retry)
 
 - Storing a regular shape's edge path as its outline (finding 12).

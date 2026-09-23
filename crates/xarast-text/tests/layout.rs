@@ -174,9 +174,16 @@ fn right_and_centre_alignment_use_the_width_to_the_last_non_space() {
 
 #[test]
 fn tracking_is_thousandths_of_an_em_and_excluded_from_the_last_character() {
-    // Acceptance criterion 7, by hand: at 10 pt an em is 10 000 mp, so a
-    // tracking of 100 adds 1 000 mp after every character.
+    // Acceptance criterion 7, by hand: the unit is the width of 'M' (the
+    // original's em character), so a tracking of 100 adds a tenth of it
+    // after every character.
     let s = shaper();
+    let em = s
+        .char_metrics(&FontQuery::new("Noto Sans"), Mp::new(10_000), 1.0, 'M')
+        .unwrap()
+        .em_width;
+    assert!(em < Mp::new(10_000) && em > Mp::new(8_000), "{em:?}");
+    let step = em.mul_ratio(100, 1000);
     let text = "HHHH";
     let plain = lay(
         &s,
@@ -195,14 +202,11 @@ fn tracking_is_thousandths_of_an_em_and_excluded_from_the_last_character() {
     assert_eq!(plain.lines[0].width, Mp::new(4 * h.raw()));
     assert_eq!(
         t.lines[0].width,
-        Mp::new(4 * h.raw() + 3 * 1_000),
+        Mp::new(4 * h.raw() + 3 * step.raw()),
         "sum(advances) - last tracking"
     );
     assert_eq!(t.lines[0].x + t.lines[0].width, Mp::new(100_000));
-    assert_eq!(
-        ink_right(text, &t.lines[0], Mp::new(1_000)),
-        Mp::new(100_000)
-    );
+    assert_eq!(ink_right(text, &t.lines[0], step), Mp::new(100_000));
 }
 
 #[test]
@@ -229,19 +233,21 @@ fn manual_kerns_are_em_relative_and_survive_reshaping() {
         StoryMode::Point,
     );
     let k10 = lay_at(10);
+    let em = s
+        .char_metrics(&FontQuery::new("Noto Sans"), Mp::new(10_000), 1.0, 'M')
+        .unwrap()
+        .em_width;
+    let kern = em.mul_ratio(250, 1000);
     let x = |l: &Layout, i: usize| l.lines[0].runs[0].glyphs[i].x;
     assert_eq!(x(&k10, 1), x(&plain, 1), "before the kern: unmoved");
-    assert_eq!(
-        x(&k10, 2),
-        x(&plain, 2) + Mp::new(2_500),
-        "250/1000 em at 10 pt"
-    );
-    assert_eq!(x(&k10, 3), x(&plain, 3) + Mp::new(2_500));
+    assert_eq!(x(&k10, 2), x(&plain, 2) + kern, "250/1000 of 'M' at 10 pt");
+    assert_eq!(x(&k10, 3), x(&plain, 3) + kern);
     let k20 = lay_at(20);
-    assert_eq!(
-        x(&k20, 2) - x(&k20, 1),
-        (x(&k10, 2) - x(&k10, 1)).mul_ratio(2, 1)
-    );
+    // Twice the size, twice the gap, give or take the rounding of the 'M'
+    // width to whole millipoints at each size.
+    let d20 = (x(&k20, 2) - x(&k20, 1)).raw();
+    let d10 = (x(&k10, 2) - x(&k10, 1)).raw();
+    assert!((d20 - 2 * d10).abs() <= 1, "{d20} vs 2 x {d10}");
     assert_eq!(lay_at(10), k10, "re-shaping reproduces it exactly");
 }
 

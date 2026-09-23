@@ -104,7 +104,19 @@ macro_rules! corpus_or_skip {
     };
 }
 
+/// Lays text out with the pinned OFL test fonts of `xarast-text`, never
+/// the machine's (`docs/memory/text.md`, invariant 3). Every session in
+/// this process shares the one service.
+fn pin_fonts() {
+    static PINNED: std::sync::Once = std::sync::Once::new();
+    PINNED.call_once(|| {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts");
+        let _ = xarast_app::fonts::set_shared(xarast_app::fonts::FontService::from_dir(&dir));
+    });
+}
+
 fn open(path: &Path) -> Session {
+    pin_fonts();
     Session::open(DocumentId(1), path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
@@ -207,6 +219,65 @@ fn a_blank_file_is_blank_for_a_reason_the_walker_reports() {
         blank.push(f.rel.clone());
     }
     println!("{} blank files, all explained: {blank:?}", blank.len());
+}
+
+/// Text renders (phase 9): no story in the corpus is left undrawn, only
+/// the text on a path is approximate, and every one of the fourteen
+/// `TextDesigns` acceptance files draws glyphs of its own besides the
+/// reference bitmap it carries.
+#[test]
+fn every_corpus_story_is_drawn() {
+    let c = corpus_or_skip!();
+    let mut stories = 0usize;
+    let mut on_path = Vec::new();
+    for f in &c.files {
+        let mut s = open(&c.path(f));
+        let stats = s.rebuild_scene(None).expect("scene");
+        let w = s.walk_stats();
+        assert_eq!(w.text_pending, 0, "{}: text left undrawn: {w:?}", f.rel);
+        stories += w.text_stories;
+        if w.text_on_path_pending > 0 {
+            on_path.push(f.rel.clone());
+        }
+        if f.rel.starts_with("TextDesigns/") {
+            let bitmaps = s
+                .doc
+                .tree
+                .preorder(s.doc.tree.root())
+                .filter(|&n| matches!(s.doc.tree.kind(n), Some(xarast_doc::NodeKind::Bitmap(_))))
+                .count();
+            assert!(w.text_stories > 0, "{}: no story drawn", f.rel);
+            assert!(
+                stats.primitives() > bitmaps,
+                "{}: only the reference bitmaps drew: {stats:?}",
+                f.rel
+            );
+        }
+    }
+    assert_eq!(on_path, ["Designs/TextCurve.xar"], "text on a path");
+    println!("{stories} stories drawn; approximate (on a path): {on_path:?}");
+}
+
+/// A family the pinned fonts do not have is substituted, and the
+/// substitution is reported rather than silent.
+#[test]
+fn a_missing_font_is_substituted_and_reported() {
+    let c = corpus_or_skip!();
+    let Some(f) = c
+        .files
+        .iter()
+        .find(|f| f.rel == "TextDesigns/FontChangesInText.xar")
+    else {
+        return;
+    };
+    let mut s = open(&c.path(f));
+    s.rebuild_scene(None).expect("scene");
+    let subs = s.take_font_substitutions();
+    let requested: Vec<&str> = subs.iter().map(|s| &*s.requested).collect();
+    assert!(requested.contains(&"Arial"), "{subs:?}");
+    assert!(requested.contains(&"Calisto MT"), "{subs:?}");
+    assert!(subs.iter().all(|s| &*s.used == "Noto Sans"), "{subs:?}");
+    assert!(s.take_font_substitutions().is_empty(), "reported once");
 }
 
 /// Every bitmap in the corpus decodes and registers: no object is left

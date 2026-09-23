@@ -90,6 +90,8 @@ pub struct HeadlessResult {
     /// What the walk could not draw: text, quick shapes, images, live
     /// effects, unsupported clips.
     pub walk: WalkStats,
+    /// Font families the text asked for that were replaced, each once.
+    pub font_substitutions: Vec<xarast_text::FontSubstitution>,
 }
 
 /// Why a headless render failed.
@@ -119,6 +121,21 @@ pub enum HeadlessError {
 ///
 /// [`HeadlessError`] when the walk, the backend or the surface refuses.
 pub fn render(session: &Session, opts: &HeadlessOptions) -> Result<HeadlessResult, HeadlessError> {
+    render_with_fonts(session, opts, None)
+}
+
+/// [`render`] laying text out with `fonts` instead of the process's shared
+/// service: golden renders and tests pass pinned fonts, so that the
+/// output never depends on the machine's (`docs/memory/text.md`).
+///
+/// # Errors
+///
+/// As [`render`].
+pub fn render_with_fonts(
+    session: &Session,
+    opts: &HeadlessOptions,
+    fonts: Option<std::sync::Arc<crate::fonts::FontService>>,
+) -> Result<HeadlessResult, HeadlessError> {
     let mut view = session.viewport.clone();
     if let Some(dpi) = opts.dpi {
         view.set_dpi(dpi);
@@ -127,7 +144,10 @@ pub fn render(session: &Session, opts: &HeadlessOptions) -> Result<HeadlessResul
     match opts.frame {
         HeadlessFrame::Session => {}
         HeadlessFrame::FitDrawing => {
-            view.fit_rect(crate::viewport::drawing_or_page_rect(&session.doc));
+            view.fit_rect(crate::viewport::drawing_or_page_rect_with(
+                &session.doc,
+                fonts.as_deref(),
+            ));
         }
         HeadlessFrame::Fit(r) => view.fit_rect(r),
         HeadlessFrame::Fixed { zoom, centre_on } => {
@@ -138,7 +158,10 @@ pub fn render(session: &Session, opts: &HeadlessOptions) -> Result<HeadlessResul
         }
     }
 
-    let mut walker = crate::walker::SceneWalker::new();
+    let mut walker = match fonts {
+        Some(f) => crate::walker::SceneWalker::with_fonts(f),
+        None => crate::walker::SceneWalker::new(),
+    };
     let mut scene = xarast_render::Scene::new();
     let scene_stats = walker.rebuild(
         &session.doc,
@@ -182,6 +205,7 @@ pub fn render(session: &Session, opts: &HeadlessOptions) -> Result<HeadlessResul
         zoom: view.zoom(),
         scene: scene_stats,
         walk: walker.stats(),
+        font_substitutions: walker.font_substitutions().to_vec(),
     })
 }
 
