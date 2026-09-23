@@ -36,6 +36,7 @@
 //! | [`scale`] | The single owner of the fractional scale factor |
 //! | [`decorations`] | Who draws the window frame |
 //! | [`input`] | The platform-neutral event model and its translation |
+//! | [`intents`] | Physical [`ShellEvent`]s to semantic `xarast_app::Intent`s |
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
 //!
@@ -50,6 +51,7 @@ pub mod clipboard;
 pub mod decorations;
 pub mod display;
 pub mod input;
+pub mod intents;
 pub mod portal;
 pub mod scale;
 mod window;
