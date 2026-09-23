@@ -17,7 +17,7 @@ note first and update it afterwards.
 | `packaging.md` | Packaging | AppImage, CI, glibc compatibility |
 | `text.md` | Text | Shaping, fonts, text on a path |
 | `image.md` | Images (`xarast-image`) | Decoding façade, decode limits and bomb fixtures, EXIF, `.xar` bitmap wrappings, the walker contract |
-| `export.md` | Export (`xarast-io`) | Export model and sizing, filter registry, raster encoders, determinism contract, `Compromise` taxonomy, the `.xar` non-goal |
+| `export.md` | Export (`xarast-io`) | Export model and sizing, filter registry, raster encoders, PDF (crate spike, fidelity matrix, the ladder), determinism contract, `Compromise` taxonomy, the `.xar` non-goal |
 | `perf.md` | Performance | Benchmarks, budgets, regressions |
 
 ## Status

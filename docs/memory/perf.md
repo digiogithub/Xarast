@@ -146,6 +146,19 @@ largest files, not by the export (a single A4 at 300 dpi peaks at 197 MB).
   372 MB, most of it a 64 MiB strip, its converted and filtered copies, and
   the 32 MiB DEFLATE batch. JPEG and WebP hold the whole RGBA image.
 
+**PDF (round 2, XARA-US-0059, 2026-09-23).** Release, same machine, other
+agents compiling. `xarast-cli export --format pdf --background paper` over
+the corpus, rasterised objects at 300 dpi, `BlendFidelity::Exact`: 59/59,
+**121 MB**, open 0.64 s, scene 0.49 s, translate+rasterise **6.5 s**,
+encode 0.47 s. The time and the size are the ladder's last step: the three
+largest files are blend-heavy designs whose Stained Glass/Bleach objects
+are rendered with their backdrop (`scope3 simple` 29 MB, `ProbeX16` 24 MB,
+`Spitfire` 22 MB, `Watch4` 13 MB). Before graduated transparency became a
+soft mask, `10000GradFilledShapes` rasterised 2 000 objects: 298 MB and
+66 s for one file; after, 7.2 MB. Interning functions and shadings halved
+the corpus (214 → 121 MB). Next steps are XARA-T-0232; the phase budget
+rows for PDF are not benched yet.
+
 ### Images (`xarast-image`, phase 10)
 
 `taskset -c 0-7 cargo bench -p xarast-image --bench decode`, 2026-09-23, at
