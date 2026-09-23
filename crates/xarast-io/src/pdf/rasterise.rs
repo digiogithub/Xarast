@@ -185,7 +185,7 @@ impl<'a> Rasteriser<'a> {
             // linear in the backdrop, so the two give the object's coverage
             // and its premultiplied colour exactly, whatever the renderer
             // does over a transparent destination (it mixes towards the
-            // straight colour stored there, black: XARA-T follow-up in
+            // straight colour stored there, black: XARA-T-0231, and
             // `docs/memory/export.md`).
             let black = render([0, 0, 0, 255])?;
             let white = render([255, 255, 255, 255])?;
