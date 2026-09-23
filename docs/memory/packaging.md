@@ -19,6 +19,12 @@ macOS in phase 14). Specification in
   freedesktop theme sizes; CI fails if the committed PNGs are stale.
 - CI builds x86_64 and aarch64, smoke-tests both, and attaches them to
   releases with zsync metadata.
+- `ci.yml` also runs the export regression (XARA-US-0060): jobs `export`
+  (ubuntu-24.04 and 22.04; installs `poppler-utils`, `ghostscript`,
+  `qpdf`) and `reproducible` (the two machines' export bytes must match);
+  the `check` job installs `poppler-utils` so PDF render tests run. The
+  nightly `export-corpus.yml` checks out the fork's corpus directories
+  (`CORPUS_TOKEN` secret if private). Details in `export.md`.
 
 ## Size (2026-09-23, x86_64, commit 8646a5d)
 
