@@ -2,14 +2,15 @@
 id: XARA-US-0023
 type: story
 title: W3 — SVG profile writer (browser/Inkscape-readable)
-status: in_review
+status: done
 priority: high
 parent: XARA-EP-0007
 author: mcp
 labels: [phase-6, xarast-format, svg]
 created: 2026-09-23T09:41:28Z
-updated: 2026-09-23T15:43:35Z
+updated: 2026-09-23T15:45:29Z
 started: 2026-09-23T15:05:06Z
+closed: 2026-09-23T15:45:29Z
 ---
 
 ## Description
