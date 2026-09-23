@@ -83,6 +83,23 @@ pub fn save_to<W: Write + Seek>(
     Ok(SaveReport { package, ..partial })
 }
 
+/// The first half of [`save`]: `document.svg`, `meta.xml` and the
+/// resources, serialised into a [`PackageWriter`] that is not written yet.
+/// For a caller that adds entries of its own before writing — the
+/// application renders `thumbnail.png` on another thread meanwhile and
+/// sets it with [`PackageWriter::set_thumbnail`] — then finishes with
+/// [`PackageWriter::finish`] inside [`crate::write_atomic_with`].
+///
+/// # Errors
+///
+/// [`WriteError::BadThumbnail`] for a bad [`SaveOptions::thumbnail`].
+pub fn prepare_save(
+    doc: &Document,
+    opts: &SaveOptions,
+) -> Result<(PackageWriter, SaveReport), WriteError> {
+    prepare(doc, opts)
+}
+
 fn prepare(doc: &Document, opts: &SaveOptions) -> Result<(PackageWriter, SaveReport), WriteError> {
     let t = Instant::now();
     let mut resources = ResourceIndex::new();

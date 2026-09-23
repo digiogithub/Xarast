@@ -246,6 +246,21 @@ pub fn save_opened_to<W: Write + Seek, R: Read + Seek>(
     Ok(SaveReport { package, ..partial })
 }
 
+/// The first half of [`save_opened`], as [`crate::save::prepare_save`] is
+/// of [`crate::save()`]: finish with [`PackageWriter::finish_with_source`]
+/// over the same `source`.
+///
+/// # Errors
+///
+/// As [`crate::save::prepare_save`].
+pub fn prepare_resave<R: Read + Seek>(
+    doc: &Document,
+    source: &XarastReader<R>,
+    opts: &SaveOptions,
+) -> Result<(PackageWriter, SaveReport), WriteError> {
+    prepare_from(doc, source, opts)
+}
+
 fn prepare_from<R: Read + Seek>(
     doc: &Document,
     source: &XarastReader<R>,

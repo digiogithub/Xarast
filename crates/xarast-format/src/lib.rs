@@ -84,12 +84,12 @@ pub use error::{Diagnostic, ReadError, WriteError};
 pub use limits::Limits;
 pub use manifest::{FileEntry, Manifest, Role};
 pub use open::{
-    OpenError, OpenOptions, OpenedDocument, open, open_reader, open_with, save_opened,
-    save_opened_to,
+    OpenError, OpenOptions, OpenedDocument, open, open_reader, open_with, prepare_resave,
+    save_opened, save_opened_to,
 };
 pub use reader::{EntryInfo, XarastReader};
 pub use resource::{ResourceId, ResourceIndex, ResourceKind};
-pub use save::{SaveOptions, SaveReport, meta_xml, save, save_to};
+pub use save::{SaveOptions, SaveReport, meta_xml, prepare_save, save, save_to};
 pub use sniff::{sniff, sniff_bytes};
 pub use thumbnail::ThumbnailProvider;
 pub use writer::{PackageWriter, WriteOptions, WriteReport};
