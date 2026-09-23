@@ -159,12 +159,15 @@ pub enum Intent {
     /// `Esc`: cancel the gesture in flight, or, when there is none,
     /// select nothing (`research/04 §4.1`).
     Cancel,
+    /// Sets one of the current attributes, which every object created
+    /// from now on is given (`phase-07` T2.7).
+    SetCurrentAttribute(xarast_doc::AttrValue),
     /// A value typed into a field of the active tool's infobar.
     InfobarEdit {
         /// Which field.
         field: crate::tool::InfobarField,
         /// The value, already parsed from its units.
-        value: xarast_geom::Mp,
+        value: crate::tool::InfobarValue,
     },
     /// A frame tick while a drag holds the pointer at the canvas edge:
     /// scroll the view one step and carry the gesture along. The shell

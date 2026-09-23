@@ -99,7 +99,19 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   (greyed and plain "Undo" when empty), Delete and Select none greyed with
   no selection. Items close the menu on click.
 - **Model**: `UiModel.editing: Option<EditingView>` (tool, undo, redo,
-  selected count, infobar); `UiCommand::InfobarEdit { field, value: Mp }`.
+  selected count, infobar); `UiCommand::InfobarEdit { field, value:
+  InfobarValue }` (lengths in mp, angles in degrees, toggles, anchors).
+- **Infobar items**: `Measure` (unit text field), `Angle` (degrees,
+  `format_angle`/`parse_angle` accept `45`, `45°`, `45deg`), `Toggle`
+  (check box: Lock aspect, Scale lines), `Anchor` (the 9-anchor grid: one
+  22 pt allocation, `ui.interact` per cell, each cell an AccessKit node
+  "Anchor: Top left (chosen)"), `Note`.
+- **Overlay**: `HandleKind::Skew` (hollow square) and `HandleKind::Radius`
+  (filled dot) added; the viewer turns `OverlayShape::Polyline` into
+  `OverlayItem::Line` segments (shape outlines while drawing, the
+  transformed box while scaling/rotating/skewing).
+- **Keys** (shell): momentary Space/Alt+S/Alt+Z/Alt+X
+  (`input/momentary.rs`); View › Zoom to selection = `3`.
 - **Tests**: `crates/xarast-ui/tests/toolbar.rs` (palette order/placement/
   state/keys, click → command, Edit labels, infobar typing `1in` → 72 pt);
   viewer end-to-end tests in `xarast-shell/src/viewer.rs` (keys and palette
@@ -108,6 +120,9 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
 - **Real window**: `xarast --probe drag --screenshot out.png file.xar`
   presses on the object nearest the canvas centre, drags it 100 frames and
   releases (one Move), then captures. Needs no input on the desktop.
+  `--probe scale|rotate` click that object (twice for rotate) and drag its
+  top-right blob; `--probe rect|ellipse` choose the tool and drag out a
+  shape.
 - The colour panel has a "Fill" button of its own: query palette buttons
   by role *and* position in tests.
 

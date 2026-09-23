@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use egui::{Color32, Pos2, Rect, Stroke, Vec2, pos2, vec2};
-use xarast_app::{AppCommand, InfobarField, InfobarItem, ToolId};
+use xarast_app::{Anchor, AppCommand, InfobarField, InfobarItem, InfobarValue, ToolId};
 
 use crate::model::{CommandSink, UiCommand, UiModel};
 use crate::theme::ThemeTokens;
@@ -318,6 +318,24 @@ impl InfobarRow {
                         value,
                         editable,
                     } => self.measure(ui, *field, *value, *editable, unit, out),
+                    InfobarItem::Angle {
+                        field,
+                        value,
+                        editable,
+                    } => self.angle(ui, *field, *value, *editable, out),
+                    InfobarItem::Toggle { field, on } => {
+                        let mut v = *on;
+                        let r = ui
+                            .checkbox(&mut v, field.label())
+                            .on_hover_text(field.description());
+                        if r.changed() {
+                            out.push(UiCommand::InfobarEdit {
+                                field: *field,
+                                value: InfobarValue::Toggle(v),
+                            });
+                        }
+                    }
+                    InfobarItem::Anchor { value } => anchor_grid(ui, *value, tokens, out),
                     InfobarItem::Note(text) => {
                         ui.label(egui::RichText::new(text).color(tokens.text_muted));
                     }
@@ -362,10 +380,136 @@ impl InfobarRow {
             if let Ok(v) = parse_measure(text, unit)
                 && Some(v) != value
             {
-                out.push(UiCommand::InfobarEdit { field, value: v });
+                out.push(UiCommand::InfobarEdit {
+                    field,
+                    value: InfobarValue::Length(v),
+                });
             }
             text.clone_from(&shown);
         }
+    }
+
+    fn angle(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: InfobarField,
+        value: Option<f64>,
+        editable: bool,
+        out: &mut CommandSink,
+    ) {
+        ui.label(field.label());
+        let shown = value.map(format_angle).unwrap_or_default();
+        let id = ui.make_persistent_id(("xarast_infobar", field));
+        let has_focus = ui.memory(|m| m.has_focus(id));
+        let text = self.editing.entry(field).or_insert_with(|| shown.clone());
+        if !has_focus {
+            text.clone_from(&shown);
+        }
+        let response = ui.add_enabled(
+            editable && value.is_some(),
+            egui::TextEdit::singleline(text)
+                .id(id)
+                .desired_width(56.0)
+                .horizontal_align(egui::Align::RIGHT),
+        );
+        let label = match value {
+            Some(v) => format!("{}: {}", field.description(), format_angle(v)),
+            None => field.description().to_owned(),
+        };
+        crate::a11y::set_label(ui.ctx(), response.id, label);
+        let commit = response.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if commit {
+            if let Some(v) = parse_angle(text)
+                && value.is_none_or(|old| (old - v).abs() > 1e-9)
+            {
+                out.push(UiCommand::InfobarEdit {
+                    field,
+                    value: InfobarValue::Angle(v),
+                });
+            }
+            text.clone_from(&shown);
+        }
+    }
+}
+
+/// An angle as the bar shows it: degrees, up to two decimals, with the
+/// degree sign.
+#[must_use]
+pub fn format_angle(deg: f64) -> String {
+    let mut s = format!("{deg:.2}");
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" {
+        s = "0".to_owned();
+    }
+    s.push('°');
+    s
+}
+
+/// Parses an angle in degrees: a number, optionally followed by `°`,
+/// `deg` or `d`. `None` for anything else, or for a non-finite number.
+#[must_use]
+pub fn parse_angle(text: &str) -> Option<f64> {
+    let t = text.trim();
+    let t = t
+        .strip_suffix('°')
+        .or_else(|| t.strip_suffix("deg"))
+        .or_else(|| t.strip_suffix('d'))
+        .unwrap_or(t)
+        .trim();
+    t.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The 9-anchor grid: three rows of three small buttons, the chosen one
+/// filled.
+fn anchor_grid(ui: &mut egui::Ui, value: Anchor, tokens: &ThemeTokens, out: &mut CommandSink) {
+    // One allocation for the whole grid, so it never grows the row: nested
+    // horizontal layouts would each take a full interaction height.
+    const CELL: f32 = 6.0;
+    const GAP: f32 = 1.5;
+    let side = CELL * 3.0 + GAP * 2.0;
+    let (grid, _) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
+    for (i, &a) in Anchor::ALL.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let (col, row) = ((i % 3) as f32, (i / 3) as f32);
+        let rect = Rect::from_min_size(
+            grid.min + vec2(col * (CELL + GAP), row * (CELL + GAP)),
+            vec2(CELL, CELL),
+        );
+        let response = ui.interact(
+            rect,
+            ui.make_persistent_id(("xarast_anchor", i)),
+            egui::Sense::click(),
+        );
+        let chosen = a == value;
+        let fill = if chosen {
+            tokens.accent
+        } else if response.hovered() {
+            tokens.text_muted
+        } else {
+            tokens.text_muted.gamma_multiply(0.45)
+        };
+        ui.painter().rect_filled(rect, 1.0, fill);
+        crate::a11y::set_label(
+            ui.ctx(),
+            response.id,
+            format!(
+                "Anchor: {}{}",
+                a.label(),
+                if chosen { " (chosen)" } else { "" }
+            ),
+        );
+        if response.clicked() && !chosen {
+            out.push(UiCommand::InfobarEdit {
+                field: InfobarField::Anchor,
+                value: InfobarValue::Anchor(a),
+            });
+        }
+        response.on_hover_text(a.label());
     }
 }
 
@@ -374,11 +518,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn angles_format_and_parse_back() {
+        assert_eq!(format_angle(90.0), "90°");
+        assert_eq!(format_angle(-12.345), "-12.35°");
+        assert_eq!(format_angle(-0.0001), "0°");
+        for t in ["45", "45°", " 45 deg", "45d"] {
+            assert_eq!(parse_angle(t), Some(45.0), "{t}");
+        }
+        assert_eq!(parse_angle("abc"), None);
+        assert_eq!(parse_angle("inf"), None);
+        assert_eq!(parse_angle(&format_angle(33.5)), Some(33.5));
+    }
+
+    #[test]
     fn tooltips_name_the_tool_its_key_and_its_state() {
         assert_eq!(tool_tooltip(ToolId::Selector), "Selector (F2)");
         assert_eq!(
-            tool_tooltip(ToolId::Rectangle),
-            "Rectangle (Shift+F3) — coming soon (phase 7)"
+            tool_tooltip(ToolId::Pen),
+            "Pen (Shift+F5) — coming soon (phase 7)"
         );
         assert_eq!(
             tool_tooltip(ToolId::Text),

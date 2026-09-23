@@ -1,5 +1,5 @@
-//! Scripted pan, zoom and drag latency probes
-//! (`xarast --probe pan|zoom|drag`).
+//! Scripted pan, zoom and editing latency probes
+//! (`xarast --probe pan|zoom|drag|scale|rotate|rect|ellipse`).
 //!
 //! The probe drives the real viewer with intents it generates itself, one
 //! per frame, never with input injected into the desktop: the maintainer's
@@ -31,6 +31,18 @@ pub enum ProbeKind {
     /// end. Every frame is a live preview (a scene rebuild), and the
     /// release commits one Move — the whole phase-7 editing path.
     Drag,
+    /// A selector scale: click the object, then drag its top-right blob
+    /// the same way. The release commits one Scale.
+    Scale,
+    /// A selector rotation: click the object twice (the rotate/skew
+    /// handles), then drag its top-right blob. The release commits one
+    /// Rotate.
+    Rotate,
+    /// The rectangle tool: drag out a rectangle from beside the canvas
+    /// centre. The release commits one Create Rectangle.
+    Rect,
+    /// The ellipse tool, likewise.
+    Ellipse,
 }
 
 impl ProbeKind {
@@ -41,6 +53,10 @@ impl ProbeKind {
             "pan" => Some(ProbeKind::Pan),
             "zoom" => Some(ProbeKind::Zoom),
             "drag" => Some(ProbeKind::Drag),
+            "scale" => Some(ProbeKind::Scale),
+            "rotate" => Some(ProbeKind::Rotate),
+            "rect" => Some(ProbeKind::Rect),
+            "ellipse" => Some(ProbeKind::Ellipse),
             _ => None,
         }
     }
@@ -50,7 +66,18 @@ impl ProbeKind {
             ProbeKind::Pan => "pan",
             ProbeKind::Zoom => "zoom",
             ProbeKind::Drag => "drag",
+            ProbeKind::Scale => "scale",
+            ProbeKind::Rotate => "rotate",
+            ProbeKind::Rect => "rect",
+            ProbeKind::Ellipse => "ellipse",
         }
+    }
+
+    /// Whether the probe is a pointer gesture: a press, a drag of one
+    /// step a frame, and a release at the end.
+    #[must_use]
+    pub const fn is_gesture(self) -> bool {
+        !matches!(self, ProbeKind::Pan | ProbeKind::Zoom)
     }
 }
 
@@ -70,6 +97,11 @@ pub struct Probe {
     pub frames_delivered: u32,
     /// Where a drag probe's pointer is, in canvas pixels.
     drag_at: Option<(f64, f64)>,
+    /// Intents a gesture probe applies first, one a step (choosing a tool,
+    /// clicks), before it presses.
+    prelude: std::collections::VecDeque<Intent>,
+    /// Steps of the gesture itself, after the prelude.
+    gesture_step: u32,
 }
 
 impl Probe {
@@ -85,7 +117,16 @@ impl Probe {
             gpu_ms: Vec::new(),
             frames_delivered: 0,
             drag_at: None,
+            prelude: std::collections::VecDeque::new(),
+            gesture_step: 0,
         }
+    }
+
+    /// Sets up a gesture probe: the intents to apply first, and where to
+    /// press, in canvas pixels.
+    pub fn set_gesture(&mut self, prelude: Vec<Intent>, press: (f64, f64)) {
+        self.prelude = prelude.into();
+        self.drag_at = Some(press);
     }
 
     /// Records the present of the frame that showed the last intent.
@@ -151,10 +192,18 @@ impl Probe {
                     dy: 7.7 * dir,
                 }
             }
-            ProbeKind::Drag => {
+            ProbeKind::Drag
+            | ProbeKind::Scale
+            | ProbeKind::Rotate
+            | ProbeKind::Rect
+            | ProbeKind::Ellipse => {
+                if let Some(intent) = self.prelude.pop_front() {
+                    return intent;
+                }
+                self.gesture_step += 1;
                 let (x, y) = *self.drag_at.get_or_insert(centre);
                 let at = |x: f64, y: f64| PointerSample::at(DevicePoint::new(x, y));
-                match self.step {
+                match self.gesture_step {
                     1 => Intent::PointerMove(at(x, y)),
                     2 => Intent::PointerDown {
                         button: PointerButton::Primary,
@@ -254,6 +303,25 @@ mod tests {
         let r = p.report("CPU", (10, 10));
         assert!(r.contains("3 samples"), "{r}");
         assert!(r.contains("p50"), "{r}");
+    }
+
+    #[test]
+    fn a_gesture_probe_plays_its_prelude_then_presses_and_drags() {
+        let mut p = Probe::new(ProbeKind::Rect, 5);
+        p.set_gesture(
+            vec![Intent::ChooseTool(xarast_app::ToolId::Rectangle)],
+            (50.0, 60.0),
+        );
+        assert!(matches!(p.next((0.0, 0.0)), Intent::ChooseTool(_)));
+        assert!(matches!(p.next((0.0, 0.0)), Intent::PointerMove(_)));
+        assert!(matches!(p.next((0.0, 0.0)), Intent::PointerDown { .. }));
+        match p.next((0.0, 0.0)) {
+            Intent::PointerMove(s) => assert_eq!((s.at.x, s.at.y), (53.0, 61.5)),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(p.finish(), Some(Intent::PointerUp { .. })));
+        assert!(ProbeKind::parse("ellipse").unwrap().is_gesture());
+        assert!(!ProbeKind::Pan.is_gesture());
     }
 
     #[test]

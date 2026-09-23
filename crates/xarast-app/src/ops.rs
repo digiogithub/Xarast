@@ -19,24 +19,34 @@
 //! says so *and* they were dispatched inside the same gesture
 //! ([`xarast_doc::CommandBus::begin_gesture`]). The label is part of the
 //! merge key, so a wrong merge shows up as a wrong "Undo …" label.
+//!
+//! # Locked layers
+//!
+//! The document refuses to edit a node carrying the `LOCKED` flag; a
+//! locked *layer* protects everything on it, and that is checked here,
+//! by every command, before anything is applied ([`on_locked_layer`]).
 
-use xarast_doc::{EditError, NodeId, Tx};
-use xarast_geom::Matrix;
+use std::sync::Arc;
+
+use xarast_doc::{
+    Attach, AttrNode, AttrSlot, AttrValue, Document, EditError, NodeId, NodeKind, QuickShape, Tx,
+};
+use xarast_geom::{Matrix, Mp};
 
 /// Every document mutation a tool can ask for. Grows with the phase.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum EditCommand {
-    /// Transforms nodes and everything under them. A pure translation is
-    /// a "Move"; anything else a "Transform".
+    /// Transforms nodes and everything under them. The label names what
+    /// the matrix does: "Move", "Scale", "Rotate", "Skew" or "Transform".
     TransformNodes {
         /// The nodes. A node whose ancestor is also listed is skipped, so
         /// a group and its member are not moved twice.
         nodes: Vec<NodeId>,
         /// The transform, in document space.
         xf: Matrix,
-        /// Whether line widths scale with the objects. Reserved for the
-        /// scale handles (W4); a translation ignores it.
+        /// Whether line widths scale with the objects, by the square root
+        /// of the transform's area factor. A translation ignores it.
         scale_line_widths: bool,
     },
     /// Deletes nodes and everything under them. They stay alive, retained
@@ -45,6 +55,58 @@ pub enum EditCommand {
         /// The nodes.
         nodes: Vec<NodeId>,
     },
+    /// Creates a parametric shape (a rectangle or an ellipse) as the last
+    /// object of a layer, carrying the given attributes as its own
+    /// attribute children. Its outline is generated from the parameters.
+    CreateShape {
+        /// The layer it goes onto.
+        layer: NodeId,
+        /// The parameters. Any cached `path` is ignored and regenerated.
+        shape: Box<QuickShape>,
+        /// The current attributes the new object is given.
+        attrs: Vec<AttrValue>,
+    },
+    /// Replaces a quick shape's parameters (its size, its corner radius),
+    /// regenerating the outline. The node stays a quick shape.
+    SetShapeParams {
+        /// The quick shape.
+        node: NodeId,
+        /// The new parameters. Any cached `path` is ignored and
+        /// regenerated.
+        shape: Box<QuickShape>,
+    },
+}
+
+/// What the linear part of a matrix does, as the Edit menu names it.
+fn transform_label(m: &Matrix) -> &'static str {
+    const EPS: f64 = 1e-9;
+    if m.is_translation_only() {
+        return "Move";
+    }
+    let (a, b, c, d) = (m.a, m.b, m.c, m.d);
+    // Orthonormal with a positive determinant: a pure rotation (a half
+    // turn included, although it is also a scale by -1).
+    if (a - d).abs() < EPS && (b + c).abs() < EPS && (a.mul_add(a, b * b) - 1.0).abs() < 1e-6 {
+        return "Rotate";
+    }
+    if b.abs() < EPS && c.abs() < EPS {
+        return "Scale";
+    }
+    if (a - 1.0).abs() < EPS && (d - 1.0).abs() < EPS && (b.abs() < EPS || c.abs() < EPS) {
+        return "Skew";
+    }
+    "Transform"
+}
+
+/// The label a created shape gets.
+fn create_label(q: &QuickShape) -> &'static str {
+    if q.circular {
+        "Create Ellipse"
+    } else if q.sides == 4 && !q.stellated {
+        "Create Rectangle"
+    } else {
+        "Create Shape"
+    }
 }
 
 impl EditCommand {
@@ -62,16 +124,17 @@ impl EditCommand {
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
-            EditCommand::TransformNodes { xf, .. } if xf.is_translation_only() => "Move",
-            EditCommand::TransformNodes { .. } => "Transform",
+            EditCommand::TransformNodes { xf, .. } => transform_label(xf),
             EditCommand::DeleteNodes { .. } => "Delete",
+            EditCommand::CreateShape { shape, .. } => create_label(shape),
+            EditCommand::SetShapeParams { .. } => "Edit Shape",
         }
     }
 
     /// Whether this command may merge with `prev` into one undo step when
     /// both belong to the same gesture: the same kind of transform on the
-    /// same nodes. A delete never merges, and a move never merges with a
-    /// scale.
+    /// same nodes, or two edits of the same shape. A delete or a creation
+    /// never merges, and a move never merges with a scale.
     #[must_use]
     pub fn coalesces_with(&self, prev: &EditCommand) -> bool {
         match (self, prev) {
@@ -79,6 +142,10 @@ impl EditCommand {
                 EditCommand::TransformNodes { nodes: a, .. },
                 EditCommand::TransformNodes { nodes: b, .. },
             ) => a == b && self.label() == prev.label(),
+            (
+                EditCommand::SetShapeParams { node: a, .. },
+                EditCommand::SetShapeParams { node: b, .. },
+            ) => a == b,
             _ => false,
         }
     }
@@ -90,6 +157,7 @@ impl EditCommand {
         match self {
             EditCommand::TransformNodes { nodes, xf, .. } => nodes.is_empty() || xf.is_identity(),
             EditCommand::DeleteNodes { nodes } => nodes.is_empty(),
+            EditCommand::CreateShape { .. } | EditCommand::SetShapeParams { .. } => false,
         }
     }
 }
@@ -111,6 +179,79 @@ fn outermost(tx: &Tx<'_>, nodes: &[NodeId]) -> Vec<NodeId> {
     out
 }
 
+/// Whether `node` is a locked layer, or lies on one.
+#[must_use]
+pub fn on_locked_layer(doc: &Document, node: NodeId) -> bool {
+    std::iter::once(node)
+        .chain(doc.tree.ancestors(node))
+        .find_map(|n| match doc.tree.kind(n) {
+            Some(NodeKind::Layer(l)) => Some(l.locked),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn check_layers(tx: &Tx<'_>, nodes: &[NodeId]) -> Result<(), EditError> {
+    match nodes.iter().find(|n| on_locked_layer(tx.doc(), **n)) {
+        Some(n) => Err(EditError::NotPermitted(*n)),
+        None => Ok(()),
+    }
+}
+
+/// A quick shape with its outline regenerated from its parameters.
+fn with_outline(q: &QuickShape) -> QuickShape {
+    let mut q = q.clone();
+    q.path = q.outline().map(Arc::new);
+    q
+}
+
+fn is_line_width_attr(doc: &Document, n: NodeId) -> Option<Mp> {
+    match doc.tree.kind(n) {
+        Some(NodeKind::Attr(a)) => match a.value {
+            AttrValue::LineWidth(w) => Some(w),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Scales every line width that applies to `node`'s ink by `k`: the
+/// widths set inside its subtree, and — when it sets none of its own —
+/// the one it inherits, pinned as a new first attribute child.
+fn scale_line_widths(tx: &mut Tx<'_>, node: NodeId, k: f64) -> Result<(), EditError> {
+    let scaled = |w: Mp| Mp::from_f64_round((w.to_f64() * k).max(0.0));
+    let doc = tx.doc();
+    let inside: Vec<(NodeId, Mp)> = doc
+        .tree
+        .preorder(node)
+        .filter_map(|n| is_line_width_attr(doc, n).map(|w| (n, w)))
+        .collect();
+    let own = doc
+        .tree
+        .children(node)
+        .any(|c| is_line_width_attr(doc, c).is_some());
+    let ink = doc.tree.kind(node).is_some_and(NodeKind::is_ink);
+    let inherited = match xarast_doc::attr::resolve_uncached(&doc.tree, node, &doc.defaults)
+        .get(AttrSlot::LineWidth)
+    {
+        AttrValue::LineWidth(w) => Some(*w),
+        _ => None,
+    };
+    for (n, w) in inside {
+        tx.set_attr(n, AttrValue::LineWidth(scaled(w)))?;
+    }
+    if !own
+        && ink
+        && let Some(w) = inherited
+    {
+        let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(
+            AttrValue::LineWidth(scaled(w)),
+        ))))?;
+        tx.attach(attr, node, Attach::FirstChild)?;
+    }
+    Ok(())
+}
+
 impl xarast_doc::Command for EditCommand {
     fn label(&self) -> &'static str {
         EditCommand::label(self)
@@ -118,17 +259,58 @@ impl xarast_doc::Command for EditCommand {
 
     fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
         match self {
-            EditCommand::TransformNodes { nodes, xf, .. } => {
-                for n in outermost(tx, nodes) {
+            EditCommand::TransformNodes {
+                nodes,
+                xf,
+                scale_line_widths: lines,
+            } => {
+                let nodes = outermost(tx, nodes);
+                check_layers(tx, &nodes)?;
+                let k = xf.determinant().abs().sqrt();
+                let lines = *lines
+                    && !xf.is_translation_only()
+                    && k.is_finite()
+                    && k > 0.0
+                    && (k - 1.0).abs() > 1e-12;
+                for n in nodes {
                     tx.transform(n, *xf)?;
+                    if lines {
+                        scale_line_widths(tx, n, k)?;
+                    }
                 }
                 Ok(())
             }
             EditCommand::DeleteNodes { nodes } => {
-                for n in outermost(tx, nodes) {
+                let nodes = outermost(tx, nodes);
+                check_layers(tx, &nodes)?;
+                for n in nodes {
                     tx.delete(n)?;
                 }
                 Ok(())
+            }
+            EditCommand::CreateShape {
+                layer,
+                shape,
+                attrs,
+            } => {
+                match tx.doc().tree.kind(*layer) {
+                    Some(NodeKind::Layer(l)) if !l.locked && !l.guide => {}
+                    _ => return Err(EditError::NotPermitted(*layer)),
+                }
+                let node = tx.create(NodeKind::QuickShape(Box::new(with_outline(shape))))?;
+                tx.attach(node, *layer, Attach::LastChild)?;
+                for a in attrs {
+                    let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(a.clone()))))?;
+                    tx.attach(attr, node, Attach::LastChild)?;
+                }
+                Ok(())
+            }
+            EditCommand::SetShapeParams { node, shape } => {
+                check_layers(tx, &[*node])?;
+                if !matches!(tx.doc().tree.kind(*node), Some(NodeKind::QuickShape(_))) {
+                    return Err(EditError::WrongKind(*node));
+                }
+                tx.set_kind(*node, NodeKind::QuickShape(Box::new(with_outline(shape))))
             }
         }
     }
@@ -152,7 +334,7 @@ impl CommandSink for Vec<EditCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xarast_geom::Vector;
+    use xarast_geom::{Point, Vector};
 
     fn ids() -> (NodeId, NodeId) {
         let doc = xarast_doc::Document::new_empty();
@@ -164,16 +346,22 @@ mod tests {
     #[test]
     fn labels_name_what_the_user_did() {
         let (a, _) = ids();
+        let t = |xf: Matrix| EditCommand::TransformNodes {
+            nodes: vec![a],
+            xf,
+            scale_line_widths: true,
+        };
         assert_eq!(
             EditCommand::translate(vec![a], Vector::raw(10, 0)).label(),
             "Move"
         );
-        let scale = EditCommand::TransformNodes {
-            nodes: vec![a],
-            xf: Matrix::scale(2.0, 2.0),
-            scale_line_widths: true,
-        };
-        assert_eq!(scale.label(), "Transform");
+        assert_eq!(t(Matrix::scale(2.0, 2.0)).label(), "Scale");
+        assert_eq!(
+            t(Matrix::rotate_about(0.3, Point::raw(5, 5))).label(),
+            "Rotate"
+        );
+        assert_eq!(t(Matrix::skew(0.2, 0.0)).label(), "Skew");
+        assert_eq!(t(Matrix::skew(0.2, 0.1)).label(), "Transform");
         assert_eq!(
             EditCommand::DeleteNodes { nodes: vec![a] }.label(),
             "Delete"

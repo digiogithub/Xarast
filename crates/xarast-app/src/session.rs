@@ -201,6 +201,8 @@ pub struct Session {
     tools: ToolMachine,
     /// What the tool in force wants drawn while its gesture is in flight.
     preview: Preview,
+    /// The pick index, rebuilt lazily after a change.
+    picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
     last_edit: Option<EditCommand>,
     /// The document changed since the viewport's scroll bounds were
@@ -248,6 +250,7 @@ impl Session {
             walker: SceneWalker::new(),
             tools: ToolMachine::new(),
             preview: Preview::default(),
+            picker: crate::tool::Picker::new(),
             last_edit: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
@@ -670,6 +673,7 @@ impl Session {
                 preview: &mut self.preview,
                 commands: &mut commands,
                 requests: &mut requests,
+                picker: &self.picker,
             };
             f(&mut self.tools, &mut cx)
         };
@@ -711,8 +715,22 @@ impl Session {
         }
         let mut result = Ok(());
         for cmd in commands {
+            let created_on = match &cmd {
+                EditCommand::CreateShape { layer, .. } => Some(*layer),
+                _ => None,
+            };
             match self.apply_edit(cmd) {
-                Ok(Some(_)) => changed |= Changed::DOCUMENT | Changed::UI,
+                Ok(Some(_)) => {
+                    changed |= Changed::DOCUMENT | Changed::UI;
+                    // A new object is selected, as the original does: the
+                    // tool that drew it then edits it.
+                    if let Some(layer) = created_on
+                        && let Some(n) = self.doc.tree.children(layer).next_back()
+                    {
+                        self.edit.select([n], SelectMode::Replace);
+                        changed |= Changed::SELECTION;
+                    }
+                }
                 Ok(None) => {}
                 Err(e) => {
                     result = Err(e);
@@ -720,12 +738,29 @@ impl Session {
                 }
             }
         }
+        if let Some(tool) = requests.tool {
+            changed |= self.choose_tool(tool);
+        }
         self.edit.tool.drag_from = if self.tools.is_pressed() {
             self.tools.last_pointer()
         } else {
             None
         };
         result.map(|()| (changed, consumed))
+    }
+
+    /// Makes `tool` the chosen tool, as the palette does. A momentary
+    /// switch in force keeps the pointer until it is released.
+    fn choose_tool(&mut self, tool: ToolId) -> Changed {
+        let mut changed = Changed::empty();
+        if self.edit.tool.active != tool && tool.is_available() {
+            self.edit.tool.active = tool;
+            changed |= Changed::UI | Changed::SELECTION;
+            if self.edit.tool.momentary.is_none() {
+                changed |= self.switch_tool(tool);
+            }
+        }
+        changed
     }
 
     /// Cancels the gesture in flight, if any. Returns what changed.
@@ -749,6 +784,7 @@ impl Session {
 
     fn after_mutation(&mut self) {
         self.modified = true;
+        self.picker.invalidate();
         self.edit.prune(&self.doc);
         // The scroll bounds need the drawing's extent, which is a walk of
         // the whole document while the bounds cache is cold: 30 ms at
@@ -853,7 +889,7 @@ impl Session {
                 }
             }
             Intent::InfobarEdit { field, value } => {
-                changed |= self.infobar_edit(field, value)?;
+                changed |= self.infobar_edit(field, value)? | Changed::UI;
             }
             Intent::AutoScroll => {
                 if let Some((dx, dy)) = self.tools.autoscroll(self.viewport.size())
@@ -911,13 +947,10 @@ impl Session {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
                 }
             }
-            Intent::ChooseTool(tool) => {
-                if self.edit.tool.active != tool && tool.is_available() {
-                    self.edit.tool.active = tool;
-                    changed |= Changed::UI | Changed::SELECTION;
-                    if self.edit.tool.momentary.is_none() {
-                        changed |= self.switch_tool(tool);
-                    }
+            Intent::ChooseTool(tool) => changed |= self.choose_tool(tool),
+            Intent::SetCurrentAttribute(value) => {
+                if self.edit.current.set(value) {
+                    changed |= Changed::UI;
                 }
             }
             Intent::MomentaryTool(tool) => {
@@ -935,6 +968,7 @@ impl Session {
             }
             Intent::InvalidateAll => {
                 self.walker.reset();
+                self.picker.invalidate();
                 changed |= Changed::CACHE | Changed::DOCUMENT;
             }
             // Application-level: `AppState::apply` handles these before a
@@ -963,7 +997,7 @@ impl Session {
     fn infobar_edit(
         &mut self,
         field: InfobarField,
-        value: xarast_geom::Mp,
+        value: crate::tool::InfobarValue,
     ) -> Result<Changed, SessionError> {
         Ok(self
             .run_tool(|m, cx| {

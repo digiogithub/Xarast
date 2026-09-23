@@ -129,6 +129,8 @@ pub struct Viewer {
     empty_frames: u32,
     /// The keys of the command table.
     shortcuts: ShortcutMap<AppCommand>,
+    /// The momentary tool switch held down, if any (Space, Alt+S/Z/X).
+    momentary: crate::input::momentary::MomentarySwitch,
     /// What the core asked the platform to do, not yet done.
     requests: Vec<PlatformRequest>,
     /// The file chooser on screen, if one is.
@@ -192,6 +194,7 @@ impl Viewer {
             view_shown: false,
             empty_frames: 0,
             shortcuts: command_shortcuts(),
+            momentary: crate::input::momentary::MomentarySwitch::new(),
             requests: Vec::new(),
             open_dialog: None,
             title_stale: false,
@@ -710,19 +713,21 @@ impl Viewer {
         }
         let c = self.adapter.canvas();
         let mut anchor = (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0);
-        if probe.kind() == crate::probe::ProbeKind::Drag
+        let setup = if probe.kind().is_gesture()
             && !probe.has_anchor()
             && let Some(s) = self.app.active()
         {
-            // Press on the topmost object nearest the canvas centre, so the
-            // drag moves something rather than drawing a marquee.
-            if let Some(p) = drag_target(s) {
-                anchor = p;
-            }
-        }
+            Some(gesture_setup(s, probe.kind(), anchor))
+        } else {
+            None
+        };
         let Some(probe) = self.probe.as_mut() else {
             return;
         };
+        if let Some((prelude, press)) = setup {
+            anchor = press;
+            probe.set_gesture(prelude, press);
+        }
         let intent = probe.next(anchor);
         self.apply(vec![intent]);
     }
@@ -848,13 +853,35 @@ impl Viewer {
             }
             // A text field has the keyboard: typing "1" into a layer name
             // must not zoom to 100 %.
+            // The release of a momentary switch's key restores the tool
+            // even while a text field has the keyboard.
+            ShellEvent::Key(k) if k.state == KeyState::Released => {
+                if let (Some(intent), _) = self.momentary.key(k) {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+            }
+            ShellEvent::Focused(false) => {
+                if let Some(intent) = self.momentary.release() {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+            }
             ShellEvent::Key(k) if k.state == KeyState::Pressed && !self.text_input => {
                 if !k.modifiers.constrain()
                     && let Some(pan) = self.arrow_pan(&k.key)
                 {
                     redraw |= self.apply(vec![pan]).needs_redraw();
                 }
-                if let Some(command) = self.shortcut(k) {
+                let (momentary, consumed) = if self.app.active().is_some() {
+                    self.momentary.key(k)
+                } else {
+                    (None, false)
+                };
+                if let Some(intent) = momentary {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+                if consumed {
+                    // A momentary switch, not a shortcut.
+                } else if let Some(command) = self.shortcut(k) {
                     let changed = self.run_command(command);
                     redraw |= changed.needs_redraw()
                         || changed.contains(Changed::ACTIVE)
@@ -932,9 +959,75 @@ fn name_the_tree(update: &mut egui::accesskit::TreeUpdate, title: &str) {
     }
 }
 
+/// What a gesture probe does before it presses, and where it presses.
+///
+/// The drag presses on the object nearest the canvas centre, so it moves
+/// something rather than drawing a marquee; the scale clicks that object
+/// first and presses on its top-right blob; the rotation clicks it twice
+/// (a second apart, so not a double click) for the rotate handles; the
+/// shape tools choose their tool and press beside the centre.
+fn gesture_setup(
+    s: &Session,
+    kind: crate::probe::ProbeKind,
+    centre: (f64, f64),
+) -> (Vec<Intent>, (f64, f64)) {
+    use crate::probe::ProbeKind as K;
+    use xarast_app::{PointerButton, PointerSample};
+    let target = drag_target(s);
+    let click = |at: (f64, f64), time_ms: u64| {
+        let sample = PointerSample {
+            at: xarast_app::DevicePoint::new(at.0, at.1),
+            pressure: None,
+            time_ms,
+        };
+        [
+            Intent::PointerMove(sample),
+            Intent::PointerDown {
+                button: PointerButton::Primary,
+                sample,
+            },
+            Intent::PointerUp {
+                button: PointerButton::Primary,
+                sample,
+            },
+        ]
+    };
+    match (kind, target) {
+        (K::Scale | K::Rotate, Some((at, node))) => {
+            // The click selects whatever is on top at that point, which
+            // need not be the object whose centre it is.
+            use xarast_app::geometry::DocPointF64Ext;
+            let p = s
+                .viewport
+                .device_to_doc_f64(xarast_app::DevicePoint::new(at.0, at.1))
+                .to_doc_point();
+            let node = xarast_app::tool::pick(&s.doc, p, xarast_geom::Mp::ZERO)
+                .map_or(node, |h| h.top_group);
+            let b = xarast_app::viewport::nodes_rect(&s.doc, [node]);
+            let blob = xarast_app::selector::blob_points(b)[7];
+            let d = s.viewport.doc_to_device(blob);
+            let mut prelude: Vec<Intent> = click(at, 0).into();
+            if kind == K::Rotate {
+                prelude.extend(click(at, 1000));
+            }
+            (prelude, (d.x, d.y))
+        }
+        (K::Rect, _) => (
+            vec![Intent::ChooseTool(xarast_app::ToolId::Rectangle)],
+            (centre.0 - 120.0, centre.1 - 80.0),
+        ),
+        (K::Ellipse, _) => (
+            vec![Intent::ChooseTool(xarast_app::ToolId::Ellipse)],
+            (centre.0 - 120.0, centre.1 - 80.0),
+        ),
+        (_, Some((at, _))) => (Vec::new(), at),
+        (_, None) => (Vec::new(), centre),
+    }
+}
+
 /// Where the drag probe presses: the centre of the visible selectable
-/// object nearest the canvas centre, in canvas pixels.
-fn drag_target(s: &Session) -> Option<(f64, f64)> {
+/// object nearest the canvas centre, in canvas pixels, and the object.
+fn drag_target(s: &Session) -> Option<((f64, f64), xarast_doc::NodeId)> {
     let size = s.viewport.size();
     let (cx, cy) = (f64::from(size.width) / 2.0, f64::from(size.height) / 2.0);
     xarast_app::edit::selectable_objects(&s.doc)
@@ -948,9 +1041,9 @@ fn drag_target(s: &Session) -> Option<(f64, f64)> {
                 && d.y > 0.0
                 && d.x < f64::from(size.width)
                 && d.y < f64::from(size.height);
-            inside.then_some((d.x, d.y))
+            inside.then_some(((d.x, d.y), n))
         })
-        .min_by(|a, b| {
+        .min_by(|(a, _), (b, _)| {
             let da = (a.0 - cx).hypot(a.1 - cy);
             let db = (b.0 - cx).hypot(b.1 - cy);
             da.total_cmp(&db)
@@ -961,26 +1054,45 @@ fn drag_target(s: &Session) -> Option<(f64, f64)> {
 fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
     use xarast_app::{HandleShape, OverlayShape};
     use xarast_ui::{HandleKind, OverlayItem};
-    s.overlay()
-        .into_iter()
-        .map(|o| match o {
-            OverlayShape::Handle { at, shape } => OverlayItem::Handle {
+    let mut out = Vec::new();
+    for o in s.overlay() {
+        match o {
+            OverlayShape::Handle { at, shape } => out.push(OverlayItem::Handle {
                 x: at.x,
                 y: at.y,
                 kind: match shape {
                     HandleShape::Bounds => HandleKind::Bounds,
                     HandleShape::Rotate => HandleKind::Rotate,
+                    HandleShape::Skew => HandleKind::Skew,
                     HandleShape::Centre => HandleKind::Centre,
                     HandleShape::Node => HandleKind::Node,
+                    HandleShape::Radius => HandleKind::Radius,
                 },
                 active: false,
-            },
-            OverlayShape::Rect { rect, dashed } => OverlayItem::Rect {
+            }),
+            OverlayShape::Rect { rect, dashed } => out.push(OverlayItem::Rect {
                 bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),
                 dashed,
-            },
-        })
-        .collect()
+            }),
+            OverlayShape::Polyline {
+                points,
+                closed,
+                dashed,
+            } => {
+                let n = points.len();
+                let segments = if closed { n } else { n.saturating_sub(1) };
+                for i in 0..segments {
+                    let (a, b) = (points[i], points[(i + 1) % n]);
+                    out.push(OverlayItem::Line {
+                        from: (a.x, a.y),
+                        to: (b.x, b.y),
+                        dashed,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The pointer shape for a tool's request.
@@ -990,6 +1102,8 @@ const fn tool_cursor(c: xarast_app::CursorKind) -> CursorShape {
         K::Default => CursorShape::Default,
         K::Move => CursorShape::Move,
         K::Crosshair => CursorShape::Crosshair,
+        K::Resize => CursorShape::ResizeNwSe,
+        K::Rotate => CursorShape::Grabbing,
         K::Grab => CursorShape::Grab,
         K::Grabbing => CursorShape::Grabbing,
         K::ZoomIn => CursorShape::ZoomIn,
@@ -1806,6 +1920,58 @@ mod tests {
         }
     }
 
+    fn key_state(
+        v: &mut Viewer,
+        key: Key,
+        modifiers: crate::input::keyboard::Modifiers,
+        state: KeyState,
+    ) {
+        use crate::input::keyboard::{KeyEvent, KeyLocation};
+        send(
+            v,
+            &[ShellEvent::Key(KeyEvent {
+                key,
+                location: KeyLocation::Standard,
+                state,
+                repeat: false,
+                text: None,
+                modifiers,
+            })],
+        );
+    }
+
+    #[test]
+    fn held_switch_keys_change_the_tool_until_released() {
+        let (mut v, _) = viewer_with_square();
+        press(
+            &mut v,
+            Key::Named(NamedKey::Function(3)),
+            Modifiers::NONE.with_shift(),
+        );
+        assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+        let alt = Modifiers::NONE.with_alt();
+        for (key, mods, want) in [
+            (
+                Key::Named(NamedKey::Space),
+                Modifiers::NONE,
+                xarast_app::ToolId::Selector,
+            ),
+            (Key::char('s'), alt, xarast_app::ToolId::Selector),
+            (Key::char('z'), alt, xarast_app::ToolId::Zoom),
+            (Key::char('x'), alt, xarast_app::ToolId::Pan),
+        ] {
+            key_state(&mut v, key.clone(), mods, KeyState::Pressed);
+            assert_eq!(tool(&v), want, "{key:?} held");
+            // Alt let go before the letter: the switch still ends.
+            key_state(&mut v, key.clone(), Modifiers::NONE, KeyState::Released);
+            assert_eq!(tool(&v), xarast_app::ToolId::Rectangle, "{key:?} released");
+        }
+        // Focus loss while held restores too.
+        key_state(&mut v, Key::char('z'), alt, KeyState::Pressed);
+        send(&mut v, &[ShellEvent::Focused(false)]);
+        assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+    }
+
     /// Clicks the first accessible node with this label, as a screen
     /// reader would.
     fn activate(v: &mut Viewer, label: &str) {
@@ -2122,7 +2288,17 @@ mod tests {
                     minor: xarast_geom::Vector::raw(0, 100_000),
                 },
             )))?;
-            tx.attach(n, layer, xarast_doc::Attach::LastChild)
+            tx.attach(n, layer, xarast_doc::Attach::LastChild)?;
+            // Filled (with the default line colour, black), so a click on
+            // its interior picks it: a transparent interior does not.
+            let black = match xarast_doc::default_for(xarast_doc::AttrSlot::StrokeColour) {
+                xarast_doc::AttrValue::StrokeColour(p) => p,
+                _ => unreachable!("the stroke colour slot holds a stroke colour"),
+            };
+            let fill = tx.create(xarast_doc::NodeKind::Attr(Box::new(
+                xarast_doc::AttrNode::new(xarast_doc::AttrValue::Fill(black)),
+            )))?;
+            tx.attach(fill, n, xarast_doc::Attach::LastChild)
         }
     }
 
@@ -2170,6 +2346,10 @@ mod tests {
         // The palette button, as a screen reader clicks it.
         activate(&mut v, "Rectangle");
         assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+        let infobar = v.ui_model(1.0).editing.unwrap().infobar;
+        assert!(format!("{infobar:?}").contains("draw a rectangle"));
+        activate(&mut v, "Pen");
+        assert_eq!(tool(&v), xarast_app::ToolId::Pen);
         let infobar = v.ui_model(1.0).editing.unwrap().infobar;
         assert!(format!("{infobar:?}").contains("coming soon"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);

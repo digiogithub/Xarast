@@ -39,3 +39,7 @@ harness = false
 [[bench]]
 name = "undo"
 harness = false
+
+[[bench]]
+name = "pick"
+harness = false

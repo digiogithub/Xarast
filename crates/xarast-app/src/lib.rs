@@ -71,12 +71,15 @@ pub mod headless;
 pub mod intent;
 pub mod ops;
 mod paint;
+pub mod picking;
 pub mod prefs;
 pub mod recent;
 pub mod render_thread;
 mod reuse;
 pub mod schedule;
+pub mod selector;
 pub mod session;
+pub mod shapes;
 pub mod tool;
 pub mod tools;
 pub mod viewport;
@@ -84,7 +87,9 @@ pub mod walker;
 
 pub use app::{AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, Severity};
 pub use command::{AppCommand, ChordKey, KeyChord};
-pub use edit::{ControlPoints, EditState, Modifiers, SelectMode, ToolId, ToolState};
+pub use edit::{
+    ControlPoints, CurrentAttributes, EditState, Modifiers, SelectMode, ToolId, ToolState,
+};
 pub use geometry::{DevicePoint, DeviceSize, DocPoint, DocPointF, DocRect};
 pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult, render_to_png};
 pub use intent::{Changed, Intent, PlatformRequest, PointerButton, PointerSample};
@@ -97,8 +102,8 @@ pub use render_thread::{
 };
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use tool::{
-    CursorKind, GestureEvent, HandleShape, HitResult, Infobar, InfobarField, InfobarItem,
-    InteractionState, OverlayShape, Preview, Tool, ToolCtx, ToolMachine, ToolView,
+    Anchor, CursorKind, GestureEvent, HandleShape, HitResult, Infobar, InfobarField, InfobarItem,
+    InfobarValue, InteractionState, OverlayShape, Preview, Tool, ToolCtx, ToolMachine, ToolView,
 };
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};
 pub use walker::{SceneWalker, WalkStats};

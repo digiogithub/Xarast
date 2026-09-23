@@ -19,5 +19,6 @@
 pub mod coalesce;
 pub mod event;
 pub mod keyboard;
+pub mod momentary;
 pub mod tablet;
 pub mod translate;

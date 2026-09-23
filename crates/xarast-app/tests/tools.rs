@@ -3,8 +3,8 @@
 
 use xarast_app::tool::{DRAG_THRESHOLD_PX, InteractionState};
 use xarast_app::{
-    Changed, DevicePoint, DocumentId, EditCommand, InfobarField, InfobarItem, Intent, Modifiers,
-    OverlayShape, PointerButton, PointerSample, Session, ToolId, build_scene,
+    Changed, DevicePoint, DocumentId, EditCommand, InfobarField, InfobarItem, InfobarValue, Intent,
+    Modifiers, OverlayShape, PointerButton, PointerSample, Session, ToolId, build_scene,
 };
 use xarast_doc::{Attach, Command, EditError, NodeId, NodeKind, ShapeKind, ShapeNode, Tx};
 use xarast_geom::{Mp, Point, Vector};
@@ -28,6 +28,16 @@ impl Command for AddRects {
                 minor: Vector::raw(0, side),
             })))?;
             tx.attach(n, layer, Attach::LastChild)?;
+            // A painted fill, so the interior picks (a transparent one
+            // does not).
+            let fill = tx.create(NodeKind::Attr(Box::new(xarast_doc::AttrNode::new(
+                xarast_doc::AttrValue::Fill(xarast_doc::fill::Paint::Flat {
+                    value: xarast_color::Colour::Direct(xarast_color::ColourValue::rgbt(
+                        0.8, 0.2, 0.2, 0.0,
+                    )),
+                }),
+            ))))?;
+            tx.attach(fill, n, Attach::LastChild)?;
         }
         Ok(())
     }
@@ -319,9 +329,9 @@ fn delete_is_one_labelled_step_and_undo_brings_the_object_back() {
 fn tools_switch_and_the_reserved_ones_are_refused() {
     let (mut s, _, _) = fixture();
     assert_eq!(s.tools().current(), ToolId::Selector);
-    s.apply(Intent::ChooseTool(ToolId::Rectangle)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Rectangle);
-    assert_eq!(s.edit.tool.active, ToolId::Rectangle);
+    s.apply(Intent::ChooseTool(ToolId::Pen)).unwrap();
+    assert_eq!(s.tools().current(), ToolId::Pen);
+    assert_eq!(s.edit.tool.active, ToolId::Pen);
     // A pending tool says so and ignores the canvas.
     assert!(matches!(
         s.infobar().items.as_slice(),
@@ -337,14 +347,14 @@ fn tools_switch_and_the_reserved_ones_are_refused() {
 
     // Phase 8 and 9 tools cannot be chosen yet.
     s.apply(Intent::ChooseTool(ToolId::Text)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Rectangle);
+    assert_eq!(s.tools().current(), ToolId::Pen);
 
     // A momentary switch restores the chosen tool on release.
     s.apply(Intent::MomentaryTool(Some(ToolId::Selector)))
         .unwrap();
     assert_eq!(s.tools().current(), ToolId::Selector);
     s.apply(Intent::MomentaryTool(None)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Rectangle);
+    assert_eq!(s.tools().current(), ToolId::Pen);
 }
 
 #[test]
@@ -386,7 +396,7 @@ fn the_infobar_shows_the_selection_and_typing_x_moves_it() {
     let (mut s, a, _) = fixture();
     let bar = s.infobar();
     assert!(matches!(
-        bar.items[0],
+        bar.items[1],
         InfobarItem::Measure {
             field: InfobarField::X,
             value: None,
@@ -396,7 +406,7 @@ fn the_infobar_shows_the_selection_and_typing_x_moves_it() {
     click_at(&mut s, 125_000, 125_000, 0);
     let bar = s.infobar();
     assert!(matches!(
-        bar.items[0],
+        bar.items[1],
         InfobarItem::Measure {
             field: InfobarField::X,
             value: Some(v),
@@ -405,7 +415,7 @@ fn the_infobar_shows_the_selection_and_typing_x_moves_it() {
     ));
     s.apply(Intent::InfobarEdit {
         field: InfobarField::X,
-        value: Mp::new(150_000),
+        value: InfobarValue::Length(Mp::new(150_000)),
     })
     .unwrap();
     assert_eq!(origin_of(&s, a), Point::raw(150_000, 100_000));

@@ -169,7 +169,7 @@ fn the_infobar_shows_the_tool_and_parses_what_is_typed() {
         commands.into_inner(),
         vec![UiCommand::InfobarEdit {
             field: InfobarField::X,
-            value: Mp::from_pt(72.0),
+            value: xarast_app::InfobarValue::Length(Mp::from_pt(72.0)),
         }]
     );
 }
