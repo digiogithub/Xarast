@@ -670,7 +670,16 @@ The same 12 families are combined with the five gradient shapes
 **Bitmap/tile** (`wxOil/grndrgn.cpp:3453-3800`): a parallelogram A,B,C (or a quadrilateral A..D
 in perspective) is defined, and the repetition type comes from `FillMappingAttribute::Repeat`
 (`RepeatType`, `Kernel/fillval.h:132`): 1 simple, 2 repeated, 3 repeated inverted (mirrored),
-4 repeated high quality. They are combined with:
+4 repeated high quality.
+
+**Orientation.** The fill's `StartPoint`, `EndPoint`, `EndPoint2` are passed as the
+parallelogram's first three corners (`grndrgn.cpp:3501-3521`; with perspective the
+four are Start, End, `EndPoint3`, `EndPoint2`), and the plotter maps the first corner
+to the first stored row of the bottom-up DIB: a plain bitmap plot passes a rectangle's
+low (bottom) corner first (`grndrgn.cpp:4862-4865`). So `StartPoint` is the image's
+**bottom-left** corner, `EndPoint` its bottom-right and `EndPoint2` its top-left,
+which is also how a bitmap object becomes a fill (`Kernel/nodebmp.cpp:1210-1212`:
+parallelogram corner 3 → start, 2 → end, 0 → second end). They are combined with:
 
 * `SetTileSmoothingFlag` (bilinear smoothing when there is rotation/scaling) and
   `SetTileFilteringFlag` (maximum-quality filter when printing/exporting), decided by
