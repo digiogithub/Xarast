@@ -490,6 +490,14 @@ findings.
 
 ## Open TODOs
 
+- [ ] **Per-node foreign-baggage container (XARA-T-0089, phase 6 risk K1).**
+      The model has none. `research/06 §8.2`/`§8.5` need, per node, unknown
+      foreign attributes `(uri, local, value)`, verbatim unknown child
+      fragments with their sibling position, comments/PIs, and the
+      `foreign-dirty`/`foreign-stale`/`base-authoritative` marks, surviving
+      edits and undo. It must land before the `.xarast` SVG reader (W4); a
+      side table keyed by `NodeId` is the least invasive shape. Found by the
+      phase-6 format owner, who did not touch `xarast-doc`.
 - [x] Benchmark arena vs `imbl` over a 100 000-node traversal. **Done; the
       arena wins; `10-architecture.md` §3.1 and §7 updated.**
 - [x] Settle the exact `AttrSlot` set against the `.xar` tags. **Done; 46,
