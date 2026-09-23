@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use kurbo::{BezPath, Shape};
+use kurbo::{BezPath, PathEl, Shape};
 use xarast_geom::Path;
 
 /// A shared path, ready to hand to a rasteriser.
@@ -17,6 +17,7 @@ pub struct PathRef {
     path: Arc<Path>,
     bez: Arc<BezPath>,
     bounds: kurbo::Rect,
+    polyline: bool,
 }
 
 impl PartialEq for PathRef {
@@ -29,13 +30,7 @@ impl PathRef {
     /// Adopts a document-space path.
     #[must_use]
     pub fn new(path: Path) -> PathRef {
-        let bez = path.to_bez_path();
-        let bounds = bez.bounding_box();
-        PathRef {
-            path: Arc::new(path),
-            bez: Arc::new(bez),
-            bounds,
-        }
+        PathRef::from_arc(Arc::new(path))
     }
 
     /// Adopts an already shared path.
@@ -43,10 +38,15 @@ impl PathRef {
     pub fn from_arc(path: Arc<Path>) -> PathRef {
         let bez = path.to_bez_path();
         let bounds = bez.bounding_box();
+        let polyline = bez
+            .elements()
+            .iter()
+            .all(|el| !matches!(el, PathEl::QuadTo(..) | PathEl::CurveTo(..)));
         PathRef {
             path,
             bez: Arc::new(bez),
             bounds,
+            polyline,
         }
     }
 
@@ -69,6 +69,13 @@ impl PathRef {
     #[must_use]
     pub fn bounds(&self) -> kurbo::Rect {
         self.bounds
+    }
+
+    /// Whether the path has only straight segments, so that flattening it
+    /// would reproduce it unchanged.
+    #[must_use]
+    pub fn is_polyline(&self) -> bool {
+        self.polyline
     }
 
     /// Whether the path draws nothing.

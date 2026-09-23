@@ -47,7 +47,7 @@ use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
 use crate::scene::{LayerKind, RenderQuality, SceneOp};
 use crate::surface::{DeviceRect, DirtyRect, Surface};
-use crate::tiling::{MIN_BAND_SCANLINES, plan_bands};
+use crate::tiling::{MIN_BAND_SCANLINES, band_height};
 
 /// Rows of geometry rasterised beyond a band's edge before the coverage is
 /// used.
@@ -96,12 +96,17 @@ impl CpuConfig {
 
     /// The configuration the canvas uses: runtime SIMD detection and every
     /// core.
+    ///
+    /// Bands are half the deterministic height: at 1920 px wide a 1 MiB
+    /// band is 136 rows, eight bands per 1080p frame, which leaves most of
+    /// a many-core machine idle. Sixteen bands halved the 100 000-object
+    /// frame on the reference machine; see `docs/memory/perf.md`.
     #[must_use]
     pub fn interactive() -> CpuConfig {
         CpuConfig {
             pin_simd: false,
             threads: 0,
-            band_budget_bytes: 1 << 20,
+            band_budget_bytes: 1 << 19,
             weights: LumaWeights::BT601,
         }
     }
@@ -197,11 +202,11 @@ impl CpuBackend {
         if area.is_empty() {
             return Ok(FrameTimings::default());
         }
-        let plan = plan_bands(dl, target.bounds(), self.cfg.band_budget_bytes);
-        let band_lines = plan
-            .tiles
-            .first()
-            .map_or(MIN_BAND_SCANLINES, |t| t.rect.height())
+        // The same height `plan_bands` gives its first band, without the
+        // binning, which the band loop does not use.
+        let target_rect = target.bounds();
+        let band_lines = band_height(target_rect, self.cfg.band_budget_bytes)
+            .min(target_rect.height())
             .max(1);
         let build_us = elapsed_us(t_build);
 
@@ -308,7 +313,10 @@ fn render_band(
         num_threads: 0,
     };
     let mut ctx = RenderContext::new_with(1, 1, settings);
-    let mut scratch = Pixmap::new(1, 1);
+    let mut scratch = Scratch {
+        pixmap: Pixmap::new(1, 1),
+        flat: BezPath::new(),
+    };
     let mut resources = Resources::new();
 
     // The compositing stack. Index 0 is the target itself; deeper entries
@@ -480,6 +488,13 @@ fn split_target<'a>(layers: &'a mut [Layer], rows: &'a mut [u8]) -> (&'a mut [u8
     }
 }
 
+/// A band's reusable buffers: the coverage pixmap and the flattened path,
+/// kept across primitives so that neither is reallocated per command.
+struct Scratch {
+    pixmap: Pixmap,
+    flat: BezPath,
+}
+
 enum Primitive<'a> {
     Fill {
         path: &'a PathRef,
@@ -523,7 +538,7 @@ fn to_join(j: Join) -> KJoin {
 /// rectangle already clipped to the band.
 fn rasterise_coverage(
     ctx: &mut RenderContext,
-    scratch: &mut Pixmap,
+    scratch: &mut Scratch,
     resources: &mut Resources,
     prim: &Primitive<'_>,
     rect: DeviceRect,
@@ -540,7 +555,7 @@ fn rasterise_coverage(
         return false;
     }
     ctx.reset_and_resize(w16, h16);
-    scratch.resize(w16, h16);
+    scratch.pixmap.resize(w16, h16);
     ctx.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
     let to_origin = Affine::translate((-f64::from(rect.x0), -f64::from(rect.y0)));
     // Flatness is **ours**, not the rasteriser's. The original sets it too
@@ -553,7 +568,14 @@ fn rasterise_coverage(
         Primitive::Fill { path, rule, xf } => {
             ctx.set_fill_rule(to_fill(*rule));
             ctx.set_transform(to_origin * xf.to_affine());
-            ctx.fill_path(&flatten(path.bez(), tol_doc));
+            if path.is_polyline() {
+                // Flattening a polyline reproduces it element for element,
+                // so skipping it changes nothing but the time.
+                ctx.fill_path(path.bez());
+            } else {
+                flatten_into(path.bez(), tol_doc, &mut scratch.flat);
+                ctx.fill_path(&scratch.flat);
+            }
         }
         Primitive::Stroke { path, style, xf } => {
             let scale = xf.max_scale().max(1e-12);
@@ -581,19 +603,20 @@ fn rasterise_coverage(
             let outline = kurbo_stroke(path.bez(), &stroke, tol_doc);
             ctx.set_fill_rule(Fill::NonZero);
             ctx.set_transform(to_origin * xf.to_affine());
-            ctx.fill_path(&flatten(&outline, tol_doc));
+            flatten_into(&outline, tol_doc, &mut scratch.flat);
+            ctx.fill_path(&scratch.flat);
         }
     }
     ctx.flush();
-    ctx.render(&mut *scratch, resources);
+    ctx.render(&mut scratch.pixmap, resources);
     true
 }
 
-/// Flattens a path to line segments within `tol` document units.
-fn flatten(path: &BezPath, tol: f64) -> BezPath {
-    let mut out = BezPath::new();
+/// Flattens a path to line segments within `tol` document units, into a
+/// reused buffer.
+fn flatten_into(path: &BezPath, tol: f64, out: &mut BezPath) {
+    out.truncate(0);
     vello_cpu::kurbo::flatten(path.iter(), tol.max(1e-6), |el| out.push(el));
-    out
 }
 
 /// Expands a stroke into its outline at our tolerance.
@@ -608,7 +631,7 @@ fn kurbo_stroke(path: &BezPath, style: &KStroke, tol: f64) -> BezPath {
 )]
 fn rasterise_clip(
     ctx: &mut RenderContext,
-    scratch: &mut Pixmap,
+    scratch: &mut Scratch,
     resources: &mut Resources,
     path: &PathRef,
     rule: FillRule,
@@ -624,7 +647,7 @@ fn rasterise_clip(
     }
     let w = band.width() as usize;
     let skip = (band.y0 - guarded.y0) as usize * w;
-    for (dst, px) in mask.iter_mut().zip(scratch.data()[skip..].iter()) {
+    for (dst, px) in mask.iter_mut().zip(scratch.pixmap.data()[skip..].iter()) {
         *dst = px.a;
     }
     mask
@@ -637,7 +660,7 @@ fn rasterise_clip(
 )]
 fn draw_primitive(
     ctx: &mut RenderContext,
-    scratch: &mut Pixmap,
+    scratch: &mut Scratch,
     resources: &mut Resources,
     prim: Primitive<'_>,
     paint: &Paint,
@@ -668,7 +691,7 @@ fn draw_primitive(
         return 0;
     }
     composite_coverage(
-        scratch.data(),
+        scratch.pixmap.data(),
         guarded,
         rect,
         band,
@@ -783,6 +806,15 @@ fn composite_coverage(
         TranspSource::Flat(t) => Some(*t),
         _ => None,
     };
+    // An opaque solid colour mixed at zero transparency replaces a fully
+    // covered pixel outright, whatever was under it: `composite` gives the
+    // source with alpha 255 there, and premultiplying that is the identity.
+    // Most pixels of a flat-filled scene take this path.
+    // `opaque_replace_matches_the_general_path` pins the equivalence.
+    let replace = match (solid, flat) {
+        (Some(c), Some(0)) if c.a == 255 && transparency.family == BlendFamily::Mix => Some(c),
+        _ => None,
+    };
     let mut touched = 0u64;
     let cw = coverage_rect.width() as usize;
     for y in rect.y0..rect.y1 {
@@ -798,6 +830,13 @@ fn composite_coverage(
                 if cov == 0 {
                     continue;
                 }
+            }
+            if cov == 255
+                && let Some(c) = replace
+            {
+                write_opaque(dst, band, width, x, y, c);
+                touched += 1;
+                continue;
             }
             let p = Point64::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
             let src = match solid {
@@ -916,6 +955,15 @@ fn blend_into(
     dst[o + 1] = out.g;
     dst[o + 2] = out.b;
     dst[o + 3] = out.a;
+}
+
+/// Writes an opaque colour over a pixel: [`blend_into`] for a fully
+/// covered, opaque, zero-transparency Mix.
+fn write_opaque(dst: &mut [u8], band: DeviceRect, width: u32, x: i32, y: i32, c: Rgba8) {
+    let o = ((y - band.y0) as usize * width as usize + (x - band.x0) as usize) * 4;
+    if let Some(px) = dst.get_mut(o..o + 4) {
+        px.copy_from_slice(&[c.r, c.g, c.b, 255]);
+    }
 }
 
 fn unpremultiply(c: Rgba8) -> Rgba8 {
@@ -1208,5 +1256,63 @@ pub const fn render_mode(q: RenderQuality) -> RenderMode {
     match q {
         RenderQuality::Draft => RenderMode::OptimizeSpeed,
         RenderQuality::Final => RenderMode::OptimizeQuality,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_replace_matches_the_general_path() {
+        let luts = BlendLuts::build(LumaWeights::BT601);
+        let cfg = CpuConfig::deterministic();
+        let band = DeviceRect::new(0, 0, 1, 1);
+        let mut s: u64 = 0x9e37_79b9;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        let check = |src: Rgba8, under: [u8; 4]| {
+            let mut slow = under;
+            blend_into(
+                &mut slow,
+                band,
+                1,
+                0,
+                0,
+                src,
+                0,
+                255,
+                BlendFamily::Mix,
+                &luts,
+                &cfg,
+            );
+            let mut fast = under;
+            write_opaque(&mut fast, band, 1, 0, 0, src);
+            assert_eq!(slow, fast, "{src:?} over {under:?}");
+        };
+        // Every premultiplied destination alpha, with channels at and
+        // below it, and random opaque sources.
+        for a in 0..=255u8 {
+            for _ in 0..64 {
+                let r = next();
+                let under = [
+                    (r as u8).min(a),
+                    ((r >> 8) as u8).min(a),
+                    ((r >> 16) as u8).min(a),
+                    a,
+                ];
+                let src = Rgba8 {
+                    r: (r >> 24) as u8,
+                    g: (r >> 32) as u8,
+                    b: (r >> 40) as u8,
+                    a: 255,
+                };
+                check(src, under);
+            }
+        }
     }
 }
