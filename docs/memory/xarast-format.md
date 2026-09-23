@@ -11,7 +11,10 @@ SVG profile writer (W3), the document-level save and `xarast-cli convert`.
 Round 3 (2026-09-23): passes 4–5, `zlib-rs` everywhere, the path-data
 separator fix; the reader (W4): `svg::read_svg`, `normal_form`, `open`,
 `save_opened`, F4.7 marking in `xarast-doc`, `.xarast` in the app's open
-path.
+path. Round 4 (2026-09-23): the writer gaps the corpus round trip found —
+opaque subtrees (XARA-T-0108), fill mapping (T-0109), first re-save
+differences (T-0110), ambiguous twins (T-0111) — closed; the round trip
+is exact for all 59 files (below) and its tests have no exception list.
 
 | Workstream | State | Where |
 |---|---|---|
@@ -119,6 +122,30 @@ stats, foreign_count, foreign_digest }`.
   value, then each fragment's raw text — every field as u64-LE length +
   UTF-8 bytes. `foreign-count` = attributes + fragments written; both are
   omitted when zero. **W4 must compute the digest the same way.**
+- **Opaque nodes** (an unknown `.xar` record): `<xarast:opaque
+  xarast:tag xarast:encoding="base64">PAYLOAD` then the record's own
+  subtree as ordinary profile elements, then `</xarast:opaque>`
+  (`research/06 §8.2.1`). Not SVG, so resvg, Chrome and Inkscape draw
+  none of it — the same as the renderer, which skips opaque subtrees. It
+  is a `GroupKind::Block` for passes 4–5: nothing hoists into or through
+  it. Childless opaque nodes keep the old one-line form.
+- **Exact twins** (`research/06 §6.14`, round 4): whatever a reader
+  would have to guess is written, and whatever is derived (baked stops,
+  flat approximations) is computed from the values **as written**
+  (`paint::key_colour`: a palette key resolves exactly, a literal one is
+  quantised to its 8-bit spelling first). Palette components, tint
+  amounts, shade factors and key positions use `num::f32s` (shortest
+  round-trip `f32`); key colours carry `xarast:stop-refs` /
+  `colour-refs` / `contone-refs`; plain ramps whose key positions four
+  decimals do not pin also get `xarast:stops` / `xarast:levels`; a
+  `cx cy r` circle gets `xarast:major` when the reader would not derive
+  it; `xarast:fill-repeat` on bitmap patterns, `xarast:repeat` and
+  `xarast:fill-effect` on every twin; transparency twins carry levels,
+  profile, procedural parameters, the bitmap `href` and the mapping; the
+  stroke's own transparency is `<xarast:stroke-transparency>`,
+  `xarast:stroke-mask` and `xarast:stroke-blend` (then `xarast:blend` is
+  the fill's alone). `meta.xml` counts the bitmaps written
+  (`Stats::bitmaps`), not the model's.
 - **Live effects**: controller `<g xarast:kind="blend|…">` with the
   parametric element first; generated children in `<g
   xarast:generated=… xarast:generated-by=… xarast:base-authoritative="true">`
@@ -273,18 +300,24 @@ diagnostics, stats, preservation }`; `open` wraps it with the container,
   differs from `default_for`. Rules for what SVG merges: `fill-opacity` =
   colour alpha × transparency alpha — a literal colour is taken as
   opaque (all of it becomes the transparency), a palette colour or a twin
-  says its own alpha; `xarast:blend` goes to the fill transparency when
-  there is a fill; two `<xarast:transparency>` twins are fill then
-  stroke, one is the fill's when there is a fill (XARA-T-0111). A mask's
+  says its own alpha. `xarast:stroke-blend` is the stroke's mode and
+  `xarast:blend` then the fill's; `<xarast:stroke-transparency>` and
+  `xarast:stroke-mask` are the stroke's. Files written before round 4:
+  `xarast:blend` goes to the fill transparency when there is a fill; two
+  `<xarast:transparency>` twins are fill then stroke, one is the fill's
+  when there is a fill. A key colour takes the palette colour its
+  `*-refs` token names when that resolves to the written 8-bit value. A mask's
   box, padded by the writer with `width/2 + 1`, gives back the line width
   of an unstroked element. A circular radial gradient's major axis is
   the minor axis turned a quarter clockwise (the renderer takes both axes
   as given; `cx cy r` alone would shear it).
-- **Palette**: rebuilt in order so `c-N` ids are stable. Six decimals do
-  not always pin an `f32` component: where a colour resolves one level
-  off the `xarast:srgb` the file records, the nearest `f32` that prints
-  the same six decimals and resolves right is chosen (components, then a
-  tint factor).
+- **Palette**: rebuilt in order so `c-N` ids are stable. Components are
+  read with `parse::f32_exact` (correctly rounded decimal → `f32`), so
+  round-4 files come back bit for bit. Older files have six decimals,
+  which do not always pin an `f32` component: where a colour resolves
+  one level off the `xarast:srgb` the file records, the nearest `f32`
+  that prints the same six decimals and resolves right is chosen
+  (components, then a tint factor).
 - **Preservation digest (F4.6)**: recomputed by running `write_svg` on
   the loaded document when it has baggage or the file declares any — the
   writer's own emission order, no second implementation. Count lower than
@@ -305,26 +338,38 @@ characters folded into styled runs); flags `LOCKED`/`MAGNETIC`; per ink
 node the **resolved** attribute stack projected through the writer's own
 paint code (`svg::paint::{colour_paint, transparency}`) with definitions
 inlined by content and **derived data dropped** (baked stops of a keyed
-ramp, the flat approximation of a twin); baggage with clamped positions;
-Opaque nodes with their children. Two documents are equivalent iff their
+ramp, the flat approximation of a twin), each drawn side's blend mode
+and the stroke mask; baggage with clamped positions; Opaque nodes with
+their children. **Its blind spot**: it projects through the writer, so
+a value the writer never writes is invisible to it (the transparency
+twins lost their levels and parameters with an equal normal form). Round
+4 found those by diffing the *resolved attribute stacks* of every ink
+node, import against reload (a scratch example, not committed). Two documents are equivalent iff their
 normal forms are equal. It is independent of where attributes sit, of
 hoisting and classes, and of def ids.
 
 ### Round trip numbers (2026-09-23, corpus of 59)
 
-- **Model**: normal form equal for 50 files; the other 9 lose exactly the
-  objects the importer keeps under an unknown record (an `Opaque` with
-  children), which the writer does not emit (XARA-T-0108): everything
-  else in them round-trips (`tests/svg_roundtrip.rs`, `KNOWN_OPAQUE_LOSS`).
-  Passes 4–5 on and off read the same model for all 59.
-- **Bytes**: 54/59 byte-identical on the first re-save through
-  `save_opened`; all 59 a fixed point on the second. The five: 8-bit key
-  stops resampled once (Fill Types simple, Spitfire, WATCH2, Watch4) and
-  `xarast:bitmaps` counting an unreferenced bitmap (scope3) — XARA-T-0110.
-- **Render** (`crates/xarast-app/tests/xarast_roundtrip.rs`, CPU, 480×360,
-  both framed on the original's drawing): 50/59 pixel-identical, 6 within
-  2 levels on ≤ 0.03 % of pixels; scope3 (2.3 %), Watch4 (0.5 %) and
-  Spitfire (14 px) differ for writer gaps XARA-T-0108/-0109.
+Round 4, after XARA-T-0108…0111; both tests have **no exception list**:
+
+- **Model** (`tests/svg_roundtrip.rs`): normal form equal for **59/59**,
+  passes 4–5 on and off alike, no warning on read. The resolved attribute
+  stack of every ink node equals the import's for 59/59 but for two
+  harmless spellings: `-0.0` vs `0.0` in a profile gain (Watch4) and the
+  scale of an arrow spec that names no arrow (GardenPlan, Kerning:
+  arrows are XARA-T-0103).
+- **Bytes**: **59/59** byte-identical on the first re-save through
+  `save_opened` (every entry, the container included).
+- **Render** (`crates/xarast-app/tests/xarast_roundtrip.rs`, CPU,
+  480×360, both framed on the original's drawing): **59/59
+  pixel-identical** — the tolerance (2 levels on 0.1 % of pixels) is
+  gone.
+- **Browsers**: resvg renders every corpus `document.svg` pixel-identical
+  before and after round 4 (59/59 at 800 px); `xmllint` passes on all
+  118 `document.svg` + `meta.xml`. Size: corpus SVG 96.5 → 100.0 MB
+  (+3.6 %), packages 14.95 → 15.29 MB.
+- Before round 4: model 50/59 (the opaque subtrees), bytes 54/59, render
+  50/59 identical + 6 within 2 levels.
 - **Open time** (`open_reader`, release): ProbeX16 (518k nodes, 50 MB SVG)
   1.7–2.2 s; the 1,800-object files 3–15 ms (budget: 120 ms).
 
@@ -456,10 +501,17 @@ spelling changes the fragment text). What does not survive yet: its
 - No `unsafe` (`#![forbid(unsafe_code)]`); parser modules deny indexing,
   unwrap/expect, panic and unchecked arithmetic.
 - **Read then write is a fixed point** on what the writer produced: the
-  first re-save of a reloaded document equals the original save (54/59
-  corpus files, the rest listed in XARA-T-0110) and the second always
-  does (`tests/svg_roundtrip.rs`, `fuzz_xarast_svg_read`). A reader
+  first re-save of a reloaded document equals the original save (59/59
+  corpus files, `tests/svg_roundtrip.rs`; fuzzed synthetic input may
+  settle one round later, `fuzz_xarast_svg_read`). A reader or writer
   change that breaks it is a bug, however small the difference.
+- **Derived data comes from written values.** Baked stops and flat
+  approximations are computed from the keys as a reader will rebuild
+  them (`paint::key_colour`), never from the model's `f32` colours:
+  otherwise the reload re-derives one level off.
+- **The reload renders pixel-identical** (59/59, CPU): a twin that drops
+  anything the renderer reads is a bug even when the normal form stays
+  equal.
 - **Opening writes nothing** (F4.10, `tests/svg_read.rs::opening_writes_nothing`):
   no lock, no temporary, the file's bytes and mtime untouched.
 - A foreign fragment is stored as the text read (+ the declarations it
@@ -541,6 +593,15 @@ the file means", not crashes; each input is now a unit test in
   numbers in ProbeX16, 11 corpus files render closer to the reference
   since).
 - Comparing lock-file text to decide ownership on release.
+- Six decimals for palette components (and for key positions): they do
+  not pin an `f32`, so a reload moved derived stops by a level. Shortest
+  round-trip `f32` (`num::f32s`) instead.
+- Trusting an equal normal form as "nothing lost": it cannot see what
+  the writer does not write (see "The normal form"). Diff resolved
+  attribute stacks, and render.
+- Moving an opaque node's subtree out of `<xarast:opaque>` so browsers
+  draw it: the renderer skips opaque subtrees, so the browser would show
+  what Xarast does not.
 - Reading the SVG through a float path parser (`Path::from_svg_path_data`
   via kurbo): relative commands accumulate in `f64`; the reader's own
   integer parser is exact and needs no rounding.
@@ -564,10 +625,12 @@ the file means", not crashes; each input is now a unit test in
 
 - W4 leftovers: F4.7 deletion accounting (XARA-T-0113); header data
   another editor adds — `namedview`, `<metadata>`, run-level attributes,
-  foreign ids (XARA-T-0112); writer twins the reader cannot tell apart
-  (XARA-T-0111). Writer gaps the round trip found: Opaque subtrees
-  (XARA-T-0108, data loss, 9 corpus files), fill mapping of bitmap and
-  procedural fills (XARA-T-0109), first re-save differences (XARA-T-0110).
+  foreign ids (XARA-T-0112). Round-trip gaps not in the corpus: a
+  custom arrow outline is written as the name `custom` (its path is
+  lost) and an arrow spec's width/height is not written (XARA-T-0103);
+  per-key transparency modes are taken from the side's mode; a tinted
+  palette reference on a key (`Colour::Indexed { tint: Some }`) is
+  written as its 8-bit value.
 - W3 leftovers: baking/`BakeProvider`
   (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`

@@ -90,7 +90,7 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Pan/zoom, 100k objects, integrated GPU, 4K canvas, offscreen | ≤ 16 ms | pan p99 **9.6 ms**, zoom p99 **5.8 ms** (to GPU idle) | passes; the CPU tier at 4K is 35–41 ms (T-0052's upload cliff) |
 | Present one CPU frame, 4K, integrated GPU (the pre-T-0050 full `write_texture`) | — | **23–27 ms** (1080p: 0.54–1.6 ms) | off the interactive path since XARA-T-0050; still paid by the CPU tier and by the Final at rest; XARA-T-0052 investigates the cliff |
 | Save a 20 MB `.xarast`, container part (no SVG serialisation) | ≤ 1 s | ~~273 ms~~ **89 ms** in memory, ~~285~~ **98 ms** through `write_atomic` to disk (zlib-rs since XARA-T-0090) | passes; table in "`.xarast` container" |
-| Save a `.xarast` end to end (SVG + meta + container, atomic), from `.xar`, real corpus | ≤ 1 s for 20 MB | ProbeX16 (518 k nodes, **50.8 MB SVG**, 9.5 MB package): ~~1.60 s~~ **0.79 s** (SVG 453 ms + package 337 ms, medians of 7); every other corpus file ≤ 150 ms | **passes** since round 3 (XARA-T-0090 + XARA-T-0101 + the path-writer fix, 2026-09-23); table in "`.xarast` save end to end" |
+| Save a `.xarast` end to end (SVG + meta + container, atomic), from `.xar`, real corpus | ≤ 1 s for 20 MB | ProbeX16 (518 k nodes, **52.0 MB SVG**, 9.7 MB package): ~~1.60 s~~ ~~0.79 s~~ **0.83 s** (SVG 490 ms + package 340 ms, medians of 7, after the round-trip twins); every other corpus file ≤ 150 ms | **passes** since round 3 (XARA-T-0090 + XARA-T-0101 + the path-writer fix, 2026-09-23); table in "`.xarast` save end to end" |
 | Re-save a 300 MB photo `.xarast` with unchanged resources | ≤ 1 s | ~~104~~ **91 ms** | passes: raw copies, no rehash, no recompression |
 | Open a 20 MB `.xarast`: signature + manifest + thumbnail | ≤ 15 ms | **0.046 ms** | passes (unchanged on zlib-rs) |
 | BLAKE3 throughput, one core | ≥ 1 GB/s | **5.4–5.9 GiB/s** | passes |
@@ -350,6 +350,21 @@ walk); the package write is DEFLATE-bound (~150 MB/s at level 6).
 
 Criterion, synthetic 100 000-node document, pinned: `svg/write_100k`
 34.2 → **30.6 ms**, `svg/save_100k` 114.9 → **63.0 ms**.
+
+**Round 4 (2026-09-23): the round-trip twins** (XARA-T-0108…0111: the
+subtree under opaque nodes, palette references on key colours, complete
+transparency twins, exact palette components). Same command, `taskset
+-c 4-7`, load 5–12 (higher than round 3's 2–5), ProbeX16 over 7 runs,
+the corpus over 3:
+
+| | Round 3 | Round 4 |
+|---|---|---|
+| ProbeX16 `document.svg` / package | 50.83 / 9.49 MB | **52.05 / 9.65 MB** (+2.4 %: its opaque subtrees are written now, key colours name their palette colour) |
+| ProbeX16 SVG serialisation | 453 ms | **490 ms** (482–505) |
+| ProbeX16 package write | 337 ms | **340 ms** (332–345) |
+| **ProbeX16 save (SVG + package)** | 0.79 s | **0.83 s** — within the 1 s budget |
+| Corpus SVG / packages | 96.5 / 14.95 MB | 100.0 / 15.29 MB |
+| Corpus serialisation + package | 0.80 + 0.79 s | 0.89–1.09 + 0.84–0.94 s (load) |
 
 ## Phase 2 — document model (development container, historical)
 
