@@ -40,7 +40,7 @@ OPTIONS:
         --size <WxH>        Initial window size in logical pixels (default 1280x800)
         --synthetic <N>     Open a synthetic document of about N nodes (250000
                             gives about 100 000 paths), for the probes
-        --probe <pan|zoom|drag|scale|rotate|rect|ellipse|nodes|pen|freehand>
+        --probe <pan|zoom|drag|scale|rotate|rect|ellipse|nodes|pen|freehand|snap|arrange|paste>
                             Once the document has rendered, pan or zoom it;
                             move, scale or rotate the object nearest the centre
                             with the selector; draw a rectangle or an ellipse;
@@ -130,7 +130,8 @@ fn main() -> ExitCode {
                 Some(k) => probe = Some(k),
                 None => {
                     eprintln!(
-                        "--probe needs pan, zoom, drag, scale, rotate, rect, ellipse, nodes, pen or freehand"
+                        "--probe needs pan, zoom, drag, scale, rotate, rect, ellipse, \
+                         nodes, pen, freehand, snap, arrange or paste"
                     );
                     return ExitCode::FAILURE;
                 }

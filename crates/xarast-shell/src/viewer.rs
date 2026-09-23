@@ -370,7 +370,14 @@ impl Viewer {
                     }
                 }
                 PlatformRequest::ReadClipboard { in_place } => {
-                    let text = match ctx.clipboard().text() {
+                    let read = ctx.clipboard().text();
+                    let ours = self.app.clipboard().map(|c| c.svg.as_str());
+                    tracing::info!(
+                        read = ?read.as_ref().map(String::len),
+                        ours = read.as_ref().ok().map(String::as_str) == ours,
+                        "clipboard read for a paste"
+                    );
+                    let text = match read {
                         Ok(t) => Some(t),
                         // No clipboard at all: paste our own last copy.
                         Err(crate::clipboard::ClipboardError::Unavailable(_)) => None,
@@ -1078,6 +1085,72 @@ fn gesture_setup(
             }
             (prelude, (d.x, d.y))
         }
+        (K::Snap, Some((at, _))) => {
+            use xarast_app::snap::{GuideOp, SnapKind};
+            let mut grid = xarast_app::snap::grid_of(&s.doc);
+            grid.visible = true;
+            grid.spacing = xarast_geom::Mp::from_mm(10.0);
+            grid.subdivisions = 2;
+            let guide_x = s
+                .viewport
+                .device_to_doc(xarast_app::DevicePoint::new(at.0 + 90.0, at.1))
+                .x;
+            let mut prelude = vec![
+                Intent::Guides(GuideOp::SetGrid(grid)),
+                Intent::Guides(GuideOp::Add {
+                    horizontal: false,
+                    position: guide_x,
+                }),
+                Intent::ToggleSnap(SnapKind::Grid),
+                Intent::ToggleSnap(SnapKind::Object),
+            ];
+            if s.edit.snap.guides {
+                // Guides snap by default; keep them on.
+            } else {
+                prelude.push(Intent::ToggleSnap(SnapKind::Guide));
+            }
+            (prelude, at)
+        }
+        (K::Arrange, Some((at, node))) => {
+            use xarast_app::structure::{AlignSpec, AlignTarget, AxisAlign, ZOrder};
+            let select = |mode| Intent::Select {
+                nodes: vec![node],
+                mode,
+            };
+            // Each Duplicate copies the selection and selects the copy: a
+            // stair of four. The original joins the last copy, the two are
+            // aligned on their left edges and grouped, and the group goes to
+            // the back. The Alignment panel opens for the screenshot.
+            let prelude = vec![
+                select(xarast_app::SelectMode::Replace),
+                Intent::Duplicate,
+                Intent::Duplicate,
+                Intent::Duplicate,
+                select(xarast_app::SelectMode::Add),
+                Intent::Align(AlignSpec {
+                    x: AxisAlign::Min,
+                    y: AxisAlign::None,
+                    to: AlignTarget::Selection,
+                }),
+                Intent::Group,
+                Intent::Arrange(ZOrder::SendToBack),
+                Intent::ShowDialog(xarast_app::Dialog::Align),
+            ];
+            (prelude, at)
+        }
+        (K::Paste, Some((_, node))) => (
+            vec![
+                Intent::Select {
+                    nodes: vec![node],
+                    mode: xarast_app::SelectMode::Replace,
+                },
+                Intent::Copy,
+                Intent::Paste { in_place: false },
+                // A frame for the shell to read the clipboard back.
+                Intent::SelectNone,
+            ],
+            centre,
+        ),
         (K::Rect, _) => (
             vec![Intent::ChooseTool(xarast_app::ToolId::Rectangle)],
             (centre.0 - 120.0, centre.1 - 80.0),
