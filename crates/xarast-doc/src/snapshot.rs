@@ -25,6 +25,7 @@ use slotmap::SecondaryMap;
 use crate::Document;
 use crate::attr::DefaultAttrs;
 use crate::document::DocumentMeta;
+use crate::foreign::ForeignBaggage;
 use crate::kind::NodeKind;
 use crate::resources::DocumentResources;
 use crate::tree::{Attach, NodeData, NodeFlags, NodeId, Tree};
@@ -33,6 +34,7 @@ use crate::tree::{Attach, NodeData, NodeFlags, NodeId, Tree};
 #[derive(Clone, Debug)]
 pub struct Snapshot {
     nodes: Arc<SecondaryMap<NodeId, NodeData>>,
+    foreign: Arc<SecondaryMap<NodeId, Arc<ForeignBaggage>>>,
     root: NodeId,
     resources: Arc<DocumentResources>,
     defaults: DefaultAttrs,
@@ -74,13 +76,18 @@ impl Document {
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         let mut nodes = SecondaryMap::with_capacity(self.tree.node_count());
+        let mut foreign = SecondaryMap::new();
         for id in self.tree.preorder(self.tree.root()) {
             if let Some(d) = self.tree.get(id) {
                 nodes.insert(id, d.clone());
             }
+            if let Some(b) = self.tree.foreign_arc(id) {
+                foreign.insert(id, Arc::clone(b));
+            }
         }
         Snapshot {
             nodes: Arc::new(nodes),
+            foreign: Arc::new(foreign),
             root: self.tree.root(),
             resources: Arc::new(self.resources.clone()),
             defaults: self.defaults.clone(),
@@ -113,6 +120,9 @@ impl Document {
 
         let mut map: HashMap<NodeId, NodeId> = HashMap::new();
         map.insert(s.root, new_root);
+        if let Some(b) = s.foreign.get(s.root) {
+            tree.set_foreign(new_root, Some(Arc::clone(b)));
+        }
         let mut stack = vec![s.root];
         while let Some(old) = stack.pop() {
             let Some(parent_new) = map.get(&old).copied() else {
@@ -129,6 +139,9 @@ impl Document {
                 let _ = tree.attach(n, parent_new, Attach::LastChild);
                 if let Some(nd) = tree.get_mut(n) {
                     nd.flags = cd.flags & !NodeFlags::DETACHED;
+                }
+                if let Some(b) = s.foreign.get(oc) {
+                    tree.set_foreign(n, Some(Arc::clone(b)));
                 }
                 map.insert(oc, n);
                 stack.push(oc);

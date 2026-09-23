@@ -8,6 +8,7 @@
 
 mod attrs;
 mod builder;
+mod foreign;
 mod invariants;
 mod props;
 mod tree;

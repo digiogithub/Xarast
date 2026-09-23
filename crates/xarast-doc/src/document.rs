@@ -261,7 +261,14 @@ impl Document {
         // `MARKED` is transient and `DETACHED` cannot be set on a reachable
         // node, so neither belongs in the identity of the document.
         let bits = data.flags.bits() & !(NodeFlags::MARKED | NodeFlags::DETACHED).bits();
-        h.u32(u32::from(bits));
+        // Foreign baggage is folded in only where there is some, flagged by a
+        // bit above the sixteen `NodeFlags` can use, so that a document with
+        // none digests exactly as it did before baggage existed.
+        let foreign = self.tree.foreign(id);
+        h.u32(u32::from(bits) | if foreign.is_some() { 1 << 16 } else { 0 });
+        if let Some(b) = foreign {
+            h.add(b);
+        }
         let n = self.tree.children(id).count();
         h.len(n);
         for c in self.tree.children(id) {
