@@ -61,6 +61,9 @@ pub struct OpenFileRequest {
     pub multiple: bool,
     /// Where to start.
     pub directory: Option<PathBuf>,
+    /// The window the dialog belongs to, as the portal spells it
+    /// (`wayland:<handle>`, `x11:<xid>`); see `ShellCtx::parent_window`.
+    pub parent: Option<String>,
 }
 
 /// A request to choose a save location.
@@ -74,6 +77,8 @@ pub struct SaveFileRequest {
     pub file_name: Option<String>,
     /// Where to start.
     pub directory: Option<PathBuf>,
+    /// The window the dialog belongs to; see [`OpenFileRequest::parent`].
+    pub parent: Option<String>,
 }
 
 /// The answer to a portal request.
@@ -480,11 +485,27 @@ fn portal_filters(filters: &[FileFilter]) -> Vec<ashpd::desktop::file_chooser::F
         .collect()
 }
 
+/// The portal's parent window, from the string `ShellCtx::parent_window`
+/// gives. A string the portal would not understand is dropped (and the
+/// dialog opens unparented) rather than failing the request.
+#[cfg(feature = "portals")]
+fn parent_identifier(parent: Option<&str>) -> Option<ashpd::WindowIdentifier> {
+    let parent = parent?;
+    match parent.parse::<ashpd::WindowIdentifierType>() {
+        Ok(t) => Some(t.into()),
+        Err(e) => {
+            tracing::warn!(parent, error = %e, "unusable parent window for a portal dialog");
+            None
+        }
+    }
+}
+
 #[cfg(feature = "portals")]
 fn open_files(id: PortalRequestId, req: &OpenFileRequest) -> PortalEvent {
     use ashpd::desktop::file_chooser::SelectedFiles;
     let result = pollster::block_on(async {
         let mut builder = SelectedFiles::open_file()
+            .identifier(parent_identifier(req.parent.as_deref()))
             .title(req.title.as_str())
             .modal(true)
             .multiple(req.multiple)
@@ -510,6 +531,7 @@ fn save_file(id: PortalRequestId, req: &SaveFileRequest) -> PortalEvent {
     use ashpd::desktop::file_chooser::SelectedFiles;
     let result = pollster::block_on(async {
         let mut builder = SelectedFiles::save_file()
+            .identifier(parent_identifier(req.parent.as_deref()))
             .title(req.title.as_str())
             .modal(true)
             .current_name(req.file_name.as_deref())
@@ -587,6 +609,23 @@ mod tests {
             ),
             Err(reason) => assert!(reason.contains("D-Bus"), "{reason}"),
         }
+    }
+
+    #[cfg(feature = "portals")]
+    #[test]
+    fn the_parent_window_reaches_the_portal_in_its_own_spelling() {
+        assert_eq!(
+            parent_identifier(Some("wayland:abc-123")).map(|w| w.to_string()),
+            Some("wayland:abc-123".to_owned())
+        );
+        assert_eq!(
+            parent_identifier(Some("x11:4a00007")).map(|w| w.to_string()),
+            Some("x11:4a00007".to_owned())
+        );
+        // Something the portal would reject opens the dialog unparented.
+        assert!(parent_identifier(Some("mir:1")).is_none());
+        assert!(parent_identifier(Some("x11:zz")).is_none());
+        assert!(parent_identifier(None).is_none());
     }
 
     #[test]

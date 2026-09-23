@@ -5354,6 +5354,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols",
  "wgpu 30.0.1",
  "winit",
  "xarast-app",
@@ -5361,6 +5362,7 @@ dependencies = [
  "xarast-geom",
  "xarast-render",
  "xarast-ui",
+ "xarast-xar",
 ]
 
 [[package]]

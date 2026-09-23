@@ -44,6 +44,7 @@ pub struct ShellCtx<'a> {
     pub(crate) exit: bool,
     pub(crate) renderer: Option<RendererStatus>,
     pub(crate) last_present: Option<PresentTiming>,
+    pub(crate) parent_window: Option<&'a str>,
 }
 
 /// What presents the canvas, for the status bar and bug reports.
@@ -196,6 +197,14 @@ impl ShellCtx<'_> {
     #[must_use]
     pub const fn portal(&self) -> &PortalHandle {
         self.portal
+    }
+
+    /// The window as a portal names a parent: `wayland:<handle>` (an
+    /// `xdg-foreign` export) or `x11:<xid>`. `None` when the platform
+    /// offers no way to name it, and a dialog then opens unparented.
+    #[must_use]
+    pub fn parent_window(&self) -> Option<String> {
+        self.parent_window.map(str::to_owned)
     }
 
     /// Asks for another frame.
@@ -380,6 +389,7 @@ macro_rules! ctx_of {
             exit: false,
             renderer: $this.gpu.as_ref().map(Gpu::status),
             last_present: $this.gpu.as_ref().and_then(|g| g.last_present),
+            parent_window: $this.parent_window.as_deref(),
         }
     };
 }
@@ -993,6 +1003,15 @@ pub(crate) struct ShellLoop<A: ShellApp> {
         not(any(target_os = "macos", target_os = "ios", target_os = "android"))
     ))]
     drops: Option<crate::wayland_dnd::WaylandDrops>,
+    /// The window exported for portal dialogs (`xdg-foreign`). Dropped in
+    /// `exiting`, like `drops`.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    exported: Option<crate::wayland_export::ExportedWindow>,
+    /// The window as a portal names a parent, once there is a window.
+    parent_window: Option<String>,
     /// What to do about GPU errors, frame by frame.
     recovery: GpuRecovery,
     /// While set, frames are neither drawn nor presented: the GPU is being
@@ -1039,6 +1058,12 @@ impl<A: ShellApp> ShellLoop<A> {
                 not(any(target_os = "macos", target_os = "ios", target_os = "android"))
             ))]
             drops: None,
+            #[cfg(all(
+                unix,
+                not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+            ))]
+            exported: None,
+            parent_window: None,
             recovery: GpuRecovery::new(),
             backoff_until: None,
             redraw_at: None,
@@ -1179,10 +1204,21 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
             not(any(target_os = "macos", target_os = "ios", target_os = "android"))
         ))]
         {
-            use raw_window_handle::HasDisplayHandle;
+            use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
             self.drops = window.display_handle().ok().and_then(|h| {
                 crate::wayland_dnd::WaylandDrops::new(h.as_raw(), self.waker.clone())
             });
+            let display = window.display_handle().ok().map(|h| h.as_raw());
+            let raw = window.window_handle().ok().map(|h| h.as_raw());
+            self.exported = display
+                .zip(raw)
+                .and_then(|(d, w)| crate::wayland_export::ExportedWindow::new(d, w));
+            self.parent_window = match (&self.exported, raw) {
+                (Some(e), _) => Some(e.parent_window()),
+                (None, Some(RawWindowHandle::Xlib(h))) => Some(format!("x11:{:x}", h.window)),
+                (None, Some(RawWindowHandle::Xcb(h))) => Some(format!("x11:{:x}", h.window)),
+                _ => None,
+            };
         }
         match Gpu::new(
             window.clone(),
@@ -1367,6 +1403,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
         ))]
         {
             self.drops = None;
+            self.exported = None;
         }
     }
 }
