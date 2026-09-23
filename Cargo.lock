@@ -5621,6 +5621,7 @@ name = "xarast-cli"
 version = "0.0.1"
 dependencies = [
  "xarast-app",
+ "xarast-color",
  "xarast-doc",
  "xarast-format",
  "xarast-geom",

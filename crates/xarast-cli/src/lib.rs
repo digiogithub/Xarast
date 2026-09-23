@@ -17,6 +17,7 @@
 
 pub mod args;
 pub mod convert;
+pub mod export;
 pub mod inputs;
 pub mod render;
 pub mod smoke;
@@ -52,6 +53,7 @@ USAGE:
 
 SUBCOMMANDS
     convert      convert .xar documents to .xarast packages
+    export       export documents to PNG, JPEG or WebP
     render       render documents to PNG on the CPU backend
     smoke-open   import documents, walk the scene and report what is missing
     version      print the version
@@ -81,6 +83,7 @@ pub fn run(argv: &[String]) -> Exit {
             Exit::Ok
         }
         "convert" => dispatch(rest, convert::USAGE, convert::parse, convert::run),
+        "export" => dispatch(rest, export::USAGE, export::parse, export::run),
         "render" => dispatch(rest, render::USAGE, render::parse, render::run),
         "smoke-open" => dispatch(rest, smoke::USAGE, smoke::parse, smoke::run),
         other => {
