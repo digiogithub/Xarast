@@ -765,7 +765,9 @@ dependencies = [
  "flate2",
  "quick-xml",
  "thiserror",
+ "xarast-color",
  "xarast-doc",
+ "xarast-geom",
  "zip",
 ]
 
