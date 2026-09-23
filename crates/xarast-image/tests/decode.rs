@@ -359,3 +359,95 @@ fn jpeg8bpp_leaves_a_translucent_non_jpeg_alone() {
         assert!(p[..3].iter().all(|c| *c <= p[3]));
     }
 }
+
+/// Splices a `pHYs` chunk (2 835 px/m, about 72 dpi) in after `IHDR`.
+fn with_phys(png: &[u8]) -> Vec<u8> {
+    let mut body = b"pHYs".to_vec();
+    body.extend_from_slice(&2835u32.to_be_bytes());
+    body.extend_from_slice(&2835u32.to_be_bytes());
+    body.push(1);
+    let ihdr_end = 8 + 12 + 13;
+    let mut out = png[..ihdr_end].to_vec();
+    out.extend_from_slice(&9u32.to_be_bytes());
+    out.extend_from_slice(&body);
+    out.extend_from_slice(&crc32(&body).to_be_bytes());
+    out.extend_from_slice(&png[ihdr_end..]);
+    out
+}
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = 0xFFFF_FFFFu32;
+    for &b in data {
+        c ^= u32::from(b);
+        for _ in 0..8 {
+            c = if c & 1 == 1 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+        }
+    }
+    !c
+}
+
+/// A tag-68 PNG with an alpha channel stores transparency there (0 =
+/// opaque): `decode_xar_bitmap` inverts it, and `normalise_xar_png`
+/// rewrites the file so a plain decode agrees, keeping its other chunks.
+#[test]
+fn a_xar_png_alpha_channel_is_transparency() {
+    // What the image means, and what the file stores: alpha inverted.
+    let meant = pattern(11, 7, true);
+    let mut stored = meant.clone();
+    for p in stored.pixels_mut() {
+        p.0[3] = 255 - p.0[3];
+    }
+    let png = with_phys(&encode(&DynamicImage::ImageRgba8(stored), F::Png));
+    assert!(xar::png_alpha_is_transparency(&png));
+    let limits = DecodeLimits::default();
+    let d = xar::decode_xar_bitmap(xar::TAG_DEFINEBITMAP_PNG, &png, &[], &limits).expect("68");
+    assert_eq!(&*d.data.pixels, &premul(&meant)[..]);
+
+    let fixed = xar::normalise_xar_png(&png, &limits)
+        .expect("normalise")
+        .expect("has alpha");
+    assert_ne!(fixed, png);
+    let plain = decode(&fixed, &limits).expect("standard png");
+    assert_eq!(&*plain.data.pixels, &premul(&meant)[..]);
+    assert_eq!(plain.info.hdpi, d.info.hdpi, "pHYs is kept");
+    assert_ne!(plain.info.hdpi, xarast_image::DEFAULT_DPI, "pHYs is read");
+
+    // Opaque layouts are left alone; so are other formats.
+    let rgb = encode(
+        &DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(meant).to_rgb8()),
+        F::Png,
+    );
+    assert!(!xar::png_alpha_is_transparency(&rgb));
+    assert_eq!(xar::normalise_xar_png(&rgb, &limits).expect("rgb"), None);
+    assert_eq!(
+        xar::normalise_xar_png(b"GIF89a", &limits).expect("gif"),
+        None
+    );
+    // A truncated file is an error, never a panic.
+    assert!(xar::normalise_xar_png(&png[..png.len() / 2], &limits).is_err());
+}
+
+/// Sixteen-bit grey + alpha is inverted on the whole sample, losslessly.
+#[test]
+fn a_sixteen_bit_xar_png_is_normalised_losslessly() {
+    let mut la = image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::new(5, 3);
+    for (i, p) in la.pixels_mut().enumerate() {
+        let i = i as u16;
+        p.0 = [i * 4000, 65535 - i * 3000];
+    }
+    let png = encode(&DynamicImage::ImageLumaA16(la.clone()), F::Png);
+    let fixed = xar::normalise_xar_png(&png, &DecodeLimits::default())
+        .expect("normalise")
+        .expect("has alpha");
+    let back = image::load_from_memory(&fixed)
+        .expect("reload")
+        .to_luma_alpha16();
+    for (a, b) in la.pixels().zip(back.pixels()) {
+        assert_eq!(a.0[0], b.0[0]);
+        assert_eq!(65535 - a.0[1], b.0[1]);
+    }
+}

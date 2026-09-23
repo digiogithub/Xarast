@@ -120,6 +120,16 @@ pub fn decode_as(
     format: ImageFormat,
     limits: &DecodeLimits,
 ) -> Result<DecodedImage, DecodeError> {
+    decode_as_with(bytes, format, limits, |_| {})
+}
+
+/// [`decode_as`] with a hook on the native buffer, before conversion.
+pub(crate) fn decode_as_with(
+    bytes: &[u8],
+    format: ImageFormat,
+    limits: &DecodeLimits,
+    transform: impl FnOnce(&mut Native),
+) -> Result<DecodedImage, DecodeError> {
     let start = Instant::now();
     let deadline = start + limits.max_duration;
     let owned;
@@ -129,7 +139,7 @@ pub fn decode_as(
     } else {
         (bytes, format)
     };
-    let result = decode_inner(bytes, codec_format, limits, deadline);
+    let result = decode_inner_with(bytes, codec_format, limits, deadline, transform);
     // Whatever the decoder said, a decode that overran is a timeout: an
     // I/O error raised by the deadline reader may arrive wrapped as
     // "corrupt", and a result that arrived late is discarded, never
@@ -439,12 +449,49 @@ fn check_size(w: u32, h: u32, limits: &DecodeLimits) -> Result<(), DecodeError> 
     Ok(())
 }
 
-fn decode_inner(
+/// A decoder's raw output: the pixels in the file's own layout, after every
+/// guard has passed, before conversion and orientation.
+pub(crate) struct Native {
+    head: Header,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) color: image::ColorType,
+    pub(crate) buf: Vec<u8>,
+    warnings: Vec<DecodeWarning>,
+    ceiling: u64,
+}
+
+impl Native {
+    /// Inverts the alpha channel in place, when the layout has one: the
+    /// `.xar` PNG convention stores *transparency* there (0 = opaque).
+    /// Bitwise NOT is `max − v` at both 8 and 16 bits, so every byte of the
+    /// sample is flipped. Returns whether there was a channel to flip.
+    pub(crate) fn invert_alpha(&mut self) -> bool {
+        use image::ColorType as C;
+        let (stride, alpha) = match self.color {
+            C::La8 => (2, 1..2),
+            C::Rgba8 => (4, 3..4),
+            C::La16 => (4, 2..4),
+            C::Rgba16 => (8, 6..8),
+            // Floating-point layouts come from no format a `.xar` embeds.
+            _ => return false,
+        };
+        for px in self.buf.chunks_exact_mut(stride) {
+            for b in &mut px[alpha.clone()] {
+                *b = !*b;
+            }
+        }
+        true
+    }
+}
+
+/// Every guard, then the decoder into its native buffer.
+pub(crate) fn decode_native(
     bytes: &[u8],
     format: ImageFormat,
     limits: &DecodeLimits,
     deadline: Instant,
-) -> Result<DecodedImage, DecodeError> {
+) -> Result<Native, DecodeError> {
     let mut dec = open(bytes, format, limits, deadline)?;
     let head = read_header(&mut *dec, bytes, format, true);
     let (w, h) = dec.dimensions();
@@ -504,7 +551,37 @@ fn decode_inner(
     if Instant::now() > deadline {
         return Err(DecodeError::Timeout);
     }
+    Ok(Native {
+        head,
+        width: w,
+        height: h,
+        color,
+        buf,
+        warnings,
+        ceiling,
+    })
+}
 
+/// [`decode_native`] into the premultiplied, upright result. `transform`
+/// sees the native buffer first (the `.xar` alpha inversion).
+pub(crate) fn decode_inner_with(
+    bytes: &[u8],
+    format: ImageFormat,
+    limits: &DecodeLimits,
+    deadline: Instant,
+    transform: impl FnOnce(&mut Native),
+) -> Result<DecodedImage, DecodeError> {
+    let mut native = decode_native(bytes, format, limits, deadline)?;
+    transform(&mut native);
+    let Native {
+        head,
+        width: w,
+        height: h,
+        color,
+        buf,
+        mut warnings,
+        ceiling,
+    } = native;
     let px = (w as usize) * (h as usize);
     let mut out = Vec::new();
     out.try_reserve_exact(px * 4)

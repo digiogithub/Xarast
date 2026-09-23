@@ -12,12 +12,21 @@
 //!   was 8 bpp, plus the original palette; the 8 bpp image is reconstructed
 //!   by mapping every pixel to its nearest palette entry, undithered.
 //!
+//! And one embeds a standard file with a non-standard meaning:
+//!
+//! - **68 `TAG_DEFINEBITMAP_PNG`**: when the PNG has an alpha channel
+//!   (colour type 4 or 6) that channel holds **transparency**, 0 = opaque —
+//!   the original's 32 bpp convention, written without the inversion its
+//!   PNG export applies. [`normalise_xar_png`] turns such a file into a
+//!   standard PNG; [`decode_xar_bitmap`] inverts while decoding.
+//!
 //! The importer hands this module the tag, the image bytes and (for 71) the
 //! palette; it needs nothing else from `xarast-xar`, which keeps this crate a
 //! leaf and lets the fuzzer reach the same code.
 
 use std::io::Read;
 
+use crate::decode::{Native, decode_as_with, decode_native};
 use crate::limits::{DecodeError, DecodeLimits};
 use crate::model::ImageFormat;
 use crate::{DecodedImage, decode_as, sniff};
@@ -51,6 +60,8 @@ pub enum XarWrapping {
     DibCompressed,
     /// A JPEG to snap back onto its palette.
     Jpeg8Bpp,
+    /// A PNG whose alpha channel, if it has one, holds transparency.
+    PngTransparency,
 }
 
 impl XarWrapping {
@@ -61,9 +72,8 @@ impl XarWrapping {
             TAG_DEFINEBITMAP_BMP => XarWrapping::Dib,
             TAG_DEFINEBITMAP_BMPZIP => XarWrapping::DibCompressed,
             TAG_DEFINEBITMAP_JPEG8BPP => XarWrapping::Jpeg8Bpp,
-            TAG_DEFINEBITMAP_GIF | TAG_DEFINEBITMAP_JPEG | TAG_DEFINEBITMAP_PNG => {
-                XarWrapping::Plain
-            }
+            TAG_DEFINEBITMAP_PNG => XarWrapping::PngTransparency,
+            TAG_DEFINEBITMAP_GIF | TAG_DEFINEBITMAP_JPEG => XarWrapping::Plain,
             TAG_PREVIEW_FIRST..=TAG_PREVIEW_LAST => XarWrapping::Plain,
             _ => return None,
         })
@@ -91,6 +101,13 @@ pub fn decode_xar_bitmap(
 ) -> Result<DecodedImage, DecodeError> {
     let wrapping = XarWrapping::from_tag(tag).ok_or(DecodeError::UnknownFormat)?;
     let mut img = match (sniff::sniff(bytes), wrapping) {
+        (Some(ImageFormat::Png), XarWrapping::PngTransparency)
+            if png_alpha_is_transparency(bytes) =>
+        {
+            decode_as_with(bytes, ImageFormat::Png, limits, |n: &mut Native| {
+                n.invert_alpha();
+            })?
+        }
         (Some(f), _) => decode_as(bytes, f, limits)?,
         (None, XarWrapping::Dib) => decode_as(bytes, ImageFormat::Dib, limits)?,
         (None, XarWrapping::DibCompressed) => {
@@ -115,6 +132,104 @@ pub fn decode_xar_bitmap(
         img.info.palette_entries = palette.len() as u16;
     }
     Ok(img)
+}
+
+/// Whether a tag-68 image is a PNG with an alpha channel (IHDR colour type
+/// 4, grey + alpha, or 6, RGBA), and so stores transparency there.
+///
+/// A palette PNG is not: the original writes 8 bpp and below with a single
+/// transparent index, which means what it says (`research/01 §4.5`).
+#[must_use]
+pub fn png_alpha_is_transparency(bytes: &[u8]) -> bool {
+    // Signature (8), IHDR length (4), "IHDR" (4), width, height (8),
+    // bit depth (1), then the colour type at offset 25.
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        && bytes.get(12..16) == Some(b"IHDR")
+        && matches!(bytes.get(25), Some(4 | 6))
+}
+
+/// Rewrites a tag-68 PNG whose alpha channel holds transparency as a
+/// standard PNG, so that the bytes mean the same thing in a browser, in a
+/// `.xarast` package and to [`crate::decode`].
+///
+/// Returns `Ok(None)` when the file needs nothing (no alpha channel, or not
+/// a PNG). Otherwise the pixels are decoded under `limits` in their own
+/// layout, the alpha samples inverted, and the image re-encoded at the same
+/// bit depth and colour type — lossless. Every ancillary chunk of the
+/// original (`pHYs`, `sRGB`, `iCCP`, text…) is kept, in order, around the
+/// new `IHDR` and `IDAT`; the result is never interlaced.
+///
+/// # Errors
+///
+/// Any [`DecodeError`] from the decode, or [`DecodeError::Corrupt`] when
+/// the encoder refuses the layout.
+pub fn normalise_xar_png(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<Option<Vec<u8>>, DecodeError> {
+    use image::ImageEncoder;
+    if !png_alpha_is_transparency(bytes) {
+        return Ok(None);
+    }
+    let deadline = std::time::Instant::now() + limits.max_duration;
+    let mut native = decode_native(bytes, ImageFormat::Png, limits, deadline)?;
+    if !native.invert_alpha() {
+        return Ok(None);
+    }
+    let mut fresh = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut fresh)
+        .write_image(
+            &native.buf,
+            native.width,
+            native.height,
+            native.color.into(),
+        )
+        .map_err(|e| DecodeError::corrupt(format!("PNG re-encode: {e}")))?;
+    drop(native);
+    let old = png_chunks(bytes).ok_or_else(|| DecodeError::corrupt("PNG chunk list"))?;
+    let new = png_chunks(&fresh).ok_or_else(|| DecodeError::corrupt("re-encoded chunk list"))?;
+    let mut out = Vec::with_capacity(fresh.len() + bytes.len() / 8);
+    out.extend_from_slice(&bytes[..8]);
+    let pick = |list: &[(&[u8; 4], &[u8])], ty: &[u8; 4]| -> Vec<u8> {
+        list.iter()
+            .filter(|(t, _)| *t == ty)
+            .flat_map(|(_, c)| c.iter().copied())
+            .collect()
+    };
+    out.extend_from_slice(&pick(&new, b"IHDR"));
+    let first_idat = old
+        .iter()
+        .position(|(t, _)| *t == b"IDAT")
+        .unwrap_or(old.len());
+    let keep = |(t, _): &&(&[u8; 4], &[u8])| !matches!(*t, b"IHDR" | b"IDAT" | b"IEND");
+    for (_, c) in old[..first_idat].iter().filter(keep) {
+        out.extend_from_slice(c);
+    }
+    out.extend_from_slice(&pick(&new, b"IDAT"));
+    for (_, c) in old[first_idat..].iter().filter(keep) {
+        out.extend_from_slice(c);
+    }
+    out.extend_from_slice(&pick(&new, b"IEND"));
+    Ok(Some(out))
+}
+
+/// A PNG's chunks as `(type, whole chunk bytes)`, bounds-checked; `None` on
+/// a truncated or overlong chunk.
+fn png_chunks(bytes: &[u8]) -> Option<Vec<(&[u8; 4], &[u8])>> {
+    let mut out = Vec::new();
+    let mut at = 8usize;
+    while at < bytes.len() {
+        let len = u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?) as usize;
+        let end = at.checked_add(12)?.checked_add(len)?;
+        let chunk = bytes.get(at..end)?;
+        let ty: &[u8; 4] = chunk.get(4..8)?.try_into().ok()?;
+        out.push((ty, chunk));
+        at = end;
+        if ty == b"IEND" {
+            break;
+        }
+    }
+    Some(out)
 }
 
 /// Maps every pixel to its nearest palette entry by squared RGB
@@ -288,7 +403,11 @@ mod tests {
         assert_eq!(XarWrapping::from_tag(65), Some(XarWrapping::Dib));
         assert_eq!(XarWrapping::from_tag(69), Some(XarWrapping::DibCompressed));
         assert_eq!(XarWrapping::from_tag(71), Some(XarWrapping::Jpeg8Bpp));
-        assert_eq!(XarWrapping::from_tag(68), Some(XarWrapping::Plain));
+        assert_eq!(
+            XarWrapping::from_tag(68),
+            Some(XarWrapping::PngTransparency)
+        );
+        assert_eq!(XarWrapping::from_tag(67), Some(XarWrapping::Plain));
         assert_eq!(XarWrapping::from_tag(61), Some(XarWrapping::Plain));
         assert_eq!(XarWrapping::from_tag(70), None);
     }
