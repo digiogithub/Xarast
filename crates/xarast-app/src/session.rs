@@ -16,6 +16,7 @@
 //! Writing `.xar` is a permanent non-goal (architecture §3.5).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use xarast_doc::{Command, CommandBus, Document, EditError};
 use xarast_render::{
@@ -175,6 +176,10 @@ pub struct Session {
     pub quality: RenderQuality,
     scene: Scene,
     walker: SceneWalker,
+    /// The resolver as of the last walk, shared with the render thread.
+    /// Taken lazily and dropped by every rebuild, so a pan (which does not
+    /// rebuild) sends the same `Arc` frame after frame.
+    resolver_snapshot: Option<Arc<xarast_render::Resolver>>,
     dirty: Dirty,
     modified: bool,
     diagnostics: Vec<String>,
@@ -209,6 +214,7 @@ impl Session {
             quality: RenderQuality::Final,
             scene: Scene::new(),
             walker: SceneWalker::new(),
+            resolver_snapshot: None,
             dirty: Dirty::everything(size),
             modified: false,
             diagnostics: Vec::new(),
@@ -367,7 +373,37 @@ impl Session {
             &mut self.scene,
         )?;
         self.dirty.scene = false;
+        self.resolver_snapshot = None;
         Ok(stats)
+    }
+
+    /// The resolver as of the last walk, as a snapshot another thread can
+    /// hold. Cloned once per rebuild, not once per frame.
+    pub fn resolver_snapshot(&mut self) -> Arc<xarast_render::Resolver> {
+        Arc::clone(
+            self.resolver_snapshot
+                .get_or_insert_with(|| Arc::new(self.walker.resolver().clone())),
+        )
+    }
+
+    /// Packages the current scene and view as a frame for the render
+    /// thread: the display list for the whole viewport, the resolver it
+    /// needs and the view it was built for. Never a node.
+    ///
+    /// Rebuild the scene first when [`Session::dirty`] says it is stale;
+    /// this only re-projects the scene that exists.
+    pub fn frame_job(&mut self, background: [u8; 4]) -> crate::render_thread::FrameJob {
+        let view = self.view_params();
+        let list =
+            xarast_render::DisplayList::build(&self.scene, &view, &DirtyRect::of(view.viewport));
+        crate::render_thread::FrameJob {
+            doc: self.id,
+            list,
+            resolver: self.resolver_snapshot(),
+            view,
+            background,
+            generation: 0,
+        }
     }
 
     /// Runs a command and keeps the session consistent with the result.
