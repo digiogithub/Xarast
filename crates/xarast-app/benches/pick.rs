@@ -72,6 +72,33 @@ fn bench(c: &mut Criterion) {
         s.picker().rebuilds() <= rebuilds + 1,
         "the edits were applied incrementally"
     );
+
+    // XARA-US-0042: resolving a colour drag's drop target, once per pointer
+    // move (`phase-08` budget: 1 ms at 100k objects). Two points a pixel
+    // apart, so every move resolves again.
+    use xarast_app::colour_bar::{ColourBarOp, ColourSource, DragPoint};
+    let (cx, cy) = centre.to_f64();
+    s.viewport
+        .set_centre(xarast_app::geometry::DocPointF::new(cx, cy));
+    let a = s.viewport.doc_to_device(centre);
+    let b2 = xarast_app::DevicePoint::new(a.x + 1.0, a.y);
+    s.apply(Intent::ColourBar(ColourBarOp::DragBegin(
+        ColourSource::NoColour,
+    )))
+    .expect("drag");
+    g.bench_function("colour drag: resolve the drop target per move", |b| {
+        b.iter(|| {
+            for at in [a, b2] {
+                black_box(
+                    s.apply(Intent::ColourBar(ColourBarOp::DragTo(DragPoint::Canvas {
+                        at,
+                        shift: false,
+                    })))
+                    .expect("move"),
+                );
+            }
+        });
+    });
     g.finish();
 }
 
