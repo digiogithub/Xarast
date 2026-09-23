@@ -117,6 +117,11 @@ impl WalkStats {
 #[derive(Debug, Default)]
 pub struct SceneWalker {
     resolver: Resolver,
+    /// Whether the node being painted is one a gesture previews: its
+    /// ramps are built at draft length (256 entries) whatever the quality,
+    /// since a new one is made every frame (`phase-08` T8.5.3). The frame
+    /// after the release walks it at the session's quality again.
+    draft_ramps: bool,
     images: HashMap<BitmapId, ImageId>,
     /// Bitmaps whose decode failed: the negative cache, so that a bad
     /// bitmap costs one decode per walker, not one per frame.
@@ -276,6 +281,13 @@ impl SceneWalker {
         let dirty = if preview.is_empty() { dirty } else { None };
         let moved = preview.transformed_set();
         let hidden: std::collections::HashSet<NodeId> = preview.hidden.iter().copied().collect();
+        // Attribute overrides: the value and a fingerprint of it, so a
+        // previewed node's content hash changes with every drag frame.
+        let overrides: HashMap<NodeId, (Arc<AttrValue>, u64)> = preview
+            .attrs
+            .iter()
+            .map(|(n, v)| (*n, (Arc::new(v.clone()), value_fingerprint(v))))
+            .collect();
         let preview_xf = preview
             .transform
             .as_ref()
@@ -284,6 +296,7 @@ impl SceneWalker {
         // at their `LeaveScope` after the node's own frame.
         let mut preview_open: Vec<NodeId> = Vec::new();
         self.sync_caches(doc);
+        self.resolver.begin_frame();
         self.stats = WalkStats::default();
         self.text_ink = Rect::EMPTY;
 
@@ -315,8 +328,27 @@ impl SceneWalker {
                     };
                     match kind {
                         NodeKind::Attr(a) => {
-                            attrs.push(self.attr_value(node, a));
-                            self.scope = mix64(self.scope, node_version(doc, node));
+                            // A previewed node's own attribute of the
+                            // overridden slot gives way to the preview.
+                            let over = if overrides.is_empty() {
+                                None
+                            } else {
+                                doc.tree
+                                    .links(node)
+                                    .parent
+                                    .and_then(|p| overrides.get(&p))
+                                    .filter(|(v, _)| v.slot() == a.value.slot())
+                            };
+                            match over {
+                                Some((v, fp)) => {
+                                    attrs.push(Arc::clone(v));
+                                    self.scope = mix64(self.scope, *fp);
+                                }
+                                None => {
+                                    attrs.push(self.attr_value(node, a));
+                                    self.scope = mix64(self.scope, node_version(doc, node));
+                                }
+                            }
                             continue;
                         }
                         NodeKind::Opaque(_) | NodeKind::Guideline(_) => {
@@ -360,7 +392,22 @@ impl SceneWalker {
                             b.pop_group();
                         }
                     } else if leaf {
+                        let over = overrides.get(&node);
+                        if let Some((v, fp)) = over {
+                            attrs.push_scope();
+                            scopes.push(self.scope);
+                            attrs.push(Arc::clone(v));
+                            self.scope = mix64(self.scope, *fp);
+                        }
+                        self.draft_ramps = over.is_some();
                         self.paint(doc, edit, node, &attrs, quality, &mut b);
+                        self.draft_ramps = false;
+                        if over.is_some() {
+                            attrs.pop_scope();
+                            if let Some(fp) = scopes.pop() {
+                                self.scope = fp;
+                            }
+                        }
                         if previewed && preview_xf.is_some() {
                             b.pop_group();
                         }
@@ -369,10 +416,19 @@ impl SceneWalker {
                 WalkEvent::EnterScope { parent } => {
                     attrs.push_scope();
                     scopes.push(self.scope);
+                    // The override stands first, where the command would
+                    // add the attribute; an own attribute of the slot is
+                    // replaced at its visit.
+                    if let Some((v, fp)) = overrides.get(&parent) {
+                        attrs.push(Arc::clone(v));
+                        self.scope = mix64(self.scope, *fp);
+                    }
                     frames.push(self.open(doc, parent, &attrs, &mut b));
                 }
                 WalkEvent::LeaveScope { parent } => {
+                    self.draft_ramps = overrides.contains_key(&parent);
                     self.paint(doc, edit, parent, &attrs, quality, &mut b);
+                    self.draft_ramps = false;
                     if let Some(f) = frames.pop() {
                         debug_assert_eq!(f.node, parent);
                         if f.clip {
@@ -396,6 +452,9 @@ impl SceneWalker {
 
         let stats = b.finish()?;
         self.scene_stats = stats;
+        // Ramps no scene of late has used go past the budget (a fill drag
+        // makes one per frame); this frame's are never evicted.
+        self.resolver.trim_ramps(RAMP_CACHE_BUDGET);
         Ok(stats)
     }
 
@@ -579,7 +638,11 @@ impl SceneWalker {
         self.check_transparency_image(attrs);
         let mut ctx = PaintCtx {
             colours: &doc.resources.colours,
-            ramp_length: quality.ramp_length(),
+            ramp_length: if self.draft_ramps {
+                xarast_render::RampLength::Short
+            } else {
+                quality.ramp_length()
+            },
             filter: quality.image_filter(),
             resolver: &mut self.resolver,
             images: &self.images,
@@ -1043,6 +1106,19 @@ fn node_version(doc: &Document, node: NodeId) -> u64 {
 /// Folds `v` into `h`: order-dependent, and well mixed (the SplitMix64
 /// finaliser), so that two scopes differing in one attribute's revision
 /// differ in about half their bits.
+/// The bytes of gradient tables the walker's ramp cache keeps between
+/// frames: 2048 final-quality tables, or 16 384 draft ones.
+pub const RAMP_CACHE_BUDGET: usize = 16 << 20;
+
+/// A fingerprint of a previewed attribute value. Only computed for the
+/// few nodes a gesture previews, once per scene rebuild.
+fn value_fingerprint(v: &AttrValue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{v:?}").hash(&mut h);
+    mix64(0x5052_4556_4945_5721, h.finish())
+}
+
 fn mix64(h: u64, v: u64) -> u64 {
     let mut z = h.rotate_left(5) ^ v.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

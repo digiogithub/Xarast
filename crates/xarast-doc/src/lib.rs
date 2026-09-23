@@ -57,6 +57,7 @@ pub mod digest;
 pub mod document;
 pub mod fill;
 pub mod fill_edit;
+pub mod fill_mutate;
 pub mod foreign;
 pub mod history;
 pub mod kind;
@@ -94,6 +95,7 @@ pub use fill_edit::{
     RemoveStop, SetFillEffect, SetFillGeometry, SetFillProfile, SetRampMapping, SetStopValue,
     SetTiling, SetTranspMode, StopTarget, StopValue,
 };
+pub use fill_mutate::{FillShape, MutateFill, MutationLoss, mutate_fill};
 pub use foreign::{ForeignAttr, ForeignBaggage, ForeignChild, ForeignChildKind, ForeignMarks};
 pub use history::{Action, CoalesceKey, Command, CommandBus, EditError, History, Transaction, Tx};
 pub use kind::{

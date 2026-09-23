@@ -193,6 +193,11 @@ pub struct Preview {
     pub transform: Option<(Vec<NodeId>, Matrix)>,
     /// Nodes not drawn at all.
     pub hidden: Vec<NodeId>,
+    /// Nodes drawn with an attribute of their own replaced (or added): a
+    /// fill handle being dragged. The value stands in for the node's own
+    /// attribute of that slot, exactly as the command the drag commits
+    /// will write it.
+    pub attrs: Vec<(NodeId, xarast_doc::AttrValue)>,
 }
 
 impl Preview {
@@ -200,12 +205,13 @@ impl Preview {
     pub fn clear(&mut self) {
         self.transform = None;
         self.hidden.clear();
+        self.attrs.clear();
     }
 
     /// Whether there is nothing to apply.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.transform.is_none() && self.hidden.is_empty()
+        self.transform.is_none() && self.hidden.is_empty() && self.attrs.is_empty()
     }
 
     /// The previewed nodes as a set, for the walker's lookups.
@@ -239,6 +245,18 @@ pub enum HandleShape {
     Radius,
     /// Where a drag snapped: a transient marker (`phase-07` T8.5).
     Snap,
+    /// A fill's control point or colour blob: a square.
+    FillBlob,
+    /// The selected fill control point.
+    FillBlobSelected,
+    /// A radial, conical or diamond fill's centre: a round blob.
+    FillCentre,
+    /// The selected centre.
+    FillCentreSelected,
+    /// An intermediate ramp stop: a diamond on the arm.
+    FillStop,
+    /// The selected ramp stop.
+    FillStopSelected,
 }
 
 /// One thing a tool wants drawn over the document, in document space.
@@ -260,6 +278,13 @@ pub enum OverlayShape {
         rect: DocRect,
         /// Dashed: a rubber band.
         dashed: bool,
+    },
+    /// A solid arrow with its head at `to`: a fill's arm.
+    Arrow {
+        /// The tail.
+        from: DocPoint,
+        /// The head.
+        to: DocPoint,
     },
     /// An outline through document points: a shape being drawn, or a
     /// shape's new outline while one of its handles is dragged.
@@ -399,6 +424,24 @@ pub enum InfobarField {
     EvenOdd,
     /// The freehand tool's smoothing, 0 to 100.
     Smoothing,
+    /// The shape of the fill: flat, linear, circular…
+    FillType,
+    /// How colours interpolate: fade or rainbow.
+    FillEffect,
+    /// Whether a fill repeats past its handles.
+    FillTiling,
+    /// Whether the ramp's parameter is eased.
+    RampMapping,
+    /// The ramp profile's bias, −1 to 1.
+    ProfileBias,
+    /// The ramp profile's gain, −1 to 1.
+    ProfileGain,
+    /// A transparency's blend mode.
+    TranspMode,
+    /// The selected ramp stop's position along the arm, in per cent.
+    StopPosition,
+    /// The selected handle's transparency, in per cent.
+    StopLevel,
 }
 
 impl InfobarField {
@@ -417,6 +460,15 @@ impl InfobarField {
             InfobarField::ScaleLines => "Scale lines",
             InfobarField::EvenOdd => "Even-odd fill",
             InfobarField::Smoothing => "Smoothing",
+            InfobarField::FillType => "Type",
+            InfobarField::FillEffect => "Effect",
+            InfobarField::FillTiling => "Tiling",
+            InfobarField::RampMapping => "Mapping",
+            InfobarField::ProfileBias => "Bias",
+            InfobarField::ProfileGain => "Gain",
+            InfobarField::TranspMode => "Mode",
+            InfobarField::StopPosition => "Position",
+            InfobarField::StopLevel => "Transparency",
         }
     }
 
@@ -435,6 +487,15 @@ impl InfobarField {
             InfobarField::ScaleLines => "Scale line widths with the objects",
             InfobarField::EvenOdd => "Fill overlapping areas by the even-odd rule",
             InfobarField::Smoothing => "How smooth freehand lines are, 0 to 100",
+            InfobarField::FillType => "The shape of the fill",
+            InfobarField::FillEffect => "How colours blend along the fill",
+            InfobarField::FillTiling => "Whether the fill repeats beyond its handles",
+            InfobarField::RampMapping => "Whether the fill eases in and out",
+            InfobarField::ProfileBias => "Pushes the fill towards its start or its end",
+            InfobarField::ProfileGain => "Sharpens or softens the middle of the fill",
+            InfobarField::TranspMode => "How the transparency combines with what is below",
+            InfobarField::StopPosition => "Position of the selected stop, in per cent",
+            InfobarField::StopLevel => "Transparency of the selected handle, in per cent",
         }
     }
 }
@@ -452,6 +513,10 @@ pub enum InfobarValue {
     Anchor(Anchor),
     /// A whole number.
     Number(u8),
+    /// The index of an option of a choice.
+    Choice(usize),
+    /// A real number, in the field's own range.
+    Real(f64),
 }
 
 /// One item of a tool's infobar.
@@ -503,6 +568,26 @@ pub enum InfobarItem {
         value: u8,
         /// The largest value.
         max: u8,
+    },
+    /// One option among several: a drop-down list.
+    Choice {
+        /// Which field.
+        field: InfobarField,
+        /// The options, in order.
+        options: Vec<&'static str>,
+        /// The option in force; `None` when the selection mixes several.
+        selected: Option<usize>,
+    },
+    /// A real number in a range: a slider.
+    Real {
+        /// Which field.
+        field: InfobarField,
+        /// Its value; `None` shows a disabled slider.
+        value: Option<f64>,
+        /// The smallest value.
+        min: f64,
+        /// The largest value.
+        max: f64,
     },
     /// A line of text.
     Note(String),

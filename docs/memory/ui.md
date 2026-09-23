@@ -89,8 +89,7 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   (`toolbar::ToolPalette`, 40 pt strip, one 30 pt button per `ToolId::ALL`)
   → canvas → dock on the right → status bar.
 - **Palette**: glyphs are painted strokes (original, no image assets);
-  selected = accent fill; later-phase tools (Fill, Transparency, Text)
-  disabled; implemented-later phase-7 tools enabled with a corner dot and
+  selected = accent fill; later-phase tools (Text) disabled; implemented-later phase-7 tools enabled with a corner dot and
   "coming soon (phase 7)" in the tooltip. Each button is published as an
   AccessKit `Button` named after the tool with `toggled`, `disabled`,
   `keyboard_shortcut` and a description (the tooltip). Clicking raises
@@ -125,6 +124,30 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   shape.
 - The colour panel has a "Fill" button of its own: query palette buttons
   by role *and* position in tests.
+
+### Fill and transparency tools (phase 8, XARA-US-0039)
+
+- **Palette**: Fill (F5) and Transparency (F6) are now available and
+  implemented; only Text stays disabled.
+- **State machine** (`xarast-app/src/fill_tool.rs`, full rules in
+  `tools.md` decisions 45–52): hover a handle → Move cursor; press+drag a
+  handle → live preview through `Preview::attrs`, one step on release; press
+  elsewhere → drag out a new fill; double click on an arm → insert a stop;
+  click a handle → it becomes the selected handle and the infobar rebinds;
+  Esc mid-drag → nothing happened (no command was emitted, so nothing to
+  undo); Esc idle → deselect the handle, then the objects.
+- **Pick radius**: 5 device px (`FILL_PICK_RADIUS_PX`, the phase's
+  proposal), measured in device space at every zoom; stops beat end
+  handles, which beat the arm line. The 8 px pen/touch radius is not wired:
+  no input-device reporting reaches the tools yet.
+- **Infobar items added**: `Choice` (an `egui::ComboBox`, AccessKit label
+  "description: option") and `Real` (an `egui::Slider` over `min..=max`,
+  disabled without a value), raising `InfobarValue::Choice(i)` /
+  `InfobarValue::Real(v)`.
+- **Overlay items added**: `OverlayItem::Arrow` (accent line over a darker
+  3-hairline halo, open 9 × 8 px head, no head for a zero-length arm),
+  `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);
+  stops reuse the `Fill` diamond; a selected handle is drawn `active`.
 
 ## Panels and canvas
 

@@ -41,6 +41,10 @@ pub enum HandleKind {
     Control,
     /// Where a drag snapped: a cross in the accent colour, transient.
     Snap,
+    /// A fill's control point or colour blob, drawn as a square.
+    FillBlob,
+    /// A fill's centre, drawn as a round blob.
+    FillCentre,
 }
 
 impl HandleKind {
@@ -81,6 +85,13 @@ pub enum OverlayItem {
         to: (Mp, Mp),
         /// Drawn dashed, for a construction line.
         dashed: bool,
+    },
+    /// A solid arrow with its head at `to`: a fill or transparency arm.
+    Arrow {
+        /// Tail, document coordinates.
+        from: (Mp, Mp),
+        /// Head, document coordinates.
+        to: (Mp, Mp),
     },
     /// An outlined rectangle: a bounding box or a rubber band.
     Rect {
@@ -139,6 +150,11 @@ impl OverlayPainter<'_> {
                     let b = self.snap_point(self.to_screen(to.0, to.1));
                     self.paint_line(painter, a, b, *dashed);
                 }
+                OverlayItem::Arrow { from, to } => {
+                    let a = self.snap_point(self.to_screen(from.0, from.1));
+                    let b = self.snap_point(self.to_screen(to.0, to.1));
+                    self.paint_arrow(painter, a, b);
+                }
                 OverlayItem::Rect { bounds, dashed } => {
                     let a = self.snap_point(self.to_screen(bounds.0, bounds.1));
                     let b = self.snap_point(self.to_screen(bounds.2, bounds.3));
@@ -170,6 +186,31 @@ impl OverlayPainter<'_> {
             }
         } else {
             painter.line_segment([a, b], egui::Stroke::new(w, self.tokens.accent));
+        }
+    }
+
+    /// A line under a darker halo, with an open head at `b`: legible on
+    /// light and dark artwork alike.
+    fn paint_arrow(&self, painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2) {
+        let w = self.scale.hairline_width() as f32;
+        let halo = egui::Stroke::new(3.0 * w, self.tokens.surface_sunken);
+        let line = egui::Stroke::new(w, self.tokens.accent);
+        let d = b - a;
+        let len = d.length();
+        let head = if len > 1.0 && len.is_finite() {
+            let u = d / len;
+            let n = egui::vec2(-u.y, u.x);
+            let back = b - u * 9.0;
+            Some([back + n * 4.0, back - n * 4.0])
+        } else {
+            None
+        };
+        for stroke in [halo, line] {
+            painter.line_segment([a, b], stroke);
+            if let Some([l, r]) = head {
+                painter.line_segment([b, l], stroke);
+                painter.line_segment([b, r], stroke);
+            }
         }
     }
 
@@ -222,7 +263,7 @@ impl OverlayPainter<'_> {
                     egui::StrokeKind::Inside,
                 );
             }
-            HandleKind::Control => {
+            HandleKind::Control | HandleKind::FillCentre => {
                 painter.circle_filled(c, half, fill);
                 painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));
             }
@@ -243,7 +284,7 @@ impl OverlayPainter<'_> {
                     egui::Stroke::new(w, self.tokens.surface_sunken),
                 ));
             }
-            HandleKind::Bounds | HandleKind::Node => {
+            HandleKind::Bounds | HandleKind::Node | HandleKind::FillBlob => {
                 painter.rect_filled(rect, 0.0, fill);
                 painter.rect_stroke(
                     rect,
@@ -427,6 +468,27 @@ mod tests {
                     OverlayItem::Rect {
                         bounds: (Mp::ZERO, Mp::ZERO, Mp::from_pt(60.0), Mp::from_pt(40.0)),
                         dashed: false,
+                    },
+                    OverlayItem::Arrow {
+                        from: (Mp::ZERO, Mp::ZERO),
+                        to: (Mp::from_pt(50.0), Mp::from_pt(10.0)),
+                    },
+                    // A zero-length arm draws no head and does not panic.
+                    OverlayItem::Arrow {
+                        from: (Mp::ZERO, Mp::ZERO),
+                        to: (Mp::ZERO, Mp::ZERO),
+                    },
+                    OverlayItem::Handle {
+                        x: Mp::from_pt(50.0),
+                        y: Mp::from_pt(10.0),
+                        kind: HandleKind::FillBlob,
+                        active: true,
+                    },
+                    OverlayItem::Handle {
+                        x: Mp::ZERO,
+                        y: Mp::from_pt(10.0),
+                        kind: HandleKind::FillCentre,
+                        active: false,
                     },
                 ];
                 p.paint(ui.painter(), &items);

@@ -166,7 +166,7 @@ impl FillValue {
         }
     }
 
-    fn into_attr(self, slot: PaintSlot) -> AttrValue {
+    pub(crate) fn into_attr(self, slot: PaintSlot) -> AttrValue {
         match (self, slot) {
             (FillValue::Colour(g), PaintSlot::Fill) => AttrValue::Fill(g),
             (FillValue::Colour(g), PaintSlot::Stroke) => AttrValue::StrokeColour(g),
@@ -641,7 +641,7 @@ fn transp_stop(v: &StopValue, like: Option<Transparency>) -> Result<Transparency
 // ─────────────────────────────── commands ───────────────────────────────
 
 /// Replaces an object's fill (of either payload) wholesale.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetFillGeometry {
     /// The object.
     pub node: NodeId,
@@ -665,7 +665,7 @@ impl Command for SetFillGeometry {
 }
 
 /// Moves one fill handle to a document point: the fill tool's drag.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoveFillControl {
     /// The object.
     pub node: NodeId,
@@ -722,7 +722,7 @@ fn coalesce_hash(words: &[u64]) -> u64 {
 }
 
 /// Adds an intermediate stop at `pos` along the ramp.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InsertStop {
     /// The object.
     pub node: NodeId,
@@ -760,7 +760,7 @@ impl Command for InsertStop {
 }
 
 /// Moves an intermediate stop along the ramp, re-sorting.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MoveStop {
     /// The object.
     pub node: NodeId,
@@ -807,7 +807,7 @@ impl Command for MoveStop {
 }
 
 /// Removes an intermediate stop.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RemoveStop {
     /// The object.
     pub node: NodeId,
@@ -842,7 +842,7 @@ impl Command for RemoveStop {
 /// Sets the value of an endpoint, an intermediate stop or a corner: a
 /// palette colour dropped on a stop. Changes that one field and nothing
 /// else.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetStopValue {
     /// The object.
     pub node: NodeId,
@@ -874,7 +874,7 @@ impl Command for SetStopValue {
 
 /// Sets the bias/gain profile of a fill's ramp (or of a bitmap or
 /// procedural fill).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetFillProfile {
     /// The object.
     pub node: NodeId,
@@ -910,7 +910,7 @@ impl Command for SetFillProfile {
 }
 
 /// Sets how the ramp parameter is eased (linear or sine).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetRampMapping {
     /// The object.
     pub node: NodeId,
@@ -940,7 +940,7 @@ impl Command for SetRampMapping {
 /// Sets how colours are interpolated (fade, rainbow, alternate rainbow).
 /// A separate attribute from the geometry, as in the file format; it
 /// applies to the interior's colour fill.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetFillEffect {
     /// The object.
     pub node: NodeId,
@@ -960,7 +960,7 @@ impl Command for SetFillEffect {
 
 /// Sets how a fill repeats outside its extent. A separate attribute from
 /// the geometry, per channel, as in the file format.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetTiling {
     /// The object.
     pub node: NodeId,
@@ -986,7 +986,7 @@ impl Command for SetTiling {
 
 /// Sets the blend mode of every stop of a transparency fill (T8.2.6): a
 /// transparency fill has one mode, carried redundantly by its stops.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SetTranspMode {
     /// The object.
     pub node: NodeId,

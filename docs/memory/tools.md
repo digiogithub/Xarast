@@ -309,6 +309,78 @@ undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
     save/reopen; Show guides = the guide layer's visibility (hidden guides
     do not snap). The snap marker is `HandleShape::Snap` while dragging.
 
+## Phase 8: the fill and transparency tools (XARA-US-0039)
+
+| Piece | Where | State |
+|---|---|---|
+| `FillHandles` derivation (`fill_handles`), `HandleKind`, `Guide`, `stop_target` | `xarast-app/src/fill_handles.rs` | done (T8.3.1) |
+| Device-space `hit_handle`, `FILL_PICK_RADIUS_PX` = 5, z-order stop > end > arm | `fill_handles.rs` | done (T8.3.2) |
+| Overlay: `OverlayShape::Arrow`, `HandleShape::Fill{Blob,Centre,Stop}[Selected]`; UI `OverlayItem::Arrow`, `HandleKind::{FillBlob, FillCentre}` (stops reuse the `Fill` diamond) | `tool.rs`, `xarast-ui/src/overlay.rs`, shell `viewer.rs` | done (T8.3.3) |
+| Shared handle sets for selected objects with equal fills (`fill_sets`) | `fill_tool.rs` | done (T8.3.4) |
+| `FillLikeTool<K: FillKind>`, `GradFillTool` (F5), `TransparencyTool` (F6) | `fill_tool.rs`, `tools.rs`, `command.rs` | done (T8.4.1, T8.4.2) |
+| Infobars: type (mutate), effect / blend mode, tiling, ramp mapping, bias, gain, stop position, stop transparency | `fill_tool.rs`; `InfobarItem::{Choice, Real}`, `InfobarValue::{Choice, Real}`; UI combo box and slider in `toolbar.rs` | done (T8.4.3, T8.4.4) |
+| `EditCommand::Fill { edits: Vec<FillCommand> }` wrapping the `xarast-doc` fill commands | `ops.rs`, `fill_tool.rs` | done (fill half of XARA-T-0212) |
+| `Preview::attrs` — attribute overrides the walker applies | `tool.rs`, `walker.rs` | done |
+
+Tests: `tests/fill_tool.rs` (10: drag-out makes one "Set Fill" step and
+undoes exactly; a handle drag leaves the digest untouched until release,
+previews in pixels and commits pixel-identical to the preview; Esc on a
+handle drag and on a drag-out leaves digest and history unchanged; double
+click on the arm inserts a stop, drag moves it, Delete removes it; two
+objects sharing a fill show one set and move together, and split into two
+sets once they differ; type menu mutates; Constrain snaps to 15°; profile,
+effect, tiling and mapping fields; the transparency tool's 0→255 drag-out,
+blend mode and per-cent level; Shift drags a circular fill; a leaf object
+previews as it commits); unit tests in `fill_handles.rs` (3: handle
+counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
+
+45. **A fill drag previews, it does not emit.** `phase-08 §W8.4` sketches
+    live `MoveFillControl`s per mouse move plus a restore on Esc; that would
+    break invariants 2 and 7 (nothing before `DragEnd`, the pick index never
+    sees a drag frame). Instead the tool snapshots the fill at the press,
+    recomputes it each frame with `xarast_doc::fill_edit::move_control`, and
+    puts it in `Preview::attrs`; the walker draws each node with that value
+    standing in for its own attribute of the slot. Release emits one
+    `EditCommand::Fill` (`MoveFillControl`/`MoveStop` per node with the final
+    point, so the step is labelled "Move Fill Handle"/"Move Fill Stop"); Esc
+    has nothing to undo. The command's `drag` coalescing key stays unused by
+    the tool.
+46. **Walker override rule**: a node in `Preview::attrs` gets the value
+    pushed right after its `EnterScope` (where the command would add the
+    attribute), its own attribute child of that slot is replaced at its
+    visit, and a leaf is painted inside a pushed scope holding the value.
+    The scope fingerprint mixes a hash of the value so the node's content
+    hash changes every frame. `headless::render` renders the preview too.
+47. **Handle sets**: the selected objects are grouped by equal fill in force
+    (`fill_in_force`, interior slot); a set's drag edits every node in it.
+    Outline (stroke) fills have no handles yet.
+48. **Drag-out** (`research/04`, `tools/filltool.cpp` OnClick): a drag not on
+    a handle makes a new fill of the infobar's type over the pressed object
+    (selecting it) or over the selection; flat → linear; Adjust (Shift) →
+    circular. Colours: a flat colour runs to itself at zero saturation (the
+    W8.2 mutation rule; black/white when already grey), a gradient keeps its
+    ends and ramp; transparency 0 → 255 (`Kernel/opgrad.cpp:2796-2802`),
+    mix mode unless the object already has one. The end handle is selected
+    afterwards, as the original does. The original's "double click then
+    drag = conical" is not done (the machine does not report a press after a
+    click as such).
+49. **Stops**: a double click on an arm inserts a stop with the ramp sampled
+    there (Fade), selected; Delete removes the selected stop
+    (`ToolAction::Delete`, before object deletion); Esc with a handle
+    selected deselects it. The selected stop keeps its identity across a
+    re-sort (`ramp_move` returns the new index).
+50. **Constrain during a handle drag** turns the handle about the arm's other
+    end (or the centre, or the three/four-colour origin) in 15° steps
+    (T8.3.6's snap-to-15°; axis and aspect locks not done). Snapping goes
+    through `ToolCtx::snap_point`.
+51. **Tiling in the infobar is "Simple"/"Repeating"**: Repeating writes
+    `Tiling::RepeatExtra` for a graduated fill (the only mapping that tiles
+    one, `research/01 §8.3`) and `Tiling::Repeat` for three/four-colour
+    fills. Repeat-inverted only renders for bitmaps and is not offered.
+52. **Blend modes offered**: the nine `TranspMode`s other than `None`
+    (`TRANSP_MODES`); phase 8 lists Hue as a tenth, which `TranspMode` does
+    not have yet.
+
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
 | Keys | Command | Note |
@@ -324,6 +396,7 @@ undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
 | NumPad . / NumPad 2 / NumPad * | Snap to grid / guides / objects | work mid-drag (`works_in_drag`) |
 | `#` | Show grid | |
 | NumPad 1 | Show guides | keypad only (`ChordKey::NumPad`), so `1` stays 100 % |
+| F5 / F6 | Fill tool / Transparency tool | `research/04 §4.4` line 640 |
 
 Clashes: none with the path tools' plain L/C/S/Z/B/J/Enter, Backspace and
 Ctrl+Shift+S (XARA-US-0034), checked by `no_two_commands_share_a_key`.
@@ -359,6 +432,9 @@ duplicate while plain `D` is fit drawing — different chords.
    stroke are each one undo step.
 9. The shape editor never changes a quick shape's kind except through
    `ConvertToPaths`.
+10. A fill or transparency drag emits nothing before release; the release
+    is one `EditCommand::Fill` step, and what the preview drew is what the
+    commit renders (pixel-identical, `tests/fill_tool.rs`).
 
 ## Dead ends (do not retry)
 
@@ -375,6 +451,14 @@ duplicate while plain `D` is fit drawing — different chords.
   undo pair through the bus). The bench now moves the smallest object.
 
 ## Open TODOs
+
+- [ ] Fill tools (phase 8): stroke-slot handles; keyboard nudge of a fill
+      handle (T8.3.5); axis/aspect lock during a handle drag (rest of
+      T8.3.6); status-line text and per-target cursors (T8.4.6); dropping a
+      palette colour on a stop or the arm (W8.7); the Hue blend mode; the
+      original's double-click-then-drag conical; linear `end2` (skew) handle;
+      bitmap-fill handles (phase 10). Profile slider drags produce one undo
+      step per change outside a gesture (XARA-T-0220).
 
 - [x] **Incremental pick index** (decision 37). Image alpha picking
       is still open.
