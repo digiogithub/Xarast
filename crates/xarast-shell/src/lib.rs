@@ -39,6 +39,7 @@
 //! | [`intents`] | Physical [`ShellEvent`]s to semantic `xarast_app::Intent`s |
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
+//! | [`gpu_errors`] | `wgpu` errors logged and recovered from, never a panic |
 //!
 //! See `docs/phases/phase-05-shell-and-ui.md` and `docs/memory/ui.md`.
 
@@ -50,6 +51,7 @@ use std::time::{Duration, Instant};
 pub mod clipboard;
 pub mod decorations;
 pub mod display;
+pub mod gpu_errors;
 pub mod input;
 pub mod intents;
 mod paint;
@@ -71,6 +73,7 @@ pub use decorations::{DecorationMode, DecorationPlan};
 pub use display::{
     Desktop, DisplayEnvironment, DisplayServer, PlatformCapabilities, headless_skip_reason,
 };
+pub use gpu_errors::GpuErrorReport;
 pub use input::event::{
     ColorScheme, DragEvent, GestureEvent, PointerButton, PointerEvent, PointerId, PointerPhase,
     ScrollUnit, ShellEvent,

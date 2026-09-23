@@ -14,6 +14,7 @@ use winit::window::{Window, WindowId};
 use crate::clipboard::{Clipboard, system_clipboard};
 use crate::decorations::DecorationPlan;
 use crate::display::{DisplayEnvironment, PlatformCapabilities};
+use crate::gpu_errors::{GpuErrorSink, GpuRecovery, Recovery};
 use crate::input::event::ShellEvent;
 use crate::input::translate::EventTranslator;
 use crate::paint::{CanvasFrame, Painter, UiFrame};
@@ -227,6 +228,8 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     painter: Painter,
+    /// Where `wgpu` reports the errors it would otherwise panic on.
+    errors: GpuErrorSink,
     pub(crate) report: AdapterReport,
 }
 
@@ -284,6 +287,19 @@ impl Gpu {
             ..Default::default()
         }))
         .map_err(|e| ShellError::Surface(e.to_string()))?;
+        // Before anything else touches the device: from here on a
+        // validation error is logged and recovered from, never a panic
+        // (`ui.md` shell invariant 6).
+        let errors = GpuErrorSink::new();
+        errors.install(&device);
+        let lost = errors.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            // Dropping the device at exit reports `Destroyed`; that is not
+            // a fault.
+            if reason != wgpu::DeviceLostReason::Destroyed {
+                lost.record("device lost", &message);
+            }
+        });
 
         let size = window.inner_size();
         let mut config = surface
@@ -322,6 +338,7 @@ impl Gpu {
             queue,
             config,
             painter,
+            errors,
             report,
         })
     }
@@ -498,6 +515,17 @@ impl Gpu {
         xarast_render::golden::write_png(&surface, path).map_err(|e| e.to_string())
     }
 
+    /// Raises a validation error on purpose, for `XARAST_INJECT_GPU_ERRORS`:
+    /// the only way to watch the recovery path in a real window.
+    fn inject_error(&self) {
+        let _ = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("injected error"),
+            size: 16,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE,
+            mapped_at_creation: false,
+        });
+    }
+
     /// Re-applies the current configuration, which is how a lost, outdated or
     /// suboptimal swapchain is recovered.
     fn reconfigure(&mut self) {
@@ -546,6 +574,14 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     events: Vec<ShellEvent>,
     frames: u32,
     consecutive_failures: u32,
+    /// What to do about GPU errors, frame by frame.
+    recovery: GpuRecovery,
+    /// While set, frames are neither drawn nor presented: the GPU is being
+    /// left alone after a run of errors.
+    backoff_until: Option<std::time::Instant>,
+    /// Frames still to raise a deliberate GPU error in
+    /// (`XARAST_INJECT_GPU_ERRORS`); zero in normal use.
+    inject_errors: u32,
     pub(crate) report: Option<AdapterReport>,
     pub(crate) error: Option<ShellError>,
 }
@@ -570,6 +606,12 @@ impl<A: ShellApp> ShellLoop<A> {
             events: Vec::new(),
             frames: 0,
             consecutive_failures: 0,
+            recovery: GpuRecovery::new(),
+            backoff_until: None,
+            inject_errors: std::env::var("XARAST_INJECT_GPU_ERRORS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             report: None,
             error: None,
         }
@@ -611,6 +653,41 @@ impl<A: ShellApp> ShellLoop<A> {
         }
         if ctx.exit {
             event_loop.exit();
+        }
+    }
+
+    /// Acts on the GPU errors the last frame raised, if any: reconfigure,
+    /// or back off. Never exits — a failing GPU leaves the document open
+    /// (`ui.md` shell invariant 6). The application hears of it as a
+    /// [`ShellEvent::GpuError`].
+    fn recover_from_gpu_errors(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(gpu) = self.gpu.as_mut() else { return };
+        let report = gpu.errors.take_report();
+        match self.recovery.after_frame(report.is_some()) {
+            Recovery::Continue => {}
+            Recovery::Reconfigure => {
+                tracing::warn!(
+                    streak = self.recovery.streak(),
+                    "GPU error; reconfiguring the surface"
+                );
+                gpu.reconfigure();
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+            Recovery::Backoff(delay) => {
+                tracing::warn!(
+                    streak = self.recovery.streak(),
+                    delay_ms = delay.as_millis(),
+                    "GPU errors persist; pausing presentation"
+                );
+                let until = std::time::Instant::now() + delay;
+                self.backoff_until = Some(until);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            }
+        }
+        if let Some(report) = report {
+            self.events.push(ShellEvent::GpuError(report));
         }
     }
 
@@ -681,6 +758,16 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 if event_loop.exiting() {
                     return;
                 }
+                // Backing off after GPU errors: the application's state
+                // waits in `pending` (texture deltas merge there), and the
+                // loop sleeps until the deadline instead of spinning.
+                if let Some(until) = self.backoff_until {
+                    if std::time::Instant::now() < until {
+                        event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+                        return;
+                    }
+                    self.backoff_until = None;
+                }
 
                 let mut ctx = ctx_of!(self);
                 let request = self.app.on_frame(&mut ctx);
@@ -692,6 +779,10 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 apply_frame_request(event_loop, self.window.as_ref(), request);
 
                 let Some(gpu) = self.gpu.as_mut() else { return };
+                if self.inject_errors > 0 {
+                    self.inject_errors -= 1;
+                    gpu.inject_error();
+                }
                 // Applied whether or not this present succeeds: texture
                 // deltas must reach the GPU exactly once and in order.
                 gpu.apply(&mut self.pending);
@@ -703,6 +794,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 } else if let Some((_, true)) = capture {
                     event_loop.exit();
                 }
+                self.recover_from_gpu_errors(event_loop);
                 match outcome {
                     FrameOutcome::Presented => self.frames += 1,
                     // A skipped frame is normal: the window is occluded, or the
@@ -752,6 +844,12 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_portal_answers();
         self.dispatch(event_loop);
+        if let Some(until) = self.backoff_until
+            && std::time::Instant::now() >= until
+            && let Some(w) = &self.window
+        {
+            w.request_redraw();
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

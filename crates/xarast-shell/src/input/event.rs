@@ -221,6 +221,9 @@ pub enum ShellEvent {
     Drag(DragEvent),
     /// An answer from a portal request.
     Portal(crate::portal::PortalEvent),
+    /// The GPU raised errors during the last frame. The shell has already
+    /// logged them and is recovering; this is for the status bar.
+    GpuError(crate::gpu_errors::GpuErrorReport),
     /// The user asked to close the window.
     CloseRequested,
 }

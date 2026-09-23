@@ -356,6 +356,15 @@ impl Viewer {
                 self.to_open.extend(paths.iter().cloned());
                 redraw = true;
             }
+            ShellEvent::GpuError(report) => {
+                // Already logged and being recovered from by the shell;
+                // the status bar says so rather than the window vanishing.
+                self.message = Some(format!(
+                    "Graphics error ({} so far), recovering: {}",
+                    report.total, report.message
+                ));
+                redraw = true;
+            }
             ShellEvent::ColorSchemeChanged(s)
             | ShellEvent::Portal(PortalEvent::ColorSchemeChanged(s)) => {
                 self.scheme = *s;
