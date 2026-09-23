@@ -84,20 +84,24 @@ pub mod schedule;
 pub mod selector;
 pub mod session;
 pub mod shapes;
+pub mod snap;
+pub mod structure;
 mod text;
 pub mod tool;
 pub mod tools;
 pub mod viewport;
 pub mod walker;
 
-pub use app::{AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, Severity};
+pub use app::{
+    AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, InternalClipboard, Severity,
+};
 pub use command::{AppCommand, ChordKey, KeyChord};
 pub use edit::{
     ControlPoints, CurrentAttributes, EditState, Modifiers, SelectMode, ToolId, ToolState,
 };
 pub use geometry::{DevicePoint, DeviceSize, DocPoint, DocPointF, DocRect};
 pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult, render_to_png};
-pub use intent::{Changed, Intent, PlatformRequest, PointerButton, PointerSample};
+pub use intent::{Changed, Dialog, Intent, PlatformRequest, PointerButton, PointerSample};
 pub use ops::{CommandSink, EditCommand};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
 pub use recent::RecentFiles;

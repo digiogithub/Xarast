@@ -255,7 +255,12 @@ pub fn creating_tool(doc: &Document, node: NodeId) -> Option<ToolId> {
 #[derive(Debug, Clone, PartialEq)]
 enum SelectorDrag {
     /// Moving the selection by `delta`.
-    Move { nodes: Vec<NodeId>, delta: Vector },
+    Move {
+        nodes: Vec<NodeId>,
+        /// The moved objects' bounds at the start, which snapping aligns.
+        bounds: DocRect,
+        delta: Vector,
+    },
     /// A rubber band from `from` to `to`.
     Marquee { from: DocPoint, to: DocPoint },
     /// Scaling from a blob.
@@ -448,8 +453,18 @@ impl SelectorTool {
         let m = cx.modifiers;
         let lock = self.lock_aspect;
         let preview = match &mut self.drag {
-            Some(SelectorDrag::Move { nodes, delta }) => {
-                *delta = Self::delta(cx, from, to);
+            Some(SelectorDrag::Move {
+                nodes,
+                bounds,
+                delta,
+            }) => {
+                let d = Self::delta(cx, from, to);
+                // A constrained move keeps its direction: no snapping.
+                *delta = if m.constrain {
+                    d
+                } else {
+                    cx.snap_move(nodes, *bounds, d)
+                };
                 Some((nodes.clone(), Matrix::translate(*delta)))
             }
             Some(SelectorDrag::Marquee { to: t, .. }) => {
@@ -462,6 +477,7 @@ impl SelectorTool {
                 blob,
                 xf,
             }) => {
+                let to = cx.snap_point(to);
                 *xf = scale_matrix(*bounds, *blob, to, m.constrain || lock, m.adjust);
                 Some((nodes.clone(), *xf))
             }
@@ -485,6 +501,7 @@ impl SelectorTool {
             }
             Some(SelectorDrag::Centre { at }) => {
                 let bounds = cx.edit.selection_bounds(cx.doc);
+                let to = cx.snap_point(to);
                 *at = Self::snap_centre(cx, bounds, to);
                 None
             }
@@ -594,8 +611,10 @@ impl Tool for SelectorTool {
                             vec![h.top_group]
                         };
                         nodes.dedup();
+                        let bounds = crate::viewport::nodes_rect(cx.doc, nodes.iter().copied());
                         SelectorDrag::Move {
                             nodes,
+                            bounds,
                             delta: Vector::ZERO,
                         }
                     }
@@ -611,7 +630,7 @@ impl Tool for SelectorTool {
             GestureEvent::DragEnd { from, to } => {
                 self.update(cx, *from, *to);
                 match self.drag.take() {
-                    Some(SelectorDrag::Move { nodes, delta }) => {
+                    Some(SelectorDrag::Move { nodes, delta, .. }) => {
                         self.commit(cx, nodes, Matrix::translate(delta), false);
                     }
                     Some(SelectorDrag::Marquee { from, to }) => {

@@ -168,9 +168,74 @@ pub struct AppState {
     recent_store: Option<PathBuf>,
     /// What the platform layer has been asked to do and has not done yet.
     requests: Vec<PlatformRequest>,
+    /// The application's own clipboard: the last copy, in full fidelity,
+    /// and the SVG text it put on the system clipboard.
+    clipboard: Option<InternalClipboard>,
+}
+
+/// The last copy made in this process.
+#[derive(Debug, Clone)]
+pub struct InternalClipboard {
+    /// The copied objects, self-contained.
+    pub fragment: std::sync::Arc<xarast_doc::Document>,
+    /// The SVG flavour handed to the system clipboard. When the system
+    /// clipboard still holds exactly this text, a paste uses `fragment`
+    /// (bitmaps and palette references included) rather than re-reading
+    /// the SVG.
+    pub svg: String,
 }
 
 impl AppState {
+    /// The application's own clipboard, if anything was copied.
+    #[must_use]
+    pub fn clipboard(&self) -> Option<&InternalClipboard> {
+        self.clipboard.as_ref()
+    }
+
+    /// Copies the active selection to the internal clipboard and asks the
+    /// platform to put its SVG flavour on the system clipboard.
+    fn copy(&mut self) -> Changed {
+        let Some(fragment) = self.active().and_then(Session::copy_selection) else {
+            return Changed::empty();
+        };
+        let svg = crate::structure::fragment_svg(&fragment);
+        self.requests
+            .push(PlatformRequest::SetClipboardText(svg.clone()));
+        self.clipboard = Some(InternalClipboard {
+            fragment: std::sync::Arc::new(fragment),
+            svg,
+        });
+        Changed::UI
+    }
+
+    /// Pastes what the shell read from the clipboard: our own last copy
+    /// when the text is the SVG we put there (or there is no clipboard to
+    /// read), otherwise the text read as SVG.
+    fn paste_text(
+        &mut self,
+        text: Option<String>,
+        in_place: bool,
+    ) -> Result<Changed, SessionError> {
+        let fragment = match (&text, &self.clipboard) {
+            (None, Some(c)) => Some(std::sync::Arc::clone(&c.fragment)),
+            (Some(t), Some(c)) if *t == c.svg => Some(std::sync::Arc::clone(&c.fragment)),
+            (Some(t), _) => crate::structure::fragment_from_svg(t).map(std::sync::Arc::new),
+            (None, None) => None,
+        };
+        let Some(fragment) = fragment else {
+            self.diagnostics.push(DiagnosticEntry {
+                severity: Severity::Info,
+                message: "The clipboard holds nothing Xarast can paste.".to_owned(),
+                document: self.active,
+            });
+            return Ok(Changed::UI);
+        };
+        match self.active_mut() {
+            Some(s) => s.paste_fragment(fragment, in_place),
+            None => Ok(Changed::empty()),
+        }
+    }
+
     /// An application with nothing open.
     #[must_use]
     pub fn new() -> AppState {
@@ -182,6 +247,7 @@ impl AppState {
             recent: RecentFiles::new(),
             recent_store: None,
             requests: Vec::new(),
+            clipboard: None,
         }
     }
 
@@ -335,6 +401,32 @@ impl AppState {
                 self.save_recent();
                 Ok(Changed::UI)
             }
+            Intent::ShowDialog(d) => {
+                self.requests.push(PlatformRequest::ShowDialog(d));
+                Ok(Changed::UI)
+            }
+            Intent::Copy => Ok(self.copy()),
+            Intent::Cut => {
+                let changed = self.copy();
+                if changed.is_empty() {
+                    return Ok(changed);
+                }
+                match self.active_mut() {
+                    Some(s) => {
+                        let nodes: Vec<_> = s.edit.selection().collect();
+                        Ok(changed | s.structure(crate::structure::StructureOp::Cut(nodes))?)
+                    }
+                    None => Ok(changed),
+                }
+            }
+            Intent::Paste { in_place } => {
+                if self.active.is_some() {
+                    self.requests
+                        .push(PlatformRequest::ReadClipboard { in_place });
+                }
+                Ok(Changed::empty())
+            }
+            Intent::PasteText { text, in_place } => self.paste_text(text, in_place),
             intent => match self.active_mut() {
                 Some(s) => s.apply(intent),
                 None => Ok(Changed::empty()),

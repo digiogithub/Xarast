@@ -46,6 +46,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use xarast_app::schedule::{Backdrop, Canvas};
+use xarast_app::snap::GuideOp;
 use xarast_app::{AppCommand, AppState, Changed, ChordKey, Intent, PlatformRequest, Session};
 use xarast_ui::model::{
     DocumentView, EditingView, LayerInfo, LayerKey, StatusInfo, UiCommand, UiModel, ViewTransform,
@@ -98,6 +99,8 @@ pub struct Viewer {
     shown: u64,
     /// Row index → layer node, rebuilt with the model every frame.
     layer_keys: Vec<xarast_doc::NodeId>,
+    /// The guideline behind each index of `DocumentView::guides`.
+    guide_keys: Vec<xarast_doc::NodeId>,
     scheme: ColorScheme,
     message: Option<String>,
     renderer_label: String,
@@ -176,6 +179,7 @@ impl Viewer {
             render_stale: false,
             shown: 0,
             layer_keys: Vec::new(),
+            guide_keys: Vec::new(),
             scheme: ColorScheme::NoPreference,
             message: None,
             renderer_label: "CPU".to_owned(),
@@ -357,6 +361,28 @@ impl Viewer {
                     }
                 }
                 PlatformRequest::Quit => ctx.exit(),
+                PlatformRequest::SetClipboardText(text) => {
+                    // The SVG flavour of a copy. `arboard` offers text,
+                    // HTML and images only, so it goes out as text; the
+                    // full-fidelity copy stays in the application.
+                    if let Err(e) = ctx.clipboard().set_text(&text) {
+                        self.message = Some(format!("Copied inside Xarast only: {e}"));
+                    }
+                }
+                PlatformRequest::ReadClipboard { in_place } => {
+                    let text = match ctx.clipboard().text() {
+                        Ok(t) => Some(t),
+                        // No clipboard at all: paste our own last copy.
+                        Err(crate::clipboard::ClipboardError::Unavailable(_)) => None,
+                        // Something that is not text (an image): nothing
+                        // Xarast can paste yet.
+                        Err(_) => Some(String::new()),
+                    };
+                    self.apply(vec![Intent::PasteText { text, in_place }]);
+                }
+                PlatformRequest::ShowDialog(xarast_app::Dialog::Align) => {
+                    self.workspace.menu().set_align_open(true);
+                }
                 other => tracing::warn!(?other, "platform request not handled"),
             }
         }
@@ -412,16 +438,18 @@ impl Viewer {
             self.message = Some(last);
         }
         self.layer_keys.clear();
+        self.guide_keys.clear();
         let document = self
             .app
             .active()
-            .map(|s| document_view(s, scale, &mut self.layer_keys));
+            .map(|s| document_view(s, scale, &mut self.layer_keys, &mut self.guide_keys));
         let editing = self.app.active().map(|s| EditingView {
             tool: s.tools().current(),
             undo: s.undo_label().map(str::to_owned),
             redo: s.redo_label().map(str::to_owned),
             selected: s.edit.selection_len(),
             infobar: s.infobar(),
+            snap: s.edit.snap,
         });
         UiModel {
             document,
@@ -604,8 +632,36 @@ impl Viewer {
             UiCommand::OpenRecent(path) => Intent::OpenFile(path),
             UiCommand::ClearRecent => Intent::ClearRecent,
             UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
-            // Guides, grid, unit, colours, layer order and the theme have
-            // no intent yet; they are phase 7/8 commands.
+            UiCommand::Align(spec) => Intent::Align(spec),
+            UiCommand::AddGuide(g) => Intent::Guides(GuideOp::Add {
+                horizontal: g.axis == xarast_ui::guides::Axis::Horizontal,
+                position: g.position,
+            }),
+            UiCommand::MoveGuide { index, position } => Intent::Guides(GuideOp::Move {
+                guide: *self.guide_keys.get(index)?,
+                position,
+            }),
+            UiCommand::RemoveGuide(index) => {
+                Intent::Guides(GuideOp::Delete(*self.guide_keys.get(index)?))
+            }
+            UiCommand::SetGuidesVisible(on) => {
+                let s = self.app.active()?;
+                if xarast_app::snap::guides_visible(&s.doc) == on {
+                    return None;
+                }
+                Intent::ToggleGuides
+            }
+            UiCommand::SetGrid(g) => {
+                let s = self.app.active()?;
+                let mut grid = xarast_app::snap::grid_of(&s.doc);
+                grid.visible = g.visible;
+                grid.spacing = g.spacing;
+                grid.subdivisions = g.subdivisions.max(1);
+                grid.origin = xarast_geom::Point::new(g.origin.0, g.origin.1);
+                Intent::Guides(GuideOp::SetGrid(grid))
+            }
+            // Unit, colours, layer order and the theme have no intent
+            // yet; they are phase 8 commands.
             _ => return None,
         })
     }
@@ -755,6 +811,7 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
                 ChordKey::Enter => Key::Named(NamedKey::Enter),
                 ChordKey::Escape => Key::Named(NamedKey::Escape),
                 ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
+                ChordKey::NumPad(c) => Key::char(c),
             };
             let mut modifiers = Modifiers::NONE;
             if chord.ctrl {
@@ -764,6 +821,9 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
                 modifiers = modifiers.with_shift();
             }
             let mut shortcut = Shortcut::new(key.clone(), modifiers);
+            if matches!(chord.key, ChordKey::NumPad(_)) {
+                shortcut = shortcut.at(crate::input::keyboard::KeyLocation::Numpad);
+            }
             if command.works_in_drag() {
                 shortcut = shortcut.works_in_drag();
             }
@@ -1127,6 +1187,7 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     HandleShape::Node | HandleShape::NodeSelected => HandleKind::Node,
                     HandleShape::Control => HandleKind::Control,
                     HandleShape::Radius => HandleKind::Radius,
+                    HandleShape::Snap => HandleKind::Snap,
                 },
                 active: shape == HandleShape::NodeSelected,
             }),
@@ -1183,7 +1244,12 @@ fn points(p: PhysicalPos, ppp: f32) -> egui::Pos2 {
 /// origin and its `y`-up orientation into [`ViewTransform`], so the page
 /// edge, the rulers, the grid and the pointer read-out land on exactly the
 /// pixels the renderer used and read document `y` the right way up.
-fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> DocumentView {
+fn document_view(
+    s: &Session,
+    ppp: f64,
+    keys: &mut Vec<xarast_doc::NodeId>,
+    guide_keys: &mut Vec<xarast_doc::NodeId>,
+) -> DocumentView {
     use xarast_geom::Mp;
     let vp = &s.viewport;
     let origin = vp.doc_to_device_f64(xarast_app::DocPointF::new(0.0, 0.0));
@@ -1220,6 +1286,22 @@ fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> D
         || "Untitled".to_owned(),
         |n| n.to_string_lossy().into_owned(),
     );
+    let g = xarast_app::snap::grid_of(doc);
+    let grid = xarast_ui::grid::GridSettings {
+        visible: g.visible,
+        spacing: g.spacing,
+        subdivisions: g.subdivisions.max(1),
+        origin: (g.origin.x, g.origin.y),
+    };
+    let mut guides = Vec::new();
+    for gl in xarast_app::snap::guidelines(doc) {
+        guide_keys.push(gl.node);
+        guides.push(if gl.horizontal {
+            xarast_ui::guides::Guide::horizontal(gl.position)
+        } else {
+            xarast_ui::guides::Guide::vertical(gl.position)
+        });
+    }
     DocumentView {
         title,
         // Left, top, right, bottom: under a y-up view the top is `hi.y`.
@@ -1227,6 +1309,9 @@ fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> D
         layers,
         active_layer: active,
         view,
+        grid,
+        guides,
+        show_guides: xarast_app::snap::guides_visible(doc),
         ..DocumentView::default()
     }
 }
@@ -1397,7 +1482,7 @@ mod tests {
         let s = session();
         let ppp = 1.25;
         let mut keys = Vec::new();
-        let dv = document_view(&s, ppp, &mut keys);
+        let dv = document_view(&s, ppp, &mut keys, &mut Vec::new());
         let rendered = xarast_app::viewport::device_rect_of(
             &s.viewport,
             xarast_app::viewport::page_rect(&s.doc),
@@ -1425,7 +1510,7 @@ mod tests {
         let s = session();
         let ppp = 1.25;
         let mut keys = Vec::new();
-        let dv = document_view(&s, ppp, &mut keys);
+        let dv = document_view(&s, ppp, &mut keys, &mut Vec::new());
         let page = xarast_app::viewport::page_rect(&s.doc);
         let rendered = xarast_app::viewport::device_rect_of(&s.viewport, page);
         let (top, bottom) = (f64::from(rendered.y0) / ppp, f64::from(rendered.y1) / ppp);
@@ -1463,7 +1548,7 @@ mod tests {
     fn layers_are_listed_with_keys_that_map_back_to_nodes() {
         let s = session();
         let mut keys = Vec::new();
-        let dv = document_view(&s, 1.0, &mut keys);
+        let dv = document_view(&s, 1.0, &mut keys, &mut Vec::new());
         assert_eq!(dv.layers.len(), keys.len());
         assert!(!keys.is_empty(), "an empty document still has a layer");
         let mut v = Viewer::new(Vec::new());
