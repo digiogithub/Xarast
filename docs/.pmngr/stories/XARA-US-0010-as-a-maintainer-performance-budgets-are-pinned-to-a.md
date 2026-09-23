@@ -2,13 +2,14 @@
 id: XARA-US-0010
 type: story
 title: As a maintainer, performance budgets are pinned to a reference machine
-status: backlog
+status: in_progress
 priority: critical
 parent: XARA-EP-0017
 author: mcp
 labels: [perf, hardware]
 created: 2026-09-23T09:40:31Z
-updated: 2026-09-23T09:40:31Z
+updated: 2026-09-23T09:51:05Z
+started: 2026-09-23T09:51:05Z
 ---
 
 ## Description
