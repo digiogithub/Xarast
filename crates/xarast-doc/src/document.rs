@@ -74,9 +74,9 @@ pub struct Document {
     ///
     /// This *is* the block the original hangs under the document node as
     /// forty-odd attribute nodes. Keeping it as a dense table instead means a
-    /// resolution does not scan forty nodes before it starts, and the
-    /// importer's `TAG_CURRENTATTRIBUTES` maps onto
-    /// [`DefaultAttrs::set`](crate::DefaultAttrs::set).
+    /// resolution does not scan forty nodes before it starts. The `.xar`
+    /// `TAG_CURRENTATTRIBUTES` block is *not* this: it holds the editor's
+    /// current attributes, and a file never overrides the defaults.
     pub defaults: DefaultAttrs,
     /// Title, dates, producer.
     pub meta: DocumentMeta,
