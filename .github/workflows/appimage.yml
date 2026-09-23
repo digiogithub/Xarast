@@ -18,6 +18,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The validators are run on the current runner image rather than inside the
+  # ubuntu:22.04 build container: 22.04's desktop-file-validate 0.26 rejects
+  # the `Version=1.5` key the entry declares, and its appstreamcli 0.15 has no
+  # --strict. What matters is what current software centres accept.
+  metadata:
+    name: Desktop entry and AppStream metadata
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+
+      - name: Validate the desktop entry
+        run: desktop-file-validate packaging/linux/xarast.desktop
+
+      # --no-net: the validator would otherwise fetch every <url>, and a flaky
+      # homepage must not fail a build. --strict fails on warnings too;
+      # pedantic hints stay informational.
+      - name: Validate the AppStream metainfo
+        run: |
+          appstreamcli validate --no-net --strict --explain \
+            packaging/linux/es.digio.Xarast.metainfo.xml
+
   build:
     name: Build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
@@ -38,6 +65,7 @@ jobs:
     # start on any of those distributions.
     container:
       image: ubuntu:22.04
+    timeout-minutes: 60
 
     steps:
       - name: Install build prerequisites
@@ -69,12 +97,25 @@ jobs:
           git diff --exit-code assets/icons \
             || { echo "assets/icons is stale; run 'cargo xtask icons' and commit"; exit 1; }
 
-      - name: Validate the desktop entry and AppStream metadata
-        run: |
-          desktop-file-validate packaging/linux/xarast.desktop
-
       - name: Build the AppImage
         run: ARCH=${{ matrix.arch }} bash packaging/linux/build-appimage.sh
+        env:
+          # The phase 5 budget, now that wgpu, egui, winit, AccessKit, the
+          # portal, clipboard and font stacks are linked in. The script fails
+          # the build above it. Measured at 7.7 MiB on 2026-09-23.
+          SIZE_LIMIT_MIB: 80
+
+      - name: Report the image size
+        run: |
+          image=dist/Xarast-${{ matrix.arch }}.AppImage
+          {
+            echo "### Xarast-${{ matrix.arch }}.AppImage"
+            echo ""
+            echo "| Item | Bytes |"
+            echo "|---|---:|"
+            echo "| AppImage | $(stat -c%s "$image") |"
+            echo "| usr/bin/xarast (stripped) | $(stat -c%s build/AppDir/usr/bin/xarast) |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # An AppImage that builds but does not start is worse than no AppImage,
       # because nothing else in CI would catch it.
@@ -103,3 +144,46 @@ jobs:
           files: |
             dist/Xarast-${{ matrix.arch }}.AppImage
             dist/Xarast-${{ matrix.arch }}.AppImage.zsync
+
+  # W0.4.8: boot the built image on the distributions it promises to run on.
+  # Bare containers: no display, no FUSE, no packages beyond the base image,
+  # which is exactly the hostile case. The script checks --version, --help,
+  # --selftest, that --selftest-window reports "skipped" with no compositor,
+  # and that the loader resolves every DT_NEEDED library with no compositor or
+  # GPU library linked. `timeout` bounds a hung container; the job bounds the
+  # pull.
+  distro-smoke:
+    name: Smoke (${{ matrix.name }})
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 12
+            image: debian:12
+          - name: Fedora
+            image: registry.fedoraproject.org/fedora:latest
+          - name: openSUSE Tumbleweed
+            image: registry.opensuse.org/opensuse/tumbleweed:latest
+          - name: openSUSE Leap 15.6
+            image: registry.opensuse.org/opensuse/leap:15.6
+          # SteamOS 3 is Arch-based; archlinux is the nearest public image.
+          - name: Arch (SteamOS-like)
+            image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: Xarast-x86_64.AppImage
+          path: dist
+
+      - name: Boot the image
+        run: |
+          chmod +x dist/Xarast-x86_64.AppImage
+          timeout 300 docker run --rm \
+            -v "$PWD":/work:ro -w /work \
+            "${{ matrix.image }}" \
+            bash packaging/linux/smoke-test.sh dist/Xarast-x86_64.AppImage
