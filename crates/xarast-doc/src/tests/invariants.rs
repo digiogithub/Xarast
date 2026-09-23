@@ -36,6 +36,39 @@ fn cycle_is_detected() {
     )));
 }
 
+/// The cycle check walks each parent chain once. It must report exactly the
+/// nodes that are their own ancestors: the nodes on the cycle, once each,
+/// and not the nodes whose chains merely run into it.
+#[test]
+fn a_cycle_reports_exactly_the_nodes_on_it() {
+    let mut f = fixture();
+    // group → shape_a → group: a two-node cycle. The group's other
+    // children (group_fill, shape_b) lead into it without being on it.
+    f.doc.tree.get_mut(f.group).unwrap().links.parent = Some(f.shape_a);
+    let mut on_cycle: Vec<_> = f
+        .doc
+        .tree
+        .iter()
+        .map(|(id, _)| id)
+        .filter(|id| f.doc.tree.is_ancestor(*id, *id))
+        .collect();
+    let mut reported: Vec<_> = f
+        .doc
+        .validate()
+        .errors
+        .iter()
+        .filter_map(|e| match e {
+            Invariant::Cycle { at } => Some(*at),
+            _ => None,
+        })
+        .collect();
+    on_cycle.sort();
+    reported.sort();
+    reported.dedup();
+    assert_eq!(on_cycle.len(), 2);
+    assert_eq!(reported, on_cycle);
+}
+
 #[test]
 fn broken_sibling_link_is_detected() {
     let mut f = fixture();

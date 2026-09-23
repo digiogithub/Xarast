@@ -717,17 +717,24 @@ impl Canon for NodeKind {
             }
             NodeKind::QuickShape(q) => {
                 h.u32(q.sides);
+                h.bool(q.circular);
                 h.bool(q.stellated);
                 h.bool(q.curved);
+                h.bool(q.stellation_curved);
                 h.add(&q.centre);
                 h.add(&q.major);
                 h.add(&q.minor);
-                h.f32(q.stellation_radius);
-                match &q.path {
-                    None => h.u8(0),
-                    Some(p) => {
-                        h.u8(1);
-                        h.add(&**p);
+                h.f64(q.stellation_radius);
+                h.f64(q.stellation_offset);
+                h.f64(q.primary_curvature);
+                h.f64(q.stellation_curvature);
+                for p in [&q.primary_edge, &q.secondary_edge, &q.path] {
+                    match p {
+                        None => h.u8(0),
+                        Some(p) => {
+                            h.u8(1);
+                            h.add(&**p);
+                        }
                     }
                 }
             }

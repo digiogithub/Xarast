@@ -158,6 +158,12 @@ enum Edit {
     Scale(u8),
     Flag(u8),
     Recolour(u8),
+    /// `Tx::move_node`, which can carry a layer between spreads.
+    Move(u8, u8, u8),
+    /// Set a layer's `active` flag, leaving the repair to the commit.
+    SetActive(u8, bool),
+    /// Attach a whole new spread holding two layers that are both active.
+    AddSpread(u8),
 }
 
 fn edit_strategy() -> impl Strategy<Value = Edit> {
@@ -168,6 +174,9 @@ fn edit_strategy() -> impl Strategy<Value = Edit> {
         (0u8..64).prop_map(Edit::Scale),
         (0u8..64).prop_map(Edit::Flag),
         (0u8..64).prop_map(Edit::Recolour),
+        (0u8..64, 0u8..64, 0u8..4).prop_map(|(a, b, h)| Edit::Move(a, b, h)),
+        (0u8..64, any::<bool>()).prop_map(|(a, v)| Edit::SetActive(a, v)),
+        (0u8..64).prop_map(Edit::AddSpread),
     ]
 }
 
@@ -214,6 +223,36 @@ impl Command for EditCommand {
                 }
                 _ => Ok(()),
             },
+            Edit::Move(a, b, h) => match (pick(ids, a), pick(ids, b)) {
+                (Some(n), Some(anchor)) if n != anchor && n != tx.doc().tree.root() => {
+                    tx.move_node(n, anchor, how(h))
+                }
+                _ => Ok(()),
+            },
+            Edit::SetActive(a, v) => match pick(ids, a) {
+                Some(n) => match tx.doc().tree.kind(n) {
+                    Some(NodeKind::Layer(l)) => {
+                        let mut next = l.clone();
+                        next.active = v;
+                        tx.set_kind(n, NodeKind::Layer(next))
+                    }
+                    _ => Ok(()),
+                },
+                None => Ok(()),
+            },
+            Edit::AddSpread(a) => {
+                let Some(anchor) = pick(ids, a) else {
+                    return Ok(());
+                };
+                let spread = tx.create(NodeKind::Spread(Box::default()))?;
+                for name in ["s1", "s2"] {
+                    let mut l = LayerNode::named(name);
+                    l.active = true;
+                    let l = tx.create(NodeKind::Layer(Box::new(l)))?;
+                    tx.attach(l, spread, Attach::LastChild)?;
+                }
+                tx.attach(spread, anchor, Attach::LastChild)
+            }
         }
     }
 }

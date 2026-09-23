@@ -8,7 +8,7 @@
 //! real `.xar` files violate it. An importer that refused those files would be
 //! useless.
 
-use std::collections::{HashMap, HashSet};
+use slotmap::SecondaryMap;
 
 use crate::kind::NodeKind;
 use crate::live::{LiveKind, LiveRole};
@@ -97,6 +97,10 @@ pub struct ValidationReport {
     pub errors: Vec<Invariant>,
     /// Invariants that are desirable but that real files break.
     pub warnings: Vec<Invariant>,
+    /// How many distinct nodes are reachable from the root. When it equals
+    /// [`Tree::node_count`], every node alive in the arena is part of the
+    /// document, and a caller may iterate the arena instead of walking it.
+    pub reachable: usize,
 }
 
 impl ValidationReport {
@@ -123,27 +127,33 @@ impl ValidationReport {
 /// Checks every structural invariant of a tree.
 #[must_use]
 pub fn validate_tree(tree: &Tree) -> ValidationReport {
-    let mut r = ValidationReport::default();
+    validate(tree, None)
+}
 
-    // 7. Tag uniqueness and the bijection with the arena.
-    let mut seen_tags: HashMap<Tag, NodeId> = HashMap::new();
+/// The tree checks, plus the resource checks when `resources` is given. One
+/// walk over the reachable tree serves both.
+fn validate(
+    tree: &Tree,
+    resources: Option<&crate::resources::DocumentResources>,
+) -> ValidationReport {
+    let mut r = ValidationReport::default();
+    let mut refs = Vec::new();
+
+    // 7. Tag uniqueness and the bijection with the arena. `by_tag` is a
+    //    function, so if every node's tag maps back to that node, no two
+    //    nodes can share a tag: whichever one the map does not name fails.
+    //    That makes a separate set of seen tags redundant.
     for (id, data) in tree.iter() {
-        if let Some(other) = seen_tags.insert(data.tag, id)
-            && other != id
-        {
-            r.errors.push(Invariant::DuplicateTag { tag: data.tag });
-        }
         if tree.by_tag(data.tag) != Some(id) {
             r.errors.push(Invariant::DuplicateTag { tag: data.tag });
         }
     }
 
     // 1. Acyclicity, over the whole arena, not just the reachable part.
-    for (id, _) in tree.iter() {
-        if tree.is_ancestor(id, id) {
-            r.errors.push(Invariant::Cycle { at: id });
-        }
-    }
+    //    Each parent chain is walked once: a node whose chain is known to
+    //    end at a parentless node is never walked again, so this is O(n)
+    //    rather than O(n × depth).
+    check_acyclic(tree, &mut r);
 
     // 2. Link coherence.
     for (id, data) in tree.iter() {
@@ -184,13 +194,14 @@ pub fn validate_tree(tree: &Tree) -> ValidationReport {
     }
 
     // Walk the reachable tree once for the rest.
-    let mut reachable: HashSet<NodeId> = HashSet::new();
+    let mut reachable: SecondaryMap<NodeId, ()> = SecondaryMap::with_capacity(tree.node_count());
     for id in tree.preorder(tree.root()) {
-        if !reachable.insert(id) {
+        if reachable.insert(id, ()).is_some() {
             r.errors.push(Invariant::Cycle { at: id });
             continue;
         }
         let Some(data) = tree.get(id) else { continue };
+        r.reachable += 1;
 
         // 3. `DETACHED` is transitive downwards: nothing under a detached node
         //    is reachable, so no reachable node may carry the flag.
@@ -267,9 +278,80 @@ pub fn validate_tree(tree: &Tree) -> ValidationReport {
                 }
             }
         }
+
+        // 9. Every referenced resource exists.
+        if let Some(resources) = resources {
+            refs.clear();
+            crate::resources::refs_of(&data.kind, &mut refs);
+            for rf in &refs {
+                if !resources.contains(*rf) {
+                    let missing = Invariant::MissingResource {
+                        node: id,
+                        resource: *rf,
+                    };
+                    // A colour reference resolves through the table's own
+                    // fallback, so a dangling one still renders and is only a
+                    // warning; `DocumentBuilder::finish` keeps such nodes on
+                    // exactly that basis. A missing bitmap, dash or arrow
+                    // cannot be drawn at all and is an error.
+                    if matches!(rf, ResourceRef::Colour(_)) {
+                        r.warnings.push(missing);
+                    } else {
+                        r.errors.push(missing);
+                    }
+                }
+            }
+        }
     }
 
     r
+}
+
+/// Reports every node that is its own ancestor.
+///
+/// Colours each node by what its parent chain is known to do: unvisited,
+/// on the chain being walked now, or ending at a parentless node. A walk
+/// that meets its own chain has found a cycle. Every node on that chain
+/// leads into the cycle, but only the nodes *on* the cycle are reported,
+/// matching `is_ancestor(id, id)`.
+fn check_acyclic(tree: &Tree, r: &mut ValidationReport) {
+    const ON_CHAIN: u8 = 1;
+    const DONE: u8 = 2;
+    let mut state: SecondaryMap<NodeId, u8> = SecondaryMap::with_capacity(tree.node_count());
+    let mut chain: Vec<NodeId> = Vec::new();
+    for (start, _) in tree.iter() {
+        if state.contains_key(start) {
+            continue;
+        }
+        chain.clear();
+        let mut cur = Some(start);
+        while let Some(id) = cur {
+            match state.get(id).copied() {
+                Some(DONE) => break,
+                Some(_) => {
+                    // `id` is on the current chain: the cycle is the part of
+                    // the chain from `id` onwards.
+                    if let Some(pos) = chain.iter().position(|c| *c == id) {
+                        for c in &chain[pos..] {
+                            r.errors.push(Invariant::Cycle { at: *c });
+                        }
+                    }
+                    break;
+                }
+                None => {
+                    if !tree.contains(id) {
+                        break;
+                    }
+                    state.insert(id, ON_CHAIN);
+                    chain.push(id);
+                    cur = tree.links(id).parent;
+                }
+            }
+        }
+        for c in &chain {
+            state.insert(*c, DONE);
+        }
+    }
 }
 
 fn has_box(tree: &Tree, id: NodeId) -> bool {
@@ -291,32 +373,5 @@ fn has_controller_ancestor(tree: &Tree, id: NodeId, kind: &LiveKind) -> bool {
 /// Checks the tree's invariants plus the ones that need the resource tables.
 #[must_use]
 pub fn validate_document(doc: &crate::Document) -> ValidationReport {
-    let mut r = validate_tree(&doc.tree);
-    let mut refs = Vec::new();
-    for id in doc.tree.preorder(doc.tree.root()) {
-        let Some(data) = doc.tree.get(id) else {
-            continue;
-        };
-        refs.clear();
-        crate::resources::refs_of(&data.kind, &mut refs);
-        for rf in &refs {
-            if !doc.resources.contains(*rf) {
-                let missing = Invariant::MissingResource {
-                    node: id,
-                    resource: *rf,
-                };
-                // A colour reference resolves through the table's own
-                // fallback, so a dangling one still renders and is only a
-                // warning; `DocumentBuilder::finish` keeps such nodes on
-                // exactly that basis. A missing bitmap, dash or arrow
-                // cannot be drawn at all and is an error.
-                if matches!(rf, crate::resources::ResourceRef::Colour(_)) {
-                    r.warnings.push(missing);
-                } else {
-                    r.errors.push(missing);
-                }
-            }
-        }
-    }
-    r
+    validate(&doc.tree, Some(&doc.resources))
 }

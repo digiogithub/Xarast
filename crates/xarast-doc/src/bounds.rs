@@ -104,7 +104,13 @@ pub fn compute_bounds_with(tree: &Tree, id: NodeId, stroke_extent: xarast_geom::
         NodeKind::Shape(s) => parallelogram(s.origin, s.major, s.minor).inflated(*attrs),
         NodeKind::QuickShape(q) => match &q.path {
             Some(p) => p.bounds().inflated(*attrs),
-            None => parallelogram(q.centre, q.major, q.minor),
+            // The axes run from the centre, so the shape fits in
+            // `centre ± major ± minor`, not in the parallelogram they span
+            // from the centre as a corner.
+            None => Rect::from_point(q.centre + q.major + q.minor)
+                .union_point(q.centre + q.major - q.minor)
+                .union_point(q.centre - q.major + q.minor)
+                .union_point(q.centre - q.major - q.minor),
         },
         NodeKind::Bitmap(b) => parallelogram(b.origin, b.major, b.minor),
         NodeKind::Page(p) => p.rect,

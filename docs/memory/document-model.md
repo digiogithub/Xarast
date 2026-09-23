@@ -32,7 +32,7 @@ Modules, all of them in `crates/xarast-doc/src/`:
 | `live` | `LiveNode`, `LiveRole`, `LiveKind`, `RegenState` and the seven parameter structs |
 | `resources` | `DocumentResources`, `BitmapId`/`DashId`/`ArrowId`, `BitmapResource`, `collect_unused` |
 | `history` | `Action`, `Tx`, `Transaction`, `History`, `CoalesceKey`, `Command`, `CommandBus`, `EditError` |
-| `snapshot` | `Snapshot` over `imbl`, plus `Document::snapshot`/`restore` |
+| `snapshot` | `Snapshot`, a dense `Arc<SecondaryMap<NodeId, NodeData>>`, plus `Document::snapshot`/`restore` |
 | `document` | `Document`, `DocumentMeta`, `DumpOptions`, `canonical_digest`, `dump`, `update_bounds` |
 | `digest` | `CanonicalHasher`, the `Canon` trait and its impls |
 | `builder` | `DocumentBuilder`, `BuildLimits`, `Diagnostic`, `DiagCode`, `Severity`, `BuildError` |
@@ -43,8 +43,11 @@ Modules, all of them in `crates/xarast-doc/src/`:
 `Layer`, `Grid`, `Path`, `Shape`, `QuickShape`, `Bitmap`, `Guideline`, `Group`,
 `Live`, `ClipView`, `TextStory`, `TextLine`, `TextItem`, `Attr`, `Opaque`.
 `Live` and the text variants are **structure and round-trip only**:
-`regenerate()` is Phase 13 and shaping is Phase 9. `QuickShape` stores its
-parameters and an optional imported path; generating the path is Phase 7.
+`regenerate()` is Phase 13 and shaping is Phase 9. `QuickShape` stores all
+its parameters. Its `path` is the **generated outline** in document
+coordinates, from `xarast_geom::regular_shape_outline` (XARA-T-0013,
+2026-09-23). `QuickShape::outline()` regenerates it from the stored
+parameters.
 
 `ATTR_SLOT_COUNT` is **46**, unchanged by the reconciliation.
 
@@ -136,7 +139,8 @@ Three of these need a word.
   (`History::set_checkpoint_cadence`), and Phase 6 should drive checkpoints
   from the autosave timer and make them incremental — sharing structure with
   the previous snapshot instead of rebuilding — which is the one thing a HAMT
-  is actually good at.
+  is actually good at. *(Superseded 2026-09-23: the HAMT is gone from
+  checkpoints and `snapshot()` is 9.7 ms. See "Dead ends".)*
 - **221 B/node is not comparable to the 160 B budget.** The budget says
   "excluding payloads"; the measurement is whole-process resident memory and
   therefore includes every `Arc<Path>`, every boxed `NodeKind` payload and the
@@ -398,6 +402,30 @@ own actions are recorded and undo stays exact. Pinned by
 `tests::undo::the_active_layer_can_be_moved_within_one_transaction`, which was
 confirmed to fail against the old behaviour before being committed.
 
+**`Tx::commit` is O(what changed), not O(document)** (XARA-T-0030,
+2026-09-23). `Tx::act` records the spreads each action can affect, and the
+commit repairs only those:
+
+- a detach: the old parent, read *before* the action applies;
+- an attach: the new parent, plus every spread inside the attached
+  subtree, read *after* it applies;
+- a `SetKind`: the parent spread when the old or the new kind is a layer,
+  and the node itself when it becomes a spread;
+- a `Batch` holding any attach, detach or set-kind: a full rescan, because
+  its sub-actions' pre-states depend on each other.
+
+Transforms, flags, attributes and resources record nothing. The argument
+for correctness is that every document a `Tx` sees starts valid: the
+builder guarantees it and every commit preserves it. So a spread nobody
+touched is still valid. The subtree walk on attach is not optional. A
+spread broken *while detached* is unreachable at that commit and is not
+repaired then, so it must be caught when it comes back.
+`a_spread_broken_while_detached_is_repaired_when_it_comes_back` pins this.
+The walk costs no more than `Tree::attach`'s own height check. The undo
+property test now also moves nodes, flips `active` and attaches spreads
+that have two active layers. Each tracking path was confirmed to fail it
+when disabled. `dispatch/single_node_edit`: 1.96 ms → 101 ns at 100k nodes.
+
 The general rule this establishes: **a transaction is allowed to pass through
 an invalid intermediate state — that is what transactions are for.** Repairs
 and invariant checks belong at the boundary, never between two mutations that
@@ -446,6 +474,16 @@ findings.
 - **Letting `Tree::detach` fix the active layer for itself.** An automatic
   change the undo log never saw breaks byte-identical undo. Policy belongs to
   commands.
+- **Building checkpoints as an `imbl::HashMap<NodeId, Arc<NodeData>>` from
+  scratch.** Nothing used the structural sharing, and every rebuild paid a
+  HAMT insert and an `Arc` allocation per node: 43–80 ms at 100k nodes. A
+  dense `SecondaryMap` costs 9.7 ms. A HAMT only pays off once checkpoints
+  are incremental, and that needs dirty tracking in the tree first.
+- **Walking the whole tree in each `DocumentBuilder::finish` repair.** The
+  builder now records its candidates at `node()` time: spreads, hard
+  resource references, and whether any text or live node exists. Four
+  preorders over 518k nodes cost ~70 ms.
+- **Validating twice on import.** Use `finish_with_report()`.
 
 ## Open TODOs
 
@@ -483,12 +521,10 @@ findings.
       fuzz_doc_builder.rs` (2026-09-23), nightly in CI. It drives every node
       kind, unbalanced scopes, and colour/bitmap keys forged with
       `slotmap::KeyData::from_ffi`, and treats `Inconsistent` as a finding.
-- [ ] **`Tx::commit` is O(document size).** `keep_one_active_layer` runs
-      `preorder` over the whole tree on every commit to find the spreads. On
-      the reference machine that makes a single-node edit cost **1.04 ms** to
-      dispatch at 100 000 nodes, while the undo itself costs 0.28 µs. It was
-      found on 2026-09-23 when the `undo/single_node_edit` bench, which timed
-      dispatch and undo together, jumped from 0.27 µs to 1.13 ms. The bench is
-      now split (`dispatch/` and `undo/`). The fix is to keep a spread index,
-      or to check only the spreads whose layers the transaction touched.
-      `docs/memory/perf.md` has the numbers.
+- [x] **`Tx::commit` is O(document size).** Fixed 2026-09-23 (XARA-T-0030):
+      the commit checks only the spreads the transaction touched. See
+      "Fixed defects worth remembering".
+- [x] **`snapshot()` over budget.** Fixed 2026-09-23: 43–80 ms → 9.7 ms,
+      with a dense map instead of a HAMT.
+- [ ] Incremental checkpoints would need dirty tracking in `Tree`. Revisit
+      the snapshot representation (HAMT or chunked) only then.

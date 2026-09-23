@@ -1048,6 +1048,46 @@ supplied by the matrix. (`TAG_REGULAR_SHAPE_PHASE_1` (1900) is identical but wit
 `DocCoord ut_centre` after `num_sides`; it exists only in very old files,
 `Kernel/cxftags.h:360-374`.)
 
+**The record holds no outline.** The two edge paths are *edge templates*: each one
+describes the shape of a single edge, not the shape. An unedited edge is a two-point
+`MoveTo, LineTo` (a straight edge) at an arbitrary position. In the corpus it is
+typically `(-576pt, -576pt) → (-504pt, -576pt)`. The outline has to be generated
+from the parameters. These are the facts it depends on. They are taken from
+`Kernel/nodershp.cpp`, but only as behaviour, never as code (added 2026-09-23 for
+XARA-T-0013):
+
+- **Frame.** All geometry is built in untransformed space, with the centre at the
+  origin. The record's matrix is applied at the end. A point at angle `θ` and
+  radius ratio `r` sits at `r·(cos θ · major − sin θ · minor)`
+  (`nodershp.cpp:2402-2430` normalises onto the parallelogram
+  `centre ± major ± minor`, `:2466-2486`).
+- **Primary points** are at `θ_k = π/n + k·2π/n`, `k = 0…n−1`, and radius ratio 1.
+- **Stellation points** (stellated only) are at `θ_k + (0.5 + stellation_offset)·2π/n`
+  and radius ratio `stellation_radius` (`:2403-2406`). An offset of ±0.5 therefore
+  lands on the neighbouring primary angle.
+- **Outline order**: primary 0, stellation 0, primary 1, …, and then closed. An edge
+  from a primary to a stellation point uses the primary edge template. An edge from a
+  stellation point to a primary uses the secondary template. A polygon that is not
+  stellated uses only the primary template (`:2735-2790`).
+- **Edge template insertion** (`:2186-2233`): a two-point template is a straight
+  line. A four-point template (one cubic) has its two control points carried by the
+  **similarity** (rotation plus uniform scale) that maps the template's first point
+  to the edge's start and its last point to the edge's end. When start equals end,
+  the edge is a degenerate cubic.
+- **Ellipse** (`circular`, `:2254-2330`): four cubics through `+major`, `+minor`,
+  `−major` and `−minor`, in that order. Each control point lies on the line from
+  its endpoint to the parallelogram corner between the two endpoints, at ratio
+  **0.552** of that distance (`:161`).
+- **Corner rounding** (`:2533-2660`). Let `L = max(1, |major| · max(1, r_s))`,
+  where `r_s` is the stellation ratio for a stellated shape. The primary corners
+  cut a length `L·primary_curvature` and the stellation corners cut
+  `L·secondary_curvature`. On an edge of length `d` whose two corners want `a + b`:
+  when `a + b > d`, both cuts are scaled by `d/(a + b)`, and when `d < 1` the cut
+  collapses onto the corner. A rounded corner is one cubic from the incoming cut
+  point to the outgoing one. Its controls sit on the lines from each cut point to the
+  corner, at ratio 0.552. Primary corners are rounded when flag `0x04` is set, and
+  stellation corners when `0x08` is set.
+
 Typical observed size: 119 bytes (75 + 40 for a 4-point path + 4 for the empty path).
 
 **Legacy families** (`Kernel/cxfellp.cpp:157-186`, `Kernel/cxfrect.cpp:196-470`,

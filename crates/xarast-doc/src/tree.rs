@@ -36,6 +36,35 @@ slotmap::new_key_type! {
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub struct Tag(pub u32);
 
+/// The hasher for the tag index.
+///
+/// Tags are allocated by the tree itself, sequentially, and never come from a
+/// file, so a keyed hash buys no protection and costs a SipHash round per
+/// lookup, on every node the builder creates and every node `validate`
+/// checks. A multiplicative (Fibonacci) hash spreads sequential values over
+/// both the bucket bits and the control bits.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct TagHasher(u64);
+
+impl std::hash::Hasher for TagHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0 ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.0 = (self.0 ^ u64::from(v)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type TagIndex = HashMap<Tag, NodeId, std::hash::BuildHasherDefault<TagHasher>>;
+
 /// Tree links.
 ///
 /// `last_child` is the one field the original does not keep — it walks to find
@@ -159,7 +188,7 @@ pub enum TreeError {
 pub struct Tree {
     nodes: SlotMap<NodeId, NodeData>,
     root: NodeId,
-    by_tag: HashMap<Tag, NodeId>,
+    by_tag: TagIndex,
     next_tag: u32,
     bounds: SecondaryMap<NodeId, BoundsCache>,
     /// Maximum depth accepted by [`Tree::attach`]. Mirrors
@@ -183,7 +212,7 @@ impl Tree {
             flags: NodeFlags::empty(),
             kind,
         });
-        let mut by_tag = HashMap::new();
+        let mut by_tag = TagIndex::default();
         by_tag.insert(tag, root);
         Tree {
             nodes,
@@ -350,7 +379,10 @@ impl Tree {
         if id == self.root {
             return Err(TreeError::IsRoot);
         }
-        if self.is_ancestor(id, anchor) {
+        // A node with no children cannot be an ancestor of anything and adds
+        // no height, which is every node an importer creates; skip both walks.
+        let leaf = self.nodes[id].links.first_child.is_none();
+        if !leaf && self.is_ancestor(id, anchor) {
             return Err(TreeError::WouldCycle { child: id, anchor });
         }
 
@@ -361,7 +393,8 @@ impl Tree {
             }
         };
 
-        let depth = self.depth_of(parent) + 1 + self.subtree_height(id);
+        let height = if leaf { 0 } else { self.subtree_height(id) };
+        let depth = self.depth_of(parent) + 1 + height;
         if depth > self.max_depth {
             return Err(TreeError::TooDeep {
                 limit: self.max_depth,

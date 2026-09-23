@@ -281,6 +281,19 @@ impl Action {
         }
     }
 
+    /// Whether the action can change which layers a spread holds, or whether
+    /// one of them is active.
+    fn touches_structure(&self) -> bool {
+        match self {
+            Action::Attach { .. } | Action::Detach { .. } | Action::SetKind { .. } => true,
+            Action::Batch(a) => a.iter().any(Action::touches_structure),
+            Action::SetFlags { .. }
+            | Action::Transform { .. }
+            | Action::SetAttr { .. }
+            | Action::SetResource { .. } => false,
+        }
+    }
+
     /// The nodes this action detaches, and which the transaction must keep
     /// alive.
     fn retains(&self, out: &mut Vec<NodeId>) {
@@ -382,6 +395,12 @@ pub struct Tx<'d> {
     created: Vec<NodeId>,
     bytes: usize,
     committed: bool,
+    /// Spreads whose layer children, or those layers' `active` flags, this
+    /// transaction may have changed. [`Tx::commit`] repairs only these.
+    touched_spreads: Vec<NodeId>,
+    /// Set when an action's effect on spreads cannot be bounded cheaply; the
+    /// commit then falls back to checking every spread in the document.
+    rescan_all_spreads: bool,
 }
 
 impl<'d> Tx<'d> {
@@ -394,6 +413,8 @@ impl<'d> Tx<'d> {
             created: Vec::new(),
             bytes: 0,
             committed: false,
+            touched_spreads: Vec::new(),
+            rescan_all_spreads: false,
         }
     }
 
@@ -407,7 +428,10 @@ impl<'d> Tx<'d> {
     pub fn act(&mut self, action: Action) -> Result<(), EditError> {
         let inverse = action.inverse(self.doc);
         self.bytes += action.size_hint(self.doc);
-        action.apply(self.doc)?;
+        self.note_spreads_before(&action);
+        let applied = action.apply(self.doc);
+        self.note_spreads_after(&action);
+        applied?;
         action.retains(&mut self.retained);
         self.inverses.push(inverse);
         Ok(())
@@ -517,20 +541,96 @@ impl<'d> Tx<'d> {
         })
     }
 
+    /// Records the spreads an action can affect, from the state **before** it
+    /// applies: a detach changes its old parent's children.
+    fn note_spreads_before(&mut self, action: &Action) {
+        match action {
+            Action::Detach { node, .. } => self.note_parent_spread(*node),
+            Action::SetKind { node, new } => {
+                // A layer turning active or inactive, or a node turning into
+                // or out of a layer, changes its parent spread's layer set.
+                let was_layer = matches!(self.doc.tree.kind(*node), Some(NodeKind::Layer(_)));
+                if was_layer || matches!(**new, NodeKind::Layer(_)) {
+                    self.note_parent_spread(*node);
+                }
+                if matches!(**new, NodeKind::Spread(_)) {
+                    self.touched_spreads.push(*node);
+                }
+            }
+            Action::Batch(actions) => {
+                // The sub-actions' pre-states depend on each other, so a batch
+                // that changes structure is not bounded here; the commit
+                // checks every spread instead. Batches of transforms, which is
+                // what `Tx::transform` builds, stay cheap.
+                if actions.iter().any(Action::touches_structure) {
+                    self.rescan_all_spreads = true;
+                }
+            }
+            Action::Attach { .. }
+            | Action::SetFlags { .. }
+            | Action::Transform { .. }
+            | Action::SetAttr { .. }
+            | Action::SetResource { .. } => {}
+        }
+    }
+
+    /// Records the spreads an action can affect, from the state **after** it
+    /// applied: an attach changes its new parent's children, and makes any
+    /// spread inside the attached subtree reachable.
+    fn note_spreads_after(&mut self, action: &Action) {
+        if let Action::Attach { node, .. } = action {
+            self.note_parent_spread(*node);
+            let tree = &self.doc.tree;
+            self.touched_spreads.extend(
+                tree.preorder(*node)
+                    .filter(|id| matches!(tree.kind(*id), Some(NodeKind::Spread(_)))),
+            );
+        }
+    }
+
+    /// How many spreads the commit would check, and whether it would rescan
+    /// the whole document instead.
+    #[cfg(test)]
+    pub(crate) fn spreads_to_check(&self) -> (usize, bool) {
+        (self.touched_spreads.len(), self.rescan_all_spreads)
+    }
+
+    fn note_parent_spread(&mut self, node: NodeId) {
+        if let Some(parent) = self.doc.tree.links(node).parent
+            && matches!(self.doc.tree.kind(parent), Some(NodeKind::Spread(_)))
+        {
+            self.touched_spreads.push(parent);
+        }
+    }
+
     /// Restores "one spread, one active layer" as part of the same
     /// transaction, so that undo puts the old active layer back too.
     ///
     /// The arena deliberately does **not** do this for itself: an automatic
     /// change the undo log never saw is exactly how undo stops being exact.
     /// Which layer is active is a policy, and policy belongs to commands.
+    ///
+    /// Only the spreads this transaction touched are checked. Every document
+    /// a `Tx` can see starts valid (the builder guarantees it and every commit
+    /// preserves it), so an untouched spread is still valid, and the repair
+    /// costs O(what changed) rather than O(document size).
     fn keep_one_active_layer(&mut self) -> Result<(), EditError> {
-        let root = self.doc.tree.root();
-        let spreads: Vec<NodeId> = self
-            .doc
-            .tree
-            .preorder(root)
-            .filter(|id| matches!(self.doc.tree.kind(*id), Some(NodeKind::Spread(_))))
-            .collect();
+        let tree = &self.doc.tree;
+        let spreads: Vec<NodeId> = if self.rescan_all_spreads {
+            tree.preorder(tree.root())
+                .filter(|id| matches!(tree.kind(*id), Some(NodeKind::Spread(_))))
+                .collect()
+        } else {
+            let mut seen = std::collections::HashSet::new();
+            self.touched_spreads
+                .iter()
+                .copied()
+                .filter(|s| seen.insert(*s))
+                .filter(|s| {
+                    matches!(tree.kind(*s), Some(NodeKind::Spread(_))) && tree.is_reachable(*s)
+                })
+                .collect()
+        };
         for s in spreads {
             let layers: Vec<NodeId> = self
                 .doc

@@ -188,6 +188,27 @@ pub struct DocumentBuilder {
     nodes: usize,
     bytes: usize,
     orphans: Vec<NodeId>,
+    /// What the repairs in [`DocumentBuilder::finish`] have to look at,
+    /// recorded as the nodes are emitted so that no repair has to walk the
+    /// whole document to find its candidates.
+    candidates: RepairCandidates,
+}
+
+/// Nodes a repair may have to touch. Each list is in emission order; a node
+/// in it may have been destroyed or detached since, so every repair
+/// re-checks its candidates.
+#[derive(Debug, Default)]
+struct RepairCandidates {
+    /// Any `TextLine` or `TextItem` was emitted.
+    text: bool,
+    /// Any `Live` node was emitted.
+    live: bool,
+    /// Every spread.
+    spreads: Vec<NodeId>,
+    /// Every node holding a reference that cannot fall back (not a colour).
+    hard_refs: Vec<NodeId>,
+    /// Scratch space for `refs_of`.
+    scratch: Vec<ResourceRef>,
 }
 
 impl Default for DocumentBuilder {
@@ -212,6 +233,7 @@ impl DocumentBuilder {
             nodes: 1,
             bytes: 0,
             orphans: Vec::new(),
+            candidates: RepairCandidates::default(),
         }
     }
 
@@ -296,7 +318,23 @@ impl DocumentBuilder {
             .is_some_and(|p| legal_child(p, &kind));
         let name = kind.type_name();
         let parent_name = self.doc.tree.kind(parent).map_or("?", NodeKind::type_name);
+        let c = &mut self.candidates;
+        match &kind {
+            NodeKind::TextLine(_) | NodeKind::TextItem(_) => c.text = true,
+            NodeKind::Live(_) => c.live = true,
+            _ => {}
+        }
+        let is_spread = matches!(kind, NodeKind::Spread(_));
+        c.scratch.clear();
+        crate::resources::refs_of(&kind, &mut c.scratch);
+        let hard_ref = c.scratch.iter().any(|r| is_hard_ref(*r));
         let id = self.doc.tree.create(kind);
+        if is_spread {
+            self.candidates.spreads.push(id);
+        }
+        if hard_ref {
+            self.candidates.hard_refs.push(id);
+        }
         self.nodes += 1;
         if legal {
             self.doc.tree.attach(id, parent, Attach::LastChild)?;
@@ -406,7 +444,22 @@ impl DocumentBuilder {
     /// [`BuildError::Empty`] when nothing was emitted, and
     /// [`BuildError::Inconsistent`] when a repair failed — which would be a
     /// bug in this module, reported rather than hidden.
-    pub fn finish(mut self) -> Result<(Document, Vec<Diagnostic>), BuildError> {
+    pub fn finish(self) -> Result<(Document, Vec<Diagnostic>), BuildError> {
+        self.finish_with_report()
+            .map(|(doc, diags, _)| (doc, diags))
+    }
+
+    /// As [`DocumentBuilder::finish`], and also hands back the validation
+    /// report it had to compute anyway, so that a caller that wants one does
+    /// not pay for a second whole-document validation. It holds no errors,
+    /// only warnings.
+    ///
+    /// # Errors
+    ///
+    /// As [`DocumentBuilder::finish`].
+    pub fn finish_with_report(
+        mut self,
+    ) -> Result<(Document, Vec<Diagnostic>, crate::ValidationReport), BuildError> {
         if self.scopes.len() > 1 {
             self.diagnostic(Diagnostic::new(
                 Severity::Warning,
@@ -439,7 +492,7 @@ impl DocumentBuilder {
                 break;
             }
         }
-        Ok((self.doc, self.diagnostics))
+        Ok((self.doc, self.diagnostics, report))
     }
 
     fn sweep_orphans(&mut self) {
@@ -452,6 +505,9 @@ impl DocumentBuilder {
     }
 
     fn repair_text_nesting(&mut self) {
+        if !self.candidates.text {
+            return;
+        }
         let root = self.doc.tree.root();
         let bad: Vec<NodeId> = self
             .doc
@@ -480,6 +536,9 @@ impl DocumentBuilder {
     }
 
     fn repair_live(&mut self) {
+        if !self.candidates.live {
+            return;
+        }
         let root = self.doc.tree.root();
         // Generated nodes with no controller ancestor are derived data; drop.
         let orphaned: Vec<NodeId> = self
@@ -580,12 +639,15 @@ impl DocumentBuilder {
     }
 
     fn repair_active_layers(&mut self) {
-        let root = self.doc.tree.root();
+        let tree = &self.doc.tree;
         let spreads: Vec<NodeId> = self
-            .doc
-            .tree
-            .preorder(root)
-            .filter(|id| matches!(self.doc.tree.kind(*id), Some(NodeKind::Spread(_))))
+            .candidates
+            .spreads
+            .iter()
+            .copied()
+            .filter(|id| {
+                matches!(tree.kind(*id), Some(NodeKind::Spread(_))) && tree.is_reachable(*id)
+            })
             .collect();
         for s in spreads {
             let layers: Vec<NodeId> = self
@@ -638,13 +700,15 @@ impl DocumentBuilder {
     }
 
     fn repair_missing_resources(&mut self) {
-        let root = self.doc.tree.root();
         let mut refs = Vec::new();
         let mut bad: Vec<NodeId> = Vec::new();
-        for id in self.doc.tree.preorder(root) {
+        for &id in &self.candidates.hard_refs {
             let Some(d) = self.doc.tree.get(id) else {
                 continue;
             };
+            if !self.doc.tree.is_reachable(id) {
+                continue;
+            }
             refs.clear();
             crate::resources::refs_of(&d.kind, &mut refs);
             if refs
