@@ -90,6 +90,7 @@ pub mod session;
 pub mod shapes;
 pub mod snap;
 pub mod structure;
+pub mod svg_text;
 mod text;
 pub mod thumbnail;
 pub mod tool;

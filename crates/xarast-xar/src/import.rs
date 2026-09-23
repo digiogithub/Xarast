@@ -851,8 +851,9 @@ impl<'o> Mapper<'o> {
                 ))))?;
                 self.push_scope()?;
                 // The original draws a story that sets no size at its own
-                // factory default, 16 pt, not at the model's; say so
-                // explicitly where the file relies on it.
+                // factory default, 16 pt. The model's default is the same
+                // (XARA-T-0172); should they ever differ, say so explicitly
+                // where the file relies on it.
                 let size = self.attrs.get(AttrSlot::TxtFontSize).clone();
                 if size != xarast_doc::default_for(AttrSlot::TxtFontSize) {
                     self.builder.attribute(size)?;
@@ -1872,8 +1873,10 @@ fn layer_from(children: &[RecordNode]) -> LayerNode {
 
 /// The attribute values the original starts from where they differ from
 /// the model's defaults: text with no size attribute is 16 pt
-/// (`Kernel/txtattr.cpp:449-452`). The importer mirrors the file's state
-/// from these, and writes a value explicitly wherever a node relies on one.
+/// (`Kernel/txtattr.cpp:449-452`), which the model's default now agrees
+/// with (XARA-T-0172). The importer mirrors the file's state from these,
+/// and writes a value explicitly wherever a node relies on one that the
+/// model's defaults do not give.
 fn xar_defaults() -> xarast_doc::DefaultAttrs {
     let mut d = xarast_doc::DefaultAttrs::default();
     d.set(AttrValue::FontSize(Mp::new(16_000)));
@@ -2136,11 +2139,16 @@ mod tests {
                 "EOL"
             ]
         );
-        // The story, which sets no size, carries the original's 16 pt.
+        // The story sets no size: it relies on the original's 16 pt, which
+        // is the model's default too, so nothing needs to be written.
         let story = doc.tree.links(line).parent.unwrap();
-        assert!(doc.tree.children(story).any(|c| matches!(
+        assert_eq!(
+            xarast_doc::default_for(AttrSlot::TxtFontSize),
+            AttrValue::FontSize(Mp::new(16_000))
+        );
+        assert!(!doc.tree.children(story).any(|c| matches!(
             doc.tree.kind(c),
-            Some(NodeKind::Attr(a)) if a.value == AttrValue::FontSize(Mp::new(16_000))
+            Some(NodeKind::Attr(a)) if matches!(a.value, AttrValue::FontSize(_))
         )));
     }
 

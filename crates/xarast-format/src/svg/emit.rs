@@ -23,7 +23,8 @@ use xarast_doc::fill::{Paint, Tiling};
 use xarast_doc::foreign::{ForeignBaggage, ForeignChildKind};
 use xarast_doc::{
     AttrSlot, AttrStack, AttrValue, BitmapId, ClipViewMode, Document, LiveKind, LiveNode, LiveRole,
-    NodeFlags, NodeId, NodeKind, RegenState, ShapeKind, TextItem, TextLayout, TextStoryNode,
+    NodeFlags, NodeId, NodeKind, RegenState, ResolvedAttrs, ShapeKind, TextItem, TextLayout,
+    TextLineNode, TextStoryNode,
 };
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Vector};
 
@@ -35,7 +36,10 @@ use super::paint::{
 };
 use super::pathdata::path_data;
 use super::style::{self, GroupKind, Styler, Vals, p};
-use super::xml::{attr, base64, fragment_is_well_formed, is_ncname, push_text_escaped};
+use super::text::{Placer, StoryPlacement};
+use super::xml::{
+    attr, base64, fragment_is_well_formed, is_ncname, is_xml_char, push_text_escaped,
+};
 use super::{
     FragmentKind, NS_CC, NS_DC, NS_INKSCAPE, NS_RDF, NS_SODIPODI, NS_SVG, NS_XARAST, NS_XLINK,
     NS_XML, Stats,
@@ -242,6 +246,8 @@ pub(crate) struct Emitter<'d, 'b> {
     spread_index: usize,
     spread_y: i64,
     bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
+    /// Where the application lays text out, for the base SVG of text.
+    placer: Option<Placer>,
 }
 
 impl<'d, 'b> Emitter<'d, 'b> {
@@ -294,6 +300,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             spread_index: 0,
             spread_y: 0,
             bitmap_href,
+            placer: opts.text.clone(),
         }
     }
 
@@ -957,7 +964,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
         let mut el = El::new("path");
         el.ink = true;
         let (bounds, filled, stroked, mut known) = build(self, &mut el);
-        self.paint(n, &mut el, bounds, filled, stroked, &mut known);
+        self.paint(&mut el, bounds, filled, stroked, &mut known);
         self.names(n, &mut known);
         if has_kids {
             self.attrs.pop_scope();
@@ -1226,7 +1233,6 @@ impl<'d, 'b> Emitter<'d, 'b> {
     /// Resolves and writes the paint of one ink element.
     fn paint(
         &mut self,
-        _n: NodeId,
         el: &mut El,
         bounds: Option<(i64, i64, i64, i64)>,
         filled: bool,
@@ -1658,9 +1664,11 @@ impl<'d, 'b> Emitter<'d, 'b> {
         self.container(n, el, prelude);
     }
 
-    /// A text story. Before Phase 9 shapes text, the layout is approximate:
-    /// one `<tspan>` per line on the story's own axis, lines spaced by the
-    /// line-spacing attribute, runs split where the font or fill changes.
+    /// A text story (`research/06 §6.7`, `svg/text.rs`): `<text>` with one
+    /// `<tspan>` per line and, inside it, one `<tspan>` per run of items
+    /// that write identically. With a [`TextPlacer`](super::TextPlacer)
+    /// every character is placed where the application's layout puts it;
+    /// without one, lines start at the story's origin.
     fn text(&mut self, n: NodeId, story: &TextStoryNode) {
         self.stats.texts += 1;
         let m = self.frame.local_matrix(&story.transform);
@@ -1678,7 +1686,22 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 mp(m[5] as i64)
             ),
         );
+        // Six decimals do not pin a rotation's `f64`s: the exact values,
+        // when they differ from what the transform spells.
+        let spelled = [m[0], m[1], m[2], m[3]]
+            .iter()
+            .all(|v| f64s(*v, 6).parse::<f64>().ok() == Some(*v));
+        if !spelled {
+            el.a(
+                "xarast:matrix",
+                format!(
+                    "{} {} {} {}",
+                    story.transform.a, story.transform.b, story.transform.c, story.transform.d
+                ),
+            );
+        }
         el.a("xml:space", "preserve");
+        el.a("xarast:exact", "true");
         match &story.layout {
             TextLayout::AtPoint => {}
             TextLayout::InColumn { width, word_wrap } => {
@@ -1714,6 +1737,12 @@ impl<'d, 'b> Emitter<'d, 'b> {
         if story.print_as_shapes {
             el.a("xarast:print-as-shapes", "true");
         }
+        // Placed with the state in force at the story, before its own
+        // attribute children.
+        let placement = match self.placer.clone() {
+            Some(p) => p.0.place(self.doc, n, &mut self.attrs),
+            None => None,
+        };
         let others: Vec<NodeId> = self
             .doc
             .tree
@@ -1733,8 +1762,8 @@ impl<'d, 'b> Emitter<'d, 'b> {
             let mut g = El::new("g");
             g.a("xarast:kind", "text-story");
             self.open_container(Some(n), g);
-            // Runs elide black and never stroke: text relies on the initial
-            // values, so nothing is hoisted over it.
+            // Text relies on the initial values (its runs elide black and
+            // `none`), so nothing is hoisted over it.
             self.block();
             self.body.push('>');
             self.newline();
@@ -1745,6 +1774,9 @@ impl<'d, 'b> Emitter<'d, 'b> {
             self.block();
             self.open(Some(n), el);
         }
+        // The runs' paint slots belong to the text, which no value is
+        // hoisted into or through.
+        self.open_group("text", &[]);
         self.body.push('>');
         let mut y: i64 = 0;
         let mut first_line = true;
@@ -1752,16 +1784,16 @@ impl<'d, 'b> Emitter<'d, 'b> {
         for c in &kids {
             match self.doc.tree.kind(*c) {
                 Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
-                Some(NodeKind::TextLine(_)) => {
+                Some(NodeKind::TextLine(l)) => {
                     self.attrs.push_scope();
-                    let line = self.text_line(*c, &mut y, first_line);
+                    self.text_line(*c, l, &mut y, first_line, placement.as_ref());
                     first_line = false;
-                    self.body.push_str(&line);
                     self.attrs.pop_scope();
                 }
                 _ => {}
             }
         }
+        self.close_group();
         if wrapped {
             self.body.push_str("</text>");
             self.newline();
@@ -1783,118 +1815,278 @@ impl<'d, 'b> Emitter<'d, 'b> {
         }
     }
 
-    /// One line: its characters, split into styled runs.
-    fn text_line(&mut self, line: NodeId, y: &mut i64, first: bool) -> String {
-        let mut runs: Vec<(String, String)> = Vec::new();
-        let mut max_size: i64 = 0;
+    /// One line: its items grouped into runs, each written as a `<tspan>`.
+    fn text_line(
+        &mut self,
+        line: NodeId,
+        node: &TextLineNode,
+        y: &mut i64,
+        first: bool,
+        place: Option<&StoryPlacement>,
+    ) {
+        let mut runs: Vec<TextRun> = Vec::new();
+        let mut snap: Option<ResolvedAttrs> = None;
+        let mut dirty = true;
         let kids: Vec<NodeId> = self.doc.tree.children(line).collect();
         for c in kids {
             match self.doc.tree.kind(c) {
-                Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
+                Some(NodeKind::Attr(a)) => {
+                    self.attrs.push(Arc::new(a.value.clone()));
+                    dirty = true;
+                }
                 Some(NodeKind::TextItem(item)) => {
-                    let ch = match item {
-                        TextItem::Char(ch) => *ch,
-                        TextItem::Tab => '\t',
-                        TextItem::Kern(_) | TextItem::LineBreak(_) => continue,
-                    };
-                    let (style, size) = self.run_style();
-                    max_size = max_size.max(size);
-                    match runs.last_mut() {
-                        Some((s, text)) if *s == style => text.push(ch),
-                        _ => runs.push((style, ch.to_string())),
+                    let item = *item;
+                    // An item's own attribute children apply to it alone.
+                    let own = self.doc.tree.links(c).first_child.is_some();
+                    if own {
+                        self.attrs.push_scope();
+                        let sub: Vec<NodeId> = self.doc.tree.children(c).collect();
+                        for a in sub {
+                            if let Some(NodeKind::Attr(a)) = self.doc.tree.kind(a) {
+                                self.attrs.push(Arc::new(a.value.clone()));
+                            }
+                        }
+                        dirty = true;
+                    }
+                    if dirty || runs.is_empty() {
+                        let s = self.attrs.snapshot();
+                        if runs.is_empty() || snap.as_ref() != Some(&s) {
+                            let r = self.text_run(place);
+                            match runs.last() {
+                                Some(last) if last.same_output(&r) => {}
+                                _ => runs.push(r),
+                            }
+                        }
+                        snap = Some(s);
+                        dirty = false;
+                    }
+                    if let Some(r) = runs.last_mut() {
+                        r.items.push((c, item));
+                    }
+                    if own {
+                        self.attrs.pop_scope();
+                        dirty = true;
                     }
                 }
                 _ => {}
             }
         }
-        if max_size == 0 {
-            let (_, size) = self.run_style();
-            max_size = size;
+        if runs.is_empty() {
+            // A line with no items still has line-level attributes: the
+            // story's state around it, its own attributes out of scope
+            // (`StoryText`'s rule). The caller pops the scope reopened here.
+            self.attrs.pop_scope();
+            let r = self.text_run(place);
+            self.attrs.push_scope();
+            runs.push(r);
         }
-        if !first {
-            *y += match self.attrs.get(AttrSlot::TxtLineSpace) {
-                AttrValue::LineSpace(xarast_doc::LineSpacing::Absolute(v)) => i64::from(v.raw()),
-                AttrValue::LineSpace(xarast_doc::LineSpacing::Ratio(r)) => {
-                    (max_size as f64 * 1.2 * f64::from(*r)).round() as i64
-                }
-                _ => max_size * 6 / 5,
-            };
-        }
+
+        // The line's own position: where its first placed character is
+        // (with a placer), else one line height below the previous line.
+        let first_pos = place.and_then(|p| {
+            runs.iter()
+                .flat_map(|r| r.items.iter())
+                .find_map(|(n, _)| p.chars.get(n).copied())
+        });
         let mut s = String::from("<tspan");
         attr(&mut s, "id", &node_id(self.doc, line));
         self.stats.elements += 1;
-        attr(&mut s, "x", "0");
-        attr(&mut s, "y", &mp(*y));
-        match self.attrs.get(AttrSlot::TxtJustification) {
-            AttrValue::Justification(xarast_doc::Justification::Centre) => {
-                attr(&mut s, "text-anchor", "middle");
+        match first_pos {
+            Some((x, py)) => {
+                attr(&mut s, "x", &mp(i64::from(x.raw())));
+                attr(&mut s, "y", &mp(-i64::from(py.raw())));
             }
-            AttrValue::Justification(xarast_doc::Justification::Right) => {
-                attr(&mut s, "text-anchor", "end");
+            None => {
+                let max_size = runs.iter().map(|r| r.size).max().unwrap_or(0);
+                if !first {
+                    *y += match runs.first().map(|r| r.spacing) {
+                        Some(xarast_doc::LineSpacing::Absolute(v)) => i64::from(v.raw()),
+                        Some(xarast_doc::LineSpacing::Ratio(r)) => {
+                            (max_size as f64 * 1.2 * f64::from(r)).round() as i64
+                        }
+                        None => max_size * 6 / 5,
+                    };
+                }
+                attr(&mut s, "x", "0");
+                attr(&mut s, "y", &mp(*y));
+                // Without placed characters, the line's alignment is the
+                // nearest a browser can do.
+                if place.is_none() {
+                    match runs.first().map(|r| r.justification) {
+                        Some(xarast_doc::Justification::Centre) => {
+                            attr(&mut s, "text-anchor", "middle");
+                        }
+                        Some(xarast_doc::Justification::Right) => {
+                            attr(&mut s, "text-anchor", "end");
+                        }
+                        _ => {}
+                    }
+                }
             }
-            AttrValue::Justification(xarast_doc::Justification::Full) => {
-                attr(&mut s, "xarast:justify", "full");
-            }
-            _ => {}
+        }
+        if let Some(r) = &node.ruler {
+            attr(&mut s, "xarast:ruler", &super::text::ruler_text(r));
         }
         s.push('>');
-        for (style, text) in runs {
-            self.stats.characters += text.chars().count();
-            s.push_str("<tspan");
-            s.push_str(&style);
-            s.push('>');
-            push_text_escaped(&mut s, &text);
-            s.push_str("</tspan>");
+        self.body.push_str(&s);
+        for r in runs {
+            self.write_run(r, place);
         }
-        s.push_str("</tspan>");
-        s
+        self.body.push_str("</tspan>");
     }
 
-    /// The attributes of a run in the current state, and its font size.
-    fn run_style(&mut self) -> (String, i64) {
-        let mut s = String::new();
-        if let AttrValue::FontTypeface(f) = self.attrs.get(AttrSlot::TxtFontTypeface) {
-            let fam = f.family.replace('\'', "");
-            attr(&mut s, "font-family", &format!("'{fam}', sans-serif"));
+    /// A run's start tag from the attribute state in force: text
+    /// attributes, then paint (as for any ink element, through a slot).
+    fn text_run(&mut self, place: Option<&StoryPlacement>) -> TextRun {
+        let subs: &[(Arc<str>, Arc<str>)] = place.map_or(&[], |p| &p.substitutions);
+        let mut el = El::new("tspan");
+        for (k, v) in super::text::run_text_attrs(&self.attrs, subs) {
+            el.a(k, v);
         }
+        el.ink = true;
+        let mut known = Vec::new();
+        self.paint(&mut el, None, true, true, &mut known);
         let size = match self.attrs.get(AttrSlot::TxtFontSize) {
             AttrValue::FontSize(v) => i64::from(v.raw()),
-            _ => 12_000,
+            _ => 0,
         };
-        attr(&mut s, "font-size", &mp(size));
-        if let AttrValue::Bold(true) = self.attrs.get(AttrSlot::TxtBold) {
-            attr(&mut s, "font-weight", "bold");
-        }
-        if let AttrValue::Italic(true) = self.attrs.get(AttrSlot::TxtItalic) {
-            attr(&mut s, "font-style", "italic");
-        }
-        if let AttrValue::Underline(true) = self.attrs.get(AttrSlot::TxtUnderline) {
-            attr(&mut s, "text-decoration", "underline");
-        }
-        let fill = match self.attrs.get(AttrSlot::FillGeometry) {
-            AttrValue::Fill(p) => Some(p.clone()),
-            _ => None,
+        let spacing = match self.attrs.get(AttrSlot::TxtLineSpace) {
+            AttrValue::LineSpace(l) => *l,
+            _ => xarast_doc::LineSpacing::default(),
         };
-        if let Some(p) = fill {
-            let this = &mut *self;
-            let mut ctx = PaintCtx {
-                colours: &this.doc.resources.colours,
-                defs: &mut this.defs,
-                frame: this.frame,
-                stats: &mut this.stats,
-                palette: &this.palette,
-                bitmap_href: &mut *this.bitmap_href,
-            };
-            let out = colour_paint(&mut ctx, &p, Tiling::None, FillEffect::Fade);
-            if out.value != "#000" {
-                attr(&mut s, "fill", &out.value);
-            }
-            if let Some(o) = out.opacity {
-                attr(&mut s, "fill-opacity", &f64s(o, 3));
-            }
+        let justification = match self.attrs.get(AttrSlot::TxtJustification) {
+            AttrValue::Justification(j) => *j,
+            _ => xarast_doc::Justification::Left,
+        };
+        TextRun {
+            el,
+            sidecars: known,
+            items: Vec::new(),
+            size,
+            spacing,
+            justification,
         }
-        (s, size)
     }
+
+    /// Writes one run: `<tspan …>` with its twins and its items.
+    fn write_run(&mut self, r: TextRun, place: Option<&StoryPlacement>) {
+        let TextRun {
+            mut el,
+            sidecars,
+            items,
+            ..
+        } = r;
+        if let Some(p) = place {
+            // One position per character the browser draws.
+            let mut xs: Vec<i64> = Vec::new();
+            let mut ys: Vec<i64> = Vec::new();
+            for (n, item) in &items {
+                let drawn = match item {
+                    TextItem::Char(c) => is_xml_char(*c),
+                    TextItem::Tab => true,
+                    _ => false,
+                };
+                if !drawn {
+                    continue;
+                }
+                let (x, y) = match p.chars.get(n) {
+                    Some((x, y)) => (i64::from(x.raw()), -i64::from(y.raw())),
+                    None => match (xs.last(), ys.last()) {
+                        (Some(x), Some(y)) => (*x, *y),
+                        _ => continue,
+                    },
+                };
+                xs.push(x);
+                ys.push(y);
+            }
+            if let Some(&y0) = ys.first() {
+                let mut pos = Vec::with_capacity(2);
+                pos.push(("x".to_owned(), join_mp(&xs)));
+                if ys.iter().all(|v| *v == y0) {
+                    pos.push(("y".to_owned(), mp(y0)));
+                } else {
+                    pos.push(("y".to_owned(), join_mp(&ys)));
+                }
+                el.attrs.splice(0..0, pos);
+            }
+        }
+        el.start(&mut self.body);
+        if self.inline > 0 {
+            self.styler.write_inline(&el.paint, &mut self.body);
+        } else {
+            self.styler.ink(self.body.len(), el.paint, false);
+        }
+        self.body.push('>');
+        for s in sidecars {
+            self.body.push_str(&s);
+        }
+        let mut text = String::new();
+        for (_, item) in items {
+            match item {
+                TextItem::Char(c) if is_xml_char(c) => {
+                    self.stats.characters += 1;
+                    text.push(c);
+                }
+                TextItem::Tab => {
+                    self.stats.characters += 1;
+                    text.push('\t');
+                }
+                other => {
+                    push_text_escaped(&mut self.body, &text);
+                    text.clear();
+                    match other {
+                        TextItem::Char(c) => {
+                            // Not an XML character: SVG cannot carry it.
+                            self.stats.characters += 1;
+                            self.body.push_str("<xarast:char xarast:code=\"");
+                            self.body.push_str(&format!("{:x}", u32::from(c)));
+                            self.body.push_str("\"/>");
+                        }
+                        TextItem::Kern(k) => {
+                            // Thousandths of an em.
+                            self.body.push_str("<xarast:kern xarast:em=\"");
+                            self.body.push_str(&k.raw().to_string());
+                            self.body.push_str("\"/>");
+                        }
+                        TextItem::LineBreak(true) => self.body.push_str("<xarast:eol/>"),
+                        TextItem::LineBreak(false) => {
+                            self.body.push_str("<xarast:eol xarast:soft=\"true\"/>");
+                        }
+                        TextItem::Tab => {}
+                    }
+                }
+            }
+        }
+        push_text_escaped(&mut self.body, &text);
+        self.body.push_str("</tspan>");
+    }
+}
+
+/// A run of a line being written: its start tag (text attributes and
+/// paint), its twins and its items.
+struct TextRun {
+    el: El,
+    sidecars: Vec<String>,
+    items: Vec<(NodeId, TextItem)>,
+    /// For the placement fallback: the size, spacing and alignment.
+    size: i64,
+    spacing: xarast_doc::LineSpacing,
+    justification: xarast_doc::Justification,
+}
+
+impl TextRun {
+    /// Whether two runs would write the same start tag and twins.
+    fn same_output(&self, other: &TextRun) -> bool {
+        self.el.attrs == other.el.attrs
+            && self.el.paint == other.el.paint
+            && self.sidecars == other.sidecars
+    }
+}
+
+/// Millipoint values as an SVG number list.
+fn join_mp(v: &[i64]) -> String {
+    let parts: Vec<String> = v.iter().map(|x| mp(*x)).collect();
+    parts.join(" ")
 }
 
 /// Feeds a length-prefixed string into the preservation digest.

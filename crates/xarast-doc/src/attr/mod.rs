@@ -693,7 +693,8 @@ pub fn default_for(slot: AttrSlot) -> AttrValue {
         AttrSlot::TxtJustification => AttrValue::Justification(Justification::Left),
         AttrSlot::TxtTracking => AttrValue::Tracking(Mp::ZERO),
         AttrSlot::TxtUnderline => AttrValue::Underline(false),
-        AttrSlot::TxtFontSize => AttrValue::FontSize(Mp::new(12_000)),
+        // The original's factory default (`Kernel/txtattr.cpp:449-452`).
+        AttrSlot::TxtFontSize => AttrValue::FontSize(Mp::new(16_000)),
         AttrSlot::TxtScript => AttrValue::Script(Script::default()),
         AttrSlot::TxtBaseline => AttrValue::Baseline(Mp::ZERO),
         AttrSlot::TxtLineSpace => AttrValue::LineSpace(LineSpacing::Ratio(1.0)),

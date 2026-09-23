@@ -20,7 +20,7 @@ tool (W9.4) and text on a path (W9.5) are later rounds.
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4) and story invariants (T9.2.5) open | in review |
-| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); golden images and the `.xarast` text writer (XARA-T-0172) open | in progress |
+| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
 
 Public API (`crates/xarast-text/src/lib.rs`):
 
@@ -245,9 +245,10 @@ run).
   Before this, `Tracking.xar` was ~20 % too wide; now it overlays.
 - **The default font size is 16 pt** (`Kernel/txtattr.cpp:449-452`); the
   default typeface is "Times New Roman" (`Kernel/fontman.h:111`). The
-  model's `default_for(TxtFontSize)` is still 12 pt, because the `.xarast`
-  writer and reader elide defaults with 12 000 mp fallbacks of their own
-  (XARA-T-0172); the importer writes 16 pt explicitly instead.
+  model's `default_for(TxtFontSize)` is 16 pt since XARA-T-0172 (the
+  `.xarast` writer always writes a run's size and the reader's fallbacks
+  use `default_for`); the importer's explicit 16 pt is no longer needed
+  and no longer written.
 
 Taken from the original to fix semantics; implemented from these notes.
 
@@ -479,10 +480,10 @@ first story of a process waits for enumeration when nothing prewarmed
 
 ## Dead ends (do not retry)
 
-- **Changing the model's default font size to 16 pt.** Correct for Xara,
-  but the `.xarast` reader/writer use their own 12 000 mp fallbacks, and
-  the normal-form round trip (`svg_roundtrip.rs`) broke on GardenPlan. The
-  importer supplies the value instead until XARA-T-0172 aligns them.
+- ~~Changing the model's default font size to 16 pt~~ — done with
+  XARA-T-0172 once the `.xarast` writer/reader stopped using 12 000 mp
+  fallbacks of their own (they had broken the normal-form round trip on
+  GardenPlan).
 - **A `HeadlessOptions::fonts` field**: the struct is `Copy + PartialEq`;
   use `headless::render_with_fonts`.
 - **Emitting a text record's attributes after its characters** (the
@@ -507,8 +508,27 @@ first story of a process waits for enumeration when nothing prewarmed
   character still not in the model; the layer bounds cache (when warm)
   ignores text, so `drawing_rect` misses text once `update_bounds` has run;
   `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
-  embedded-font overlay; W9.5 text on a path; the `.xarast` writer's text
-  (XARA-T-0172); golden images of `TextDesigns` with pinned fonts (W9.7).
+  embedded-font overlay; W9.5 text on a path; golden images of
+  `TextDesigns` with pinned fonts (W9.7).
+
+## The `.xarast` text writer (XARA-T-0172, done)
+
+- The profile carries a story exactly (`research/06 §6.7.1`,
+  `docs/memory/xarast-format.md` "Text"): runs of items with every text
+  attribute resolved and twinned, kerns / breaks / non-XML characters as
+  elements in place. A reload resolves every character as before, so the
+  walker lays it out and draws it identically: 59/59 corpus files render
+  pixel-identical after a round trip with the pinned fonts.
+- **For browsers** the writer asks a `TextPlacer`; `xarast-app`'s
+  `svg_text::SvgTextPlacer` runs the same bridge and shaper as the walker
+  (`text::story_input`, `layout_text`) and reports each character item's
+  cluster box left edge on its baseline (`PlacedGlyph::y` of the
+  cluster's first glyph; the line baseline when it has none). The app's
+  save path (not written yet) should pass `svg_text::placer()` in
+  `SvgOptions::text`, as `xarast-cli convert` does.
+- An empty `TextLine` resolves its line attributes from the state *after*
+  its scope closes (`StoryText::end_line`), so its own attributes never
+  matter; the format writes and reads that outer state at story level.
 
 - W9.1: T9.1.6 background enumeration (the API is ready; the app must call
   `load_system_fonts` on its I/O thread), T9.1.7 gallery, T9.1.8 Windows and

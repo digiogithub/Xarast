@@ -598,7 +598,7 @@ impl<'d> Reader<'d, '_, '_> {
             .and_then(parse::transform)
             .unwrap_or(IDENTITY);
         let l = parse::mul(&ctx.ctm, &local);
-        let transform = Matrix {
+        let mut transform = Matrix {
             a: l[0],
             b: -l[1],
             c: -l[2],
@@ -606,6 +606,28 @@ impl<'d> Reader<'d, '_, '_> {
             e: mp_i32(round(l[4]).saturating_add(ctx.frame.ox)),
             f: mp_i32(ctx.frame.oy.saturating_sub(round(l[5]))),
         };
+        // The exact linear part, when the writer recorded it and the
+        // transform still says the same (an editor may have changed it).
+        if parse::is_identity(&ctx.ctm)
+            && let Some(v) = xa(t, "matrix")
+        {
+            let p: Vec<f64> = v
+                .split_ascii_whitespace()
+                .filter_map(|x| x.parse::<f64>().ok())
+                .filter(|x| x.is_finite())
+                .collect();
+            if let [a, b, c, d] = p.as_slice()
+                && (a - transform.a).abs() < 1e-6
+                && (b - transform.b).abs() < 1e-6
+                && (c - transform.c).abs() < 1e-6
+                && (d - transform.d).abs() < 1e-6
+            {
+                transform.a = *a;
+                transform.b = *b;
+                transform.c = *c;
+                transform.d = *d;
+            }
+        }
         let layout = match xa(t, "layout") {
             Some("column") => TextLayout::InColumn {
                 width: xa(t, "width").and_then(parse::mp).map_or(Mp::ZERO, mp_i32),
@@ -639,6 +661,8 @@ impl<'d> Reader<'d, '_, '_> {
                     && matches!(
                         l,
                         "kind"
+                            | "exact"
+                            | "matrix"
                             | "layout"
                             | "width"
                             | "word-wrap"
@@ -671,6 +695,13 @@ impl<'d> Reader<'d, '_, '_> {
             frame: ctx.frame,
         };
         self.b.push_scope()?;
+        let exact = is_true(xa(t, "exact"));
+        // The attribute state at story level, which each line of an exact
+        // story starts from.
+        let mut story_state: Vec<AttrValue> = xarast_doc::ALL_ATTR_SLOTS
+            .iter()
+            .map(|s| default_for(*s))
+            .collect();
         let mut count = 0u32;
         let mut prev_y: Option<i64> = None;
         let mut direct = String::new();
@@ -678,7 +709,10 @@ impl<'d> Reader<'d, '_, '_> {
             match c {
                 Child::Elem(k) => {
                     let Some(line) = self.elem(*k) else { continue };
-                    if line.is(NS_SVG, "tspan") {
+                    if line.is(NS_SVG, "tspan") && exact {
+                        self.exact_line(line, &tctx, &mut story_state)?;
+                        count = count.saturating_add(1);
+                    } else if line.is(NS_SVG, "tspan") {
                         self.text_line(line, &tctx, &mut prev_y)?;
                         count = count.saturating_add(1);
                     } else {
@@ -689,7 +723,7 @@ impl<'d> Reader<'d, '_, '_> {
                 Child::Text(s) => direct.push_str(s),
             }
         }
-        if !direct.trim().is_empty() {
+        if !exact && !direct.trim().is_empty() {
             // Text straight in `<text>` (another program's): one line.
             self.direct_line(&tctx.style, tctx.frame, &direct)?;
             count = count.saturating_add(1);
@@ -763,7 +797,15 @@ impl<'d> Reader<'d, '_, '_> {
                 Child::Comment(..) | Child::Pi(..) => self.keep_misc(c, 0, &mut bag),
             }
         }
-        let size_of = |cs: &Computed| cs.get("font-size").and_then(parse::mp).unwrap_or(12_000);
+        let default_size = match default_for(xarast_doc::AttrSlot::TxtFontSize) {
+            AttrValue::FontSize(v) => i64::from(v.raw()),
+            _ => 0,
+        };
+        let size_of = |cs: &Computed| {
+            cs.get("font-size")
+                .and_then(parse::mp)
+                .unwrap_or(default_size)
+        };
         let max_size = runs
             .iter()
             .filter(|(_, t)| !t.is_empty())
@@ -806,6 +848,262 @@ impl<'d> Reader<'d, '_, '_> {
         Ok(())
     }
 
+    /// One line of an exact story (`xarast:exact="true"`, `svg/text.rs`):
+    /// a `TextLine` whose children are, run by run, the attributes that
+    /// differ from the previous run's and the run's items.
+    fn exact_line(
+        &mut self,
+        line: &'d Elem,
+        ctx: &Ctx,
+        story_state: &mut [AttrValue],
+    ) -> Result<(), SvgReadError> {
+        let (ls, leftover) = style::compute(line, &ctx.style, &self.sheet);
+        let runs: Vec<&'d Elem> = line
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                Child::Elem(k) => self.elem(*k).filter(|r| r.is(NS_SVG, "tspan")),
+                _ => None,
+            })
+            .collect();
+        // A line with no items: its one run is the story's state around
+        // it, which goes before the line, at story level.
+        if let [only] = runs.as_slice()
+            && only
+                .children
+                .iter()
+                .all(|c| matches!(c, Child::Comment(..) | Child::Pi(..)))
+        {
+            let (rs, _) = style::compute(only, &ls, &self.sheet);
+            let rctx = Ctx {
+                style: rs,
+                ctm: ctx.ctm,
+                frame: ctx.frame,
+            };
+            let want = self.full_state(only, &rctx);
+            for (have, w) in story_state.iter_mut().zip(want) {
+                if *have != w {
+                    self.stats.attributes = self.stats.attributes.saturating_add(1);
+                    self.b.attribute(w.clone())?;
+                    *have = w;
+                }
+            }
+        }
+        let ruler = xa(line, "ruler").map(parse_ruler);
+        let node = self
+            .b
+            .node(NodeKind::TextLine(Box::new(xarast_doc::TextLineNode {
+                ruler,
+            })))?;
+        let mut bag = self.common(
+            node,
+            line,
+            &|ns, l| {
+                (ns.is_empty() && matches!(l, "x" | "y" | "dx" | "dy"))
+                    || (ns == NS_XARAST && l == "ruler")
+            },
+            &leftover,
+            false,
+            false,
+        );
+        self.b.push_scope()?;
+        let lctx = Ctx {
+            style: ls,
+            ctm: ctx.ctm,
+            frame: ctx.frame,
+        };
+        // The line starts from the story's state.
+        let mut state: Vec<AttrValue> = story_state.to_vec();
+        let mut count = 0u32;
+        for c in &line.children {
+            match c {
+                Child::Elem(k) => {
+                    let Some(r) = self.elem(*k) else { continue };
+                    if r.is(NS_SVG, "tspan") {
+                        let (rs, _) = style::compute(r, &lctx.style, &self.sheet);
+                        let rctx = Ctx {
+                            style: rs,
+                            ctm: lctx.ctm,
+                            frame: lctx.frame,
+                        };
+                        let want = self.full_state(r, &rctx);
+                        for (have, w) in state.iter_mut().zip(want) {
+                            if *have != w {
+                                self.stats.attributes = self.stats.attributes.saturating_add(1);
+                                self.b.attribute(w.clone())?;
+                                *have = w;
+                            }
+                        }
+                        self.run_items(r)?;
+                    } else {
+                        self.keep_element(*k, count, &mut bag);
+                        count = count.saturating_add(1);
+                    }
+                }
+                Child::Comment(..) | Child::Pi(..) => self.keep_misc(c, count, &mut bag),
+                // Whitespace between runs (an editor's indentation): not text.
+                Child::Text(_) => {}
+            }
+        }
+        self.b.pop_scope();
+        self.store(node, bag);
+        Ok(())
+    }
+
+    /// The items of one run, in order: characters, then the elements for
+    /// what is not a character a browser draws.
+    fn run_items(&mut self, r: &'d Elem) -> Result<(), SvgReadError> {
+        for c in &r.children {
+            match c {
+                Child::Text(s) => self.chars(s)?,
+                Child::Elem(k) => {
+                    let Some(x) = self.elem(*k) else { continue };
+                    if &*x.ns != NS_XARAST {
+                        continue;
+                    }
+                    let item = match &*x.local {
+                        "kern" => TextItem::Kern(
+                            xa(x, "em")
+                                .and_then(|v| v.trim().parse::<i32>().ok())
+                                .map_or(Mp::ZERO, Mp::new),
+                        ),
+                        "eol" => TextItem::LineBreak(!is_true(xa(x, "soft"))),
+                        "char" => {
+                            match xa(x, "code")
+                                .and_then(|v| u32::from_str_radix(v.trim(), 16).ok())
+                                .and_then(char::from_u32)
+                            {
+                                Some(ch) => TextItem::Char(ch),
+                                None => continue,
+                            }
+                        }
+                        _ => continue,
+                    };
+                    self.b.node(NodeKind::TextItem(item))?;
+                }
+                Child::Comment(..) | Child::Pi(..) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The value of every slot as a run says it: what it writes, the
+    /// defaults for the rest.
+    fn full_state(&mut self, r: &'d Elem, ctx: &Ctx) -> Vec<AttrValue> {
+        let mut want: Vec<AttrValue> = xarast_doc::ALL_ATTR_SLOTS
+            .iter()
+            .map(|s| default_for(*s))
+            .collect();
+        for v in self.exact_run_attrs(r, ctx) {
+            if let Some(slot) = v.slot()
+                && let Some(w) = want.get_mut(slot as usize)
+            {
+                *w = v;
+            }
+        }
+        want
+    }
+
+    /// Every attribute value a run says, from its text attributes, their
+    /// twins and its paint.
+    fn exact_run_attrs(&mut self, r: &'d Elem, ctx: &Ctx) -> Vec<AttrValue> {
+        let cs = &ctx.style;
+        let mut out = Vec::new();
+        let first_family = cs.get("font-family").map(|f| {
+            f.split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '\'' || c == '"')
+                .to_owned()
+        });
+        let family: Arc<str> = match xa(r, "family") {
+            Some(f) => Arc::from(f),
+            None => Arc::from(first_family.unwrap_or_default().as_str()),
+        };
+        let full: Arc<str> = xa(r, "font").map_or_else(|| Arc::clone(&family), Arc::from);
+        out.push(AttrValue::FontTypeface(Arc::new(TypefaceRef {
+            full_name: full,
+            family,
+            panose: xa(r, "panose").and_then(parse_panose),
+        })));
+        if let Some(s) = xa(r, "size")
+            .or_else(|| cs.get("font-size"))
+            .and_then(parse::mp)
+        {
+            out.push(AttrValue::FontSize(mp_i32(s)));
+        }
+        let weight = cs.get("font-weight");
+        out.push(AttrValue::Bold(
+            matches!(weight, Some("bold" | "bolder"))
+                || weight
+                    .and_then(|w| w.parse::<u32>().ok())
+                    .is_some_and(|w| w >= 600),
+        ));
+        out.push(AttrValue::Italic(matches!(
+            cs.get("font-style"),
+            Some("italic" | "oblique")
+        )));
+        out.push(AttrValue::Underline(
+            cs.get("text-decoration")
+                .is_some_and(|d| d.contains("underline")),
+        ));
+        if let Some(v) = xa(r, "aspect").and_then(parse::f32_exact) {
+            out.push(AttrValue::AspectRatio(v));
+        }
+        if let Some(v) = xa(r, "tracking").and_then(|v| v.trim().parse::<i32>().ok()) {
+            out.push(AttrValue::Tracking(Mp::new(v)));
+        }
+        if let Some(v) = xa(r, "script") {
+            let p: Vec<&str> = v.split_ascii_whitespace().collect();
+            if let [on, offset, size] = p.as_slice()
+                && let (Some(offset), Some(size)) =
+                    (parse::f32_exact(offset), parse::f32_exact(size))
+            {
+                out.push(AttrValue::Script(xarast_doc::Script {
+                    on: *on == "on",
+                    offset,
+                    size,
+                }));
+            }
+        }
+        if let Some(v) = xa(r, "baseline").and_then(parse::mp) {
+            out.push(AttrValue::Baseline(mp_i32(v)));
+        }
+        out.push(AttrValue::Justification(match xa(r, "justify") {
+            Some("centre") => Justification::Centre,
+            Some("right") => Justification::Right,
+            Some("full") => Justification::Full,
+            _ => Justification::Left,
+        }));
+        if let Some(v) = xa(r, "line-spacing") {
+            if let Some(x) = v.strip_prefix("ratio:").and_then(parse::f32_exact) {
+                out.push(AttrValue::LineSpace(LineSpacing::Ratio(x)));
+            } else if let Some(x) = v.strip_prefix("abs:").and_then(parse::mp) {
+                out.push(AttrValue::LineSpace(LineSpacing::Absolute(mp_i32(x))));
+            }
+        }
+        if let Some(v) = xa(r, "indent-left").and_then(parse::mp) {
+            out.push(AttrValue::LeftMargin(mp_i32(v)));
+        }
+        if let Some(v) = xa(r, "indent-right").and_then(parse::mp) {
+            out.push(AttrValue::RightMargin(mp_i32(v)));
+        }
+        if let Some(v) = xa(r, "indent-first").and_then(parse::mp) {
+            out.push(AttrValue::FirstIndent(mp_i32(v)));
+        }
+        if let Some(v) = xa(r, "ruler") {
+            out.push(AttrValue::Ruler(parse_ruler(v)));
+        }
+        let info = InkInfo {
+            filled: true,
+            stroked: true,
+            image: false,
+            bounds: None,
+        };
+        out.extend(self.ink_paint(r, ctx, info));
+        out
+    }
     /// Text straight in a `<text>`: one line of characters.
     fn direct_line(&mut self, cs: &Computed, frame: Frame, text: &str) -> Result<(), SvgReadError> {
         self.b.node(NodeKind::TextLine(Box::default()))?;
@@ -954,4 +1252,32 @@ fn sniff_image(b: &[u8]) -> ImageFormat {
     } else {
         ImageFormat::Unknown
     }
+}
+
+/// Ten PANOSE bytes, as twenty hex digits.
+fn parse_panose(v: &str) -> Option<[u8; 10]> {
+    let v = v.trim();
+    if v.len() != 20 || !v.is_ascii() {
+        return None;
+    }
+    let mut out = [0u8; 10];
+    for (i, b) in out.iter_mut().enumerate() {
+        let at = i.checked_mul(2)?;
+        *b = u8::from_str_radix(v.get(at..at.checked_add(2)?)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// A ruler, `position:kind` pairs (`svg/text.rs`); malformed pairs are
+/// skipped.
+fn parse_ruler(v: &str) -> Arc<[xarast_doc::TabStop]> {
+    v.split_ascii_whitespace()
+        .filter_map(|pair| {
+            let (pos, kind) = pair.split_once(':')?;
+            Some(xarast_doc::TabStop {
+                position: mp_i32(parse::mp(pos)?),
+                kind: kind.parse::<u8>().ok()?,
+            })
+        })
+        .collect()
 }

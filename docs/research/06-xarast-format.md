@@ -1376,11 +1376,11 @@ indentation 4201-4204, linked stories 4205-4207).
 | Bold / italic | 2908-2911 | `font-weight`, `font-style` | — | — |
 | Underline | 2912/2913 | `text-decoration="underline"` | — | — |
 | Super/subscript, explicit script | 2914-2917 | `<tspan baseline-shift="…" font-size="…">` | `xarast:script="super|sub|explicit"` + offset and size | — |
-| Tracking | `TAG_TEXT_TRACKING` 2918 | `letter-spacing` (converted from thousandths of an em to pt) | `xarast:tracking="<thousandths of an em>"` | Rounding |
+| Tracking | `TAG_TEXT_TRACKING` 2918 | Baked into the characters' `x` (§6.7.1) | `xarast:tracking="<thousandths of an em>"` | None |
 | Aspect ratio | `TAG_TEXT_ASPECT_RATIO` 2919 | Per-glyph positions baked into the `<tspan>`'s `x="…"` | `xarast:aspect="1.2"` | — |
 | Baseline shift | `TAG_TEXT_BASELINE` 2920 | `baseline-shift` or `dy` | — | — |
 | Line spacing | 2900 (ratio) / 2901 (absolute) | explicit `y`/`dy` per line | `xarast:line-spacing="ratio:1.2"` or `"abs:14pt"` | It is frozen |
-| Manual kerning | `TAG_TEXT_KERN` 2204 | `dx` on the `<tspan>` | — | — |
+| Manual kerning | `TAG_TEXT_KERN` 2204 | Baked into the characters' `x` (§6.7.1) | `<xarast:kern xarast:em="N"/>` in place | None |
 | Tab stops and ruler | `TAG_TEXT_TAB` 4200, `TAG_TEXT_RULER` 4204 | Baked positions | `<xarast:tabs>` and `<xarast:ruler>` | They are frozen |
 | Indents | 4201-4203 | Baked into `x` | `xarast:indent-left/first/right` | They are frozen |
 | Text converted to curves | — | `<path>` | `xarast:was-text="true"` + `<xarast:text-source>` with the original text (accessibility and search) | — |
@@ -1403,6 +1403,90 @@ indentation 4201-4204, linked stories 4205-4207).
    `<g xarast:generated="text-outline" style="display:none">`, which the reader can
    enable if the font is unavailable. High cost in size; that is why it is a separate
    profile.
+
+#### 6.7.1 Exact stories (normative for Xarast writers)
+
+The table above is the *intent*; this is what a Xarast writer produces and what a
+Xarast reader relies on (XARA-T-0172). A story is written so that a reader rebuilds a
+story whose every character **resolves to the same attributes** — the layout and the
+render then follow — while the base SVG shows the text where Xarast draws it.
+
+**Structure.**
+
+```xml
+<text id="x…" xarast:kind="text" transform="matrix(a -b -c d e f)"
+      [xarast:matrix="a b c d"] xml:space="preserve" xarast:exact="true"
+      [xarast:layout="column" xarast:width="…" [xarast:word-wrap="false"]]
+      [xarast:auto-kern="false"] …>
+  <tspan id="x…" x="…" y="…" [xarast:ruler="36:0 72:2"]>        <!-- one per TextLine -->
+    <tspan font-family="'Family', ['Substitute', ]generic" font-size="…" …twins… …paint…>
+      [<xarast:fill …/> <xarast:transparency …/> …]            <!-- paint twins, §6.14 -->
+      Te<xarast:kern xarast:em="-60"/>xt<xarast:eol/>           <!-- the run's items -->
+    </tspan>
+    …more runs…
+  </tspan>
+</text>
+```
+
+1. **One line `<tspan>` per `TextLine`**, with the line's id. A line node's own ruler
+   (the one a `.xar` line carried) is `xarast:ruler`: `position:kind` pairs, the
+   position in points, the kind the format's `type_and_flags` byte.
+2. **Runs.** Inside a line, one `<tspan>` per maximal sequence of the line's items whose
+   *written* attributes are identical (the text attributes below, the paint and its
+   twins). Every item — characters, kerns, breaks — belongs to exactly one run, in
+   order. An item's own attribute children apply to it alone. A line with no items has
+   exactly one run with no content: it states the **story-level** attribute state around
+   the line (its own attribute children out of scope, as the model resolves it).
+3. **A run's content**, in item order: a character as text (a tab as U+0009, which
+   `xml:space="preserve"` keeps; U+000D as `&#13;`); a character XML cannot carry as
+   `<xarast:char xarast:code="HEX"/>`; a manual kern as `<xarast:kern
+   xarast:em="N"/>` (thousandths of an em, as stored); a paragraph end as
+   `<xarast:eol/>`; a soft line end as `<xarast:eol xarast:soft="true"/>`. Browsers draw
+   none of these elements. No whitespace is written between elements inside `<text>`.
+4. **A run's text attributes**, always resolved (never inherited from the line or the
+   story): `font-family` (the family first, quoted; then the family the application
+   substituted, when it did; then a generic family from PANOSE: proportion 9 →
+   `monospace`, serif style 11–13 → `sans-serif`, other Latin-text PANOSE → `serif`,
+   none → `sans-serif`), `font-size` in points (the drawn size: model size × script
+   size when a script is on), `font-weight="bold"`, `font-style="italic"`,
+   `text-decoration="underline"`. Twins, each only when it says something:
+   `xarast:family` (when the chain cannot spell the family: empty, quotes, commas,
+   semicolons, backslashes, outer spaces), `xarast:font` (the full name, when not the
+   family), `xarast:panose` (20 hex digits), `xarast:font-substitute` (informative
+   only; never read into the model), `xarast:size` (the model size, when `font-size` is
+   the scripted size), `xarast:aspect` (shortest round-trip `f32`), `xarast:tracking`
+   (thousandths of an em), `xarast:script="on|off OFFSET SIZE"`, `xarast:baseline`
+   (points), `xarast:justify="centre|right|full"`, `xarast:line-spacing="ratio:R"` or
+   `"abs:PT"`, `xarast:indent-left` / `indent-right` / `indent-first` (points),
+   `xarast:ruler`.
+5. **A run's paint** is written exactly as an ink element's (§6.3–§6.6, §6.14): fill,
+   stroke (text is stroked when the resolved stroke is not `none`), transparencies,
+   blend modes, paint twins as child elements before the content. Runs take part in
+   pass 5 (classes) but the `<text>` is opaque to pass 4: nothing is hoisted into or
+   out of it.
+6. **Placement.** With the application's layout available, every run carries an `x`
+   list (one value per character the browser draws) and a `y` (one value when the run
+   sits on one baseline, a list otherwise), in the story's frame (y down): the left edge
+   of the character's cluster box on its baseline, shifts included; a cluster of several
+   characters shares its box evenly. `text-anchor` is then never written. Without the
+   layout, a line `<tspan>` has `x="0"` and a `y` one line height below the previous
+   line, and `text-anchor` reflects the line's alignment. Positions are **derived**: a
+   reader ignores them.
+7. **Matrix.** When six decimals do not reproduce the story matrix's linear part
+   exactly, `xarast:matrix` holds `a b c d` of the model (y up) in the shortest
+   round-trip spelling. A reader uses it when it agrees with `transform` to 1e-6 and no
+   ancestor transform applies; otherwise `transform` wins (an editor changed it).
+
+**Reading.** A reader rebuilds, for each line, a `TextLine` and, run by run, the
+attribute nodes whose value differs from the previous run's (the first run of a line
+from the story-level state), followed by the run's items. For a content-less single run,
+the differing attributes go before the line, at story level, and become the state the
+following lines start from. The result resolves every item as the written story did;
+where the attributes sat is not preserved (the model's normal form does not depend on
+it). A `<text>` without `xarast:exact` is another program's (or a pre-Phase-9 Xarast
+file's): lines are `<tspan>`s, runs are their `<tspan>` children, justification comes
+from `text-anchor` / `xarast:justify`, line spacing from `y` deltas, and a size that is
+not written is the model's default (16 pt).
 
 ### 6.8 Live effects
 
