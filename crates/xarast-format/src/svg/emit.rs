@@ -1,0 +1,1976 @@
+//! The tree walk: one model node, one SVG element.
+//!
+//! # The mapping rule
+//!
+//! Every non-attribute node that is reachable from the root becomes
+//! **exactly one element** carrying its persistent id (`x` + the node's
+//! tag), in document order — so z-order is document order (§5.8.2) and a
+//! reader can map elements back to nodes one to one. The two exceptions are
+//! inside text stories (lines become `<tspan>`s, characters become text)
+//! and are documented where they happen.
+//!
+//! Attribute nodes become no element: the attribute stack is resolved as
+//! the walk goes, exactly as the renderer's walker does it, and each ink
+//! element carries its **resolved** paint. SVG inheritance is never relied
+//! on, which is what lets pass 3 elide the SVG defaults safely: no ancestor
+//! `<g>` ever sets a paint property.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use xarast_color::{ColourId, ColourKind, ColourModel, FillEffect, TranspMode};
+use xarast_doc::fill::{Paint, Tiling};
+use xarast_doc::foreign::{ForeignBaggage, ForeignChildKind};
+use xarast_doc::{
+    AttrSlot, AttrStack, AttrValue, BitmapId, ClipViewMode, Document, LiveKind, LiveNode, LiveRole,
+    NodeFlags, NodeId, NodeKind, RegenState, ShapeKind, TextItem, TextLayout, TextStoryNode,
+};
+use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Vector};
+
+use super::defs::Defs;
+use super::frame::Frame;
+use super::num::{f64s, mp};
+use super::paint::{
+    BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, transparency,
+};
+use super::pathdata::path_data;
+use super::xml::{attr, base64, fragment_is_well_formed, is_ncname, push_text_escaped};
+use super::{
+    FragmentKind, NS_CC, NS_DC, NS_INKSCAPE, NS_RDF, NS_SODIPODI, NS_SVG, NS_XARAST, NS_XLINK,
+    NS_XML, Stats,
+};
+
+/// An element's box in SVG space, millipoints: `(x0, y0, x1, y1)`.
+type SvgBox = (i64, i64, i64, i64);
+
+/// What an ink element's geometry builder returns: its box, whether it is
+/// filled and stroked, and its known child elements.
+type InkOut = (Option<SvgBox>, bool, bool, Vec<String>);
+
+/// The Crockford base-32 alphabet: persistent ids are `x` + the tag in it.
+const B32: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+
+/// The persistent id of a node.
+pub(crate) fn node_id(doc: &Document, id: NodeId) -> String {
+    let mut t = doc.tree.get(id).map_or(0, |d| d.tag.0);
+    let mut digits = Vec::new();
+    loop {
+        digits.push(B32.get((t & 31) as usize).copied().unwrap_or(b'0'));
+        t >>= 5;
+        if t == 0 {
+            break;
+        }
+    }
+    digits.reverse();
+    let mut s = String::from("x");
+    s.extend(digits.into_iter().map(char::from));
+    s
+}
+
+/// An element under construction: its attributes are collected first so
+/// that foreign ones can be sorted after the known ones and never collide
+/// with them (§8.2 item 6).
+struct El {
+    tag: &'static str,
+    attrs: Vec<(String, String)>,
+}
+
+impl El {
+    fn new(tag: &'static str) -> El {
+        El {
+            tag,
+            attrs: Vec::with_capacity(8),
+        }
+    }
+
+    fn a(&mut self, name: &str, value: impl Into<String>) {
+        self.attrs.push((name.to_owned(), value.into()));
+    }
+
+    fn has(&self, name: &str) -> bool {
+        self.attrs.iter().any(|(n, _)| n == name)
+    }
+
+    fn start(&self, out: &mut String) {
+        out.push('<');
+        out.push_str(self.tag);
+        for (n, v) in &self.attrs {
+            attr(out, n, v);
+        }
+    }
+}
+
+/// Where a foreign namespace URI is declared, and with what prefix.
+#[derive(Debug, Default)]
+pub(crate) struct NsTable {
+    /// URI → prefix, for foreign URIs.
+    pub foreign: Vec<(String, String)>,
+}
+
+impl NsTable {
+    fn known(uri: &str) -> Option<&'static str> {
+        Some(match uri {
+            NS_XLINK => "xlink",
+            NS_XARAST => "xarast",
+            NS_INKSCAPE => "inkscape",
+            NS_SODIPODI => "sodipodi",
+            NS_DC => "dc",
+            NS_CC => "cc",
+            NS_RDF => "rdf",
+            NS_XML => "xml",
+            _ => return None,
+        })
+    }
+
+    /// Collects every namespace the document's baggage uses and gives each
+    /// a prefix: its own hint when that is free, `ns1`, `ns2`, … otherwise.
+    pub(crate) fn collect(doc: &Document) -> NsTable {
+        let mut uris: Vec<(&str, Option<&str>)> = doc
+            .tree
+            .foreign_iter()
+            .flat_map(|(_, b)| b.attrs.iter())
+            .filter(|a| !a.ns.is_empty() && &*a.ns != NS_SVG && NsTable::known(&a.ns).is_none())
+            .map(|a| (&*a.ns, a.prefix.as_deref()))
+            .collect();
+        uris.sort_unstable();
+        uris.dedup_by(|a, b| a.0 == b.0);
+        let mut t = NsTable::default();
+        let reserved = [
+            "xml", "xmlns", "xlink", "xarast", "inkscape", "sodipodi", "dc", "cc", "rdf",
+        ];
+        let mut n = 0usize;
+        for (uri, hint) in uris {
+            let free = |p: &str, t: &NsTable| {
+                is_ncname(p)
+                    && !reserved.contains(&p)
+                    && !p.to_ascii_lowercase().starts_with("xml")
+                    && !t.foreign.iter().any(|(_, q)| q == p)
+            };
+            let prefix = match hint {
+                Some(h) if free(h, &t) => h.to_owned(),
+                _ => loop {
+                    n += 1;
+                    let p = format!("ns{n}");
+                    if free(&p, &t) {
+                        break p;
+                    }
+                },
+            };
+            t.foreign.push((uri.to_owned(), prefix));
+        }
+        t
+    }
+
+    fn prefix(&self, uri: &str) -> Option<&str> {
+        if uri.is_empty() || uri == NS_SVG {
+            return Some("");
+        }
+        NsTable::known(uri).or_else(|| {
+            self.foreign
+                .iter()
+                .find(|(u, _)| u == uri)
+                .map(|(_, p)| p.as_str())
+        })
+    }
+}
+
+/// A chapter and the spreads it holds, for `<xarast:document>`.
+#[derive(Debug, Default)]
+pub(crate) struct ChapterInfo {
+    pub id: String,
+    pub spreads: Vec<String>,
+}
+
+/// A guideline, for `<sodipodi:namedview>`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Guide {
+    pub horizontal: bool,
+    pub position: i64,
+}
+
+/// What the header of the document needs from the walk.
+#[derive(Debug, Default)]
+pub(crate) struct Header {
+    pub chapters: Vec<ChapterInfo>,
+    pub guides: Vec<Guide>,
+    pub grid: Option<String>,
+    pub active_layer: Option<String>,
+}
+
+/// The walk's state.
+pub(crate) struct Emitter<'d, 'b> {
+    pub doc: &'d Document,
+    pub body: String,
+    pub defs: Defs,
+    pub stats: Stats,
+    pub header: Header,
+    pub ns: NsTable,
+    pub palette: HashMap<ColourId, String>,
+    pub foreign_hash: blake3::Hasher,
+    pub foreign_count: usize,
+    /// The root `<svg>`'s own id and foreign attributes, already written.
+    pub root_attrs: String,
+    frame: Frame,
+    attrs: AttrStack,
+    pretty: bool,
+    depth: usize,
+    spread_index: usize,
+    spread_y: i64,
+    bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
+}
+
+impl<'d, 'b> Emitter<'d, 'b> {
+    pub(crate) fn new(
+        doc: &'d Document,
+        frame: Frame,
+        pretty: bool,
+        bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
+    ) -> Emitter<'d, 'b> {
+        let palette = doc
+            .resources
+            .colours
+            .iter()
+            .enumerate()
+            .map(|(i, (id, _))| (id, format!("c-{}", i + 1)))
+            .collect();
+        Emitter {
+            doc,
+            body: String::with_capacity(1 << 16),
+            defs: Defs::default(),
+            stats: Stats::default(),
+            header: Header::default(),
+            ns: NsTable::collect(doc),
+            palette,
+            foreign_hash: blake3::Hasher::new(),
+            foreign_count: 0,
+            root_attrs: String::new(),
+            frame,
+            attrs: AttrStack::with_defaults(&doc.defaults),
+            pretty,
+            depth: 1,
+            spread_index: 0,
+            spread_y: 0,
+            bitmap_href,
+        }
+    }
+
+    // ── Output helpers ─────────────────────────────────────────────────────
+
+    fn indent(&mut self) {
+        if self.pretty {
+            for _ in 0..self.depth {
+                self.body.push(' ');
+            }
+        }
+    }
+
+    fn newline(&mut self) {
+        self.body.push('\n');
+    }
+
+    /// Adds the node's id, its flags and its foreign attributes, then
+    /// writes the start tag (without closing it).
+    fn open(&mut self, node: Option<NodeId>, mut el: El) {
+        if let Some(n) = node {
+            self.stats.elements += 1;
+            self.common(n, &mut el);
+        }
+        self.indent();
+        el.start(&mut self.body);
+    }
+
+    /// The attributes every node element carries: id, flags, foreign ones.
+    fn common(&mut self, n: NodeId, el: &mut El) {
+        let id = node_id(self.doc, n);
+        let flags = self.doc.tree.get(n).map(|d| d.flags).unwrap_or_default();
+        if el.tag.starts_with("xarast:") {
+            el.attrs.insert(0, ("xarast:id".into(), id.clone()));
+        } else {
+            el.attrs.insert(0, ("id".into(), id.clone()));
+        }
+        if flags.contains(NodeFlags::LOCKED) && !el.has("xarast:locked") {
+            el.a("xarast:locked", "true");
+        }
+        if flags.contains(NodeFlags::MAGNETIC) {
+            el.a("xarast:magnetic", "true");
+        }
+        if let Some(b) = self.doc.tree.foreign(n) {
+            self.foreign_attrs(&id, b, el);
+        }
+    }
+
+    /// Appends the foreign attributes and marks of a node's baggage, sorted
+    /// by namespace URI and local name, and feeds the preservation digest.
+    fn foreign_attrs(&mut self, id: &str, b: &ForeignBaggage, el: &mut El) {
+        use xarast_doc::ForeignMarks as M;
+        for (mark, name) in [
+            (M::DIRTY, "xarast:foreign-dirty"),
+            (M::STALE, "xarast:foreign-stale"),
+            (M::BASE_AUTHORITATIVE, "xarast:base-authoritative"),
+        ] {
+            if b.marks.contains(mark) && !el.has(name) {
+                el.a(name, "true");
+            }
+        }
+        let mut sorted: Vec<_> = b.attrs.iter().collect();
+        sorted.sort_by(|x, y| (&*x.ns, &*x.local).cmp(&(&*y.ns, &*y.local)));
+        digest_str(&mut self.foreign_hash, id);
+        for a in sorted {
+            let Some(prefix) = self.ns.prefix(&a.ns) else {
+                self.stats.foreign_dropped += 1;
+                continue;
+            };
+            if !is_ncname(&a.local) {
+                self.stats.foreign_dropped += 1;
+                continue;
+            }
+            let name = if prefix.is_empty() {
+                a.local.to_string()
+            } else {
+                format!("{prefix}:{}", a.local)
+            };
+            if el.has(&name) || name == "xmlns" {
+                self.stats.foreign_dropped += 1;
+                continue;
+            }
+            digest_str(&mut self.foreign_hash, &a.ns);
+            digest_str(&mut self.foreign_hash, &a.local);
+            digest_str(&mut self.foreign_hash, &a.value);
+            self.foreign_count += 1;
+            self.stats.foreign_items += 1;
+            el.a(&name, a.value.to_string());
+        }
+    }
+
+    /// Writes one foreign fragment verbatim, if it is well formed.
+    fn fragment(&mut self, kind: ForeignChildKind, raw: &str) {
+        let k = match kind {
+            ForeignChildKind::Element | ForeignChildKind::SvgElement => FragmentKind::Element,
+            ForeignChildKind::Comment => FragmentKind::Comment,
+            ForeignChildKind::ProcessingInstruction => FragmentKind::ProcessingInstruction,
+        };
+        if !fragment_is_well_formed(raw, k) {
+            self.stats.foreign_dropped += 1;
+            return;
+        }
+        digest_str(&mut self.foreign_hash, raw);
+        self.foreign_count += 1;
+        self.stats.foreign_items += 1;
+        self.indent();
+        self.body.push_str(raw);
+        self.newline();
+    }
+
+    /// Emits the node's foreign fragments whose position is at most `upto`
+    /// (all of them for `None`), starting at `*next`.
+    fn fragments(&mut self, node: NodeId, next: &mut usize, upto: Option<u32>) {
+        let Some(b) = self.doc.tree.foreign_arc(node).cloned() else {
+            return;
+        };
+        while let Some(c) = b.children.get(*next) {
+            if upto.is_some_and(|u| c.position > u) {
+                break;
+            }
+            self.fragment(c.kind, &c.raw);
+            *next += 1;
+        }
+    }
+
+    /// Walks a container's children: attributes go on the stack, every other
+    /// child becomes an element, and foreign fragments are put back between
+    /// them at their recorded positions. The caller has pushed the scope.
+    fn children(&mut self, node: NodeId, skip: Option<NodeId>) {
+        let mut count = 0u32;
+        let mut next = 0usize;
+        let kids: Vec<NodeId> = self.doc.tree.children(node).collect();
+        for c in kids {
+            match self.doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) => {
+                    self.attrs.push(Arc::new(a.value.clone()));
+                    continue;
+                }
+                None => continue,
+                _ => {}
+            }
+            self.fragments(node, &mut next, Some(count));
+            if Some(c) != skip {
+                self.node(c);
+            }
+            count = count.saturating_add(1);
+        }
+        self.fragments(node, &mut next, None);
+    }
+
+    /// Closes a container.
+    fn close(&mut self, tag: &str) {
+        self.indent();
+        self.body.push_str("</");
+        self.body.push_str(tag);
+        self.body.push('>');
+        self.newline();
+    }
+
+    /// Opens a container element, walks its children in a new attribute
+    /// scope and closes it.
+    fn container(&mut self, node: NodeId, el: El, prelude: Option<String>) {
+        let tag = el.tag;
+        self.open(Some(node), el);
+        self.body.push('>');
+        self.newline();
+        self.depth += 1;
+        if let Some(p) = prelude {
+            self.indent();
+            self.body.push_str(&p);
+            self.newline();
+        }
+        self.attrs.push_scope();
+        self.children(node, None);
+        self.attrs.pop_scope();
+        self.depth -= 1;
+        self.close(tag);
+    }
+
+    // ── The walk ───────────────────────────────────────────────────────────
+
+    /// The whole document: chapters, spreads, and anything else hanging
+    /// from the root.
+    pub(crate) fn document(&mut self) {
+        let root = self.doc.tree.root();
+        let mut el = El::new("svg");
+        self.common(root, &mut el);
+        for (n, v) in &el.attrs {
+            attr(&mut self.root_attrs, n, v);
+        }
+        self.attrs.push_scope();
+        let kids: Vec<NodeId> = self.doc.tree.children(root).collect();
+        let mut next = 0usize;
+        let mut count = 0u32;
+        for c in kids {
+            match self.doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) => {
+                    self.attrs.push(Arc::new(a.value.clone()));
+                    continue;
+                }
+                Some(NodeKind::Chapter) => {
+                    self.fragments(root, &mut next, Some(count));
+                    self.chapter(c);
+                }
+                Some(_) => {
+                    self.fragments(root, &mut next, Some(count));
+                    self.node(c);
+                }
+                None => continue,
+            }
+            count = count.saturating_add(1);
+        }
+        self.fragments(root, &mut next, None);
+        self.attrs.pop_scope();
+    }
+
+    /// A chapter has no geometry (§5.8.1): it is recorded in
+    /// `<xarast:document>` and its spreads are emitted in place.
+    fn chapter(&mut self, chapter: NodeId) {
+        let mut info = ChapterInfo {
+            id: node_id(self.doc, chapter),
+            spreads: Vec::new(),
+        };
+        self.stats.elements += 1;
+        self.attrs.push_scope();
+        let kids: Vec<NodeId> = self.doc.tree.children(chapter).collect();
+        for c in kids {
+            match self.doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
+                Some(NodeKind::Spread(_)) => {
+                    info.spreads.push(node_id(self.doc, c));
+                    self.node(c);
+                }
+                Some(_) => self.node(c),
+                None => {}
+            }
+        }
+        self.attrs.pop_scope();
+        self.header.chapters.push(info);
+    }
+
+    /// One node.
+    fn node(&mut self, n: NodeId) {
+        let Some(kind) = self.doc.tree.kind(n) else {
+            return;
+        };
+        match kind {
+            NodeKind::Attr(a) => self.attrs.push(Arc::new(a.value.clone())),
+            NodeKind::Document(_) | NodeKind::Chapter => {
+                // Illegal below the root; the builder never produces it.
+                let mut el = El::new("g");
+                el.a("xarast:kind", kind.type_name().to_ascii_lowercase());
+                self.container(n, el, None);
+            }
+            NodeKind::Spread(s) => self.spread(n, s),
+            NodeKind::Page(p) => {
+                let (x0, y0) = self.frame.pt(Point::new(p.rect.lo.x, p.rect.hi.y));
+                let (x1, y1) = self.frame.pt(Point::new(p.rect.hi.x, p.rect.lo.y));
+                let mut el = El::new("xarast:page");
+                el.a(
+                    "xarast:rect",
+                    format!("{} {} {} {}", mp(x0), mp(y0), mp(x1 - x0), mp(y1 - y0)),
+                );
+                if p.right_hand {
+                    el.a("xarast:right-hand", "true");
+                }
+                self.leaf(n, el, Vec::new());
+            }
+            NodeKind::Grid(g) => {
+                let (ox, oy) = self.frame.pt(g.origin);
+                let mut el = El::new("xarast:grid");
+                el.a(
+                    "xarast:kind",
+                    match g.kind {
+                        xarast_doc::GridKind::Rect => "rectangular",
+                        xarast_doc::GridKind::Isometric => "isometric",
+                    },
+                );
+                el.a("xarast:origin", format!("{} {}", mp(ox), mp(oy)));
+                el.a("xarast:spacing", mp(i64::from(g.spacing.raw())));
+                el.a("xarast:subdivisions", g.subdivisions.to_string());
+                el.a("xarast:visible", bool_s(g.visible));
+                if self.spread_index == 1 && self.header.grid.is_none() {
+                    let mut s = String::from("<inkscape:grid");
+                    attr(
+                        &mut s,
+                        "type",
+                        match g.kind {
+                            xarast_doc::GridKind::Rect => "xygrid",
+                            xarast_doc::GridKind::Isometric => "axonomgrid",
+                        },
+                    );
+                    attr(&mut s, "originx", &mp(ox));
+                    attr(&mut s, "originy", &mp(oy));
+                    attr(&mut s, "spacingx", &mp(i64::from(g.spacing.raw())));
+                    attr(&mut s, "spacingy", &mp(i64::from(g.spacing.raw())));
+                    attr(&mut s, "visible", bool_s(g.visible));
+                    s.push_str("/>");
+                    self.header.grid = Some(s);
+                }
+                self.leaf(n, el, Vec::new());
+            }
+            NodeKind::Layer(l) => self.layer(n, l),
+            NodeKind::Group(g) => {
+                let mut el = El::new("g");
+                el.a("xarast:kind", "group");
+                if let Some(name) = &g.name {
+                    el.a("inkscape:label", name.to_string());
+                }
+                if g.soft {
+                    el.a("xarast:soft", "true");
+                }
+                self.stats.groups += 1;
+                self.container(n, el, None);
+            }
+            NodeKind::ClipView(cv) => self.clipview(n, cv.mode),
+            NodeKind::Live(l) => self.live(n, l),
+            NodeKind::TextStory(s) => self.text(n, s),
+            NodeKind::TextLine(_) | NodeKind::TextItem(_) => {
+                // Only legal inside a story, where `text` handles them.
+                let mut el = El::new("g");
+                el.a("xarast:kind", "orphan-text");
+                self.container(n, el, None);
+            }
+            NodeKind::Path(p) => {
+                let (filled, stroked) = (p.filled, p.stroked);
+                let data = Arc::clone(&p.data);
+                self.ink(n, |e, el| {
+                    let f = e.frame;
+                    el.a("d", path_data(&data, |q| f.pt(q)));
+                    e.stats.paths += 1;
+                    if !filled {
+                        el.a("xarast:filled", "false");
+                    }
+                    if !stroked {
+                        el.a("xarast:stroked", "false");
+                    }
+                    (Some(e.path_box(&data)), filled, stroked, Vec::new())
+                });
+            }
+            NodeKind::Shape(s) => {
+                let s = (**s).clone();
+                self.ink(n, |e, el| e.shape(&s, el));
+            }
+            NodeKind::QuickShape(q) => {
+                let q = (**q).clone();
+                self.ink(n, |e, el| e.quickshape(&q, el));
+            }
+            NodeKind::Bitmap(b) => {
+                let b = (**b).clone();
+                self.bitmap(n, &b);
+            }
+            NodeKind::Guideline(g) => {
+                let mut el = El::new("xarast:guideline");
+                let pos = if g.horizontal {
+                    self.frame.oy - i64::from(g.position.raw())
+                } else {
+                    i64::from(g.position.raw()) - self.frame.ox
+                };
+                el.a(
+                    "xarast:orientation",
+                    if g.horizontal {
+                        "horizontal"
+                    } else {
+                        "vertical"
+                    },
+                );
+                el.a("xarast:position", mp(pos));
+                if let Some(c) = g.colour.and_then(|c| self.palette.get(&c)) {
+                    el.a("xarast:colour-ref", format!("#{c}"));
+                }
+                if self.spread_index == 1 {
+                    self.header.guides.push(Guide {
+                        horizontal: g.horizontal,
+                        position: pos,
+                    });
+                }
+                self.leaf(n, el, Vec::new());
+            }
+            NodeKind::Opaque(o) => {
+                self.stats.opaque += 1;
+                let mut el = El::new("xarast:opaque");
+                el.a("xarast:tag", o.tag.to_string());
+                el.a("xarast:encoding", "base64");
+                self.open(Some(n), el);
+                self.body.push('>');
+                self.body.push_str(&base64(&o.payload));
+                let mut next = 0usize;
+                self.fragments(n, &mut next, None);
+                self.body.push_str("</xarast:opaque>");
+                self.newline();
+            }
+        }
+    }
+
+    /// A childless element (or one whose only children are sidecars and
+    /// foreign fragments).
+    fn leaf(&mut self, n: NodeId, el: El, known: Vec<String>) {
+        let tag = el.tag;
+        self.open(Some(n), el);
+        let has_foreign = self
+            .doc
+            .tree
+            .foreign(n)
+            .is_some_and(|b| !b.children.is_empty());
+        if known.is_empty() && !has_foreign {
+            self.body.push_str("/>");
+            self.newline();
+            return;
+        }
+        self.body.push('>');
+        self.newline();
+        self.depth += 1;
+        for k in known {
+            self.indent();
+            self.body.push_str(&k);
+            self.newline();
+        }
+        let mut next = 0usize;
+        self.fragments(n, &mut next, None);
+        self.depth -= 1;
+        self.close(tag);
+    }
+
+    fn spread(&mut self, n: NodeId, s: &xarast_doc::SpreadNode) {
+        self.spread_index += 1;
+        self.stats.spreads += 1;
+        let r = s.page_size;
+        let w = i64::from(r.hi.x.raw()) - i64::from(r.lo.x.raw());
+        let h = i64::from(r.hi.y.raw()) - i64::from(r.lo.y.raw());
+        let saved = self.frame;
+        self.frame = Frame {
+            ox: i64::from(r.lo.x.raw()),
+            oy: i64::from(r.hi.y.raw()),
+        };
+        let first = self.spread_index == 1;
+        let mut el = El::new(if first { "g" } else { "svg" });
+        if !first {
+            // Below the previous spreads, a page unit apart (§5.8.1): outside
+            // the root viewBox, so a browser shows page one only.
+            el.a("x", "0");
+            el.a("y", mp(self.spread_y));
+            el.a("width", mp(w));
+            el.a("height", mp(h));
+            el.a("viewBox", format!("0 0 {} {}", mp(w), mp(h)));
+        }
+        el.a("xarast:kind", "spread");
+        el.a("xarast:spread", self.spread_index.to_string());
+        el.a(
+            "xarast:origin",
+            format!("{} {}", mp(self.frame.ox), mp(self.frame.oy)),
+        );
+        el.a("xarast:size", format!("{} {}", mp(w), mp(h)));
+        el.a("xarast:margin", mp(i64::from(s.margin.raw())));
+        if s.bleed != Mp::ZERO {
+            el.a("xarast:bleed", mp(i64::from(s.bleed.raw())));
+        }
+        if s.double_page {
+            el.a("xarast:double-page", "true");
+        }
+        if !s.show_shadow {
+            el.a("xarast:show-shadow", "false");
+        }
+        if let Some(a) = &s.anim {
+            el.a(
+                "xarast:anim",
+                format!("{} {} {}", a.delay, bool_s(a.hidden), bool_s(a.background)),
+            );
+        }
+        self.spread_y += h.max(0) + 36_000;
+        let tag = el.tag;
+        self.open(Some(n), el);
+        self.body.push('>');
+        self.newline();
+        self.attrs.push_scope();
+        self.children(n, None);
+        self.attrs.pop_scope();
+        self.close(tag);
+        self.frame = saved;
+    }
+
+    fn layer(&mut self, n: NodeId, l: &xarast_doc::LayerNode) {
+        self.stats.layers += 1;
+        let id = node_id(self.doc, n);
+        if l.active && self.spread_index == 1 {
+            self.header.active_layer = Some(id);
+        }
+        let mut el = El::new("g");
+        el.a("inkscape:groupmode", "layer");
+        el.a("inkscape:label", l.name.to_string());
+        el.a("xarast:kind", "layer");
+        let kind = if l.guide {
+            "guide"
+        } else if l.page_background {
+            "page-background"
+        } else if l.background {
+            "background"
+        } else if l.frame.is_some() {
+            "frame"
+        } else {
+            "normal"
+        };
+        el.a("xarast:layer-kind", kind);
+        if l.background && kind != "background" {
+            el.a("xarast:background", "true");
+        }
+        el.a("xarast:visible", bool_s(l.visible));
+        el.a("xarast:locked", bool_s(l.locked));
+        el.a("xarast:printable", bool_s(l.printable));
+        if l.active {
+            el.a("xarast:active", "true");
+        }
+        if let Some(c) = l.guide_colour.and_then(|c| self.palette.get(&c)) {
+            el.a("xarast:guide-colour", format!("#{c}"));
+        }
+        if let Some(f) = &l.frame {
+            el.a("xarast:frame-delay", f.delay.to_string());
+            if f.solid {
+                el.a("xarast:frame-solid", "true");
+            }
+            if f.overlay {
+                el.a("xarast:frame-overlay", "true");
+            }
+        }
+        if l.locked {
+            el.a("sodipodi:insensitive", "true");
+        }
+        el.a(
+            "style",
+            if l.visible && !l.guide {
+                "display:inline"
+            } else {
+                "display:none"
+            },
+        );
+        self.container(n, el, None);
+    }
+
+    // ── Ink ────────────────────────────────────────────────────────────────
+
+    /// An ink node: its attribute children are applied first (a parent
+    /// paints after its children), then `build` fills in the geometry and
+    /// the resolved paint is added.
+    fn ink(&mut self, n: NodeId, build: impl FnOnce(&mut Self, &mut El) -> InkOut) {
+        let has_kids = self.doc.tree.links(n).first_child.is_some();
+        if has_kids {
+            self.attrs.push_scope();
+            // Non-attribute children of an ink node are unusual; they are
+            // painted before it, as siblings, which is their paint order.
+            let kids: Vec<NodeId> = self.doc.tree.children(n).collect();
+            for c in kids {
+                match self.doc.tree.kind(c) {
+                    Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
+                    Some(_) => {
+                        self.stats.ink_children += 1;
+                        self.node(c);
+                    }
+                    None => {}
+                }
+            }
+        }
+        let tag_guess = El::new("path");
+        let mut el = tag_guess;
+        let (bounds, filled, stroked, mut known) = build(self, &mut el);
+        self.paint(n, &mut el, bounds, filled, stroked, &mut known);
+        self.names(n, &mut known);
+        if has_kids {
+            self.attrs.pop_scope();
+        }
+        self.leaf(n, el, known);
+    }
+
+    /// The box of a path in SVG space, for masks.
+    fn path_box(&self, p: &Path) -> (i64, i64, i64, i64) {
+        let b = p.bounds();
+        let (x0, y0) = self.frame.pt(Point::new(b.lo.x, b.hi.y));
+        let (x1, y1) = self.frame.pt(Point::new(b.hi.x, b.lo.y));
+        (x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1))
+    }
+
+    fn shape(&mut self, s: &xarast_doc::ShapeNode, el: &mut El) -> InkOut {
+        let (ox, oy) = self.frame.pt(s.origin);
+        let (ux, uy) = self.frame.vec(s.major);
+        let (vx, vy) = self.frame.vec(s.minor);
+        // Axis-aligned, in the canonical orientation: major rightwards,
+        // minor up in the document (down the page in SVG, so `vy < 0`).
+        let aligned = uy == 0 && vx == 0 && ux > 0 && vy < 0;
+        let bbox = {
+            let xs = [ox, ox + ux, ox + vx, ox + ux + vx];
+            let ys = [oy, oy + uy, oy + vy, oy + uy + vy];
+            (
+                xs.iter().copied().min().unwrap_or(0),
+                ys.iter().copied().min().unwrap_or(0),
+                xs.iter().copied().max().unwrap_or(0),
+                ys.iter().copied().max().unwrap_or(0),
+            )
+        };
+        match s.shape {
+            ShapeKind::Rect if aligned => {
+                el.tag = "rect";
+                el.a("x", mp(ox));
+                el.a("y", mp(oy + vy));
+                el.a("width", mp(ux));
+                el.a("height", mp(-vy));
+                self.stats.rects += 1;
+            }
+            ShapeKind::Ellipse if aligned => {
+                let (cx, cy) = (ox + ux / 2, oy + vy / 2);
+                if ux % 2 == 0 && vy % 2 == 0 && ux == -vy {
+                    el.tag = "circle";
+                    el.a("cx", mp(cx));
+                    el.a("cy", mp(cy));
+                    el.a("r", mp(ux / 2));
+                    self.stats.circles += 1;
+                } else if ux % 2 == 0 && vy % 2 == 0 {
+                    el.tag = "ellipse";
+                    el.a("cx", mp(cx));
+                    el.a("cy", mp(cy));
+                    el.a("rx", mp(ux / 2));
+                    el.a("ry", mp(-vy / 2));
+                    self.stats.ellipses += 1;
+                } else {
+                    // An odd diameter has a centre between millipoints; keep
+                    // it exact as a path.
+                    self.shape_path(s, el);
+                }
+            }
+            _ => self.shape_path(s, el),
+        }
+        (Some(bbox), true, true, Vec::new())
+    }
+
+    /// A rotated, sheared or mirrored rectangle or ellipse: its outline,
+    /// plus the parallelogram, which SVG has no element for.
+    fn shape_path(&mut self, s: &xarast_doc::ShapeNode, el: &mut El) {
+        let path = match s.shape {
+            ShapeKind::Rect => parallelogram(s.origin, s.major, s.minor),
+            ShapeKind::Ellipse => ellipse(s.origin, s.major, s.minor),
+        };
+        el.tag = "path";
+        el.a("d", path_data(&path, |q| self.frame.pt(q)));
+        el.a(
+            "xarast:shape",
+            match s.shape {
+                ShapeKind::Rect => "rect",
+                ShapeKind::Ellipse => "ellipse",
+            },
+        );
+        let (ox, oy) = self.frame.pt(s.origin);
+        let (ux, uy) = self.frame.vec(s.major);
+        let (vx, vy) = self.frame.vec(s.minor);
+        el.a(
+            "xarast:parallelogram",
+            format!(
+                "{} {} {} {} {} {}",
+                mp(ox),
+                mp(oy),
+                mp(ux),
+                mp(uy),
+                mp(vx),
+                mp(vy)
+            ),
+        );
+        self.stats.paths += 1;
+    }
+
+    fn quickshape(&mut self, q: &xarast_doc::QuickShape, el: &mut El) -> InkOut {
+        self.stats.quickshapes += 1;
+        let bounds = match &q.path {
+            Some(p) => {
+                el.a("d", path_data(p, |x| self.frame.pt(x)));
+                Some(self.path_box(p))
+            }
+            None => {
+                self.stats.quickshapes_without_outline += 1;
+                None
+            }
+        };
+        el.a("xarast:shape", "quick");
+        let (cx, cy) = self.frame.pt(q.centre);
+        let (ax, ay) = self.frame.vec(q.major);
+        let (bx, by) = self.frame.vec(q.minor);
+        let mut s = String::from("<xarast:quickshape");
+        attr(&mut s, "xarast:sides", &q.sides.to_string());
+        attr(&mut s, "xarast:circular", bool_s(q.circular));
+        attr(&mut s, "xarast:stellated", bool_s(q.stellated));
+        attr(&mut s, "xarast:primary-curvature", bool_s(q.curved));
+        attr(
+            &mut s,
+            "xarast:stellation-curvature",
+            bool_s(q.stellation_curved),
+        );
+        attr(
+            &mut s,
+            "xarast:stell-radius-ratio",
+            &f64s(q.stellation_radius, 9),
+        );
+        attr(
+            &mut s,
+            "xarast:primary-curve-ratio",
+            &f64s(q.primary_curvature, 9),
+        );
+        attr(
+            &mut s,
+            "xarast:stell-curve-ratio",
+            &f64s(q.stellation_curvature, 9),
+        );
+        attr(
+            &mut s,
+            "xarast:stell-offset-ratio",
+            &f64s(q.stellation_offset, 9),
+        );
+        attr(&mut s, "xarast:centre", &format!("{} {}", mp(cx), mp(cy)));
+        attr(
+            &mut s,
+            "xarast:major-axis",
+            &format!("{} {}", mp(ax), mp(ay)),
+        );
+        attr(
+            &mut s,
+            "xarast:minor-axis",
+            &format!("{} {}", mp(bx), mp(by)),
+        );
+        let reformed = q.primary_edge.is_some() || q.secondary_edge.is_some();
+        if reformed {
+            attr(&mut s, "xarast:reformed", "true");
+            s.push('>');
+            for (which, edge) in [
+                ("primary", &q.primary_edge),
+                ("secondary", &q.secondary_edge),
+            ] {
+                if let Some(e) = edge {
+                    // Edge templates live in the shape's own space, which
+                    // has no page: written as they are, Y up.
+                    s.push_str("<xarast:edge-path");
+                    attr(&mut s, "xarast:edge", which);
+                    attr(
+                        &mut s,
+                        "d",
+                        &path_data(e, |p| (i64::from(p.x.raw()), i64::from(p.y.raw()))),
+                    );
+                    s.push_str("/>");
+                }
+            }
+            s.push_str("</xarast:quickshape>");
+        } else {
+            s.push_str("/>");
+        }
+        (bounds, true, true, vec![s])
+    }
+
+    fn bitmap(&mut self, n: NodeId, b: &xarast_doc::BitmapNode) {
+        let bm = (self.bitmap_href)(b.image);
+        self.ink(n, |e, el| {
+            el.tag = "image";
+            let (ox, oy) = e.frame.pt(b.origin);
+            let (ux, uy) = e.frame.vec(b.major);
+            let (vx, vy) = e.frame.vec(b.minor);
+            // `.xar` stores the corners so that the origin is the image's
+            // top-left, the major axis runs along its top row and the minor
+            // axis down its left column (`research/01 §4.5`: converted to a
+            // fill, p3 is the start, p2 the end and p0 the second end).
+            if uy == 0 && vx == 0 && ux > 0 && vy > 0 {
+                el.a("x", mp(ox));
+                el.a("y", mp(oy));
+                el.a("width", mp(ux));
+                el.a("height", mp(vy));
+            } else {
+                el.a("width", "1");
+                el.a("height", "1");
+                el.a(
+                    "transform",
+                    format!(
+                        "matrix({} {} {} {} {} {})",
+                        mp(ux),
+                        mp(uy),
+                        mp(vx),
+                        mp(vy),
+                        mp(ox),
+                        mp(oy)
+                    ),
+                );
+            }
+            el.a("preserveAspectRatio", "none");
+            match &bm {
+                Some(r) => {
+                    el.a("href", r.href.clone());
+                    el.a("xlink:href", r.href.clone());
+                    if r.width > 0 && r.height > 0 {
+                        el.a("xarast:pixels", format!("{} {}", r.width, r.height));
+                    }
+                    e.stats.images += 1;
+                }
+                None => {
+                    e.stats.images_missing += 1;
+                    el.a("xarast:bitmap-missing", "true");
+                }
+            }
+            let xs = [ox, ox + ux, ox + vx, ox + ux + vx];
+            let ys = [oy, oy + uy, oy + vy, oy + uy + vy];
+            let bbox = (
+                xs.iter().copied().min().unwrap_or(0),
+                ys.iter().copied().min().unwrap_or(0),
+                xs.iter().copied().max().unwrap_or(0),
+                ys.iter().copied().max().unwrap_or(0),
+            );
+            // A bitmap node takes the fill transparency, and no paint.
+            (Some(bbox), false, false, Vec::new())
+        });
+    }
+
+    // ── Paint ──────────────────────────────────────────────────────────────
+
+    fn tiling(&self, slot: AttrSlot) -> Tiling {
+        match self.attrs.get(slot) {
+            AttrValue::FillMapping(t) | AttrValue::TranspFillMapping(t) => *t,
+            _ => Tiling::None,
+        }
+    }
+
+    fn effect(&self) -> FillEffect {
+        match self.attrs.get(AttrSlot::FillEffect) {
+            AttrValue::FillEffect(e) => *e,
+            _ => FillEffect::Fade,
+        }
+    }
+
+    /// Resolves and writes the paint of one ink element.
+    fn paint(
+        &mut self,
+        _n: NodeId,
+        el: &mut El,
+        bounds: Option<(i64, i64, i64, i64)>,
+        filled: bool,
+        stroked: bool,
+        known: &mut Vec<String>,
+    ) {
+        let is_image = el.tag == "image";
+        let fill_paint: Option<Paint> = match self.attrs.get(AttrSlot::FillGeometry) {
+            AttrValue::Fill(p) if filled => Some(p.clone()),
+            _ => None,
+        };
+        let stroke_paint: Option<Paint> = match self.attrs.get(AttrSlot::StrokeColour) {
+            AttrValue::StrokeColour(p) if stroked => Some(p.clone()),
+            _ => None,
+        };
+        let fill_t = match self.attrs.get(AttrSlot::TranspFillGeometry) {
+            AttrValue::TranspFill(t) => Some(t.clone()),
+            _ => None,
+        };
+        let stroke_t = match self.attrs.get(AttrSlot::StrokeTransp) {
+            AttrValue::StrokeTransp(t) => Some(t.clone()),
+            _ => None,
+        };
+        let fill_tiling = self.tiling(AttrSlot::FillMapping);
+        let transp_tiling = self.tiling(AttrSlot::TranspFillMapping);
+        let effect = self.effect();
+        let width = match self.attrs.get(AttrSlot::LineWidth) {
+            AttrValue::LineWidth(w) => i64::from(w.raw()),
+            _ => 0,
+        };
+        // Grow the box by the stroke so a mask does not clip it.
+        let mbox = bounds.map(|(a, b, c, d)| {
+            let p = width / 2 + 1;
+            (a - p, b - p, c + p, d + p)
+        });
+
+        let this = &mut *self;
+        let mut ctx = PaintCtx {
+            colours: &this.doc.resources.colours,
+            defs: &mut this.defs,
+            frame: this.frame,
+            stats: &mut this.stats,
+            palette: &this.palette,
+            bitmap_href: &mut *this.bitmap_href,
+        };
+        let fill = match &fill_paint {
+            Some(p) => colour_paint(&mut ctx, p, fill_tiling, effect),
+            None => PaintOut {
+                value: "none".into(),
+                ..PaintOut::default()
+            },
+        };
+        let ft: TranspOut = match &fill_t {
+            Some(t) if fill.value != "none" || is_image => {
+                transparency(&mut ctx, t, transp_tiling, mbox)
+            }
+            _ => TranspOut::default(),
+        };
+        let stroke = match &stroke_paint {
+            Some(p) => colour_paint(&mut ctx, p, Tiling::None, effect),
+            None => PaintOut {
+                value: "none".into(),
+                ..PaintOut::default()
+            },
+        };
+        let st: TranspOut = match &stroke_t {
+            Some(t) if stroke.value != "none" => transparency(&mut ctx, t, Tiling::None, mbox),
+            _ => TranspOut::default(),
+        };
+
+        // Fill.
+        if !is_image {
+            let fill_opacity = mul(fill.opacity, ft.alpha);
+            if fill.value != "#000" || fill_opacity.is_some() {
+                el.a("fill", fill.value.clone());
+            }
+            if let Some(o) = fill_opacity {
+                el.a("fill-opacity", f64s(o, 3));
+            }
+            if fill.value != "none"
+                && let AttrValue::WindingRule(FillRule::EvenOdd) =
+                    self.attrs.get(AttrSlot::WindingRule)
+            {
+                el.a("fill-rule", "evenodd");
+            }
+            if let Some(r) = &fill.palette_ref {
+                el.a("xarast:fill-ref", r.clone());
+            }
+            if let Some(s) = fill.sidecar {
+                known.push(s);
+            }
+        } else if let Some(o) = ft.alpha {
+            el.a("opacity", f64s(o, 3));
+        }
+        if let Some(m) = &ft.mask {
+            el.a("mask", format!("url(#{m})"));
+        }
+        if let Some(s) = ft.sidecar {
+            known.push(s);
+        }
+
+        // Stroke.
+        if stroke.value != "none" {
+            el.a("stroke", stroke.value.clone());
+            if let Some(o) = mul(stroke.opacity, st.alpha) {
+                el.a("stroke-opacity", f64s(o, 3));
+            }
+            if width == 0 {
+                // A hairline: one device pixel whatever the zoom.
+                el.a("stroke-width", "1");
+                el.a("vector-effect", "non-scaling-stroke");
+            } else if width != 1000 {
+                el.a("stroke-width", mp(width));
+            }
+            match self.attrs.get(AttrSlot::StartCap) {
+                AttrValue::LineCap(Cap::Round) => el.a("stroke-linecap", "round"),
+                AttrValue::LineCap(Cap::Square) => el.a("stroke-linecap", "square"),
+                _ => {}
+            }
+            match self.attrs.get(AttrSlot::JoinType) {
+                AttrValue::JoinType(Join::Round) => el.a("stroke-linejoin", "round"),
+                AttrValue::JoinType(Join::Bevel) => el.a("stroke-linejoin", "bevel"),
+                _ => {}
+            }
+            if let AttrValue::MitreLimit(m) = self.attrs.get(AttrSlot::MitreLimit) {
+                let v = i64::from(m.raw()).max(1000);
+                if v != 4000 {
+                    el.a("stroke-miterlimit", mp(v));
+                }
+            }
+            if let AttrValue::DashPattern(d) = self.attrs.get(AttrSlot::DashPattern) {
+                let w = Mp::new(i32::try_from(width).unwrap_or(0));
+                let lengths = d.resolved(w);
+                if !lengths.is_empty() {
+                    let dash: Vec<String> = lengths.iter().map(|l| mp(l.round() as i64)).collect();
+                    el.a("stroke-dasharray", dash.join(" "));
+                    let mut off = f64::from(d.offset.raw());
+                    if let Some(rw) = d.reference_width
+                        && rw.raw() > 0
+                    {
+                        off *= width as f64 / f64::from(rw.raw());
+                    }
+                    if off.round() as i64 != 0 {
+                        el.a("stroke-dashoffset", mp(off.round() as i64));
+                    }
+                }
+            }
+            if let Some(r) = &stroke.palette_ref {
+                el.a("xarast:stroke-ref", r.clone());
+            }
+            if let Some(s) = stroke.sidecar {
+                known.push(s.replacen("<xarast:fill", "<xarast:stroke-fill", 1));
+            }
+            if let Some(s) = st.sidecar {
+                known.push(s);
+            }
+        }
+
+        // Blend mode: the fill's transparency decides, or the stroke's when
+        // there is no fill (§6.5.2).
+        let mode = if ft.mode != TranspMode::None && ft.mode != TranspMode::Mix {
+            ft.mode
+        } else {
+            st.mode
+        };
+        if let Some((css, name)) = blend_of(mode) {
+            self.stats.blend_modes += 1;
+            if let Some(css) = css {
+                el.a("style", format!("mix-blend-mode:{css}"));
+            } else {
+                self.stats.blend_modes_approximated += 1;
+            }
+            el.a("xarast:blend", name);
+        }
+
+        self.extras(el);
+    }
+
+    /// The attributes SVG has no property for: written only when they
+    /// differ from the default, as `xarast:` attributes.
+    fn extras(&mut self, el: &mut El) {
+        let a = &self.attrs;
+        if let AttrValue::Quality(q) = a.get(AttrSlot::Quality)
+            && *q != xarast_doc::Quality::Full
+        {
+            el.a("xarast:quality", format!("{q:?}").to_ascii_lowercase());
+        }
+        for (slot, name) in [
+            (AttrSlot::OverprintLine, "xarast:overprint-stroke"),
+            (AttrSlot::OverprintFill, "xarast:overprint-fill"),
+            (AttrSlot::PrintOnAllPlates, "xarast:all-plates"),
+        ] {
+            if let AttrValue::OverprintLine(true)
+            | AttrValue::OverprintFill(true)
+            | AttrValue::PrintOnAllPlates(true) = a.get(slot)
+            {
+                el.a(name, "true");
+            }
+        }
+        if let AttrValue::WebAddress(w) = a.get(AttrSlot::WebAddress)
+            && !w.is_empty()
+        {
+            el.a("xarast:web-address", w.to_string());
+        }
+        if let AttrValue::StrokeType(s) = a.get(AttrSlot::StrokeType)
+            && !s.name.is_empty()
+        {
+            el.a("xarast:stroke-type", s.name.to_string());
+        }
+        if let AttrValue::VariableWidth(v) = a.get(AttrSlot::VariableWidth)
+            && !v.samples.is_empty()
+        {
+            let s: Vec<String> = v.samples.iter().map(|x| f64s(f64::from(*x), 4)).collect();
+            el.a("xarast:width-profile", s.join(" "));
+            self.stats.strokes_approximated += 1;
+        }
+        if let AttrValue::BrushType(b) = a.get(AttrSlot::BrushType)
+            && !b.name.is_empty()
+        {
+            el.a("xarast:brush", b.name.to_string());
+            self.stats.strokes_approximated += 1;
+        }
+        if let AttrValue::Feather { size, profile } = a.get(AttrSlot::Feather)
+            && size.raw() > 0
+        {
+            el.a(
+                "xarast:feather",
+                format!(
+                    "{} {} {}",
+                    mp(i64::from(size.raw())),
+                    f64s(profile.bias, 6),
+                    f64s(profile.gain, 6)
+                ),
+            );
+            self.stats.effects_approximated += 1;
+        }
+        for (slot, name) in [
+            (AttrSlot::StartArrow, "xarast:arrow-start"),
+            (AttrSlot::EndArrow, "xarast:arrow-end"),
+        ] {
+            if let AttrValue::StartArrow(ar) | AttrValue::EndArrow(ar) = a.get(slot)
+                && (ar.name.is_some() || ar.path.is_some())
+                && el.has("stroke")
+            {
+                el.a(
+                    name,
+                    ar.name
+                        .as_deref()
+                        .map_or_else(|| "custom".to_owned(), str::to_owned),
+                );
+                self.stats.arrows_unbaked += 1;
+            }
+        }
+        if let AttrValue::ClipRegion(p) = a.get(AttrSlot::ClipRegion)
+            && !p.is_empty()
+        {
+            self.stats.clip_regions_ignored += 1;
+        }
+    }
+
+    /// The node's own names and user attributes, from its direct attribute
+    /// children: `<title>` for the first name (§6.11), `xarast:` for the rest.
+    fn names(&mut self, n: NodeId, known: &mut Vec<String>) {
+        let mut first = true;
+        let kids: Vec<NodeId> = self.doc.tree.children(n).collect();
+        for c in kids {
+            let Some(NodeKind::Attr(a)) = self.doc.tree.kind(c) else {
+                continue;
+            };
+            match &a.value {
+                AttrValue::ObjectName(name) => {
+                    let mut s = String::new();
+                    if first {
+                        s.push_str("<title>");
+                        push_text_escaped(&mut s, name);
+                        s.push_str("</title>");
+                        first = false;
+                    } else {
+                        s.push_str("<xarast:name>");
+                        push_text_escaped(&mut s, name);
+                        s.push_str("</xarast:name>");
+                    }
+                    if s.starts_with("<title>") {
+                        known.insert(0, s);
+                    } else {
+                        known.push(s);
+                    }
+                }
+                AttrValue::User(m) => {
+                    let mut s = String::from("<xarast:user");
+                    attr(&mut s, "xarast:key", &m.key);
+                    attr(&mut s, "xarast:value", &m.value);
+                    s.push_str("/>");
+                    known.push(s);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // ── Containers with behaviour ──────────────────────────────────────────
+
+    fn clipview(&mut self, n: NodeId, mode: ClipViewMode) {
+        self.stats.clips += 1;
+        let clip_child = self.doc.tree.links(n).first_child;
+        let mut el = El::new("g");
+        el.a("xarast:kind", "clipview");
+        self.attrs.push_scope();
+        // The clipping shape is geometry, not ink: it goes into the
+        // `<clipPath>` with its own id, so Xarast gets it back as an object.
+        let shape = clip_child.filter(|c| {
+            matches!(
+                self.doc.tree.kind(*c),
+                Some(NodeKind::Path(_) | NodeKind::Shape(_) | NodeKind::QuickShape(_))
+            )
+        });
+        if let Some(c) = shape {
+            let saved = std::mem::take(&mut self.body);
+            let depth = self.depth;
+            self.depth = 0;
+            self.node(c);
+            self.depth = depth;
+            let child = std::mem::replace(&mut self.body, saved);
+            let clip = self.defs.add(
+                'k',
+                "clipPath",
+                &format!(
+                    " clipPathUnits=\"userSpaceOnUse\">{}</clipPath>",
+                    child.trim_end()
+                ),
+            );
+            el.a("xarast:clip-shape", format!("#{}", node_id(self.doc, c)));
+            match mode {
+                ClipViewMode::Inside => el.a("clip-path", format!("url(#{clip})")),
+                ClipViewMode::Outside => {
+                    el.a("xarast:clip-mode", "outside");
+                    let (x, y, w, h) = (
+                        -1_000_000_000i64,
+                        -1_000_000_000i64,
+                        2_000_000_000i64,
+                        2_000_000_000i64,
+                    );
+                    let mut body = String::new();
+                    attr(&mut body, "maskUnits", "userSpaceOnUse");
+                    let rect = |b: &mut String| {
+                        attr(b, "x", &mp(x));
+                        attr(b, "y", &mp(y));
+                        attr(b, "width", &mp(w));
+                        attr(b, "height", &mp(h));
+                    };
+                    rect(&mut body);
+                    body.push_str("><rect");
+                    rect(&mut body);
+                    attr(&mut body, "fill", "#fff");
+                    body.push_str("/><rect");
+                    rect(&mut body);
+                    attr(&mut body, "fill", "#000");
+                    attr(&mut body, "clip-path", &format!("url(#{clip})"));
+                    body.push_str("/></mask>");
+                    let m = self.defs.add('m', "mask", &body);
+                    el.a("mask", format!("url(#{m})"));
+                }
+            }
+        } else if clip_child.is_some() {
+            self.stats.clips_unsupported += 1;
+        }
+        let tag = el.tag;
+        self.open(Some(n), el);
+        self.body.push('>');
+        self.newline();
+        self.depth += 1;
+        self.children(n, shape);
+        self.depth -= 1;
+        self.attrs.pop_scope();
+        self.close(tag);
+    }
+
+    fn live(&mut self, n: NodeId, l: &LiveNode) {
+        self.stats.live += 1;
+        let kind = live_name(&l.kind);
+        let mut el = El::new("g");
+        let mut prelude = None;
+        match l.role {
+            LiveRole::Controller => {
+                el.a("xarast:kind", kind);
+                prelude = Some(live_params(&self.frame, &l.kind));
+            }
+            LiveRole::Source => {
+                el.a("xarast:kind", "live-source");
+                el.a("xarast:live", kind);
+            }
+            LiveRole::Generated => {
+                el.a("xarast:generated", kind);
+                if let Some(p) = self.doc.tree.links(n).parent {
+                    el.a("xarast:generated-by", node_id(self.doc, p));
+                }
+                // Nothing regenerates live effects before Phase 13, so the
+                // baked geometry must survive a reader (§6.8.7).
+                el.a("xarast:base-authoritative", "true");
+            }
+        }
+        if let Some(name) = &l.name {
+            el.a("inkscape:label", name.to_string());
+        }
+        match l.regen {
+            RegenState::Clean => {}
+            RegenState::Dirty => el.a("xarast:regen", "dirty"),
+            RegenState::Deferred => el.a("xarast:regen", "deferred"),
+        }
+        self.container(n, el, prelude);
+    }
+
+    /// A text story. Before Phase 9 shapes text, the layout is approximate:
+    /// one `<tspan>` per line on the story's own axis, lines spaced by the
+    /// line-spacing attribute, runs split where the font or fill changes.
+    fn text(&mut self, n: NodeId, story: &TextStoryNode) {
+        self.stats.texts += 1;
+        let m = self.frame.local_matrix(&story.transform);
+        let mut el = El::new("text");
+        el.a("xarast:kind", "text");
+        el.a(
+            "transform",
+            format!(
+                "matrix({} {} {} {} {} {})",
+                f64s(m[0], 6),
+                f64s(m[1], 6),
+                f64s(m[2], 6),
+                f64s(m[3], 6),
+                mp(m[4] as i64),
+                mp(m[5] as i64)
+            ),
+        );
+        el.a("xml:space", "preserve");
+        match &story.layout {
+            TextLayout::AtPoint => {}
+            TextLayout::InColumn { width, word_wrap } => {
+                el.a("xarast:layout", "column");
+                el.a("xarast:width", mp(i64::from(width.raw())));
+                if !word_wrap {
+                    el.a("xarast:word-wrap", "false");
+                }
+            }
+            TextLayout::OnPath {
+                reversed,
+                tangential,
+                left_indent,
+                right_indent,
+            } => {
+                self.stats.text_on_path += 1;
+                el.a("xarast:layout", "path");
+                el.a(
+                    "xarast:path-params",
+                    format!(
+                        "{} {} {} {}",
+                        bool_s(*reversed),
+                        bool_s(*tangential),
+                        mp(i64::from(left_indent.raw())),
+                        mp(i64::from(right_indent.raw()))
+                    ),
+                );
+            }
+        }
+        if !story.auto_kern {
+            el.a("xarast:auto-kern", "false");
+        }
+        if story.print_as_shapes {
+            el.a("xarast:print-as-shapes", "true");
+        }
+        let others: Vec<NodeId> = self
+            .doc
+            .tree
+            .children(n)
+            .filter(|c| {
+                !matches!(
+                    self.doc.tree.kind(*c),
+                    Some(NodeKind::Attr(_) | NodeKind::TextLine(_) | NodeKind::TextItem(_))
+                )
+            })
+            .collect();
+        self.attrs.push_scope();
+        // A story with other children (the path text flows along) becomes a
+        // group holding the text and them.
+        let wrapped = !others.is_empty();
+        if wrapped {
+            let mut g = El::new("g");
+            g.a("xarast:kind", "text-story");
+            self.open(Some(n), g);
+            self.body.push('>');
+            self.newline();
+            self.depth += 1;
+            el.attrs.retain(|(k, _)| k != "xarast:kind");
+            self.open(None, el);
+        } else {
+            self.open(Some(n), el);
+        }
+        self.body.push('>');
+        let mut y: i64 = 0;
+        let mut first_line = true;
+        let kids: Vec<NodeId> = self.doc.tree.children(n).collect();
+        for c in &kids {
+            match self.doc.tree.kind(*c) {
+                Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
+                Some(NodeKind::TextLine(_)) => {
+                    self.attrs.push_scope();
+                    let line = self.text_line(*c, &mut y, first_line);
+                    first_line = false;
+                    self.body.push_str(&line);
+                    self.attrs.pop_scope();
+                }
+                _ => {}
+            }
+        }
+        if wrapped {
+            self.body.push_str("</text>");
+            self.newline();
+            for c in others {
+                self.node(c);
+            }
+            let mut next = 0usize;
+            self.fragments(n, &mut next, None);
+            self.depth -= 1;
+            self.attrs.pop_scope();
+            self.close("g");
+        } else {
+            let mut next = 0usize;
+            self.fragments(n, &mut next, None);
+            self.body.push_str("</text>");
+            self.newline();
+            self.attrs.pop_scope();
+        }
+    }
+
+    /// One line: its characters, split into styled runs.
+    fn text_line(&mut self, line: NodeId, y: &mut i64, first: bool) -> String {
+        let mut runs: Vec<(String, String)> = Vec::new();
+        let mut max_size: i64 = 0;
+        let kids: Vec<NodeId> = self.doc.tree.children(line).collect();
+        for c in kids {
+            match self.doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) => self.attrs.push(Arc::new(a.value.clone())),
+                Some(NodeKind::TextItem(item)) => {
+                    let ch = match item {
+                        TextItem::Char(ch) => *ch,
+                        TextItem::Tab => '\t',
+                        TextItem::Kern(_) | TextItem::LineBreak(_) => continue,
+                    };
+                    let (style, size) = self.run_style();
+                    max_size = max_size.max(size);
+                    match runs.last_mut() {
+                        Some((s, text)) if *s == style => text.push(ch),
+                        _ => runs.push((style, ch.to_string())),
+                    }
+                }
+                _ => {}
+            }
+        }
+        if max_size == 0 {
+            let (_, size) = self.run_style();
+            max_size = size;
+        }
+        if !first {
+            *y += match self.attrs.get(AttrSlot::TxtLineSpace) {
+                AttrValue::LineSpace(xarast_doc::LineSpacing::Absolute(v)) => i64::from(v.raw()),
+                AttrValue::LineSpace(xarast_doc::LineSpacing::Ratio(r)) => {
+                    (max_size as f64 * 1.2 * f64::from(*r)).round() as i64
+                }
+                _ => max_size * 6 / 5,
+            };
+        }
+        let mut s = String::from("<tspan");
+        attr(&mut s, "id", &node_id(self.doc, line));
+        self.stats.elements += 1;
+        attr(&mut s, "x", "0");
+        attr(&mut s, "y", &mp(*y));
+        match self.attrs.get(AttrSlot::TxtJustification) {
+            AttrValue::Justification(xarast_doc::Justification::Centre) => {
+                attr(&mut s, "text-anchor", "middle");
+            }
+            AttrValue::Justification(xarast_doc::Justification::Right) => {
+                attr(&mut s, "text-anchor", "end");
+            }
+            AttrValue::Justification(xarast_doc::Justification::Full) => {
+                attr(&mut s, "xarast:justify", "full");
+            }
+            _ => {}
+        }
+        s.push('>');
+        for (style, text) in runs {
+            self.stats.characters += text.chars().count();
+            s.push_str("<tspan");
+            s.push_str(&style);
+            s.push('>');
+            push_text_escaped(&mut s, &text);
+            s.push_str("</tspan>");
+        }
+        s.push_str("</tspan>");
+        s
+    }
+
+    /// The attributes of a run in the current state, and its font size.
+    fn run_style(&mut self) -> (String, i64) {
+        let mut s = String::new();
+        if let AttrValue::FontTypeface(f) = self.attrs.get(AttrSlot::TxtFontTypeface) {
+            let fam = f.family.replace('\'', "");
+            attr(&mut s, "font-family", &format!("'{fam}', sans-serif"));
+        }
+        let size = match self.attrs.get(AttrSlot::TxtFontSize) {
+            AttrValue::FontSize(v) => i64::from(v.raw()),
+            _ => 12_000,
+        };
+        attr(&mut s, "font-size", &mp(size));
+        if let AttrValue::Bold(true) = self.attrs.get(AttrSlot::TxtBold) {
+            attr(&mut s, "font-weight", "bold");
+        }
+        if let AttrValue::Italic(true) = self.attrs.get(AttrSlot::TxtItalic) {
+            attr(&mut s, "font-style", "italic");
+        }
+        if let AttrValue::Underline(true) = self.attrs.get(AttrSlot::TxtUnderline) {
+            attr(&mut s, "text-decoration", "underline");
+        }
+        let fill = match self.attrs.get(AttrSlot::FillGeometry) {
+            AttrValue::Fill(p) => Some(p.clone()),
+            _ => None,
+        };
+        if let Some(p) = fill {
+            let this = &mut *self;
+            let mut ctx = PaintCtx {
+                colours: &this.doc.resources.colours,
+                defs: &mut this.defs,
+                frame: this.frame,
+                stats: &mut this.stats,
+                palette: &this.palette,
+                bitmap_href: &mut *this.bitmap_href,
+            };
+            let out = colour_paint(&mut ctx, &p, Tiling::None, FillEffect::Fade);
+            if out.value != "#000" {
+                attr(&mut s, "fill", &out.value);
+            }
+            if let Some(o) = out.opacity {
+                attr(&mut s, "fill-opacity", &f64s(o, 3));
+            }
+        }
+        (s, size)
+    }
+}
+
+/// Feeds a length-prefixed string into the preservation digest.
+fn digest_str(h: &mut blake3::Hasher, s: &str) {
+    h.update(&(s.len() as u64).to_le_bytes());
+    h.update(s.as_bytes());
+}
+
+fn mul(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (a, b) {
+        (None, None) => None,
+        (a, b) => {
+            let v = a.unwrap_or(1.0) * b.unwrap_or(1.0);
+            (v < 0.9995).then_some(v)
+        }
+    }
+}
+
+pub(crate) fn bool_s(b: bool) -> &'static str {
+    if b { "true" } else { "false" }
+}
+
+fn live_name(k: &LiveKind) -> &'static str {
+    match k {
+        LiveKind::Blend(_) => "blend",
+        LiveKind::Contour(_) => "contour",
+        LiveKind::Shadow(_) => "shadow",
+        LiveKind::Bevel(_) => "bevel",
+        LiveKind::Mould(_) => "mould",
+        LiveKind::Brush(_) => "brush",
+        LiveKind::Effect(_) => "effect",
+    }
+}
+
+/// The parametric element of a live effect (§6.8).
+fn live_params(frame: &Frame, k: &LiveKind) -> String {
+    let profile = |p: xarast_geom::BiasGain| format!("{} {}", f64s(p.bias, 6), f64s(p.gain, 6));
+    let mut s = String::new();
+    match k {
+        LiveKind::Blend(b) => {
+            s.push_str("<xarast:blend");
+            attr(&mut s, "xarast:steps", &b.steps.to_string());
+            if let Some(d) = b.step_distance {
+                attr(&mut s, "xarast:step-distance", &mp(i64::from(d.raw())));
+            }
+            attr(&mut s, "xarast:one-to-one", bool_s(b.one_to_one));
+            attr(&mut s, "xarast:antialias", bool_s(b.antialias));
+            attr(&mut s, "xarast:tangential", bool_s(b.tangential));
+            attr(&mut s, "xarast:reverse", bool_s(b.reverse));
+            attr(&mut s, "xarast:position-profile", &profile(b.profile));
+        }
+        LiveKind::Contour(c) => {
+            s.push_str("<xarast:contour");
+            attr(&mut s, "xarast:steps", &c.steps.to_string());
+            attr(&mut s, "xarast:width", &mp(i64::from(c.width.raw())));
+            attr(
+                &mut s,
+                "xarast:direction",
+                if c.outer { "outer" } else { "inner" },
+            );
+            attr(&mut s, "xarast:insets", bool_s(c.include_line_widths));
+            attr(&mut s, "xarast:join", join_name(c.join));
+            attr(&mut s, "xarast:profile", &profile(c.profile));
+        }
+        LiveKind::Shadow(sh) => {
+            s.push_str("<xarast:shadow");
+            attr(
+                &mut s,
+                "xarast:type",
+                match sh.kind {
+                    xarast_doc::ShadowKind::Wall => "wall",
+                    xarast_doc::ShadowKind::Floor => "floor",
+                    xarast_doc::ShadowKind::Glow => "glow",
+                },
+            );
+            let (dx, dy) = frame.vec(Vector::new(sh.offset.x, sh.offset.y));
+            attr(&mut s, "xarast:offset", &format!("{} {}", mp(dx), mp(dy)));
+            attr(&mut s, "xarast:blur", &mp(i64::from(sh.blur.raw())));
+            attr(&mut s, "xarast:darkness", &f64s(f64::from(sh.darkness), 6));
+            attr(&mut s, "xarast:profile", &profile(sh.profile));
+            attr(&mut s, "xarast:scale", &f64s(f64::from(sh.scale), 6));
+            attr(&mut s, "xarast:tilt", &f64s(f64::from(sh.tilt), 6));
+        }
+        LiveKind::Bevel(b) => {
+            s.push_str("<xarast:bevel");
+            attr(
+                &mut s,
+                "xarast:type",
+                match b.bevel_type {
+                    xarast_doc::BevelType::Flat => "flat",
+                    xarast_doc::BevelType::Round => "round",
+                    xarast_doc::BevelType::Hollow => "hollow",
+                },
+            );
+            attr(&mut s, "xarast:indent", &mp(i64::from(b.indent.raw())));
+            attr(
+                &mut s,
+                "xarast:direction",
+                if b.outer { "outer" } else { "inner" },
+            );
+            attr(
+                &mut s,
+                "xarast:light-angle",
+                &f64s(f64::from(b.light_angle), 6),
+            );
+            attr(
+                &mut s,
+                "xarast:light-elevation",
+                &f64s(f64::from(b.light_tilt), 6),
+            );
+            attr(&mut s, "xarast:contrast", &f64s(f64::from(b.contrast), 6));
+        }
+        LiveKind::Mould(m) => {
+            s.push_str("<xarast:mould");
+            attr(
+                &mut s,
+                "xarast:type",
+                match m.kind {
+                    xarast_doc::MouldKind::Envelope => "envelope",
+                    xarast_doc::MouldKind::Perspective => "perspective",
+                },
+            );
+            let (x0, y0) = frame.pt(Point::new(m.source.lo.x, m.source.hi.y));
+            let (x1, y1) = frame.pt(Point::new(m.source.hi.x, m.source.lo.y));
+            attr(
+                &mut s,
+                "xarast:bounds",
+                &format!("{} {} {} {}", mp(x0), mp(y0), mp(x1 - x0), mp(y1 - y0)),
+            );
+        }
+        LiveKind::Brush(b) => {
+            s.push_str("<xarast:brush");
+            attr(&mut s, "xarast:name", &b.brush);
+            attr(&mut s, "xarast:spacing", &mp(i64::from(b.spacing.raw())));
+            attr(&mut s, "xarast:scale", &f64s(f64::from(b.scale), 6));
+        }
+        LiveKind::Effect(e) => {
+            s.push_str("<xarast:effect");
+            attr(&mut s, "xarast:effect-id", &e.id);
+            if e.locked {
+                attr(&mut s, "xarast:locked", "true");
+            }
+            if !e.settings.is_empty() {
+                attr(&mut s, "xarast:settings", &base64(&e.settings));
+            }
+        }
+    }
+    s.push_str("/>");
+    s
+}
+
+fn join_name(j: Join) -> &'static str {
+    match j {
+        Join::Mitre => "miter",
+        Join::Round => "round",
+        Join::Bevel => "bevel",
+    }
+}
+
+/// The outline of a parallelogram, as the renderer draws a rectangle.
+fn parallelogram(origin: Point, major: Vector, minor: Vector) -> Path {
+    let mut b = Path::builder();
+    b.move_to(origin)
+        .line_to(origin + major)
+        .line_to(origin + major + minor)
+        .line_to(origin + minor)
+        .close();
+    b.build()
+}
+
+/// The ellipse inscribed in a parallelogram, as four cubic arcs, exactly as
+/// the renderer draws it (so the two agree to the millipoint).
+fn ellipse(origin: Point, major: Vector, minor: Vector) -> Path {
+    const K: f64 = 0.552_284_749_830_793_4;
+    let scale = |v: Vector, f: f64| Vector::new(v.dx.scale(f), v.dy.scale(f));
+    let u = scale(major, 0.5);
+    let v = scale(minor, 0.5);
+    let centre = origin + u + v;
+    let at = |su: f64, sv: f64| centre + scale(u, su) + scale(v, sv);
+    let mut b = Path::builder();
+    b.move_to(at(1.0, 0.0));
+    b.cubic_to(at(1.0, K), at(K, 1.0), at(0.0, 1.0));
+    b.cubic_to(at(-K, 1.0), at(-1.0, K), at(-1.0, 0.0));
+    b.cubic_to(at(-1.0, -K), at(-K, -1.0), at(0.0, -1.0));
+    b.cubic_to(at(K, -1.0), at(1.0, -K), at(1.0, 0.0));
+    b.close();
+    b.build()
+}
+
+/// Model-level palette information for `<xarast:palette>`.
+pub(crate) fn palette_xml(doc: &Document, ids: &HashMap<ColourId, String>) -> String {
+    let t = &doc.resources.colours;
+    if t.is_empty() {
+        return String::new();
+    }
+    let mut s = String::from("<xarast:palette xarast:id=\"doc\">\n");
+    for (id, def) in t.iter() {
+        let Some(pid) = ids.get(&id) else { continue };
+        s.push_str("<xarast:colour");
+        attr(&mut s, "xarast:id", pid);
+        if let Some(n) = &def.name {
+            attr(&mut s, "xarast:name", n);
+        }
+        let model = match def.model {
+            ColourModel::Indexed => "indexed",
+            ColourModel::Ciet => "cie",
+            ColourModel::Rgbt => "rgb",
+            ColourModel::Cmyk => "cmyk",
+            ColourModel::Hsvt => "hsv",
+            ColourModel::Greyt => "grey",
+            ColourModel::WebRgbt => "web-rgb",
+        };
+        attr(&mut s, "xarast:model", model);
+        match def.kind {
+            ColourKind::Normal => {}
+            ColourKind::Spot => attr(&mut s, "xarast:kind", "spot"),
+            ColourKind::Tint { factor } => {
+                attr(&mut s, "xarast:kind", "tint");
+                attr(&mut s, "xarast:amount", &f64s(f64::from(factor), 6));
+            }
+            ColourKind::Linked => attr(&mut s, "xarast:kind", "linked"),
+            ColourKind::Shade { x, y } => {
+                attr(&mut s, "xarast:kind", "shade");
+                attr(
+                    &mut s,
+                    "xarast:shade",
+                    &format!("{} {}", f64s(f64::from(x), 6), f64s(f64::from(y), 6)),
+                );
+            }
+        }
+        if let Some(p) = def.parent.and_then(|p| ids.get(&p)) {
+            attr(&mut s, "xarast:parent", &format!("#{p}"));
+        }
+        let comps: Vec<String> = def
+            .components
+            .iter()
+            .map(|c| c.map_or_else(|| "-".to_owned(), |v| f64s(f64::from(v), 6)))
+            .collect();
+        attr(&mut s, "xarast:components", &comps.join(" "));
+        attr(&mut s, "xarast:srgb", &hex(t.resolve_rgba8(id)));
+        if def.entry_index != 0 {
+            attr(&mut s, "xarast:entry-index", &def.entry_index.to_string());
+        }
+        s.push_str("/>\n");
+    }
+    s.push_str("</xarast:palette>");
+    s
+}

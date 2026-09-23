@@ -71,9 +71,13 @@ pub enum ForeignChildKind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ForeignChild {
     /// How many **known** child elements precede it in the serialised
-    /// document. The writer emits it just before the known child with that
-    /// index, or after the last one when there are fewer (the node's children
-    /// may have changed since it was read).
+    /// document, where "known" means an element that stands for one of this
+    /// node's non-attribute children. The writer emits it just before the
+    /// element of the child with that index, or after the last one when
+    /// there are fewer (the node's children may have changed since it was
+    /// read). Elements the writer generates for the node itself — `<title>`,
+    /// `xarast:` sidecars — are not counted: fragments at position 0 follow
+    /// them.
     pub position: u32,
     /// What the fragment is.
     pub kind: ForeignChildKind,

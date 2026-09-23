@@ -49,7 +49,13 @@ fn unix_secs(t: SystemTime) -> i64 {
 
 /// `YYYY-MM-DDTHH:MM:SSZ`.
 pub(crate) fn rfc3339_utc(t: SystemTime) -> String {
-    let c = civil(unix_secs(t));
+    rfc3339_unix(unix_secs(t))
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` of a Unix timestamp. Years are clamped to four
+/// digits so a corrupt timestamp still gives a valid date.
+pub(crate) fn rfc3339_unix(unix: i64) -> String {
+    let c = civil(unix.clamp(-62_135_596_800, 253_402_300_799));
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         c.year, c.month, c.day, c.hour, c.minute, c.second

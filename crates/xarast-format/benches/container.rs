@@ -7,6 +7,8 @@
 //! | `resave_300mb_raw` | re-save a 300 MB photo document with unchanged resources ≤ 1 s |
 //! | `open_20mb` | signature + manifest + thumbnail of a 20 MB file ≤ 15 ms |
 //! | `blake3_64mb` | ≥ 1 GB/s per core |
+//! | `svg/write_100k` | `document.svg` of the 100 000-node synthetic document (information) |
+//! | `svg/save_100k` | the whole first save of it: SVG, `meta.xml`, container (information) |
 //!
 //! The 20 MB document is 12 MiB of SVG-like path text (compressible, as a
 //! real `document.svg` is) plus 8 MiB of incompressible "JPEG" resources in
@@ -178,6 +180,28 @@ fn benches(c: &mut Criterion) {
     g.throughput(Throughput::Bytes(data.len() as u64));
     g.sample_size(20);
     g.bench_function("blake3_64mb", |b| b.iter(|| black_box(Digest::of(&data))));
+    g.finish();
+
+    let doc = xarast_doc::synthetic_document(xarast_doc::SynthSpec::default());
+    let mut g = c.benchmark_group("svg");
+    g.sample_size(10);
+    g.bench_function("write_100k", |b| {
+        b.iter(|| {
+            let mut res = ResourceIndex::new();
+            black_box(
+                xarast_format::svg::write_svg(&doc, &mut res, &Default::default())
+                    .svg
+                    .len(),
+            )
+        })
+    });
+    g.bench_function("save_100k", |b| {
+        b.iter(|| {
+            let mut out = Cursor::new(Vec::new());
+            xarast_format::save_to(&doc, &mut out, &xarast_format::SaveOptions::default()).unwrap();
+            black_box(out.into_inner().len())
+        })
+    });
     g.finish();
 }
 

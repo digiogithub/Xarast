@@ -20,6 +20,8 @@
 //! | [`reader`] | [`XarastReader`]: open without parsing `document.svg` | §3, §10.5 |
 //! | [`writer`] | [`PackageWriter`]: normative order, `mimetype` first, raw copies | §3.2, §13.4 |
 //! | [`durability`] | [`write_atomic`] and [`DocumentLock`] | §10.1, §10.4 |
+//! | [`svg`] | The SVG profile, writing side: [`svg::write_svg`] | §5, §6 |
+//! | [`save`] | [`save()`]: SVG + resources + `meta.xml` + container, atomically | §10.1, §13.3 |
 //!
 //! The container, the manifest, the resource index and the durability layer
 //! move bytes and know nothing about the document model. The SVG profile
@@ -65,7 +67,9 @@ pub mod name;
 pub mod policy;
 pub mod reader;
 pub mod resource;
+pub mod save;
 pub mod sniff;
+pub mod svg;
 pub mod thumbnail;
 mod time;
 pub mod writer;
@@ -79,6 +83,7 @@ pub use limits::Limits;
 pub use manifest::{FileEntry, Manifest, Role};
 pub use reader::{EntryInfo, XarastReader};
 pub use resource::{ResourceId, ResourceIndex, ResourceKind};
+pub use save::{SaveOptions, SaveReport, meta_xml, save, save_to};
 pub use sniff::{sniff, sniff_bytes};
 pub use thumbnail::ThumbnailProvider;
 pub use writer::{PackageWriter, WriteOptions, WriteReport};
