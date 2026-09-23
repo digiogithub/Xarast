@@ -345,6 +345,26 @@ fn svg_reader_handles_the_other_commands() {
     assert!(Path::from_svg_path_data("not a path").is_err());
 }
 
+/// `fuzz_svg_path_parse`: an arc radius of 8e77 between two ordinary
+/// points made `kurbo` try to allocate 1.8 GB of cubics. Numbers beyond
+/// twice the document extent are now refused before `kurbo` sees them.
+#[test]
+fn svg_reader_refuses_numbers_beyond_the_extent_before_parsing() {
+    assert!(Path::from_svg_path_data("M18-7A1  8170073e71 11 111\n 15").is_err());
+    assert!(Path::from_svg_path_data("M 0 0 A 1 1e999 0 0 1 10 10").is_err());
+    assert!(Path::from_svg_path_data("M 0 0 L 4294967296 0").is_err());
+    // Everything a legitimate path needs still parses: the extremes of the
+    // extent, a relative move across all of it, exponents and packed
+    // numbers.
+    let edge = Path::from_svg_path_data("M -1073741823 -1073741823 l 2147483646 2147483646")
+        .expect("parses");
+    assert_eq!(edge.points().len(), 2);
+    let packed = Path::from_svg_path_data("M1e3-2.5.5-1L-.5+1E2Z").expect("parses");
+    assert_eq!(packed.points().len(), 3);
+    let arc = Path::from_svg_path_data("M 0 0 a 1e6 1e6 0 1 1 1000 0").expect("parses");
+    assert!(arc.segment_count() >= 1);
+}
+
 #[test]
 fn kurbo_round_trip_is_exact_over_the_corpus() {
     for case in corpus() {

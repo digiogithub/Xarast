@@ -1,21 +1,50 @@
-# Fuzzing the `.xar` importer
+# Fuzzing
 
-A legacy binary format parser is attack surface, so fuzzing is part of
-Phase 3 rather than a follow-up (`docs/phases/phase-03-xar-importer.md`
-W3.11). Five of the six targets run against the byte and decoding layers
-alone, which is what makes them fast; `fuzz_xar_import` drives the whole
-pipeline into `xarast-doc`.
+Eleven `cargo-fuzz` targets, in their own workspace so that the main one
+stays on stable. Six cover the `.xar` importer — a legacy binary format
+parser is attack surface, so fuzzing is part of Phase 3 rather than a
+follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — and five cover
+the geometry, render and document-model layers the importer feeds.
+
+| Target | Crate | What it drives |
+|---|---|---|
+| `fuzz_xar_records` | `xarast-xar` | magic, framing, deflate, CRC trailer |
+| `fuzz_xar_tree` | `xarast-xar` | `DOWN`/`UP` nesting, atomic stripping, depth cap |
+| `fuzz_xar_decode` | `xarast-xar` | every typed decoder over an arbitrary tree |
+| `fuzz_xar_import` | `xarast-xar` | the whole pipeline into `DocumentBuilder` |
+| `fuzz_xar_path` | `xarast-xar` | the relative/absolute path codecs and flags |
+| `fuzz_xar_colour` | `xarast-xar` | colour records, inherit sentinels, parents |
+| `fuzz_path_boolean` | `xarast-geom` | two paths through a `BoolOp` × `FillRule`, and `self_union` |
+| `fuzz_svg_path_parse` | `xarast-geom` | SVG path data as text, and the exact round trip |
+| `fuzz_display_list` | `xarast-render` | scenes through `DisplayList::build` and the CPU backend |
+| `fuzz_ramp` | `xarast-render` | ramp tables, profiles, gradient evaluation |
+| `fuzz_doc_builder` | `xarast-doc` | arbitrary build scripts: "valid or nothing" |
+
+The five structured targets take their input through `arbitrary`; the
+helpers they share are in `fuzz_targets/common.rs`.
 
 ```sh
-cargo +nightly fuzz run fuzz_xar_records -- -runs=5000000 -timeout=5 \
-    -rss_limit_mb=2048 -malloc_limit_mb=512
-cargo +nightly fuzz run fuzz_xar_tree    -- -runs=5000000 -timeout=5
-cargo +nightly fuzz run fuzz_xar_decode  -- -runs=2000000 -timeout=5
-cargo +nightly fuzz run fuzz_xar_import  -- -runs=2000000 -timeout=5 \
-    -rss_limit_mb=2048
-cargo +nightly fuzz run fuzz_xar_path    -- -runs=5000000 -timeout=5
-cargo +nightly fuzz run fuzz_xar_colour  -- -runs=5000000 -timeout=5
+cargo +nightly fuzz run -O fuzz_xar_records -- -max_total_time=600 \
+    -timeout=5 -rss_limit_mb=2048 -malloc_limit_mb=1024
+cargo +nightly fuzz run -O fuzz_svg_path_parse -- -max_total_time=600 \
+    -dict=dicts/svg_path_parse.dict
 ```
+
+Any other target runs the same way. A local run should pass a scratch
+directory as the *first* corpus argument, so that what the fuzzer
+discovers never lands in `corpus/`:
+
+```sh
+cargo +nightly fuzz run -O fuzz_xar_import /tmp/grown corpus/fuzz_xar_import
+```
+
+## In CI
+
+`.github/workflows/fuzz.yml` runs every target for five minutes each
+night (02:30 UTC), and on demand with a chosen duration. A crash, panic,
+OOM or timeout fails that target's job and uploads the reproducer as an
+artefact. The corpus each run grows is carried between nights in the
+Actions cache, never committed.
 
 ## The invariants
 
@@ -64,7 +93,34 @@ A developer who has the corpus locally can seed from it through
 
 ## When a crash is found
 
-Minimise it with `cargo fuzz tmin`, add it to `fuzz/artifacts/` — it is
-synthetic by then, so this is clean-room safe — and turn it into a unit
-test in `xarast-xar` so that it is checked on every push rather than only
-nightly.
+Minimise it with `cargo fuzz tmin`, rebuild it by hand from the minimised
+bytes — with `xarast_xar::synth::XarBuilder` for a `.xar` input — and add
+it as a regression test in the owning crate, so that it is checked on
+every push rather than only nightly. `fuzz/artifacts/` is not committed:
+a raw artefact derived from a real-corpus seed could carry its bytes.
+`crates/xarast-xar/tests/fuzz_regressions.rs` holds the importer's.
+
+The first runs (2026-09-23) found eight bugs; each is a test now:
+
+| Target | Finding | Test |
+|---|---|---|
+| `fuzz_xar_import` | an unresolved `TAG_NODE_BITMAP` counted as mapped twice | `an_unresolved_node_bitmap_is_counted_once` |
+| `fuzz_xar_import` | children of grid records and of default attributes never counted | `a_subtree_under_a_grid_record_is_accounted_for`, `..._default_attribute_...` |
+| `fuzz_xar_tree`, `fuzz_xar_import` | `N DOWN a UP DOWN b UP` dropped `a` from the tree | `a_node_descended_into_twice_keeps_both_groups_of_children` |
+| `fuzz_doc_builder` | a dangling colour made `finish` return `Inconsistent` | `a_dangling_colour_reference_is_kept_and_is_only_a_warning` |
+| `fuzz_doc_builder` | a sourceless controller at the depth limit did too | `a_sourceless_controller_at_the_depth_limit_is_dropped` |
+| `fuzz_ramp` | NaN stop offsets broke the sort's total order | `nan_offsets_do_not_break_the_sort` |
+| `fuzz_svg_path_parse` | an 8e77 arc radius asked `kurbo` for 1.8 GB of cubics | `svg_reader_refuses_numbers_beyond_the_extent_before_parsing` |
+
+## Known limits of the targets
+
+- `fuzz_display_list` keeps geometry within ±10 000 000 mp and drops a
+  dash pattern that would cut its path into more than 2 000 pieces. The
+  CPU backend strokes and dashes a path in document space before clipping
+  it to the viewport, so a long, thick, finely dashed stroke at high zoom
+  exhausts memory; that is a render gap (`docs/memory/render.md` TODO 11,
+  gintrack XARA-T-0022), not a fuzzing artefact, and the bounds stop it
+  from masking everything else. Lift both when it is fixed.
+- `fuzz_path_boolean` runs one `BoolOp` × `FillRule` pair per input, not
+  all sixteen, because an extent-sized curve flattens to thousands of
+  vertices and sixteen overlays of it per case exhaust the time budget.

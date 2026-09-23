@@ -102,6 +102,15 @@ impl RampLength {
     }
 }
 
+/// A stop offset fit for sorting: a NaN becomes 0, as [`Stop::new`] makes
+/// it. The fields are public, so a stop can arrive without going through
+/// the constructor, and sorting by `partial_cmp` with a NaN in the list is
+/// not a total order — which the standard library's sort may detect and
+/// panic on.
+fn sane_offset(o: f32) -> f32 {
+    if o.is_nan() { 0.0 } else { o }
+}
+
 /// Samples a stop list at `f`, which is already profiled.
 fn sample_stops(stops: &[Stop], f: f32, space: EffectSpace) -> Rgba8 {
     debug_assert!(!stops.is_empty());
@@ -172,12 +181,14 @@ pub fn build_ramp(
     if stops.is_empty() {
         return vec![Rgba8::TRANSPARENT; n];
     }
-    let mut sorted: Vec<Stop> = stops.to_vec();
-    sorted.sort_by(|a, b| {
-        a.offset
-            .partial_cmp(&b.offset)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut sorted: Vec<Stop> = stops
+        .iter()
+        .map(|s| Stop {
+            offset: sane_offset(s.offset),
+            color: s.color,
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.offset.total_cmp(&b.offset));
     let d = (n - 1) as f64;
     let identity = profile.map(0.25) == 0.25 && profile.map(0.75) == 0.75;
     (0..n)
@@ -211,12 +222,14 @@ pub fn build_transparency_ramp(stops: &[TranspStop], profile: Profile, len: Ramp
     if stops.is_empty() {
         return vec![0; n];
     }
-    let mut sorted: Vec<TranspStop> = stops.to_vec();
-    sorted.sort_by(|a, b| {
-        a.offset
-            .partial_cmp(&b.offset)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut sorted: Vec<TranspStop> = stops
+        .iter()
+        .map(|s| TranspStop {
+            offset: sane_offset(s.offset),
+            level: s.level,
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.offset.total_cmp(&b.offset));
 
     // The profile is applied to the parameter, so the fixed-point stretch
     // walk happens over the profiled index.
@@ -371,6 +384,38 @@ mod tests {
 
     fn rgb(r: u8, g: u8, b: u8) -> Rgba8 {
         Rgba8 { r, g, b, a: 255 }
+    }
+
+    /// `fuzz_ramp`: NaN offsets among twenty-odd stops made the sort's
+    /// comparator inconsistent, and the standard library's sort panicked
+    /// on detecting it. Both ramp builders take stops with public fields.
+    #[test]
+    fn nan_offsets_do_not_break_the_sort() {
+        let mut offsets = vec![f32::NAN, 0.002_868_652];
+        offsets.extend(std::iter::repeat_n(0.002_856_924, 12));
+        offsets.extend([f32::NAN, -2.363_192_1e-27, 0.0]);
+        offsets.extend(std::iter::repeat_n(0.002_856_924, 5));
+        let transp: Vec<TranspStop> = offsets
+            .iter()
+            .map(|&offset| TranspStop { offset, level: 59 })
+            .collect();
+        let colour: Vec<Stop> = offsets
+            .iter()
+            .map(|&offset| Stop {
+                offset,
+                color: rgb(1, 2, 3),
+            })
+            .collect();
+        for len in [RampLength::Short, RampLength::Long] {
+            assert_eq!(
+                build_transparency_ramp(&transp, Profile::IDENTITY, len).len(),
+                len.len()
+            );
+            assert_eq!(
+                build_ramp(&colour, Profile::IDENTITY, EffectSpace::Rgb, len).len(),
+                len.len()
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,106 @@
+name: Fuzz
+
+# Every cargo-fuzz target in fuzz/, for a bounded time, every night. A
+# crash, a panic, an out-of-memory or a timeout fails the job and uploads
+# the reproducer. See fuzz/README.md for what each target asserts.
+
+on:
+  schedule:
+    # 02:30 UTC, after the day's pushes have settled.
+    - cron: "30 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "Seconds per target"
+        required: false
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_xar_records
+          - fuzz_xar_tree
+          - fuzz_xar_decode
+          - fuzz_xar_import
+          - fuzz_xar_path
+          - fuzz_xar_colour
+          - fuzz_path_boolean
+          - fuzz_svg_path_parse
+          - fuzz_display_list
+          - fuzz_ramp
+          - fuzz_doc_builder
+    steps:
+      - uses: actions/checkout@v4
+
+      # The fuzz crate is its own workspace; the main one stays on stable
+      # through rust-toolchain.toml, so nightly is selected per command.
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: ${{ matrix.target }}
+
+      # The corpus each night's run grows is kept between runs in the
+      # Actions cache, never committed: only the synthetic seeds under
+      # fuzz/corpus/ are in the repository.
+      - name: Restore the grown corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/grown/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Build
+        working-directory: fuzz
+        run: cargo +nightly fuzz build -O ${{ matrix.target }}
+
+      - name: Fuzz
+        working-directory: fuzz
+        env:
+          SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '300' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "grown/$TARGET" "artifacts/$TARGET"
+          seeds=()
+          if [ -d "corpus/$TARGET" ]; then seeds+=("corpus/$TARGET"); fi
+          extra=()
+          if [ -f "dicts/${TARGET#fuzz_}.dict" ]; then extra+=("-dict=dicts/${TARGET#fuzz_}.dict"); fi
+          cargo +nightly fuzz run -O "$TARGET" "grown/$TARGET" "${seeds[@]}" -- \
+            -max_total_time="$SECONDS_PER_TARGET" \
+            -timeout=10 \
+            -rss_limit_mb=2048 \
+            -malloc_limit_mb=1024 \
+            -max_len=1048576 \
+            -print_final_stats=1 \
+            -artifact_prefix="artifacts/$TARGET/" \
+            "${extra[@]}"
+
+      - name: Upload the reproducer
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

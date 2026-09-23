@@ -354,7 +354,11 @@ and a unit test that corrupts exactly it:
 7. `Tag` is unique; `by_tag` is bijective with the arena. → `DuplicateTag`
 8. An invalid bounding box propagates upward. → `StaleBounds`
 9. Every referenced resource exists. → `MissingResource`
-    (`Document::validate` only; `Tree::validate` cannot see the tables)
+    (`Document::validate` only; `Tree::validate` cannot see the tables).
+    A missing bitmap, dash or arrow is an **error**; a missing **colour** is
+    a **warning**, because a colour reference resolves through the table's
+    fallback and `DocumentBuilder::finish` deliberately keeps such nodes
+    (`is_hard_ref`). The two used to disagree — see below.
 10. The selection contains only reachable nodes — **not this crate's problem**,
     because the selection is not in this crate. Recorded so the numbering
     matches the research.
@@ -398,6 +402,25 @@ The general rule this establishes: **a transaction is allowed to pass through
 an invalid intermediate state — that is what transactions are for.** Repairs
 and invariant checks belong at the boundary, never between two mutations that
 are meant to be one change.
+
+**`fuzz_doc_builder` broke "valid or nothing" twice in its first minutes**
+(2026-09-23), both as `BuildError::Inconsistent` on the builder's own output:
+
+1. *A dangling colour reference.* `repair_missing_resources` keeps nodes
+   whose only missing resource is a colour (`is_hard_ref`), but
+   `validate_document` called every missing resource an error. Now a
+   colour is a warning. Pinned by
+   `a_dangling_colour_reference_is_kept_and_is_only_a_warning`.
+2. *A sourceless live controller at the depth limit.* `repair_live` gives
+   it an empty source child, but the tree refused the attach as too deep,
+   and `let _ =` threw the error away. Such a controller is now dropped
+   with a `Repaired` diagnostic. Pinned by
+   `a_sourceless_controller_at_the_depth_limit_is_dropped`.
+
+The lesson: **a repair that can fail must check its own result.** Every
+`let _ = tree.attach(…)` in a repair path is a latent `Inconsistent`.
+Clean rerun afterwards: 10 minutes, 3.8 M execs at ~6 300 exec/s, no
+findings.
 
 ## Dead ends (do not retry)
 
@@ -456,8 +479,7 @@ are meant to be one change.
       `factor_out`, `localise` — at the four boundaries `research/02 §10.6`
       identifies. Not needed until copy/paste and grouping exist (Phase 7) and
       saving does (Phase 6).
-- [ ] A `cargo-fuzz` target for `DocumentBuilder`. The property test in
-      `src/tests/props.rs` covers the same invariants over random build
-      scripts; a real fuzz target should exist before Phase 3 fuzzes the `.xar`
-      parser, so that that work tests the parser rather than rediscovering
-      builder bugs.
+- [x] A `cargo-fuzz` target for `DocumentBuilder`: `fuzz/fuzz_targets/
+      fuzz_doc_builder.rs` (2026-09-23), nightly in CI. It drives every node
+      kind, unbalanced scopes, and colour/bitmap keys forged with
+      `slotmap::KeyData::from_ffi`, and treats `Inconsistent` as a finding.

@@ -122,6 +122,34 @@ fn a_dangling_bitmap_reference_is_dropped_and_reported() {
     assert!(diags.iter().any(|d| d.code == DiagCode::DanglingReference));
 }
 
+/// `fuzz_doc_builder`: a layer whose guide colour was never defined. The
+/// builder keeps dangling colour references on purpose — they resolve
+/// through the table's fallback — so `validate()` must not call them an
+/// error, or `finish` fails with `Inconsistent` on its own output.
+#[test]
+fn a_dangling_colour_reference_is_kept_and_is_only_a_warning() {
+    let mut b = DocumentBuilder::new(BuildLimits::small());
+    b.node(NodeKind::Layer(Box::new(LayerNode {
+        active: true,
+        guide: true,
+        guide_colour: Some(xarast_color::ColourId::default()),
+        ..LayerNode::default()
+    })))
+    .unwrap();
+    let (doc, _) = b
+        .finish()
+        .expect("a dangling colour is not a build failure");
+    let r = doc.validate();
+    assert!(r.errors.is_empty(), "{:#?}", r.errors);
+    assert!(r.warnings.iter().any(|w| matches!(
+        w,
+        crate::validate::Invariant::MissingResource {
+            resource: crate::resources::ResourceRef::Colour(_),
+            ..
+        }
+    )));
+}
+
 #[test]
 fn a_controller_with_no_source_is_repaired() {
     let mut b = skeleton(BuildLimits::small()).unwrap();
@@ -129,6 +157,31 @@ fn a_controller_with_no_source_is_repaired() {
     let (doc, diags) = b.finish().unwrap();
     doc.validate().assert_clean();
     assert!(diags.iter().any(|d| d.code == DiagCode::Repaired));
+}
+
+/// `fuzz_doc_builder`: a sourceless controller at the depth limit. The
+/// repair's `attach` of an empty source was refused as too deep, the
+/// error was ignored, and `finish` returned `Inconsistent`.
+#[test]
+fn a_sourceless_controller_at_the_depth_limit_is_dropped() {
+    let mut b = DocumentBuilder::new(BuildLimits {
+        max_depth: 3,
+        ..BuildLimits::small()
+    });
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(live(LiveRole::Controller)).unwrap();
+    let (doc, diags) = b.finish().expect("the controller is repaired away");
+    doc.validate().assert_clean();
+    assert!(diags.iter().any(|d| d.code == DiagCode::Repaired));
+    assert!(
+        !doc.tree
+            .preorder(doc.tree.root())
+            .any(|n| matches!(doc.tree.kind(n), Some(NodeKind::Live(_)))),
+        "the controller must be gone"
+    );
 }
 
 #[test]

@@ -1,4 +1,7 @@
 target
+artifacts
+coverage
+grown
 corpus/*/crash-*
 corpus/*/leak-*
 corpus/*/timeout-*

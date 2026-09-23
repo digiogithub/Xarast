@@ -18,6 +18,11 @@ libfuzzer-sys = "0.4"
 xarast-xar = { path = "../crates/xarast-xar" }
 xarast-geom = { path = "../crates/xarast-geom" }
 xarast-doc = { path = "../crates/xarast-doc" }
+xarast-render = { path = "../crates/xarast-render" }
+xarast-color = { path = "../crates/xarast-color" }
+arbitrary = { version = "1", features = ["derive"] }
+# Only to forge dangling resource keys for `fuzz_doc_builder`.
+slotmap = "1.0"
 
 [profile.release]
 debug = 1
@@ -71,6 +76,46 @@ bench = false
 [[bin]]
 name = "fuzz_xar_colour"
 path = "fuzz_targets/fuzz_xar_colour.rs"
+test = false
+doc = false
+bench = false
+
+# Two arbitrary paths through every BoolOp x FillRule, and self_union.
+[[bin]]
+name = "fuzz_path_boolean"
+path = "fuzz_targets/fuzz_path_boolean.rs"
+test = false
+doc = false
+bench = false
+
+# SVG path data as arbitrary text, and the exact integer round trip.
+[[bin]]
+name = "fuzz_svg_path_parse"
+path = "fuzz_targets/fuzz_svg_path_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Arbitrary scenes through DisplayList::build and the CPU backend.
+[[bin]]
+name = "fuzz_display_list"
+path = "fuzz_targets/fuzz_display_list.rs"
+test = false
+doc = false
+bench = false
+
+# Ramp tables, profiles and gradient evaluation.
+[[bin]]
+name = "fuzz_ramp"
+path = "fuzz_targets/fuzz_ramp.rs"
+test = false
+doc = false
+bench = false
+
+# Arbitrary build scripts through DocumentBuilder: "valid or nothing".
+[[bin]]
+name = "fuzz_doc_builder"
+path = "fuzz_targets/fuzz_doc_builder.rs"
 test = false
 doc = false
 bench = false

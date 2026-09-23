@@ -28,8 +28,8 @@ fn fuzz_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz")
 }
 
-/// Whole-file seeds, for `fuzz_xar_records`, `fuzz_xar_tree` and
-/// `fuzz_xar_decode`.
+/// Whole-file seeds, for `fuzz_xar_records`, `fuzz_xar_tree`,
+/// `fuzz_xar_decode` and `fuzz_xar_import`.
 fn file_seeds() -> Vec<(String, Vec<u8>)> {
     let mut out: Vec<(String, Vec<u8>)> = Vec::new();
 
@@ -260,10 +260,11 @@ fn colour_seeds() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn the_seed_corpus_is_synthetic_and_survives_the_parser() {
     type SeedSet = (&'static str, Vec<(String, Vec<u8>)>);
-    let sets: [SeedSet; 5] = [
+    let sets: [SeedSet; 6] = [
         ("fuzz_xar_records", file_seeds()),
         ("fuzz_xar_tree", file_seeds()),
         ("fuzz_xar_decode", file_seeds()),
+        ("fuzz_xar_import", file_seeds()),
         ("fuzz_xar_path", path_seeds()),
         ("fuzz_xar_colour", colour_seeds()),
     ];
