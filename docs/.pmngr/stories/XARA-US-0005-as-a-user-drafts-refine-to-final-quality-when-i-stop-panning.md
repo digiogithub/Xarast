@@ -2,14 +2,15 @@
 id: XARA-US-0005
 type: story
 title: As a user, drafts refine to final quality when I stop panning
-status: in_progress
+status: done
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, render]
 estimate: 3
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T10:41:59Z
+updated: 2026-09-23T11:26:36Z
 started: 2026-09-23T10:41:59Z
+closed: 2026-09-23T11:26:36Z
 ---
 
 ## Description
