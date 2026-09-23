@@ -17,7 +17,9 @@
 //! With [`WriteOptions::deterministic`], the same inputs produce the same
 //! bytes: DOS timestamp 1980-01-01 00:00:00, permissions `0o644`, host system
 //! `Unix` whatever the OS, canonical entry order, a canonical manifest, and
-//! DEFLATE through the one pinned backend (`zlib-rs`).
+//! DEFLATE through the workspace's one backend (`miniz_oxide`, see the
+//! workspace manifest; `tests/container.rs::deterministic_bytes_are_pinned`
+//! fails if it changes).
 //!
 //! # Raw copies
 //!

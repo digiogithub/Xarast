@@ -20,8 +20,9 @@ xarast-doc = { path = "../xarast-doc" }
 zip = { workspace = true }
 quick-xml = { workspace = true }
 blake3 = { workspace = true }
-# The escape heuristic of `research/06 §4.3` deflates a 64 KiB sample.
-# Same crate and backend `zip` already uses.
+# The escape heuristic of `research/06 §4.3` deflates a 64 KiB sample. This
+# is also the dependency that gives `zip` its DEFLATE backend: flate2's
+# default `rust_backend` (miniz_oxide). See the workspace manifest.
 flate2 = { workspace = true }
 thiserror = { workspace = true }
 

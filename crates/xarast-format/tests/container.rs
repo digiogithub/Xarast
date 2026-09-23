@@ -778,3 +778,39 @@ fn save_atomic_end_to_end() {
     assert_eq!(r.document_bytes().unwrap(), SVG);
     let _ = ResourceId::of(b"");
 }
+
+/// The exact bytes of a deterministic save. This fails if anything changes
+/// the output of a byte-reproducible save: the entry layout, the manifest,
+/// the ZIP headers, or the DEFLATE backend (which feature unification can
+/// swap under us, see the workspace manifest). If the change is intended,
+/// update the digest and say why in the commit.
+#[test]
+fn deterministic_bytes_are_pinned() {
+    let mut opts = WriteOptions::deterministic();
+    opts.generator = "Xarast/test".into();
+    let mut w = PackageWriter::new(opts);
+    w.set_meta(META);
+    let rects: String = (0..500)
+        .map(|i| {
+            format!(
+                "<rect x=\"{i}\" y=\"{}\" width=\"10\" height=\"10\"/>\n",
+                i * 3 % 97
+            )
+        })
+        .collect();
+    let doc = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\">\n{rects}</svg>\n"
+    );
+    w.set_document(doc.into_bytes());
+    let mut ix = ResourceIndex::new();
+    ix.insert(ResourceKind::Blob, "bin", &b"pinned ".repeat(500)[..])
+        .unwrap();
+    w.add_resources(&ix);
+    let z = write(w);
+    assert_eq!(
+        Digest::of(&z).to_hex(),
+        "a382e13cd16f9109bc3d8d3fc8950561b669d40a65c9e63408aa7ca0ed1fe07e",
+        "{} bytes",
+        z.len()
+    );
+}
