@@ -43,18 +43,30 @@ pub enum RampMapping {
     Sin,
 }
 
-/// How a fill repeats outside its own extent.
+/// The fill-mapping attribute: how a fill behaves outside its own extent.
+///
+/// The variants are the original's mapping values 0–4, in order, and what
+/// they *render* as depends on the fill family
+/// (`docs/research/01-xar-format.md` §8.3, "How the mapping renders"): a
+/// graduated fill clamps unless it is [`Tiling::RepeatExtra`], a three- or
+/// four-colour fill clamps only when it is [`Tiling::Simple`], and a bitmap
+/// or procedural fill takes the value at face value.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Hash)]
 pub enum Tiling {
-    /// Clamp at the ends.
+    /// Unset (value 0). Never read from a `.xar` file.
     #[default]
     None,
-    /// One tile only.
+    /// Do not repeat (value 1): what `TAG_FILL_NONREPEATING` reads as.
     Simple,
-    /// Repeat.
+    /// Repeat (value 2), the original's factory default.
     Repeat,
-    /// Repeat, mirroring alternate tiles.
+    /// Repeat, mirroring alternate tiles (value 3).
     RepeatInverted,
+    /// The "extra" repeat (`.xar` mapping value 4). For a graduated fill
+    /// — linear, radial, conical, diamond — this is the **only** mapping
+    /// that tiles: the original clamps such a fill under the other four
+    /// (`docs/research/01-xar-format.md` §8.3, "How the mapping renders").
+    RepeatExtra,
 }
 
 /// The extra two corners that turn a gradient's parallelogram into a

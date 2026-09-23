@@ -1459,15 +1459,18 @@ fn quality(v: i32) -> xarast_doc::Quality {
     }
 }
 
-/// `TAG_FILL_REPEATING_EXTRA` (206/207) has no counterpart in the model's
-/// four tilings; it is the "extra" repeat the original added for bitmap
-/// fills, and plain repeating is the closest thing that is not a lie.
+/// The mapping records keep the original's attribute values: a
+/// non-repeating record reads back as 1 (`Tiling::Simple`), and the "extra"
+/// repeat (206/207) as 4, which is the only value that makes a graduated
+/// fill tile. How each fill family interprets them is the walker's business
+/// (`docs/research/01-xar-format.md` §8.3).
 fn tiling(r: crate::decode::FillRepeat) -> Tiling {
     use crate::decode::FillRepeat as R;
     match r {
-        R::None => Tiling::None,
-        R::Repeat | R::Extra => Tiling::Repeat,
+        R::None => Tiling::Simple,
+        R::Repeat => Tiling::Repeat,
         R::RepeatInverted => Tiling::RepeatInverted,
+        R::Extra => Tiling::RepeatExtra,
     }
 }
 
