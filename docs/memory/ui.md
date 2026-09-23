@@ -232,8 +232,14 @@ invent them.
 - [x] **`ViewTransform` has no Y flip** — fixed by `y_up`, copied from
   the viewport by the composition root, which no longer negates `y`
   (XARA-T-0026).
-- Vertical ruler labels (`1450pt`) are clipped by the 18 pt strip; draw
-  them rotated or drop the suffix (XARA-T-0032).
+- [x] **Vertical ruler labels were clipped by the 18 pt strip** (XARA-T-0032).
+  They are now turned a quarter turn anticlockwise and read up the strip
+  from just above their tick, at the horizontal ruler's 9 pt size
+  (`TextShape::with_angle`: the same glyph atlas, only the quads turn).
+  `rulers::vertical_label_rect` is the placement, and
+  `vertical_labels_fit_the_strip_at_every_scale` lays out every label the
+  ruler produces, at scales 1, 1.25 and 2. Dead end: stacking the digits.
+  `-10000mm` is 8 glyphs, taller than the 48 pt label separation.
 
 ---
 

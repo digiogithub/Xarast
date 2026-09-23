@@ -208,7 +208,10 @@ New in Phase 2:
     attribute nodes under the document root.** The original materialises them;
     doing the same here would duplicate the table, make every resolution scan
     forty-odd nodes before it starts, and put them in the digest and every
-    dump. `TAG_CURRENTATTRIBUTES` maps onto `DocumentBuilder::default_attribute`.
+    dump. **`TAG_CURRENTATTRIBUTES` does *not* map onto it** (it did until
+    XARA-T-0037): that block holds the editor's current attributes, what the
+    next object drawn gets, and a file never overrides the factory defaults.
+    Mapping it turned every unfilled path into the file's current fill.
 16. **An attribute's scope is "its following siblings and their subtrees, **and
     its parent's own ink**".** The second half is not an extra rule: a parent
     paints after its children, which is exactly what makes a `.xar` path's

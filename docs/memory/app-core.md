@@ -285,6 +285,30 @@ reason the walker *reports*, which is its own test.
     the drawing without the pages (the active spread's visible, non-guide
     layers); `drawing_or_page_rect` is what fitting frames;
     `content_rect` keeps the whole-tree bounds for culling.
+31. **A fill-mapping value is interpreted per fill family, not at face
+    value** (XARA-T-0037, `research/01 §8.3` "How the mapping renders").
+    `Tiling` holds the original's values 0–4 (`None`, `Simple`, `Repeat`,
+    `RepeatInverted`, `RepeatExtra`). In `paint.rs`:
+    * `gradient_repeat`: a linear, radial, conical or diamond fill clamps
+      unless the value is `RepeatExtra`, which becomes `Repeat::RepeatHq`;
+    * `mesh_repeat`: a three- or four-colour fill clamps only on `Simple`,
+      and otherwise tiles, the default included;
+    * `repeat_of`: a bitmap fill takes the value as is.
+    The original's factory default is `Repeat` (2), and a gradient ignores
+    it. Taking it at face value wrapped every gradient into hard bars
+    (SimpleSphere, Fill Types, leafgirl's horizon).
+32. **A circular fill's minor axis is the major one turned a quarter
+    turn** (`paint::radial_frame`). The record has no second axis, and the
+    importer repeats the edge point. The frame was degenerate, so every
+    circular fill painted nothing.
+33. **`drawing_rect` includes half of each object's line width**, from its
+    own attribute stack (`viewport::ink_rect`, used when the layer's
+    cached box is cold, which is always after import). It is not the
+    culling extent, which allows for a full mitre spike and is four times
+    as wide. Fitting with a zero extent cut thick strokes off at the image
+    border.
+34. **A bitmap fill with no decoded image counts in `images_pending`**, as a
+    bitmap node does, so a file never looks complete while it is not.
 
 ---
 
@@ -391,10 +415,17 @@ be better run once at `Tx::commit` than after every call.
       takes a bias/gain profile but no sine easing, so a sine-mapped
       gradient renders linear. Either bake the easing into the stop list
       here or add it to `xarast-render`.
-- [ ] **`Tiling::Repeat` never becomes `Repeat::RepeatHq`.** The
-      high-quality repeating mode exists to stop a tiled gradient
-      banding; deciding when to use it is a quality question nobody has
-      measured yet.
+- [x] **When a gradient becomes `Repeat::RepeatHq`**: exactly when its
+      mapping is `Tiling::RepeatExtra`, which is also the only mapping
+      that makes a gradient tile (decision 31).
+- [ ] **Bitmap fills ignore the fill-mapping attribute** (XARA-T-0054).
+      They use the per-fill `tiling` the importer leaves at `None`. The
+      original tiles them by the attribute, whose default is repeat.
+- [ ] **`FrameJob::ink` / `content_rect` use a zero stroke extent** when
+      the cache is cold. A thick stroke reaching outside every page could
+      be left out of a pan strip. It was not seen in the corpus, because
+      pages cover the drawings. If it shows up, reuse `viewport::ink_rect`
+      with the culling extent.
 - [ ] **`ClipViewMode::Outside` drops the clip** and counts it in
       `WalkStats::clips_unsupported`. The renderer has no "keep the
       outside" clip; it needs either an inverted path or a mask layer.
@@ -442,10 +473,13 @@ be better run once at `Tx::commit` than after every call.
       (XARA-T-0014): 4–5 s from open to first frame in the window for
       `testfiles/*GradFilledShapes*.xar`. Supersession keeps the window
       responsive while they render, but each pan costs a full render.
-- [ ] **`SimpleSphere.xar` renders its sphere black**, identically in the
-      window and through `examples/render_headless.rs`, so it is a
-      walker/renderer fidelity gap (gradient + transparency stack), not a
-      composition bug.
+- [x] **`SimpleSphere.xar` rendered its sphere black** (XARA-T-0025,
+      XARA-T-0037). The cause was neither the walker nor the renderer: the
+      importer took the file's `TAG_CURRENTATTRIBUTES` (a black current
+      fill) for the document defaults, so the unfilled frame drawn last
+      covered everything. The gradients also wrapped (decision 31).
+      `tests/fidelity.rs` pins both on a synthetic `.xar`. Dead end: the
+      first suspicion was the transparency stack.
 - [x] **`xarast-cli` is wired** (XARA-T-0004), and since XARA-T-0012 it
       needs no workarounds: it frames through `HeadlessOptions`
       (`HeadlessFrame::Fit`/`Fixed` plus `dpi`) and reads the zoom and the

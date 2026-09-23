@@ -30,8 +30,8 @@ are its column totals.
 | | |
 |---|---:|
 | Records read | 1 390 282 |
-| … mapped (a node, an attribute, a resource, a default, or a scope) | 1 385 224 |
-| … skipped (view state, printing, metrics, editor hints) | 2 896 |
+| … mapped (a node, an attribute, a resource, or a scope) | 1 384 408 |
+| … skipped (view state, printing, metrics, editor hints, current attributes) | 3 712 |
 | … stripped with an atomic subtree | 2 162 |
 | … kept verbatim as `NodeKind::Opaque` so they round-trip | 1 594 |
 | Document nodes built | 830 533 |
@@ -382,18 +382,27 @@ and *read* with `ReadCoordTrans(..., 0, 0)`, i.e. untranslated
 Nothing in the model depends on either; the asymmetry mattered only
 because it is what makes the origin measurable.
 
-### 3. `TAG_CURRENTATTRIBUTES` really does carry document defaults
+### 3. `TAG_CURRENTATTRIBUTES` does **not** carry document defaults
 
-Open question 3 of the previous note, answered with data. Across the
-corpus its subtrees set **816 defaults, of which 434 differ** from
-`DefaultAttrs::xara_compatible()`, in **53 of 59 files**. By tag:
-`TAG_LINEWIDTH`, `TAG_FLATFILL`, `TAG_FILL_REPEATING`,
-`TAG_TRANSPARENTFILL_REPEATING` and `TAG_FILLEFFECT_FADE` 106 each,
-`TAG_FLATTRANSPARENTFILL` 105, `TAG_LINECOLOUR_NONE` 55,
-`TAG_TEXT_FONT_SIZE` 52, `TAG_TEXT_FONT_TYPEFACE` 41, `TAG_LINECOLOUR` 31,
-one `TAG_ARROWTAIL` and one `TAG_LINEARTRANSPARENTFILL`. So the subtree is
-**not** skipped: it goes to `DocumentBuilder::default_attribute`, which is
-what `document-model.md` decision 15 always intended.
+**Corrected by XARA-T-0037 (2026-09-23).** This finding used to say the
+opposite, and it was wrong. The block holds the editor's *current*
+attributes, which the original applies to the **next object the user
+draws**: its loader switches into a "make current" insert mode for the
+subtree (`Kernel/rechdoc.cpp:1942-1966`). An object with no attribute in
+the file inherits the factory default, which no file overrides. The default
+fill is "no colour" (`research/01 §8.1`). Feeding the block into
+`DefaultAttrs` gave every unfilled path the file's current fill.
+`Designs/SimpleSphere.xar` shows it: the current fill is black, and its
+last object, a filled-and-stroked frame with no fill attribute, then
+covered the whole design in black. The block's `TAG_FILL_REPEATING` also
+became every gradient's default mapping, which is half of why its gradients
+wrapped (see `app-core.md` decision 31).
+
+The block is rich: across the corpus it holds 816 attributes, 434 of them
+different from the factory defaults, in 53 of 59 files. They are now
+counted (`ImportReport::current_attributes` / `current_differing`) and
+**skipped**. The model has no current-attribute store yet; that is Phase 7
+T2.7.
 
 The trap in it, which cost a wrong colour palette before it was found:
 **the subtree also contains definitions** — 26 `TAG_DEFINECOMPLEXCOLOUR`
@@ -573,6 +582,13 @@ dropping the analysis ~28 ms, and quick-shape outlines ~12 ms.
   that `TAG_PATH_FLAGS`, `TAG_SPREADINFORMATION` and `TAG_LAYERDETAILS` can
   patch their parent. The record tree is already materialised, so reading
   ahead costs nothing and leaves the one-construction-path rule intact.
+- **Mapping `TAG_CURRENTATTRIBUTES` onto `DefaultAttrs`.** Those are the
+  editor's current attributes. Doing it painted SimpleSphere's unfilled
+  frame black over the whole design (XARA-T-0037).
+- **Mapping `TAG_FILL_NONREPEATING` to `Tiling::None`, or the extra repeat
+  (206/207) to `Tiling::Repeat`.** The model keeps the original's values
+  0–4 (`None`, `Simple`, `Repeat`, `RepeatInverted`, `RepeatExtra`).
+  Non-repeating reads as 1 (`Simple`), and only 4 makes a gradient tile.
 - **Handling only attributes inside `TAG_CURRENTATTRIBUTES`.** Its subtree
   also defines colours and fonts, and its own default fill references them
   by record number; skipping them loses palette entries and turns later
@@ -590,8 +606,10 @@ dropping the analysis ~28 ms, and quick-shape outlines ~12 ms.
    nothing depends on it; whoever writes them in Phase 13 must check case
    by case.
 3. ~~**Whether `TAG_CURRENTATTRIBUTES` should feed `DefaultAttrs`.**~~
-   **Settled: yes.** 816 defaults set, 434 of them different from
-   `DefaultAttrs::xara_compatible()`, in 53 of 59 files. See finding 3.
+   **Settled: no** (XARA-T-0037). It was first settled "yes" because the
+   block differs from the defaults in 53 files, but differing is exactly
+   what current attributes do. The original's loader makes them current,
+   not default. See finding 3.
 4. ~~**The coordinate origin for a non-zero pasteboard.**~~ **Settled**,
    and it is the normal case, not the exotic one. See finding 1.
 5. **Units defined by the file, as opposed to the thirteen predefined
