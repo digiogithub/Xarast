@@ -16,6 +16,7 @@
 //! and reporting, never rendering.
 
 pub mod args;
+pub mod convert;
 pub mod inputs;
 pub mod render;
 pub mod smoke;
@@ -50,6 +51,7 @@ USAGE:
     xarast-cli <SUBCOMMAND> --help
 
 SUBCOMMANDS
+    convert      convert .xar documents to .xarast packages
     render       render documents to PNG on the CPU backend
     smoke-open   import documents, walk the scene and report what is missing
     version      print the version
@@ -78,6 +80,7 @@ pub fn run(argv: &[String]) -> Exit {
             println!("xarast-cli {}", env!("CARGO_PKG_VERSION"));
             Exit::Ok
         }
+        "convert" => dispatch(rest, convert::USAGE, convert::parse, convert::run),
         "render" => dispatch(rest, render::USAGE, render::parse, render::run),
         "smoke-open" => dispatch(rest, smoke::USAGE, smoke::parse, smoke::run),
         other => {
