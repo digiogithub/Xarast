@@ -248,6 +248,8 @@ pub(crate) struct Emitter<'d, 'b> {
     bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
     /// Where the application lays text out, for the base SVG of text.
     placer: Option<Placer>,
+    /// `SvgDialect::Interchange`: foreign baggage is not written.
+    interchange: bool,
 }
 
 impl<'d, 'b> Emitter<'d, 'b> {
@@ -301,6 +303,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             spread_y: 0,
             bitmap_href,
             placer: opts.text.clone(),
+            interchange: opts.dialect == super::SvgDialect::Interchange,
         }
     }
 
@@ -415,7 +418,13 @@ impl<'d, 'b> Emitter<'d, 'b> {
             el.a("xarast:magnetic", "true");
         }
         if let Some(b) = self.doc.tree.foreign(n) {
-            self.foreign_attrs(&id, b, el);
+            if self.interchange {
+                if !b.attrs.is_empty() || !b.children.is_empty() {
+                    self.stats.foreign_omitted += 1;
+                }
+            } else {
+                self.foreign_attrs(&id, b, el);
+            }
         }
     }
 
@@ -464,6 +473,10 @@ impl<'d, 'b> Emitter<'d, 'b> {
 
     /// Writes one foreign fragment verbatim, if it is well formed.
     fn fragment(&mut self, kind: ForeignChildKind, raw: &str) {
+        if self.interchange {
+            // Counted with its owner in `common`.
+            return;
+        }
         let k = match kind {
             ForeignChildKind::Element | ForeignChildKind::SvgElement => FragmentKind::Element,
             ForeignChildKind::Comment => FragmentKind::Comment,
