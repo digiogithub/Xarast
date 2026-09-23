@@ -2,13 +2,14 @@
 id: XARA-T-0110
 type: task
 title: "First re-save not byte-identical in 5 corpus files: 8-bit twin keys and a statistic of unreferenced bitmaps"
-status: backlog
+status: in_progress
 priority: low
 parent: XARA-US-0028
 author: mcp
 labels: [phase-6, xarast-format, svg]
 created: 2026-09-23T16:46:38Z
-updated: 2026-09-23T16:46:38Z
+updated: 2026-09-23T17:10:21Z
+started: 2026-09-23T17:10:21Z
 ---
 
 ## Description

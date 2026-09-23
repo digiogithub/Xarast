@@ -2,13 +2,14 @@
 id: XARA-T-0109
 type: task
 title: Writer drops the fill mapping (tiling) of bitmap, fractal and noise fills
-status: backlog
+status: in_progress
 priority: medium
 parent: XARA-US-0028
 author: mcp
 labels: [phase-6, xarast-format, svg]
 created: 2026-09-23T16:46:26Z
-updated: 2026-09-23T16:46:26Z
+updated: 2026-09-23T17:10:21Z
+started: 2026-09-23T17:10:21Z
 ---
 
 ## Description
