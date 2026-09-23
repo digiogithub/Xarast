@@ -20,6 +20,10 @@ USAGE:
 TASKS:
     icons       Rasterise assets/icons/xarast.svg into the PNG sizes the
                 freedesktop icon theme needs, under assets/icons/hicolor
+    svg-render  <SVG> <OUT.png> [WIDTH]: parse an SVG with usvg and render
+                it with resvg, resolving relative hrefs next to the file.
+                The always-available browser-grade check of the .xarast
+                SVG profile (research/06 §5.6)
     help        Print this help
 ";
 
@@ -27,6 +31,7 @@ fn main() -> ExitCode {
     let task = std::env::args().nth(1).unwrap_or_else(|| "help".to_owned());
     let result = match task.as_str() {
         "icons" => icons(),
+        "svg-render" => svg_render(&std::env::args().skip(2).collect::<Vec<_>>()),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -92,5 +97,43 @@ fn icons() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::copy(&source, scalable.join("xarast.svg"))?;
     println!("wrote assets/icons/hicolor/scalable/apps/xarast.svg");
 
+    Ok(())
+}
+
+/// Renders one SVG to PNG with resvg: the conformance renderer that needs
+/// no external binary. Prints the parse warnings usvg reports.
+fn svg_render(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let (Some(input), Some(output)) = (args.first(), args.get(1)) else {
+        return Err("usage: cargo xtask svg-render <SVG> <OUT.png> [WIDTH]".into());
+    };
+    let source = Path::new(input);
+    let svg = std::fs::read(source)?;
+    let mut options = resvg::usvg::Options {
+        resources_dir: source.parent().map(Path::to_path_buf),
+        ..Default::default()
+    };
+    options.fontdb_mut().load_system_fonts();
+    let tree = resvg::usvg::Tree::from_data(&svg, &options)?;
+    let size = tree.size();
+    let width: u32 = match args.get(2) {
+        Some(w) => w.parse()?,
+        None => size.width().ceil() as u32,
+    };
+    let scale = width as f32 / size.width();
+    let height = (size.height() * scale).ceil().max(1.0) as u32;
+    let mut pixmap =
+        resvg::tiny_skia::Pixmap::new(width.max(1), height).ok_or("cannot allocate the pixmap")?;
+    pixmap.fill(resvg::tiny_skia::Color::WHITE);
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap.save_png(output)?;
+    println!(
+        "{input}: {}x{} -> {output}",
+        pixmap.width(),
+        pixmap.height()
+    );
     Ok(())
 }

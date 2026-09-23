@@ -56,6 +56,7 @@ pub mod builder;
 pub mod digest;
 pub mod document;
 pub mod fill;
+pub mod foreign;
 pub mod history;
 pub mod kind;
 pub mod live;
@@ -85,6 +86,7 @@ pub use fill::{
     FillGeometry, Paint, Perspective, ProceduralParams, Ramp, RampMapping, RampStop, Tiling,
     TranspPaint,
 };
+pub use foreign::{ForeignAttr, ForeignBaggage, ForeignChild, ForeignChildKind, ForeignMarks};
 pub use history::{Action, CoalesceKey, Command, CommandBus, EditError, History, Transaction, Tx};
 pub use kind::{
     ArrowSpec, BitmapNode, BrushRef, ClipViewMode, ClipViewNode, GroupNode, GuidelineNode,

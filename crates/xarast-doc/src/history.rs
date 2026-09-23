@@ -21,6 +21,7 @@ use xarast_geom::Matrix;
 
 use crate::Document;
 use crate::attr::AttrValue;
+use crate::foreign::{ForeignBaggage, ForeignMarks};
 use crate::kind::NodeKind;
 use crate::resources::{BitmapData, ResourceRef};
 use crate::tree::{Attach, NodeFlags, NodeId, Tree, TreeError};
@@ -102,6 +103,14 @@ pub enum Action {
         /// The new pixels, or `None` to leave them.
         new: Option<Arc<BitmapData>>,
     },
+    /// Replace a node's foreign baggage (`research/06 §8`). `None` removes
+    /// it.
+    SetForeign {
+        /// The node.
+        node: NodeId,
+        /// The new baggage.
+        new: Option<Arc<ForeignBaggage>>,
+    },
     /// Several actions that undo as one.
     Batch(Vec<Action>),
 }
@@ -167,6 +176,12 @@ impl Action {
                 doc.resources
                     .replace_bitmap_pixels(*b, new.clone())
                     .ok_or(EditError::MissingResource(*id))?;
+            }
+            Action::SetForeign { node, new } => {
+                if !doc.tree.contains(*node) {
+                    return Err(TreeError::NoSuchNode(*node).into());
+                }
+                doc.tree.set_foreign(*node, new.clone());
             }
             Action::Batch(actions) => {
                 for a in actions {
@@ -255,6 +270,10 @@ impl Action {
                 };
                 Action::SetResource { id: *id, new: old }
             }
+            Action::SetForeign { node, .. } => Action::SetForeign {
+                node: *node,
+                new: doc.tree.foreign_arc(*node).cloned(),
+            },
             Action::Batch(actions) => {
                 let mut out = Vec::with_capacity(actions.len());
                 for a in actions.iter().rev() {
@@ -276,6 +295,7 @@ impl Action {
             Action::SetResource { new, .. } => new
                 .as_ref()
                 .map_or(0, |p| p.pixels.len() + p.palette.len() * 4),
+            Action::SetForeign { new, .. } => new.as_ref().map_or(0, |b| b.size_hint()),
             Action::Batch(a) => a.iter().map(|x| x.size_hint(doc)).sum(),
             _ => 0,
         }
@@ -290,7 +310,8 @@ impl Action {
             Action::SetFlags { .. }
             | Action::Transform { .. }
             | Action::SetAttr { .. }
-            | Action::SetResource { .. } => false,
+            | Action::SetResource { .. }
+            | Action::SetForeign { .. } => false,
         }
     }
 
@@ -541,6 +562,37 @@ impl<'d> Tx<'d> {
         })
     }
 
+    /// Replaces a node's foreign baggage. Empty baggage removes it.
+    ///
+    /// Not refused on a locked node: baggage is data this version does not
+    /// understand, and keeping or marking it is never an edit of the user's
+    /// artwork.
+    pub fn set_foreign(
+        &mut self,
+        node: NodeId,
+        baggage: Option<ForeignBaggage>,
+    ) -> Result<(), EditError> {
+        self.act(Action::SetForeign {
+            node,
+            new: baggage.filter(|b| !b.is_empty()).map(Arc::new),
+        })
+    }
+
+    /// Adds §8.5 marks to a node's baggage. A node without baggage, or one
+    /// that already carries the marks, records nothing: there is nothing to
+    /// warn a future reader about.
+    pub fn mark_foreign(&mut self, node: NodeId, marks: ForeignMarks) -> Result<(), EditError> {
+        let Some(old) = self.doc.tree.foreign(node) else {
+            return Ok(());
+        };
+        if old.marks.contains(marks) {
+            return Ok(());
+        }
+        let mut next = old.clone();
+        next.marks |= marks;
+        self.set_foreign(node, Some(next))
+    }
+
     /// Records the spreads an action can affect, from the state **before** it
     /// applies: a detach changes its old parent's children.
     fn note_spreads_before(&mut self, action: &Action) {
@@ -570,7 +622,8 @@ impl<'d> Tx<'d> {
             | Action::SetFlags { .. }
             | Action::Transform { .. }
             | Action::SetAttr { .. }
-            | Action::SetResource { .. } => {}
+            | Action::SetResource { .. }
+            | Action::SetForeign { .. } => {}
         }
     }
 

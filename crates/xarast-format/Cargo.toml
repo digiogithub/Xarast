@@ -17,6 +17,8 @@ workspace = true
 # it plugs in through `PackageWriter::set_document` / `XarastReader::entry`.
 [dependencies]
 xarast-doc = { path = "../xarast-doc" }
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
 zip = { workspace = true }
 quick-xml = { workspace = true }
 blake3 = { workspace = true }
@@ -27,6 +29,8 @@ flate2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+# The corpus sweep of the SVG writer imports `.xar` files.
+xarast-xar = { path = "../xarast-xar" }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 

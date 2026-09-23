@@ -5324,7 +5324,10 @@ dependencies = [
  "quick-xml",
  "tempfile",
  "thiserror 2.0.20",
+ "xarast-color",
  "xarast-doc",
+ "xarast-geom",
+ "xarast-xar",
  "zip",
 ]
 

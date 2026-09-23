@@ -6,22 +6,26 @@ Normative spec: `docs/research/06-xarast-format.md`. Plan:
 
 ## Current state
 
-Phase 6, round 1 (2026-09-23): the byte layer is done; the SVG profile is not.
+Phase 6, round 1 (2026-09-23): the byte layer. Round 2 (2026-09-23): the
+SVG profile writer (W3), the document-level save and `xarast-cli convert`;
+the reader (W4) is next.
 
 | Workstream | State | Where |
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
-| W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
-| W3 SVG write | not started | — |
+| W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
+| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 passes 1–3 and 6–8 done, **4–5 open** (XARA-T-0101); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `emit`), `save.rs` |
 | W4 SVG read + preservation | not started (the container half of F4.8 is done: unknown entries are raw-copied with their rows) | `writer.rs::carry_from` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4–F6.9 open | `durability/` |
 
 Public entry points: `XarastReader::{open, open_with}`, `PackageWriter`,
 `ResourceIndex`, `Manifest`, `sniff`/`sniff_bytes`, `write_atomic[_with]`,
-`DocumentLock`. The document-level `save_atomic(path, doc, ctx, opts)` of the
-spec does not exist yet: it is `write_atomic(path, |f| writer.finish(f))` once
-W3 can produce `document.svg`.
+`DocumentLock`, **`svg::write_svg`**, **`save`/`save_to`** (the spec's
+`save_atomic` for a first save: SVG + resources + `meta.xml` + container,
+atomically) and `meta_xml`. `xarast-cli convert <in.xar|DIR>… (-o F |
+--out-dir D)` drives it; `cargo xtask svg-render <svg> <png> [width]` is
+the resvg check.
 
 ### How the SVG layer plugs in (W3/W4)
 
@@ -37,6 +41,103 @@ W3 can produce `document.svg`.
   raw copies on the next save.
 - `ThumbnailProvider` takes `&xarast_doc::Document`; the implementation lives
   over the renderer (xarast-app), never in this crate.
+
+## The SVG profile writer (W3) — how it works
+
+`write_svg(doc, &mut ResourceIndex, &SvgOptions) -> SvgDocument { svg,
+stats, foreign_count, foreign_digest }`.
+
+- **One model node, one element.** Every reachable non-attribute node is
+  exactly one element with `id="x" + tag in Crockford base 32` (`xarast:id`
+  on `xarast:` elements), in document order, so z-order is document order
+  and W4 can map elements to nodes one to one. Exceptions: chapters (rows in
+  `<xarast:document>`), text lines (`<tspan id>`), characters (text). The
+  clip shape of a ClipView is its element, placed inside the `<clipPath>`.
+- **Attribute nodes produce no element; every ink element carries its
+  resolved paint**, resolved with `AttrStack` exactly as the renderer's
+  walker does (a parent's ink after its children's attributes). No `<g>`
+  ever sets a paint property, so eliding SVG defaults (pass 3) is always
+  safe. Consequence for W4: see XARA-T-0105 (the reader must localise, and
+  the model round trip compares a normalised form).
+- **Coordinates** (`svg/frame.rs`): per spread, `(x − ox, oy − y)` in
+  integer millipoints, `(ox, oy)` = top-left of the spread's pages, written
+  on the spread as `xarast:origin` so the inverse is exact. Formatting is
+  from the integer (`num.rs`), never through a float.
+- **Spreads**: the first is a `<g>` framed by the root viewBox (its pages);
+  the others are nested `<svg x=0 y=…>` stacked below, outside the root
+  viewBox, each with its own frame.
+- **Shapes**: `<rect>` only when axis-aligned in the canonical orientation
+  (major right, minor up in the document); `<ellipse>`/`<circle>` only with
+  even diameters (the centre must be an integer millipoint); otherwise
+  `<path>` + `xarast:shape` + `xarast:parallelogram` (the exact frame).
+  Quick shapes: generated outline + `<xarast:quickshape>`; edge templates
+  are written in the shape's own space, **not flipped**.
+- **Bitmaps**: `.xar` corners put the image's **top-left at the origin**,
+  the major axis along the top row, the minor axis down the left column
+  (`research/01 §4.5`: as a fill p3 is start, p2 end, p0 second end). A
+  bitmap *fill*'s origin is the image's bottom-left and `axis_y` its
+  top-left. Both verified visually (Spitfire, SimpleText, leafgirl) in
+  resvg, Inkscape and Chrome. The original encoded bytes go into the
+  `ResourceIndex` once per bitmap; every `href` written counts one
+  reference.
+- **Gradients** are exact for linear/circular/elliptical fills. With
+  `gradientUnits="userSpaceOnUse"` a radial gradient's `cx`/`cy` default to
+  **50 % of the viewport**, so an elliptical one (unit circle mapped by
+  `gradientTransform`) must write `cx="0" cy="0"` — found by rendering
+  `Fill Types simple.xar` (all elliptical fills came out black). Only the
+  "extra" repeat tiles (`spreadMethod="repeat"`), matching the renderer.
+- **Ramp baking**: resolved colours in a `Ramp<ColourValue>`, sampled with
+  `Ramp::sample` (so profile, sin easing and HSV rainbow are the model's own
+  maths), 8 uniform segments bisected up to 5 times until the midpoint error
+  is ≤ 2/255; twin: `xarast:profile`, `xarast:ramp-mapping`,
+  `xarast:fill-effect`, `xarast:stops="pos:#rrggbb[aa] …"`. A plain RGB ramp
+  gets its key stops only (rule 5).
+- **Transparency**: flat → multiplied into `fill-opacity`/`stroke-opacity`;
+  graduated → `<mask>` over the element's box (+ stroke) with a greyscale
+  gradient, `color-interpolation="sRGB"` on both; a fill transparency is
+  applied only when there is a fill. Mode → `style="mix-blend-mode:…"` +
+  `xarast:blend` (contrast/brightness have no CSS keyword: name only).
+- **Defs** are keyed by their full text; id = one-letter kind + BLAKE3
+  prefix (4 hex, extended on collision): identical gradients/masks/patterns
+  collapse and ids are stable across saves. Palette ids are `c-N`.
+- **Foreign baggage** (`Tree::foreign`): attributes after the known ones,
+  sorted by (URI, local); namespaces declared once on the root, reusing the
+  reader's prefix when free; a clash with a known attribute or a non-NCName
+  is dropped and counted. Fragments are written raw at their position, only
+  if well-formed (`xml::fragment_is_well_formed`). Marks become
+  `xarast:foreign-dirty` / `foreign-stale` / `base-authoritative`.
+  `xarast:foreign-digest="blake3:<hex>"` = BLAKE3 over, in emission order,
+  for each owner: its id, then each written attribute's URI, local name and
+  value, then each fragment's raw text — every field as u64-LE length +
+  UTF-8 bytes. `foreign-count` = attributes + fragments written; both are
+  omitted when zero. **W4 must compute the digest the same way.**
+- **Live effects**: controller `<g xarast:kind="blend|…">` with the
+  parametric element first; generated children in `<g
+  xarast:generated=… xarast:generated-by=… xarast:base-authoritative="true">`
+  — nothing regenerates them before Phase 13, so a reader must keep them.
+- **Text** (until Phase 9): `<text transform>` with the story matrix
+  conjugated by the flip (`Frame::local_matrix`), one `<tspan>` per line
+  (line advance = ratio × 1.2 × largest size, or the absolute spacing),
+  runs split where font, size, weight, style, underline or fill change.
+  Kerns are dropped; stories on a path are laid out as lines. Fill only,
+  no stroke.
+
+### Conformance (2026-09-23, by hand; XARA-T-0106 automates it)
+
+All 59 corpus files convert, and every `document.svg`, `meta.xml` and
+manifest passes `xmllint --noout`. Rendered at 100 % and compared
+(8 × 8-window grey SSIM) with Xarast's own CPU render of the `.xar`:
+resvg **mean 0.942**; 28 files ≥ 0.99, geometry/gradient files 0.98–1.0.
+The low ones are low because **the reference is less complete than the
+SVG**: Xarast does not draw text (Phase 9) or bitmaps (Phase 10) yet,
+resvg does — AngledText 0.38, Spitfire 0.57, TextJust 0.79, leafgirl
+0.87, GardenPlan 0.81 are all text or photos present only in the SVG.
+Genuine approximations: `Fill Types simple` 0.85 (conical, 3/4-colour and
+fractal rows drawn flat — XARA-T-0102). Inkscape 1.x and headless Chrome
+against resvg on six files (WATCH2, Fill Types simple, leafgirl, Spitfire,
+SimpleText, amurdove): Inkscape 0.945–0.997, Chrome (navigating to the
+`.svg`) 0.945–0.996 — the three renderers agree; the 0.945 is leafgirl's
+fine bitmap-filled figure, resampled differently by each.
 
 ## Decisions taken (and why)
 
@@ -177,6 +278,15 @@ the file means", not crashes; each input is now a unit test in
 
 ## Dead ends (do not retry)
 
+- Headless Chrome rendering the SVG through an `<img>`: SVG-as-image runs
+  in secure static mode and loads **no** external resources, so every
+  bitmap vanishes. Navigate to the `.svg` itself.
+- Comparing against `xarast-cli render --width N`: that fits the frame
+  *with a margin*. Render the reference at 100 % (`--frame page`) and
+  resvg at the reference's width.
+- Exponent-form numbers (`1e3`): only ever shorten round thousands of
+  points, and `1e3mm` in `width` is a parser trap. Not written.
+
 - JSON manifest (§3.5). `data:` URIs above 4 KiB. Recompressing already
   compressed resources. `roxmltree` as the main parser. Zstd method id 20.
 - `NsReader` for the manifest (cannot enumerate in-scope bindings).
@@ -188,10 +298,18 @@ the file means", not crashes; each input is now a unit test in
 
 ## Open TODOs
 
-- W3/W4: the SVG profile, `meta.xml` model (F2.6) and its `<metadata>` mirror
-  (F2.7), preservation context, `save_atomic(doc)`.
-- **Doc model has no per-node foreign-baggage container** (risk K1 of the
-  plan): filed as a task; it must land before W4.
+- W4: the reader, preservation context and the re-save path
+  (`from_package` + `carry_from` + raw copies) on top of `save`;
+  attribute localisation (XARA-T-0105); the preservation digest as above.
+- W3 leftovers: passes 4–5 (XARA-T-0101), baking/`BakeProvider`
+  (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
+  (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
+  entry (§5.9, SHOULD), split layout above 32 spreads / 8 MiB.
+- `meta.xml` model (F2.6) and the full `<metadata>` mirror (F2.7):
+  `save::meta_xml` writes only title, dates, generator, origin,
+  statistics, page setup and comment.
+- ~~Doc model has no per-node foreign-baggage container~~ — done,
+  XARA-T-0089 (`docs/memory/document-model.md` decision 32).
 - F6.4 lock UX + `SIGINT`/`SIGTERM` cleanup (app), F6.5 autosave, F6.6
   journal, F6.7 recovery scan, F6.8 `xarast repair`, F6.9 partial XML
   recovery.

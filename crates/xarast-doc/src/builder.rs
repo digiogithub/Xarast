@@ -353,6 +353,15 @@ impl DocumentBuilder {
         Ok(BuildId(id))
     }
 
+    /// Gives a node the foreign baggage a reader could not interpret
+    /// (`research/06 §8.2`). Replaces any baggage it had; empty baggage
+    /// clears it. Not an edit, so nothing is recorded for undo.
+    pub fn foreign(&mut self, id: BuildId, baggage: crate::foreign::ForeignBaggage) {
+        self.doc
+            .tree
+            .set_foreign(id.0, Some(std::sync::Arc::new(baggage)));
+    }
+
     /// Appends an attribute node at the current level.
     ///
     /// # Errors

@@ -11,10 +11,12 @@
 //! user lost work.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::bounds::BoundsCache;
+use crate::foreign::ForeignBaggage;
 use crate::kind::NodeKind;
 use crate::validate::ValidationReport;
 use crate::walk::{Ancestors, Children, Postorder, Preorder, RenderWalk};
@@ -191,6 +193,9 @@ pub struct Tree {
     by_tag: TagIndex,
     next_tag: u32,
     bounds: SecondaryMap<NodeId, BoundsCache>,
+    /// Foreign baggage (`research/06 §8.2`), out of line: almost no node
+    /// has any, and `NodeData` is gated at 64 bytes. See [`crate::foreign`].
+    foreign: SecondaryMap<NodeId, Arc<ForeignBaggage>>,
     /// Maximum depth accepted by [`Tree::attach`]. Mirrors
     /// [`BuildLimits::max_depth`](crate::BuildLimits).
     pub(crate) max_depth: usize,
@@ -220,6 +225,7 @@ impl Tree {
             by_tag,
             next_tag: 1,
             bounds: SecondaryMap::new(),
+            foreign: SecondaryMap::new(),
             max_depth: Tree::DEFAULT_MAX_DEPTH,
         }
     }
@@ -339,7 +345,49 @@ impl Tree {
         self.bounds.get(id).copied().unwrap_or_default()
     }
 
+    /// The foreign baggage a node carries, if any (`research/06 §8.2`).
+    #[inline]
+    #[must_use]
+    pub fn foreign(&self, id: NodeId) -> Option<&ForeignBaggage> {
+        self.foreign.get(id).map(|b| &**b)
+    }
+
+    /// The shared handle on a node's baggage, for cheap cloning.
+    #[inline]
+    #[must_use]
+    pub fn foreign_arc(&self, id: NodeId) -> Option<&Arc<ForeignBaggage>> {
+        self.foreign.get(id)
+    }
+
+    /// Every node that carries baggage, reachable or not, in arena order.
+    pub fn foreign_iter(&self) -> impl Iterator<Item = (NodeId, &ForeignBaggage)> + '_ {
+        self.foreign.iter().map(|(id, b)| (id, &**b))
+    }
+
+    /// How many nodes carry baggage.
+    #[inline]
+    #[must_use]
+    pub fn foreign_len(&self) -> usize {
+        self.foreign.len()
+    }
+
     // ── Mutation. `pub(crate)`: see the module documentation. ────────────────
+
+    /// Replaces a node's baggage, returning the old one. Empty baggage is
+    /// stored as none. Only actions and the builder call this.
+    pub(crate) fn set_foreign(
+        &mut self,
+        id: NodeId,
+        baggage: Option<Arc<ForeignBaggage>>,
+    ) -> Option<Arc<ForeignBaggage>> {
+        if !self.nodes.contains_key(id) {
+            return None;
+        }
+        match baggage.filter(|b| !b.is_empty()) {
+            Some(b) => self.foreign.insert(id, b),
+            None => self.foreign.remove(id),
+        }
+    }
 
     /// Creates a loose node. It is `DETACHED` and appears in no traversal.
     pub(crate) fn create(&mut self, kind: NodeKind) -> NodeId {
@@ -482,6 +530,7 @@ impl Tree {
                 self.by_tag.remove(&n.tag);
             }
             self.bounds.remove(*v);
+            self.foreign.remove(*v);
         }
         victims.len()
     }

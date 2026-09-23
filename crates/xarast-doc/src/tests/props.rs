@@ -164,6 +164,8 @@ enum Edit {
     SetActive(u8, bool),
     /// Attach a whole new spread holding two layers that are both active.
     AddSpread(u8),
+    /// Give a node foreign baggage, clear it, or mark it (XARA-T-0089).
+    Foreign(u8, u8),
 }
 
 fn edit_strategy() -> impl Strategy<Value = Edit> {
@@ -177,6 +179,7 @@ fn edit_strategy() -> impl Strategy<Value = Edit> {
         (0u8..64, 0u8..64, 0u8..4).prop_map(|(a, b, h)| Edit::Move(a, b, h)),
         (0u8..64, any::<bool>()).prop_map(|(a, v)| Edit::SetActive(a, v)),
         (0u8..64).prop_map(Edit::AddSpread),
+        (0u8..64, 0u8..4).prop_map(|(a, k)| Edit::Foreign(a, k)),
     ]
 }
 
@@ -252,6 +255,28 @@ impl Command for EditCommand {
                     tx.attach(l, spread, Attach::LastChild)?;
                 }
                 tx.attach(spread, anchor, Attach::LastChild)
+            }
+            Edit::Foreign(a, k) => {
+                let Some(n) = pick(ids, a) else {
+                    return Ok(());
+                };
+                match k {
+                    0 => tx.set_foreign(n, None),
+                    1 => tx.mark_foreign(n, crate::foreign::ForeignMarks::STALE),
+                    _ => tx.set_foreign(
+                        n,
+                        Some(crate::foreign::ForeignBaggage {
+                            attrs: vec![crate::foreign::ForeignAttr {
+                                ns: std::sync::Arc::from("urn:test:future"),
+                                prefix: None,
+                                local: std::sync::Arc::from("k"),
+                                value: std::sync::Arc::from(format!("{a}:{k}").as_str()),
+                            }],
+                            children: Vec::new(),
+                            marks: crate::foreign::ForeignMarks::empty(),
+                        }),
+                    ),
+                }
             }
         }
     }
