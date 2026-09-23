@@ -309,6 +309,22 @@ reason the walker *reports*, which is its own test.
     border.
 34. **A bitmap fill with no decoded image counts in `images_pending`**, as a
     bitmap node does, so a file never looks complete while it is not.
+35. **A rendered frame says what it covers and what is new**
+    (XARA-T-0050). `RenderedFrame` carries `scene_epoch`, `covered` (the
+    rectangle holding picture, not placeholder backdrop), `fresh` (what
+    was rasterised: the viewport, a scroll's strips, nothing for a
+    rescale) and `base` (the generation a scroll moved pixels from). A
+    presenter that already holds `base` uploads only `fresh`; one that
+    never saw it (dropped, or not collected) uploads all of `covered`.
+    The kept frame carries its generation and cover for this.
+36. **A presenter that resamples at input time turns CPU rescale off**
+    (`FrameJob::cpu_rescale`, `Canvas::set_cpu_rescale`). The worker then
+    skips a Draft whose zoom differs from its kept frame and publishes
+    nothing (`RenderStats::skipped`, not counted in `rendered`); the
+    Final after the gesture draws the new zoom whole. The viewer always
+    sets it off: both canvas tiers composite retained tiles. Decision 26's
+    backdrop border is therefore gone from the window; the headless tools
+    keep the CPU rescale.
 
 ---
 

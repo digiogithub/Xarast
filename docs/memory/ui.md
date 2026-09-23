@@ -410,7 +410,9 @@ instrumentation), which was extended rather than replaced.
 | `portal` | `PortalService` on a services thread, `PortalHandle`, `ashpd` FileChooser + Settings | Done; **measured on GNOME 46** (open, save, cancel, missing bus, quit with a dialog open) |
 | `clipboard` | `Clipboard` trait, `SystemClipboard` (`arboard`), `NullClipboard` | Done; **measured on GNOME 46**: text and RGBA image both ways with Wayland and X11 peers (through XWayland); **no clipboard on GNOME without XWayland** (XARA-T-0047) |
 | `wayland_dnd` (private) | `wl_data_device` drop target on `winit`'s `wl_display`, own thread; `DropTracker` | Done (XARA-T-0042); measured on GNOME 46 |
-| `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest`, `ShellWaker`, `--screenshot` read-back | Done; **runs on real hardware** (NVIDIA RTX 4000 SFF Ada, Vulkan, COSMIC/Wayland) |
+| `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest`, `ShellWaker`, `--screenshot` read-back, the adapter ladder | Done; **runs on real hardware** (Intel Arrow Lake iGPU and NVIDIA RTX 4000 SFF Ada, Vulkan; Mesa GL; lavapipe; COSMIC/Wayland) |
+| `tiles` | `TilePlanner`, `CpuTileStore`/`GpuTileStore`, `Compositor`: the canvas retained as tiles, GPU and CPU tiers | Done (XARA-T-0050) |
+| `probe` | Scripted pan/zoom latency probe (`--probe`) | Done (XARA-T-0050) |
 | `intents` | `IntentAdapter`, `semantic_modifiers`, `semantic_button`, `CanvasRegion` — physical `ShellEvent` → semantic `xarast_app::Intent` | Done (XARA-T-0001) |
 | `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame` | Done (XARA-T-0003) |
 | `viewer` | `Viewer`, the composition root: `ShellApp` over `AppState` + `Workspace` + `RenderThread` | Done (XARA-T-0003); panels respond (XARA-US-0002) |
@@ -602,6 +604,51 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     the service is dropped. Both service threads call a waker after each
     answer, because a loop parked in `Wait` otherwise sees a portal answer
     only at the next input event.
+27. **The canvas is retained as tiles and composited at every present**
+    (XARA-T-0050, `tiles.rs`). The viewer hands each rendered frame over
+    as a `TiledFrame` (`ShellCtx::show_tiled_frame`) and, every frame, the
+    session's current view as a `CanvasView` (`set_canvas_view`). The
+    shell's `TilePlanner` cuts frames into 256² tiles of a level (one zoom,
+    one pixel grid) and uploads only what the store lacks; the composite of
+    the current view goes into the painter's canvas texture before the
+    canvas + interface pass, in the same encoder. A pan or a Draft zoom is
+    therefore on screen at input time; the render thread's strips fill the
+    exposed areas when they arrive. `show_canvas` (a whole image) still
+    works and deactivates the compositor.
+28. **The capability ladder, as built.** Adapters: `WGPU_ADAPTER_NAME`
+    (substring, case-insensitive; no match is a warning, not `wgpu`'s
+    panic), then high-performance, then `force_fallback_adapter`
+    (lavapipe/llvmpipe); the first that yields a device wins, and only
+    none is `ShellError::NoAdapter`. `WGPU_BACKEND` is honoured
+    (`Backends::with_env`); it was documented but ignored before. Canvas
+    tier: **GPU tiles** by default; **CPU** (`compose_cpu` over the same
+    tiles in memory, uploaded whole) when `XARAST_RENDERER=cpu`, when the
+    tile cache cannot be created, or when GPU errors persist into
+    `Recovery::Backoff` (the demotion refills from the last frame and is
+    permanent for the session). `gpu` and `hybrid` both mean GPU tiles:
+    there is no GPU rasteriser to tell them apart. The status bar reads
+    "<tier> · <adapter> (<backend>)" from `ShellCtx::renderer()`.
+    Verified live: lavapipe (GPU tiles on a software adapter),
+    `XARAST_INJECT_GPU_ERRORS=6` (demotes to CPU at the fourth failing
+    frame and keeps presenting), a `WGPU_ADAPTER_NAME` that matches
+    nothing, and `WGPU_BACKEND=gl` (Mesa Intel GL, GPU tiles).
+29. **The instance gets the window's display handle**
+    (`InstanceDescriptor::new_with_display_handle`). The GL backend needs
+    it for EGL on Wayland: without it `WGPU_BACKEND=gl` found no adapter.
+30. **`FrameRequest::RedrawAfter` really redraws.** It used to set a
+    `WaitUntil` and nothing else, so the owed Final appeared only if some
+    other event asked for a frame; once Draft zooms stopped publishing,
+    `--screenshot` hung about one run in three. `ShellLoop::redraw_at`
+    is checked in `about_to_wait`.
+31. **Latency probes drive the viewer, never the desktop.**
+    `xarast --probe pan|zoom [--probe-samples N] [--synthetic N]` applies
+    one scripted intent per frame once the document has settled,
+    presents without vsync, waits for the GPU after each present
+    (`ShellConfig::probe`, `PresentTiming`) and prints input → presented
+    and input → GPU idle percentiles, then exits (or, with
+    `--screenshot`, captures the view it left). `examples/canvas_probe`
+    runs the same path offscreen at any size (COSMIC tiles the window,
+    so the live canvas is 1796 × 1338 whatever `--size` asks).
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
@@ -653,6 +700,12 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
 15. **No test posts a request to a live portal.** Tests use
     `PortalService::offline`; a real service on a developer's desktop
     would open dialogs on their screen and wait for them.
+16. **The GPU and CPU canvas tiers are byte-identical.** Both run the
+    same `TilePlanner` placements; the GPU through `GpuTileCache`, the CPU
+    through `compose_cpu`. `the_gpu_tier_composites_byte_for_byte_as_the_cpu_tier`
+    pins it on whatever adapter the test finds.
+17. **A tile's valid area is always a rectangle of pixels it holds.** A
+    piece that would not join it into one restarts the tile.
 
 ### Dead ends (do not retry)
 
@@ -732,10 +785,13 @@ isolated GNOME session on a private bus:
   and fixed (XARA-T-0041/42/43). Open: clipboard on GNOME without
   XWayland (XARA-T-0047), dialogs without a parent window (XARA-T-0048),
   drag *out* of Xarast (no API in `winit` 0.30).
-- `wgpu` adapter selection, the four-level capability ladder (S4/U2.5) and
-  frame pacing beyond `Wait`/`WaitUntil` are still the walking skeleton's:
-  one adapter request. The canvas is CPU-rendered and uploaded; the GPU
-  backend is not wired.
+- [x] `wgpu` adapter selection and the capability ladder — decision 28
+  (XARA-T-0050): adapter ladder, GPU tiles / CPU tier, runtime demotion.
+  Still open: `--version --verbose` does not print the tier (it needs a
+  device), there is no GPU rasteriser tier (by the GPU decision), a
+  lost device is not rebuilt, and the GL swapchain cannot be read back,
+  so `--screenshot` under `WGPU_BACKEND=gl` logs a failed capture.
+  Frame pacing beyond `Wait`/`WaitUntil` is still the skeleton's.
 - [x] **`wgpu` validation errors are fatal** — no longer: decision 21
   (XARA-T-0027). Still open: a *lost device* is logged and backed off
   from, not recreated. Rebuilding `Gpu` (device, surface, painter
