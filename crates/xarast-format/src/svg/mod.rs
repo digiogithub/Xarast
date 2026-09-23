@@ -39,8 +39,11 @@ pub mod frame;
 pub mod num;
 mod paint;
 pub mod pathdata;
+pub mod read;
 mod style;
 pub mod xml;
+
+pub use read::{ReadOptions, SvgRead, SvgReadError, normal_form, read_svg};
 
 use std::collections::HashMap;
 
