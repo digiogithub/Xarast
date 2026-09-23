@@ -713,19 +713,21 @@ impl Viewer {
         }
         let c = self.adapter.canvas();
         let mut anchor = (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0);
-        if probe.kind() == crate::probe::ProbeKind::Drag
+        let setup = if probe.kind().is_gesture()
             && !probe.has_anchor()
             && let Some(s) = self.app.active()
         {
-            // Press on the topmost object nearest the canvas centre, so the
-            // drag moves something rather than drawing a marquee.
-            if let Some(p) = drag_target(s) {
-                anchor = p;
-            }
-        }
+            Some(gesture_setup(s, probe.kind(), anchor))
+        } else {
+            None
+        };
         let Some(probe) = self.probe.as_mut() else {
             return;
         };
+        if let Some((prelude, press)) = setup {
+            anchor = press;
+            probe.set_gesture(prelude, press);
+        }
         let intent = probe.next(anchor);
         self.apply(vec![intent]);
     }
@@ -957,9 +959,75 @@ fn name_the_tree(update: &mut egui::accesskit::TreeUpdate, title: &str) {
     }
 }
 
+/// What a gesture probe does before it presses, and where it presses.
+///
+/// The drag presses on the object nearest the canvas centre, so it moves
+/// something rather than drawing a marquee; the scale clicks that object
+/// first and presses on its top-right blob; the rotation clicks it twice
+/// (a second apart, so not a double click) for the rotate handles; the
+/// shape tools choose their tool and press beside the centre.
+fn gesture_setup(
+    s: &Session,
+    kind: crate::probe::ProbeKind,
+    centre: (f64, f64),
+) -> (Vec<Intent>, (f64, f64)) {
+    use crate::probe::ProbeKind as K;
+    use xarast_app::{PointerButton, PointerSample};
+    let target = drag_target(s);
+    let click = |at: (f64, f64), time_ms: u64| {
+        let sample = PointerSample {
+            at: xarast_app::DevicePoint::new(at.0, at.1),
+            pressure: None,
+            time_ms,
+        };
+        [
+            Intent::PointerMove(sample),
+            Intent::PointerDown {
+                button: PointerButton::Primary,
+                sample,
+            },
+            Intent::PointerUp {
+                button: PointerButton::Primary,
+                sample,
+            },
+        ]
+    };
+    match (kind, target) {
+        (K::Scale | K::Rotate, Some((at, node))) => {
+            // The click selects whatever is on top at that point, which
+            // need not be the object whose centre it is.
+            use xarast_app::geometry::DocPointF64Ext;
+            let p = s
+                .viewport
+                .device_to_doc_f64(xarast_app::DevicePoint::new(at.0, at.1))
+                .to_doc_point();
+            let node = xarast_app::tool::pick(&s.doc, p, xarast_geom::Mp::ZERO)
+                .map_or(node, |h| h.top_group);
+            let b = xarast_app::viewport::nodes_rect(&s.doc, [node]);
+            let blob = xarast_app::selector::blob_points(b)[7];
+            let d = s.viewport.doc_to_device(blob);
+            let mut prelude: Vec<Intent> = click(at, 0).into();
+            if kind == K::Rotate {
+                prelude.extend(click(at, 1000));
+            }
+            (prelude, (d.x, d.y))
+        }
+        (K::Rect, _) => (
+            vec![Intent::ChooseTool(xarast_app::ToolId::Rectangle)],
+            (centre.0 - 120.0, centre.1 - 80.0),
+        ),
+        (K::Ellipse, _) => (
+            vec![Intent::ChooseTool(xarast_app::ToolId::Ellipse)],
+            (centre.0 - 120.0, centre.1 - 80.0),
+        ),
+        (_, Some((at, _))) => (Vec::new(), at),
+        (_, None) => (Vec::new(), centre),
+    }
+}
+
 /// Where the drag probe presses: the centre of the visible selectable
-/// object nearest the canvas centre, in canvas pixels.
-fn drag_target(s: &Session) -> Option<(f64, f64)> {
+/// object nearest the canvas centre, in canvas pixels, and the object.
+fn drag_target(s: &Session) -> Option<((f64, f64), xarast_doc::NodeId)> {
     let size = s.viewport.size();
     let (cx, cy) = (f64::from(size.width) / 2.0, f64::from(size.height) / 2.0);
     xarast_app::edit::selectable_objects(&s.doc)
@@ -973,9 +1041,9 @@ fn drag_target(s: &Session) -> Option<(f64, f64)> {
                 && d.y > 0.0
                 && d.x < f64::from(size.width)
                 && d.y < f64::from(size.height);
-            inside.then_some((d.x, d.y))
+            inside.then_some(((d.x, d.y), n))
         })
-        .min_by(|a, b| {
+        .min_by(|(a, _), (b, _)| {
             let da = (a.0 - cx).hypot(a.1 - cy);
             let db = (b.0 - cx).hypot(b.1 - cy);
             da.total_cmp(&db)
