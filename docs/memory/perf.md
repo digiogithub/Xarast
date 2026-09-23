@@ -74,9 +74,11 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | W0 G1: `vello_cpu`, `bulk` 1080p, 8 P-cores | ≤ 25 ms | **53–58 ms** | **fails** |
 | W0 G2: `vello`, `bulk` 1080p, integrated GPU | ≤ 8 ms | **72–86 ms** | **fails, 9–11×** |
 | W0 G2: same, discrete GPU (information only) | ≤ 8 ms | 7.8–8.0 ms | at the line |
-| CPU full frame, production path, 1080p, 100 000 objects | ≤ 25 ms | **44.7 ms** | **1.8× over** |
-| Incremental 64 × 64 dirty rect | ≤ 0.3 ms | 0.12–0.13 ms | passes |
-| `DisplayList::build`, 100 000 commands | ≤ 3 ms | **20.8 ms** | **6.9× over** |
+| CPU full frame, production path, 1080p, 100 000 objects | ≤ 25 ms | 19.0 ms (was 44.7) | passes since 2026-09-23 (XARA-US-0016) |
+| Incremental 64 × 64 dirty rect | ≤ 0.3 ms | 0.11 ms | passes |
+| `DisplayList::build`, 100 000 commands | ≤ 3 ms | 1.9–2.0 ms (was 20.8) | passes since 2026-09-23 (XARA-US-0016) |
+| `DisplayList::build`, 1920 × 40 pan strip, 100 000 ops | — | 0.26 ms (was ≈ 15–19 ms in the app bench) | XARA-T-0033 |
+| Render the 1920 × 40 pan strip, 100 000 ops, interactive | — | 1.17 ms (was 9.4) | XARA-T-0034 |
 | Ramp build, 2048 entries, 8 stops, with profile | ≤ 40 µs | 34.5 µs | passes (86.6 µs on the container) |
 | Blend LUT set, 12 families | ≤ 15 ms | 0.28 ms | passes |
 | `.xar` full import, `ProbeX16.xar` (7.4 MB) | ≤ 350 ms | **644 ms** | **1.8× over** |
@@ -106,20 +108,43 @@ the spreads the transaction touched.
 list and compositor over `vello_cpu`, `CpuConfig::interactive()`, light
 `bulk` scene):
 
-| | Measured |
-|---|---|
-| Full frame 1920 × 1080, 20 000 / 100 000 objects | 9.6 ms / **44.7 ms** |
-| Full frame 960 × 540, 20 000 objects | 22.7 ms |
-| Incremental 64 × 64 dirty rect | 0.12–0.13 ms |
-| `DisplayList::build`, 20 000 / 100 000 | 1.11 ms (55 ns/cmd) / **20.8 ms (208 ns/cmd)** |
-| Cache sweep, groups of 8 / 32 / 64 / 128 / 512 | 2.44 / 2.59 / 3.15 / 3.55 / 6.67 ms |
+| | Before (2026-09-23 morning) | After (XARA-US-0016) |
+|---|---|---|
+| Full frame 1920 × 1080, 20 000 objects | 9.6 ms (8.7–10.1 re-measured) | **5.2 ms** |
+| Full frame 1920 × 1080, 100 000 objects | **44.7 ms** (45–49 re-measured) | **19.0 ms** |
+| Full frame 960 × 540, 20 000 objects | 22.7 ms (24–52, noisy) | **4.0 ms** |
+| Incremental 64 × 64 dirty rect | 0.12–0.15 ms | 0.11 ms |
+| `DisplayList::build`, 20 000 | 1.11 ms (55 ns/cmd) | **0.34 ms** (17 ns/cmd) |
+| `DisplayList::build`, 100 000 | **19.5–20.8 ms (208 ns/cmd)** | **1.91 ms** (19 ns/cmd) |
+| `strip/build_1920x40_100000` (new) | ≈ 15–19 ms (app bench) | **0.26 ms** |
+| `strip/render_1920x40_100000` (new) | 9.4 ms | **1.17 ms** |
+| Cache sweep, groups of 8 / 32 / 64 / 128 / 512 | 2.44 / 2.59 / 3.15 / 3.55 / 6.67 ms | not re-run |
 
-**`DisplayList::build` is superlinear.** Five times the commands cost 18.8
-times the time, so the old estimate of ~10.6 ms at 100k, extrapolated
-linearly from 20k, was wrong by half. The loop is linear, so the cause is
-probably memory: the command vector and the `Arc` path clones fall out of
-cache, and every build allocates a large, fresh vector. That is not yet
-profiled. Story XARA-US-0016 owns it.
+Criterion medians. The machine was shared with other agents' builds
+(load 4–15). Spreads within one run were under 3 %. Between runs at
+different loads they reached 15 %, and the "before" full frames varied
+more, so the ranges are quoted.
+
+**Why `DisplayList::build` was superlinear (profiled 2026-09-23).** Each
+`DrawCmd` was 384 bytes: it cloned the path, the paint, the stroke style
+and the transparency. At 100 000 commands the vector was 38 MB, which is
+above glibc's 32 MB mmap ceiling. So every build page-faulted a fresh
+mapping, and dropping the list walked 200 000 cold `Arc` counters. At 20k
+it fitted in the heap and in cache. Ablations on a 100k scene: a 40-byte
+record per op, fresh vector, 3.1 ms; the same plus one `PathRef` clone,
+5.7 ms; the real build, 21 ms. Rounding was the next cost:
+`DeviceRect::enclosing` made eight libm `floor`/`ceil` calls per command,
+because the baseline x86-64 target has no SSE4.1. That was 16 ns of the
+remaining 26. The fix, in `render.md`: commands index into the scene's
+shared ops, and the rounding is done with exact integer casts.
+
+**Where the full frame went.** Single-threaded, 100k: 274 ms, of which
+composite 102 ms, `fill_path` 54 ms, **flatten 47 ms** (of polygons, which
+flattening reproduces unchanged) and `vello` render 30 ms. The frame is
+parallel over bands, and 1 MiB bands are only 8 per 1080p frame. Fixes:
+polylines skip flattening, fully covered opaque pixels are written
+directly, the unused per-band binning is gone (2 ms), and interactive
+bands are 512 KiB (16 per frame).
 
 The W0 spike and the G1/G2 verdicts are in `docs/memory/render.md`.
 
@@ -256,7 +281,7 @@ the numbers as ±20 %.
 | PNG encode + write, all 59 files | 0.69–0.79 s |
 | Render per file, median | **≈ 0.7 ms** |
 | Render per file, p90 | ≈ 135–180 ms |
-| Render, the three `*GradFilledShapes*` files | **9.8 / 10.2 / 10.9 s** (766×739 and 766×880 px, 10 000–20 000 gradient fills) |
+| Render, the three `*GradFilledShapes*` files | **9.8 / 10.2 / 10.9 s** (766×739 and 766×880 px, 10 000–20 000 gradient fills); **2.6 / 2.2 / 4.5 s** after XARA-T-0014 |
 | Render, the other 56 files together | ≈ 2.5 s; next-slowest are `ProbeX16` 1.07 s and `SimpleSphere` 0.66 s |
 
 Ink versus blank:
@@ -275,8 +300,24 @@ are still pending.
 10 s at 0.57 Mpx. Phase 4 measured 20 000 *flat* fills at 24.6 ms at 1080p,
 so gradients cost roughly 400× more per frame. `--quality draft` only brings
 the first file down to 6.5 s. At 192×192 it takes 0.45 s, so the cost scales
-with pixels × gradient objects. That points at per-object, full-bbox ramp
-work that is neither tiled nor cached. Tracked as XARA-T-0014.
+with pixels × gradient objects. Tracked as XARA-T-0014.
+
+**Why (profiled 2026-09-23): not per-object waste but pixels.** Each shape
+covers about 14 000 px, against about 100 px for a `bulk` shape, so the
+10k file composites **1.4 × 10⁸ pixels**. The "400×" compares unequal
+pixel counts. Per pixel, sampling the paint and the graduated
+transparency cost about 21 ns and the blend 9 ns. Each sample used to
+invert the gradient's 3×3 mapping. The transparency also sat in document
+space (a bug, see `render.md`), so these files had rendered with *flat*
+transparency until then. Fixes: samplers ready the inverse, table and
+image once per primitive. A linear gradient in an affine frame computes
+only `u`. `rem_euclid` and `round` stop calling libm. Opaque sampled
+pixels are written directly. The deterministic configuration uses every
+core, which is byte-safe because bands merge by index. After:
+**2.6 / 2.2 / 4.5 s**. What is left: about 30 ns per pixel across only
+three bands, because a 766 px wide image at 1 MiB per band is three bands
+tall. The next steps are row-wise (SIMD) paint and blend, and more bands
+for export; see XARA-T-0038.
 
 ## Things that were slow, and why
 
@@ -310,7 +351,11 @@ that will recur:
       (`keep_one_active_layer`): about 1 ms per command at 100k nodes.
 - [ ] `.xar` import maps at about 1.2 µs per node: `ProbeX16.xar` takes 644 ms
       against 350 ms. Profile the model-mapping half.
-- [ ] `DisplayList::build` at 100k: 20.8 ms against 3 ms (XARA-US-0016).
+- [x] `DisplayList::build` at 100k: 20.8 ms against 3 ms — now 1.9 ms
+      (XARA-US-0016, 2026-09-23). The CPU full frame at 100k passes too
+      (19 ms against 25).
+- [ ] Gradient-heavy export: about 30 ns per composited pixel and three
+      bands on a 766 px image (XARA-T-0038).
 - [ ] `Document::snapshot()`: 43–80 ms against 25 ms, still.
 - [ ] Wire the budgets into CI so that a regression fails the build, rather
       than being noticed later. CI runners are not the reference machine, so

@@ -10,8 +10,15 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   through `SceneBuilder`, which is the contract the `xarast-app` walker fills;
   the crate has no dependency on `xarast-doc` and never sees a node.
   `DisplayList` is immutable and per frame, with every transform resolved into
-  device space, every paint mapping moved with its shape, and every command's
-  device bounds precomputed.
+  device space, every paint *and transparency* mapping moved with its shape,
+  and every command's device bounds precomputed. Since XARA-US-0016 a
+  `DrawCmd` is 32 bytes of indices: the display list **shares the scene's
+  op vector** (`Arc<Vec<SceneOp>>`) and keeps side tables for device
+  transforms, device-space paints and transparencies, and image
+  placements. `DisplayList::item` resolves a command to a `DrawItem` of
+  references. A scene is re-recorded, never mutated in place, so an
+  in-flight list keeps its own ops (`Scene::clear` swaps in a fresh vector
+  when one is still shared).
 - **The CPU backend, complete and deterministic.** It uses `vello_cpu` as a
   **coverage rasteriser only**: each primitive is rasterised as opaque white
   into a scratch pixmap the size of its clipped bounds, and its alpha is the
@@ -413,6 +420,60 @@ until this was wired.
 
 ## Decisions taken (and why)
 
+**Display-list commands index into shared scene ops (2026-09-23,
+XARA-US-0016).** Copying path, paint, style and transparency into every
+command made the 100k list 38 MB. That was past glibc's mmap threshold, so
+each build page-faulted it fresh and each drop walked 200k cold `Arc`
+counters: 20.8 ms, superlinear. With indices it is 1.9 ms. Boxing only the
+stroke payload, the first idea on the TODO list, would have left the
+command over 300 bytes. Consequences: `DrawCmd` is `Copy` and opaque, and
+backends go through `DisplayList::item`. `DisplayList::from_commands` is
+gone; the immediate-mode facade records into `ListParts` (its own op
+vector plus commands).
+
+**Culling entries beside the ops (XARA-T-0033).** `Scene::cull` holds 40
+bytes per op: a primitive's padded document bounds. A *culled* build (a
+dirty rectangle smaller than the viewport) reads only those for rejected
+primitives. Under an axis-aligned transform it first rejects in document
+space against the dirty rectangle mapped back and grown by 4 px. A full
+build ignores them, because reading both arrays made it slower (3.4 ms
+against 1.9). A test compares culled builds with the filtered full build,
+command for command.
+
+**Strokes are cut to the band before dashing (XARA-T-0022).**
+`stroke_cull` clips the centre line, in device space, to the band plus the
+stroke's reach, but only when the stroke reaches more than 256 px past the
+band. Anything smaller is expanded exactly as before, which is why no
+golden moved. Each kept run is dashed from its own arc length, and a closed
+subpath cut open is rejoined at its start vertex. The dasher emits the first
+dash last, and that dash is merged into the run that ends on the vertex. On
+top of that, a **work budget** of 10⁶ flattened segments: the dash count
+times the cost of each dash (`4 + 2·√(half-width px / tolerance px)`). Past
+it the pattern is dropped and the stroke drawn solid. Culling alone cannot
+bound a stroke wide enough to reach the band from anywhere: the fuzzer's
+second finding was a 5.6 × 10⁵ mp stroke with 43 mp dashes under a
+degenerate view.
+
+**`CpuConfig::deterministic` uses every core.** Bands merge by index and the
+determinism test proves thread count cannot change a byte. The band height
+and the SIMD level are what must stay pinned, and they do.
+
+**Interactive bands are 512 KiB (16 per 1080p frame) and one-band areas are
+cut into column tiles.** The column tiles apply to the interactive
+configuration only: at most 32 tiles, each at least 64 px wide, a count that
+depends on the area and not on the thread count. A tile edge clips coverage
+horizontally, as a dirty-rect edge always did. A determinism test pins tiled
+against serial byte for byte. The deterministic configuration never tiles
+and keeps 1 MiB bands, so the goldens do not depend on either change.
+
+**Hot-path arithmetic avoids libm and repeats nothing per pixel.** The
+baseline x86-64 target has no SSE4.1, so `f64::floor/ceil/round` and `%`
+are library calls. `DeviceRect::enclosing`, `apply_repeat`'s `rem_euclid`
+and the ramp index use exact integer-cast equivalents, each pinned by a
+test against the standard library over edge cases and random bits.
+`PaintSampler` and `LevelSampler` invert a gradient's mapping once per
+primitive; `eval_paint` is a one-point `PaintSampler`.
+
 **Rounding: half away from zero, no half-pixel compensation.** CDraw truncates
 on device conversion and the application adds half a pixel back
 (`grndrgn.cpp:5290`). We inherit neither. `precision::round_device` is the one
@@ -511,6 +572,18 @@ determinism suite asserts it over four band heights.
    documents, split the offending subpaths into separate fills.
 8. **A command whose family reads the destination is a barrier** in its tile.
    The display list is fully ordered before tiling and must stay that way.
+9. **Every position-dependent paint input moves to device space in
+   `DisplayList::build`: paints, image placements and transparency
+   mappings.** The backends evaluate at device pixel centres. A mapping left
+   in document units looks like the gradient maths failing: the whole ramp
+   sits thousands of pixels away. Transparency was missed until 2026-09-23,
+   and the four `transparency_graduated_*` goldens had been blessed from
+   that bug.
+10. **`Scene::ops` and `Scene::cull` have the same length.** Every op goes
+    through `SceneBuilder::push`.
+11. **A fast path must be pinned to the slow one by a test**, bit for bit:
+    the opaque-replace write, the fast floor/ceil, `rem_euclid_pow2`,
+    `ramp_index`, `FrameMap::param`, and culled against full builds.
 
 ---
 
@@ -538,6 +611,22 @@ determinism suite asserts it over four band heights.
 - **Rendering each primitive into a band-sized scratch buffer.** A full-width
   clear per primitive is 123 KiB of memset per command; size the scratch to
   the primitive's clipped bounds instead.
+- **Boxing part of `DrawCmd` to shrink it.** A per-command allocation, and
+  the paint and transparency alone are 208 bytes. Index into shared ops.
+- **Reading the compact culling entries on full builds too.** Two streams
+  instead of one: 3.4 ms against 1.9 ms at 100k.
+- **Inverting the view to cull strokes in document space.** A degenerate
+  view (zero x scale) has no inverse, so nothing was culled and the fuzzer
+  ran out of memory. Test the centre line in device space.
+- **Shrinking the deterministic band to parallelise export.** Band height
+  is not quite invisible. The 120 golden cases are band-invariant, but the
+  100k `bulk` scene differs in 8 of 8.3 M bytes (by at most 2) between 1 MiB
+  and 256 KiB bands. Tile the interactive path instead, or re-bless
+  deliberately (XARA-T-0038).
+- **Hunting libm and divisions in the gradient samplers.** Replacing
+  `fmod`/`round` and skipping the `u` division moved the gradient files by
+  under 5 %. The time is the scalar per-pixel pipeline as a whole (≈ 30 ns),
+  not one call.
 
 ---
 
@@ -551,11 +640,13 @@ determinism suite asserts it over four band heights.
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
 | 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the comparison against the original is Phase 11 |
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
-| 7 | `DisplayList::build` on the reference machine: 1.11 ms at 20 000 (55 ns/cmd) but **20.8 ms at 100 000** (208 ns/cmd), against a 3 ms budget. It is **superlinear**, so the old linear estimate of 10.6 ms was wrong. Suspects: the size of `DrawCmd` and a fresh, large allocation per build, both of which make the working set fall out of cache (not yet profiled). Boxing the stroke payload and reusing the command vector are the first two steps. Bench: `display_list/build_{20000,100000}` | XARA-US-0016 |
+| 7 | ~~`DisplayList::build` at 100k: 20.8 ms against 3 ms~~. **Done 2026-09-23**: 1.9 ms; the cause and the fix are under "Decisions taken". The 100k CPU full frame is 19 ms against 25 | done (XARA-US-0016) |
 | 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not. After the G1/G2 re-run this is **what the 16 ms pan/zoom budget depends on**: a 100k full frame costs 35–160 ms on the CPU and 72–86 ms on the iGPU | Phase 5, which owns the idle timer |
 | 9 | ~~Fuzz targets `fuzz_display_list` and `fuzz_ramp`~~ — done 2026-09-23, nightly in CI; see below | — |
 | 10 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | deferred, no phase |
-| 11 | The CPU backend strokes and dashes the **whole** path in document space before clipping to the band. A thick, round-capped, finely dashed stroke along a long path at deep zoom exhausts memory (two 1.8 GB allocations found by `fuzz_display_list`). Needs culling to the band plus the stroke's reach, with the dash phase preserved, or a work budget. `fuzz_display_list` bounds geometry (±10 000 000 mp) and dash counts (≤ 2 000 per path) until then; lift both when fixed. gintrack XARA-T-0022 | Phase 4 follow-up |
+| 11 | ~~Strokes dashed whole before clipping~~. **Done 2026-09-23** (`stroke_cull`, XARA-T-0022); `fuzz_display_list` now spans the whole extent with unlimited dash patterns | done |
+| 13 | Gradient-heavy export: ≈ 30 ns per composited pixel, and only three 1 MiB bands on a 766 px image. The three `*GradFilledShapes*` files take 2.2–4.5 s | XARA-T-0038 |
+| 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
 | 12 | Reconcile `wgpu` versions: `vello` 0.10 / `vello_hybrid` 0.2 pin `wgpu` 29, and the workspace is on 30 | R5.1 |
 
 ### Fuzzing, first runs (2026-09-23)
@@ -570,3 +661,9 @@ determinism suite asserts it over four band heights.
   deterministic backend and compares bytes; asserts the display list is
   balanced and inside the viewport. Found only TODO 11. Clean rerun with
   the bounds in place: 565 k execs at ~940 exec/s.
+- `fuzz_display_list` with the bounds lifted (2026-09-23), three runs:
+  1. An OOM after 121 k execs: the thick-stroke work-budget case under a
+     degenerate view.
+  2. A panic: `i64` overflow on `x0 + 1` in bilinear image sampling at a
+     saturated coordinate. Now `saturating_add`.
+  3. Clean: **317 k execs in 600 s** (~530 exec/s), peak RSS 813 MB.
