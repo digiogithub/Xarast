@@ -40,12 +40,12 @@ use xarast_geom::{Cap, FillRule, Join, StrokeStyle};
 
 use crate::backend::{BackendError, FrameTimings, LayerId, Rasterizer, RasterizerCaps};
 use crate::blend::{BlendFamily, BlendLuts, LumaWeights, TranspSource, Transparency, composite};
-use crate::display_list::{DisplayList, DrawCmd};
+use crate::display_list::{DisplayList, DrawCmd, DrawItem, ListParts, SCENE_PAINT};
 use crate::paint::{GradMapping, ImageId, ImageRegistry, Paint, eval_paint};
 use crate::path::PathRef;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
-use crate::scene::{LayerKind, RenderQuality};
+use crate::scene::{LayerKind, RenderQuality, SceneOp};
 use crate::surface::{DeviceRect, DirtyRect, Surface};
 use crate::tiling::{MIN_BAND_SCANLINES, plan_bands};
 
@@ -319,15 +319,26 @@ fn render_band(
     let mut clips: Vec<Vec<u8>> = Vec::new();
 
     for cmd in dl.commands() {
-        match cmd {
-            DrawCmd::PushClip { path, rule, xf } => {
+        // Reject a primitive that misses the band on its precomputed bounds
+        // before looking up its payload: resolving touches the scene op, and
+        // at 100 000 commands per band that would be most of a band's time.
+        if let DrawCmd::Fill { bounds, .. }
+        | DrawCmd::Stroke { bounds, .. }
+        | DrawCmd::Image { bounds, .. } = cmd
+            && !bounds.intersects(draw)
+        {
+            stats.drew = true;
+            continue;
+        }
+        match dl.item(cmd) {
+            DrawItem::PushClip { path, rule, xf } => {
                 let mask = rasterise_clip(
                     &mut ctx,
                     &mut scratch,
                     &mut resources,
                     path,
-                    *rule,
-                    *xf,
+                    rule,
+                    xf,
                     band,
                     tol_doc,
                 );
@@ -341,24 +352,24 @@ fn render_band(
                 };
                 clips.push(merged);
             }
-            DrawCmd::PopClip => {
+            DrawItem::PopClip => {
                 clips.pop();
             }
-            DrawCmd::PushLayer { kind, .. } => {
+            DrawItem::PushLayer { kind, .. } => {
                 layers.push(Layer {
                     pixels: vec![0u8; rows.len()],
-                    kind: *kind,
+                    kind,
                 });
                 layer_blend.push((BlendFamily::Mix, 0));
             }
-            DrawCmd::PopLayer { blend, opacity } => {
+            DrawItem::PopLayer { blend, opacity } => {
                 let Some(layer) = layers.pop() else { continue };
                 layer_blend.pop();
                 let t = flat_level(opacity);
                 let (dst_slice, _) = split_target(&mut layers, rows);
-                composite_layer(dst_slice, &layer, *blend, t, luts, cfg.weights);
+                composite_layer(dst_slice, &layer, blend, t, luts, cfg.weights);
             }
-            DrawCmd::Fill {
+            DrawItem::Fill {
                 node: _,
                 path,
                 rule,
@@ -372,14 +383,10 @@ fn render_band(
                     &mut ctx,
                     &mut scratch,
                     &mut resources,
-                    Primitive::Fill {
-                        path,
-                        rule: *rule,
-                        xf: *xf,
-                    },
+                    Primitive::Fill { path, rule, xf },
                     paint,
                     transparency,
-                    *bounds,
+                    bounds,
                     band,
                     draw,
                     tol_doc,
@@ -392,7 +399,7 @@ fn render_band(
                 );
                 stats.drew = true;
             }
-            DrawCmd::Stroke {
+            DrawItem::Stroke {
                 node: _,
                 path,
                 style,
@@ -406,14 +413,10 @@ fn render_band(
                     &mut ctx,
                     &mut scratch,
                     &mut resources,
-                    Primitive::Stroke {
-                        path,
-                        style,
-                        xf: *xf,
-                    },
+                    Primitive::Stroke { path, style, xf },
                     paint,
                     transparency,
-                    *bounds,
+                    bounds,
                     band,
                     draw,
                     tol_doc,
@@ -426,7 +429,7 @@ fn render_band(
                 );
                 stats.drew = true;
             }
-            DrawCmd::Image {
+            DrawItem::Image {
                 node: _,
                 image,
                 mapping,
@@ -436,7 +439,7 @@ fn render_band(
             } => {
                 let (dst, _) = split_target(&mut layers, rows);
                 stats.pixels += draw_image_cmd(
-                    *image,
+                    image,
                     mapping,
                     paint,
                     transparency,
@@ -451,7 +454,7 @@ fn render_band(
                 );
                 stats.drew = true;
             }
-            DrawCmd::CachedSurface { .. } => {
+            DrawItem::CachedSurface { .. } | DrawItem::Invalid => {
                 // Blitting a cached surface is the cache's job and is
                 // exercised through `RenderCache`; a display list that has
                 // one has already had its pixels produced.
@@ -1004,6 +1007,11 @@ fn composite_layer(
     }
 }
 
+/// A vector index as a command index; see `display_list::idx`.
+fn idx(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
+}
+
 /// The immediate-mode facade over the CPU backend.
 ///
 /// It records into a display list and renders it on [`Rasterizer::end_frame`],
@@ -1012,7 +1020,7 @@ fn composite_layer(
 pub struct CpuRasterizer {
     backend: CpuBackend,
     resolver: Resolver,
-    cmds: Vec<DrawCmd>,
+    parts: ListParts,
     clip: DeviceRect,
     target: Option<Surface>,
     dirty: DirtyRect,
@@ -1026,7 +1034,7 @@ impl CpuRasterizer {
         CpuRasterizer {
             backend: CpuBackend::new(cfg),
             resolver: Resolver::new(),
-            cmds: Vec::new(),
+            parts: ListParts::default(),
             clip: DeviceRect::EMPTY,
             target: None,
             dirty: DirtyRect::NONE,
@@ -1042,7 +1050,7 @@ impl CpuRasterizer {
 
 impl Rasterizer for CpuRasterizer {
     fn begin_frame(&mut self, target: &mut Surface, clip: DeviceRect) {
-        self.cmds.clear();
+        self.parts = ListParts::default();
         self.dirty = DirtyRect::NONE;
         self.clip = clip.intersection(target.bounds());
         self.target = Some(std::mem::replace(target, Surface::new(0, 0)));
@@ -1054,13 +1062,22 @@ impl Rasterizer for CpuRasterizer {
         self.dirty = self
             .dirty
             .union(DirtyRect::of(bounds.intersection(self.clip)));
-        self.cmds.push(DrawCmd::Fill {
-            node: crate::scene::SceneNodeId(0),
+        let p = &mut self.parts;
+        let op = idx(p.ops.len());
+        p.ops.push(SceneOp::Fill {
+            id: crate::scene::SceneNodeId(0),
             path: path.clone(),
             rule,
             paint: paint.clone(),
-            xf: *xf,
             transparency: Transparency::OPAQUE,
+        });
+        let xf_i = idx(p.xforms.len());
+        p.xforms.push(*xf);
+        p.cmds.push(DrawCmd::Fill {
+            op,
+            xf: xf_i,
+            paint: SCENE_PAINT,
+            dst_read: false,
             bounds,
         });
     }
@@ -1077,13 +1094,22 @@ impl Rasterizer for CpuRasterizer {
         self.dirty = self
             .dirty
             .union(DirtyRect::of(bounds.intersection(self.clip)));
-        self.cmds.push(DrawCmd::Stroke {
-            node: crate::scene::SceneNodeId(0),
+        let p = &mut self.parts;
+        let op = idx(p.ops.len());
+        p.ops.push(SceneOp::Stroke {
+            id: crate::scene::SceneNodeId(0),
             path: path.clone(),
             style: style.clone(),
             paint: paint.clone(),
-            xf: *xf,
             transparency: Transparency::OPAQUE,
+        });
+        let xf_i = idx(p.xforms.len());
+        p.xforms.push(*xf);
+        p.cmds.push(DrawCmd::Stroke {
+            op,
+            xf: xf_i,
+            paint: SCENE_PAINT,
+            dst_read: false,
             bounds,
         });
     }
@@ -1091,18 +1117,28 @@ impl Rasterizer for CpuRasterizer {
     fn draw_image(&mut self, image: ImageId, mapping: &GradMapping, paint: &Paint) {
         let bounds = self.clip;
         self.dirty = self.dirty.union(DirtyRect::of(bounds));
-        self.cmds.push(DrawCmd::Image {
-            node: crate::scene::SceneNodeId(0),
+        let p = &mut self.parts;
+        let op = idx(p.ops.len());
+        p.ops.push(SceneOp::Image {
+            id: crate::scene::SceneNodeId(0),
             image,
             mapping: *mapping,
             paint: paint.clone(),
             transparency: Transparency::OPAQUE,
+        });
+        let m = idx(p.mappings.len());
+        p.mappings.push(*mapping);
+        p.cmds.push(DrawCmd::Image {
+            op,
+            mapping: m,
+            paint: SCENE_PAINT,
+            dst_read: false,
             bounds,
         });
     }
 
     fn push_layer(&mut self, kind: LayerKind, bounds: DeviceRect) -> LayerId {
-        self.cmds.push(DrawCmd::PushLayer {
+        self.parts.cmds.push(DrawCmd::PushLayer {
             kind,
             bounds,
             needs_dst_read: kind == LayerKind::DestinationReading,
@@ -1112,18 +1148,23 @@ impl Rasterizer for CpuRasterizer {
     }
 
     fn pop_layer(&mut self, _id: LayerId, blend: BlendFamily, opacity: u8) {
-        self.cmds.push(DrawCmd::PopLayer {
-            blend,
-            opacity: Transparency::flat(blend, opacity),
+        // The pop's transparency needs an op to live in; this one is
+        // storage only and never drawn.
+        let p = &mut self.parts;
+        let layer = idx(p.ops.len());
+        p.ops.push(SceneOp::PushLayer {
+            kind: LayerKind::Plain,
+            transparency: Transparency::flat(blend, opacity),
         });
+        p.cmds.push(DrawCmd::PopLayer { blend, layer });
     }
 
     fn end_frame(&mut self) -> DirtyRect {
         let Some(mut target) = self.target.take() else {
             return DirtyRect::NONE;
         };
-        let dl = crate::display_list::DisplayList::from_commands(
-            std::mem::take(&mut self.cmds),
+        let dl = crate::display_list::DisplayList::from_parts(
+            std::mem::take(&mut self.parts),
             self.clip,
             crate::display_list::ViewParams {
                 viewport: self.clip,

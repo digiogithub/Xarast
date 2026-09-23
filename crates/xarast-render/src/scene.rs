@@ -19,6 +19,7 @@
 //! visually different and the file format distinguishes them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use xarast_geom::{FillRule, StrokeStyle};
@@ -188,7 +189,9 @@ pub struct NodeInfo {
 /// consumes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scene {
-    pub(crate) ops: Vec<SceneOp>,
+    /// Shared with every display list built from it, which is what lets a
+    /// build reference paths, paints and styles instead of copying them.
+    pub(crate) ops: Arc<Vec<SceneOp>>,
     nodes: HashMap<SceneNodeId, NodeInfo>,
     quality: RenderQuality,
 }
@@ -202,7 +205,12 @@ impl Scene {
 
     /// Drops everything recorded, keeping the allocation.
     pub fn clear(&mut self) {
-        self.ops.clear();
+        // A display list still in flight keeps the old ops alive; only then
+        // is a fresh vector needed.
+        match Arc::get_mut(&mut self.ops) {
+            Some(ops) => ops.clear(),
+            None => self.ops = Arc::new(Vec::with_capacity(self.ops.len())),
+        }
         self.nodes.clear();
     }
 
@@ -314,6 +322,13 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
+    /// The op list, unshared: `begin` cleared the scene, so a display list
+    /// built from the previous recording no longer holds this vector and
+    /// `make_mut` never copies.
+    fn ops(&mut self) -> &mut Vec<SceneOp> {
+        Arc::make_mut(&mut self.scene.ops)
+    }
+
     fn current_transparency(&self) -> Transparency {
         self.transparency
             .last()
@@ -324,7 +339,7 @@ impl<'a> SceneBuilder<'a> {
     /// Opens a group with its own transform.
     pub fn push_group(&mut self, id: SceneNodeId, xf: Transform2D, hint: CacheHint) -> SceneNodeId {
         self.open.push((id, self.scene.ops.len()));
-        self.scene.ops.push(SceneOp::PushGroup { id, xf, hint });
+        self.ops().push(SceneOp::PushGroup { id, xf, hint });
         self.stack.push(Frame::Group);
         self.stats.groups += 1;
         self.scene.nodes.insert(
@@ -346,7 +361,7 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "group" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopGroup);
+        self.ops().push(SceneOp::PopGroup);
         if let Some((id, _)) = self.open.pop()
             && let Some(info) = self.scene.nodes.get_mut(&id)
         {
@@ -356,7 +371,7 @@ impl<'a> SceneBuilder<'a> {
 
     /// Clips everything until the matching pop to a path.
     pub fn push_clip(&mut self, path: &PathRef, rule: FillRule) {
-        self.scene.ops.push(SceneOp::PushClip {
+        self.ops().push(SceneOp::PushClip {
             path: path.clone(),
             rule,
         });
@@ -371,13 +386,13 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "clip" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopClip);
+        self.ops().push(SceneOp::PopClip);
     }
 
     /// Applies a transparency to everything emitted until the matching pop,
     /// per object, following the original's lexical attribute scoping.
     pub fn push_transparency(&mut self, t: Transparency) {
-        self.scene.ops.push(SceneOp::PushTransparency(t.clone()));
+        self.ops().push(SceneOp::PushTransparency(t.clone()));
         self.transparency.push(t);
         self.stack.push(Frame::Transparency);
     }
@@ -391,7 +406,7 @@ impl<'a> SceneBuilder<'a> {
             return;
         }
         self.transparency.pop();
-        self.scene.ops.push(SceneOp::PopTransparency);
+        self.ops().push(SceneOp::PopTransparency);
     }
 
     /// Opens an offscreen layer: everything until the matching pop is
@@ -399,9 +414,7 @@ impl<'a> SceneBuilder<'a> {
     /// capture, and it is what a transparent *group* means, as opposed to a
     /// transparency applied per object.
     pub fn push_layer(&mut self, kind: LayerKind, transparency: Transparency) {
-        self.scene
-            .ops
-            .push(SceneOp::PushLayer { kind, transparency });
+        self.ops().push(SceneOp::PushLayer { kind, transparency });
         self.stack.push(Frame::Layer);
         self.stats.layers += 1;
     }
@@ -413,13 +426,13 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "layer" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopLayer);
+        self.ops().push(SceneOp::PopLayer);
     }
 
     /// Emits a filled path.
     pub fn fill(&mut self, id: SceneNodeId, path: &PathRef, rule: FillRule, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Fill {
+        self.ops().push(SceneOp::Fill {
             id,
             path: path.clone(),
             rule,
@@ -434,7 +447,7 @@ impl<'a> SceneBuilder<'a> {
     /// document-space outline.
     pub fn stroke(&mut self, id: SceneNodeId, path: &PathRef, style: StrokeStyle, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Stroke {
+        self.ops().push(SceneOp::Stroke {
             id,
             path: path.clone(),
             style,
@@ -447,7 +460,7 @@ impl<'a> SceneBuilder<'a> {
     /// Emits an image.
     pub fn image(&mut self, id: SceneNodeId, image: ImageId, mapping: GradMapping, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Image {
+        self.ops().push(SceneOp::Image {
             id,
             image,
             mapping,

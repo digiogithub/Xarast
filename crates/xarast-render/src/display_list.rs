@@ -93,66 +93,70 @@ impl ViewParams {
     }
 }
 
+/// A command's reference to a paint the build moved into device space, or
+/// [`SCENE_PAINT`] when the scene's own paint is used as it is.
+pub type PaintSlot = u32;
+
+/// The [`PaintSlot`] of a paint that does not depend on position (solid
+/// colours and fractals), which the command borrows from the scene op.
+pub const SCENE_PAINT: PaintSlot = u32::MAX;
+
 /// One drawing command, in device space.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Commands are small and `Copy`: the heavy payload — path, paint, stroke
+/// style, transparency — stays in the scene op it came from, which the
+/// display list shares rather than copies, and the per-view data a build
+/// computes (device transforms and device-space paint mappings) lives in
+/// side tables. [`DisplayList::item`] looks all of it up. Copying the
+/// payload into every command made a 100 000-command list 38 MB, and that
+/// is what made `build` superlinear: see `docs/memory/perf.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DrawCmd {
     /// Fill a path.
     Fill {
-        /// Which scene node it came from.
-        node: SceneNodeId,
-        /// The path, still in document units.
-        path: PathRef,
-        /// Which regions count as inside.
-        rule: FillRule,
-        /// What to fill it with, already mapped into device space.
-        paint: Paint,
-        /// Document to device for this command.
-        xf: Transform2D,
-        /// How it composites.
-        transparency: Transparency,
+        /// Index of the scene op.
+        op: u32,
+        /// Index of the document-to-device transform.
+        xf: u32,
+        /// The device-space paint, or [`SCENE_PAINT`].
+        paint: PaintSlot,
+        /// Whether its transparency reads the destination.
+        dst_read: bool,
         /// Device-space bounds, already computed.
         bounds: DeviceRect,
     },
     /// Stroke a path.
     Stroke {
-        /// Which scene node it came from.
-        node: SceneNodeId,
-        /// The path, still in document units.
-        path: PathRef,
-        /// Width, caps, join, dashes. A zero width is a hairline.
-        style: StrokeStyle,
-        /// What to stroke it with.
-        paint: Paint,
-        /// Document to device for this command.
-        xf: Transform2D,
-        /// How it composites.
-        transparency: Transparency,
+        /// Index of the scene op.
+        op: u32,
+        /// Index of the document-to-device transform.
+        xf: u32,
+        /// The device-space paint, or [`SCENE_PAINT`].
+        paint: PaintSlot,
+        /// Whether its transparency reads the destination.
+        dst_read: bool,
         /// Device-space bounds.
         bounds: DeviceRect,
     },
     /// Draw an image into a parallelogram or quadrilateral.
     Image {
-        /// Which scene node it came from.
-        node: SceneNodeId,
-        /// The image.
-        image: ImageId,
-        /// Its placement, already in device space.
-        mapping: GradMapping,
-        /// Filtering, contone and adjustment.
-        paint: Paint,
-        /// How it composites.
-        transparency: Transparency,
+        /// Index of the scene op.
+        op: u32,
+        /// Index of its device-space placement.
+        mapping: u32,
+        /// The device-space paint, or [`SCENE_PAINT`].
+        paint: PaintSlot,
+        /// Whether its transparency reads the destination.
+        dst_read: bool,
         /// Device-space bounds.
         bounds: DeviceRect,
     },
     /// Start clipping to a path.
     PushClip {
-        /// The clip path, in document units.
-        path: PathRef,
-        /// Which regions count as inside.
-        rule: FillRule,
-        /// Document to device for the clip path.
-        xf: Transform2D,
+        /// Index of the scene op holding the clip path.
+        op: u32,
+        /// Index of the document-to-device transform.
+        xf: u32,
     },
     /// Stop clipping to the innermost clip path.
     PopClip,
@@ -169,15 +173,14 @@ pub enum DrawCmd {
     PopLayer {
         /// Which family composites it.
         blend: BlendFamily,
-        /// With what transparency.
-        opacity: Transparency,
+        /// Index of the op holding the layer's transparency, or `u32::MAX`
+        /// for an unmatched pop, which composites opaquely.
+        layer: u32,
     },
     /// Blit an already rendered node from the render cache.
     CachedSurface {
-        /// Which node.
-        node: SceneNodeId,
-        /// Its cache key.
-        key: CacheKey,
+        /// Index of the node and its cache key in the list's side table.
+        slot: u32,
         /// Where it goes.
         bounds: DeviceRect,
     },
@@ -203,9 +206,9 @@ impl DrawCmd {
     #[must_use]
     pub fn needs_dst_read(&self) -> bool {
         match self {
-            DrawCmd::Fill { transparency, .. }
-            | DrawCmd::Stroke { transparency, .. }
-            | DrawCmd::Image { transparency, .. } => transparency.needs_dst_read(),
+            DrawCmd::Fill { dst_read, .. }
+            | DrawCmd::Stroke { dst_read, .. }
+            | DrawCmd::Image { dst_read, .. } => *dst_read,
             DrawCmd::PushLayer { needs_dst_read, .. } => *needs_dst_read,
             DrawCmd::PopLayer { blend, .. } => blend.needs_dst_read(),
             _ => false,
@@ -213,13 +216,125 @@ impl DrawCmd {
     }
 }
 
+/// A command with its payload looked up: what a backend draws.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DrawItem<'a> {
+    /// Fill a path.
+    Fill {
+        /// Which scene node it came from.
+        node: SceneNodeId,
+        /// The path, still in document units.
+        path: &'a PathRef,
+        /// Which regions count as inside.
+        rule: FillRule,
+        /// What to fill it with, already mapped into device space.
+        paint: &'a Paint,
+        /// Document to device for this command.
+        xf: Transform2D,
+        /// How it composites.
+        transparency: &'a Transparency,
+        /// Device-space bounds.
+        bounds: DeviceRect,
+    },
+    /// Stroke a path.
+    Stroke {
+        /// Which scene node it came from.
+        node: SceneNodeId,
+        /// The path, still in document units.
+        path: &'a PathRef,
+        /// Width, caps, join, dashes. A zero width is a hairline.
+        style: &'a StrokeStyle,
+        /// What to stroke it with, already mapped into device space.
+        paint: &'a Paint,
+        /// Document to device for this command.
+        xf: Transform2D,
+        /// How it composites.
+        transparency: &'a Transparency,
+        /// Device-space bounds.
+        bounds: DeviceRect,
+    },
+    /// Draw an image into a parallelogram or quadrilateral.
+    Image {
+        /// Which scene node it came from.
+        node: SceneNodeId,
+        /// The image.
+        image: ImageId,
+        /// Its placement, already in device space.
+        mapping: &'a GradMapping,
+        /// Filtering, contone and adjustment.
+        paint: &'a Paint,
+        /// How it composites.
+        transparency: &'a Transparency,
+        /// Device-space bounds.
+        bounds: DeviceRect,
+    },
+    /// Start clipping to a path.
+    PushClip {
+        /// The clip path, in document units.
+        path: &'a PathRef,
+        /// Which regions count as inside.
+        rule: FillRule,
+        /// Document to device for the clip path.
+        xf: Transform2D,
+    },
+    /// Stop clipping to the innermost clip path.
+    PopClip,
+    /// Begin an offscreen layer.
+    PushLayer {
+        /// What the layer means for alpha.
+        kind: LayerKind,
+        /// The device area the layer needs.
+        bounds: DeviceRect,
+        /// Whether its blend reads the destination.
+        needs_dst_read: bool,
+    },
+    /// Composite the innermost offscreen layer back.
+    PopLayer {
+        /// Which family composites it.
+        blend: BlendFamily,
+        /// With what transparency.
+        opacity: &'a Transparency,
+    },
+    /// Blit an already rendered node from the render cache.
+    CachedSurface {
+        /// Which node.
+        node: SceneNodeId,
+        /// Its cache key.
+        key: CacheKey,
+        /// Where it goes.
+        bounds: DeviceRect,
+    },
+    /// A command whose indices do not resolve. [`DisplayList::build`] never
+    /// produces one; a backend skips it.
+    Invalid,
+}
+
 /// An immutable, thread-safe frame's worth of drawing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplayList {
+    /// The scene's op storage, shared: the commands index into it.
+    ops: Arc<Vec<SceneOp>>,
     cmds: Vec<DrawCmd>,
+    /// Document-to-device transforms: the view's, then one per group the
+    /// build entered.
+    xforms: Vec<Transform2D>,
+    /// Paints moved into device space.
+    paints: Vec<Paint>,
+    /// Image placements moved into device space.
+    mappings: Vec<GradMapping>,
+    /// The nodes and cache keys of `CachedSurface` commands.
+    cached: Vec<(SceneNodeId, CacheKey)>,
     bounds: DeviceRect,
     needs_dst_read: bool,
     view: ViewParams,
+}
+
+/// Converts a vector index into a command index. A display list is built
+/// from a scene held in memory, so four billion ops do not occur;
+/// saturating makes a lookup fail softly rather than alias another op if
+/// they ever did.
+fn idx(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 impl DisplayList {
@@ -235,23 +350,38 @@ impl DisplayList {
             Some(d) => d.intersection(view.viewport),
             None => view.viewport,
         };
-        let mut cmds: Vec<DrawCmd> = Vec::with_capacity(scene.ops.len());
-        let mut xf_stack: Vec<Transform2D> = vec![view.transform];
+        let ops = Arc::clone(&scene.ops);
+        let mut cmds: Vec<DrawCmd> = Vec::with_capacity(ops.len());
+        let mut xforms: Vec<Transform2D> = vec![view.transform];
+        let mut paints: Vec<Paint> = Vec::new();
+        let mut mappings: Vec<GradMapping> = Vec::new();
+        // Indices into `xforms`; the bottom entry is the view itself.
+        let mut xf_stack: Vec<u32> = vec![0];
+        // The open `PushLayer` ops, so that each pop finds its push in O(1).
+        let mut layer_stack: Vec<u32> = Vec::new();
         let mut bounds = DeviceRect::EMPTY;
         let mut needs_dst_read = false;
+        // The current transform, cached: the stack only moves on groups.
+        let mut xf_i = 0u32;
+        let mut xf = view.transform;
 
-        for op in &scene.ops {
-            let xf = *xf_stack.last().unwrap_or(&view.transform);
+        for (i, op) in ops.iter().enumerate() {
+            let op_i = idx(i);
             match op {
-                SceneOp::PushGroup { xf: g, .. } => xf_stack.push(g.then(xf)),
-                SceneOp::PopGroup => {
-                    xf_stack.pop();
+                SceneOp::PushGroup { xf: g, .. } => {
+                    xf_i = idx(xforms.len());
+                    xf = g.then(xf);
+                    xforms.push(xf);
+                    xf_stack.push(xf_i);
                 }
-                SceneOp::PushClip { path, rule } => cmds.push(DrawCmd::PushClip {
-                    path: path.clone(),
-                    rule: *rule,
-                    xf,
-                }),
+                SceneOp::PopGroup => {
+                    if xf_stack.len() > 1 {
+                        xf_stack.pop();
+                    }
+                    xf_i = xf_stack.last().copied().unwrap_or(0);
+                    xf = xforms.get(xf_i as usize).copied().unwrap_or(view.transform);
+                }
+                SceneOp::PushClip { .. } => cmds.push(DrawCmd::PushClip { op: op_i, xf: xf_i }),
                 SceneOp::PopClip => cmds.push(DrawCmd::PopClip),
                 // Attribute-scope transparency is captured into each
                 // primitive as it is recorded, so these markers carry no
@@ -260,6 +390,7 @@ impl DisplayList {
                 SceneOp::PushLayer { kind, transparency } => {
                     let dst = transparency.needs_dst_read();
                     needs_dst_read |= dst;
+                    layer_stack.push(op_i);
                     cmds.push(DrawCmd::PushLayer {
                         kind: *kind,
                         bounds: clip_to,
@@ -267,40 +398,42 @@ impl DisplayList {
                     });
                 }
                 SceneOp::PopLayer => {
-                    // The transparency of the matching push is repeated on
-                    // the pop so that a backend never has to look backwards.
-                    let (blend, opacity) = last_layer_transparency(&scene.ops, op);
-                    cmds.push(DrawCmd::PopLayer { blend, opacity });
+                    // The matching push is named on the pop so that a
+                    // backend never has to look backwards.
+                    let layer = layer_stack.pop().unwrap_or(u32::MAX);
+                    let blend = match ops.get(layer as usize) {
+                        Some(SceneOp::PushLayer { transparency, .. }) => transparency.family,
+                        _ => BlendFamily::Mix,
+                    };
+                    cmds.push(DrawCmd::PopLayer { blend, layer });
                 }
                 SceneOp::Fill {
-                    id,
                     path,
-                    rule,
                     paint,
                     transparency,
+                    ..
                 } => {
                     let b = device_bounds_of(path, xf, 0.0);
                     if !b.intersects(clip_to) {
                         continue;
                     }
                     bounds = bounds.union(b);
-                    needs_dst_read |= transparency.needs_dst_read();
+                    let dst_read = transparency.needs_dst_read();
+                    needs_dst_read |= dst_read;
                     cmds.push(DrawCmd::Fill {
-                        node: *id,
-                        path: path.clone(),
-                        rule: *rule,
-                        paint: map_paint(paint, xf),
-                        xf,
-                        transparency: transparency.clone(),
+                        op: op_i,
+                        xf: xf_i,
+                        paint: push_mapped(&mut paints, paint, xf),
+                        dst_read,
                         bounds: b,
                     });
                 }
                 SceneOp::Stroke {
-                    id,
                     path,
                     style,
                     paint,
                     transparency,
+                    ..
                 } => {
                     // A hairline is one device pixel; anything else spreads
                     // by half its width, plus the mitre allowance.
@@ -314,23 +447,21 @@ impl DisplayList {
                         continue;
                     }
                     bounds = bounds.union(b);
-                    needs_dst_read |= transparency.needs_dst_read();
+                    let dst_read = transparency.needs_dst_read();
+                    needs_dst_read |= dst_read;
                     cmds.push(DrawCmd::Stroke {
-                        node: *id,
-                        path: path.clone(),
-                        style: style.clone(),
-                        paint: map_paint(paint, xf),
-                        xf,
-                        transparency: transparency.clone(),
+                        op: op_i,
+                        xf: xf_i,
+                        paint: push_mapped(&mut paints, paint, xf),
+                        dst_read,
                         bounds: b,
                     });
                 }
                 SceneOp::Image {
-                    id,
-                    image,
                     mapping,
                     paint,
                     transparency,
+                    ..
                 } => {
                     let dev = mapping.transformed(xf);
                     let b = mapping_bounds(dev);
@@ -338,13 +469,15 @@ impl DisplayList {
                         continue;
                     }
                     bounds = bounds.union(b);
-                    needs_dst_read |= transparency.needs_dst_read();
+                    let dst_read = transparency.needs_dst_read();
+                    needs_dst_read |= dst_read;
+                    let m = idx(mappings.len());
+                    mappings.push(dev);
                     cmds.push(DrawCmd::Image {
-                        node: *id,
-                        image: *image,
-                        mapping: dev,
-                        paint: map_paint(paint, xf),
-                        transparency: transparency.clone(),
+                        op: op_i,
+                        mapping: m,
+                        paint: push_mapped(&mut paints, paint, xf),
+                        dst_read,
                         bounds: b,
                     });
                 }
@@ -352,31 +485,40 @@ impl DisplayList {
         }
 
         Arc::new(DisplayList {
+            ops,
             cmds,
+            xforms,
+            paints,
+            mappings,
+            cached: Vec::new(),
             bounds: bounds.intersection(clip_to),
             needs_dst_read,
             view: *view,
         })
     }
 
-    /// Wraps an already built command stream, for the immediate-mode
+    /// Wraps a command stream recorded directly, for the immediate-mode
     /// facade, which records commands rather than resolving a scene.
-    #[must_use]
-    pub fn from_commands(
-        cmds: Vec<DrawCmd>,
+    pub(crate) fn from_parts(
+        parts: ListParts,
         clip: DeviceRect,
         view: ViewParams,
     ) -> Arc<DisplayList> {
         let mut bounds = DeviceRect::EMPTY;
         let mut needs_dst_read = false;
-        for c in &cmds {
+        for c in &parts.cmds {
             if let Some(b) = c.bounds() {
                 bounds = bounds.union(b);
             }
             needs_dst_read |= c.needs_dst_read();
         }
         Arc::new(DisplayList {
-            cmds,
+            ops: Arc::new(parts.ops),
+            cmds: parts.cmds,
+            xforms: parts.xforms,
+            paints: parts.paints,
+            mappings: parts.mappings,
+            cached: Vec::new(),
             bounds: bounds.intersection(clip),
             needs_dst_read,
             view,
@@ -387,6 +529,133 @@ impl DisplayList {
     #[must_use]
     pub fn commands(&self) -> &[DrawCmd] {
         &self.cmds
+    }
+
+    /// Looks up everything a command refers to.
+    #[must_use]
+    pub fn item(&self, cmd: &DrawCmd) -> DrawItem<'_> {
+        self.try_item(cmd).unwrap_or(DrawItem::Invalid)
+    }
+
+    fn paint_of<'a>(&'a self, slot: PaintSlot, own: &'a Paint) -> Option<&'a Paint> {
+        if slot == SCENE_PAINT {
+            Some(own)
+        } else {
+            self.paints.get(slot as usize)
+        }
+    }
+
+    fn xf_of(&self, i: u32) -> Option<Transform2D> {
+        self.xforms.get(i as usize).copied()
+    }
+
+    fn op(&self, i: u32) -> Option<&SceneOp> {
+        self.ops.get(i as usize)
+    }
+
+    fn try_item(&self, cmd: &DrawCmd) -> Option<DrawItem<'_>> {
+        Some(match *cmd {
+            DrawCmd::Fill {
+                op,
+                xf,
+                paint,
+                bounds,
+                ..
+            } => match self.op(op)? {
+                SceneOp::Fill {
+                    id,
+                    path,
+                    rule,
+                    paint: own,
+                    transparency,
+                } => DrawItem::Fill {
+                    node: *id,
+                    path,
+                    rule: *rule,
+                    paint: self.paint_of(paint, own)?,
+                    xf: self.xf_of(xf)?,
+                    transparency,
+                    bounds,
+                },
+                _ => return None,
+            },
+            DrawCmd::Stroke {
+                op,
+                xf,
+                paint,
+                bounds,
+                ..
+            } => match self.op(op)? {
+                SceneOp::Stroke {
+                    id,
+                    path,
+                    style,
+                    paint: own,
+                    transparency,
+                } => DrawItem::Stroke {
+                    node: *id,
+                    path,
+                    style,
+                    paint: self.paint_of(paint, own)?,
+                    xf: self.xf_of(xf)?,
+                    transparency,
+                    bounds,
+                },
+                _ => return None,
+            },
+            DrawCmd::Image {
+                op,
+                mapping,
+                paint,
+                bounds,
+                ..
+            } => match self.op(op)? {
+                SceneOp::Image {
+                    id,
+                    image,
+                    paint: own,
+                    transparency,
+                    ..
+                } => DrawItem::Image {
+                    node: *id,
+                    image: *image,
+                    mapping: self.mappings.get(mapping as usize)?,
+                    paint: self.paint_of(paint, own)?,
+                    transparency,
+                    bounds,
+                },
+                _ => return None,
+            },
+            DrawCmd::PushClip { op, xf } => match self.op(op)? {
+                SceneOp::PushClip { path, rule } => DrawItem::PushClip {
+                    path,
+                    rule: *rule,
+                    xf: self.xf_of(xf)?,
+                },
+                _ => return None,
+            },
+            DrawCmd::PopClip => DrawItem::PopClip,
+            DrawCmd::PushLayer {
+                kind,
+                bounds,
+                needs_dst_read,
+            } => DrawItem::PushLayer {
+                kind,
+                bounds,
+                needs_dst_read,
+            },
+            DrawCmd::PopLayer { blend, layer } => DrawItem::PopLayer {
+                blend,
+                opacity: match self.op(layer) {
+                    Some(SceneOp::PushLayer { transparency, .. }) => transparency,
+                    _ => &Transparency::OPAQUE,
+                },
+            },
+            DrawCmd::CachedSurface { slot, bounds } => {
+                let (node, key) = *self.cached.get(slot as usize)?;
+                DrawItem::CachedSurface { node, key, bounds }
+            }
+        })
     }
 
     /// The union of every command's device bounds.
@@ -420,26 +689,28 @@ impl DisplayList {
     }
 }
 
-/// Finds the transparency of the `PushLayer` matching this `PopLayer`.
-fn last_layer_transparency(ops: &[SceneOp], this: &SceneOp) -> (BlendFamily, Transparency) {
-    // Walk backwards from this pop, counting nesting.
-    let Some(pos) = ops.iter().position(|o| std::ptr::eq(o, this)) else {
-        return (BlendFamily::Mix, Transparency::OPAQUE);
-    };
-    let mut depth = 0i32;
-    for op in ops[..pos].iter().rev() {
-        match op {
-            SceneOp::PopLayer => depth += 1,
-            SceneOp::PushLayer { transparency, .. } => {
-                if depth == 0 {
-                    return (transparency.family, transparency.clone());
-                }
-                depth -= 1;
-            }
-            _ => {}
+/// The pieces of a display list that the immediate-mode facade records
+/// directly: its own op storage, and commands indexing into it.
+#[derive(Debug, Default)]
+pub(crate) struct ListParts {
+    pub(crate) ops: Vec<SceneOp>,
+    pub(crate) cmds: Vec<DrawCmd>,
+    pub(crate) xforms: Vec<Transform2D>,
+    pub(crate) paints: Vec<Paint>,
+    pub(crate) mappings: Vec<GradMapping>,
+}
+
+/// Moves a paint into device space if it depends on position, and returns
+/// where the command finds it.
+fn push_mapped(paints: &mut Vec<Paint>, paint: &Paint, xf: Transform2D) -> PaintSlot {
+    match map_paint(paint, xf) {
+        Some(p) => {
+            let slot = idx(paints.len());
+            paints.push(p);
+            slot
         }
+        None => SCENE_PAINT,
     }
-    (BlendFamily::Mix, Transparency::OPAQUE)
 }
 
 /// The device bounds of a path, padded in document units before transform.
@@ -497,9 +768,11 @@ fn mapping_bounds(m: GradMapping) -> DeviceRect {
 
 /// Moves a paint's control points into device space, so that the backends
 /// evaluate every paint in the same frame the geometry is rasterised in.
-fn map_paint(paint: &Paint, xf: Transform2D) -> Paint {
-    match paint {
-        Paint::Solid(_) | Paint::Fractal(_) => paint.clone(),
+///
+/// `None` for a paint with no control points, which is used as it is.
+fn map_paint(paint: &Paint, xf: Transform2D) -> Option<Paint> {
+    Some(match paint {
+        Paint::Solid(_) | Paint::Fractal(_) => return None,
         Paint::Gradient {
             shape,
             mapping,
@@ -526,7 +799,7 @@ fn map_paint(paint: &Paint, xf: Transform2D) -> Paint {
             contone: *contone,
             adjust: *adjust,
         },
-    }
+    })
 }
 
 #[cfg(test)]
@@ -655,10 +928,10 @@ mod tests {
         b.pop_layer();
         b.finish().unwrap();
         let dl = DisplayList::build(&scene, &view(), &DirtyRect::NONE);
-        let last = dl.commands().last().unwrap();
+        let last = dl.item(dl.commands().last().unwrap());
         match last {
-            DrawCmd::PopLayer { blend, opacity } => {
-                assert_eq!(*blend, BlendFamily::Bleach);
+            DrawItem::PopLayer { blend, opacity } => {
+                assert_eq!(blend, BlendFamily::Bleach);
                 assert!(matches!(
                     opacity.source,
                     crate::blend::TranspSource::Flat(64)
@@ -666,6 +939,106 @@ mod tests {
             }
             other => panic!("expected a PopLayer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_command_stays_small() {
+        // The payload lives in the shared scene ops; a command is indices
+        // and bounds. Letting this grow back is what made a 100 000-command
+        // build superlinear.
+        assert!(std::mem::size_of::<DrawCmd>() <= 40);
+    }
+
+    #[test]
+    fn items_resolve_to_the_scene_payload_with_device_space_paints() {
+        let mut scene = Scene::new();
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        b.push_group(
+            SceneNodeId(1),
+            Transform2D::translate(50_000.0, 0.0),
+            CacheHint::Auto,
+        );
+        let gradient = Paint::Gradient {
+            shape: crate::paint::GradShape::Linear,
+            mapping: GradMapping::Affine {
+                a: kurbo::Point::new(0.0, 0.0),
+                b: kurbo::Point::new(0.0, 10_000.0),
+                c: kurbo::Point::new(10_000.0, 0.0),
+            },
+            repeat: crate::paint::Repeat::Simple,
+            ramp: crate::paint::GradRamp::Mesh3([Rgba8::BLACK; 3]),
+        };
+        b.fill(
+            SceneNodeId(2),
+            &rect_path(0.0, 0.0, 10.0, 10.0),
+            FillRule::EvenOdd,
+            gradient,
+        );
+        b.pop_group();
+        b.fill(
+            SceneNodeId(3),
+            &rect_path(0.0, 0.0, 10.0, 10.0),
+            FillRule::NonZero,
+            Paint::Solid(Rgba8::WHITE),
+        );
+        b.finish().unwrap();
+        let dl = DisplayList::build(&scene, &view(), &DirtyRect::NONE);
+        assert_eq!(dl.len(), 2);
+        let DrawItem::Fill {
+            node,
+            rule,
+            paint: Paint::Gradient { mapping, .. },
+            xf,
+            ..
+        } = dl.item(&dl.commands()[0])
+        else {
+            unreachable!("expected a gradient fill");
+        };
+        assert_eq!(node, SceneNodeId(2));
+        assert_eq!(rule, FillRule::EvenOdd);
+        // The group's 50 pt shift, in device pixels.
+        let GradMapping::Affine { a, .. } = *mapping else {
+            unreachable!("affine in, affine out");
+        };
+        assert!((a.x - 50.0).abs() < 1e-9, "{a:?}");
+        assert!((xf.to_affine().as_coeffs()[4] - 50.0).abs() < 1e-9);
+
+        let DrawItem::Fill {
+            node, paint, xf, ..
+        } = dl.item(&dl.commands()[1])
+        else {
+            unreachable!("expected a solid fill");
+        };
+        assert_eq!(node, SceneNodeId(3));
+        assert_eq!(*paint, Paint::Solid(Rgba8::WHITE));
+        assert_eq!(xf, view().transform, "the group was popped");
+    }
+
+    #[test]
+    fn a_display_list_outlives_the_next_recording() {
+        let mut scene = Scene::new();
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        b.fill(
+            SceneNodeId(1),
+            &rect_path(0.0, 0.0, 10.0, 10.0),
+            FillRule::NonZero,
+            Paint::Solid(Rgba8::BLACK),
+        );
+        b.finish().unwrap();
+        let old = DisplayList::build(&scene, &view(), &DirtyRect::NONE);
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        b.fill(
+            SceneNodeId(9),
+            &rect_path(0.0, 0.0, 10.0, 10.0),
+            FillRule::NonZero,
+            Paint::Solid(Rgba8::WHITE),
+        );
+        b.finish().unwrap();
+        let DrawItem::Fill { node, paint, .. } = old.item(&old.commands()[0]) else {
+            unreachable!("expected the old fill");
+        };
+        assert_eq!(node, SceneNodeId(1));
+        assert_eq!(*paint, Paint::Solid(Rgba8::BLACK));
     }
 
     #[test]
