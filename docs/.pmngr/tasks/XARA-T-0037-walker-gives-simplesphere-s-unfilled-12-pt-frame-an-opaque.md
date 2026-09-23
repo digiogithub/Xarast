@@ -2,14 +2,15 @@
 id: XARA-T-0037
 type: task
 title: Walker gives SimpleSphere's unfilled 12 pt frame an opaque black fill, hiding the whole drawing
-status: in_progress
+status: done
 priority: medium
 parent: XARA-US-0081
 author: mcp
 labels: [app-core, render]
 created: 2026-09-23T11:41:06Z
-updated: 2026-09-23T12:02:55Z
+updated: 2026-09-23T12:30:51Z
 started: 2026-09-23T12:02:55Z
+closed: 2026-09-23T12:30:51Z
 ---
 
 ## Description

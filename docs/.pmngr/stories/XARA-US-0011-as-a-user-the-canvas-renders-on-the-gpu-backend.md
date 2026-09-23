@@ -2,13 +2,13 @@
 id: XARA-US-0011
 type: story
 title: As a user, the canvas renders on the GPU backend
-status: in_progress
+status: in_review
 priority: high
 parent: XARA-EP-0017
 author: mcp
 labels: [render, gpu, hardware]
 created: 2026-09-23T09:40:31Z
-updated: 2026-09-23T12:03:52Z
+updated: 2026-09-23T12:29:08Z
 started: 2026-09-23T12:03:52Z
 ---
 

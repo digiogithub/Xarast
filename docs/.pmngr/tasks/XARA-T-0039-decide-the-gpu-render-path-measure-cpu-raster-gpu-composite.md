@@ -2,13 +2,14 @@
 id: XARA-T-0039
 type: task
 title: "Decide the GPU render path: measure CPU raster + GPU composite vs own WGSL pass vs vello (wgpu 29)"
-status: in_progress
+status: done
 parent: XARA-US-0011
 author: mcp
 labels: [render, gpu]
 created: 2026-09-23T12:04:02Z
-updated: 2026-09-23T12:04:02Z
+updated: 2026-09-23T12:31:26Z
 started: 2026-09-23T12:04:02Z
+closed: 2026-09-23T12:31:26Z
 ---
 
 ## Description

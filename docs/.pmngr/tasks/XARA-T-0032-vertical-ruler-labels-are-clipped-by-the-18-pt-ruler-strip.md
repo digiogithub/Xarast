@@ -2,13 +2,15 @@
 id: XARA-T-0032
 type: task
 title: Vertical ruler labels are clipped by the 18 pt ruler strip
-status: backlog
+status: done
 priority: low
 parent: XARA-US-0081
 author: mcp
 labels: [ui]
 created: 2026-09-23T10:59:46Z
-updated: 2026-09-23T10:59:46Z
+updated: 2026-09-23T12:30:55Z
+started: 2026-09-23T12:30:51Z
+closed: 2026-09-23T12:30:55Z
 ---
 
 ## Description

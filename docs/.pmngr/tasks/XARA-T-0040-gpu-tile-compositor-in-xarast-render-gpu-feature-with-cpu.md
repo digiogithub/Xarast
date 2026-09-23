@@ -2,13 +2,14 @@
 id: XARA-T-0040
 type: task
 title: GPU tile compositor in xarast-render (gpu feature) with CPU parity test and bench
-status: in_progress
+status: done
 parent: XARA-US-0011
 author: mcp
 labels: [render, gpu]
 created: 2026-09-23T12:04:02Z
-updated: 2026-09-23T12:04:02Z
+updated: 2026-09-23T12:31:26Z
 started: 2026-09-23T12:04:02Z
+closed: 2026-09-23T12:31:26Z
 ---
 
 ## Description
