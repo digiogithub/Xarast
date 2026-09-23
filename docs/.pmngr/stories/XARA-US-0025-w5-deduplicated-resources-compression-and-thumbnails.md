@@ -2,12 +2,14 @@
 id: XARA-US-0025
 type: story
 title: W5 — Deduplicated resources, compression and thumbnails
-status: backlog
+status: done
 parent: XARA-EP-0007
 author: mcp
 labels: [phase-6, xarast-format]
 created: 2026-09-23T09:41:28Z
-updated: 2026-09-23T09:41:28Z
+updated: 2026-09-23T15:01:24Z
+started: 2026-09-23T14:22:07Z
+closed: 2026-09-23T15:01:24Z
 ---
 
 ## Tasks (full table: phase-06 §W5)

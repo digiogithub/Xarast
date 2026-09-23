@@ -2,13 +2,14 @@
 id: XARA-US-0026
 type: story
 title: "W6 — Durability: atomic save, lock, autosave, journal, recovery"
-status: backlog
+status: in_progress
 priority: high
 parent: XARA-EP-0007
 author: mcp
 labels: [phase-6, xarast-format, durability]
 created: 2026-09-23T09:41:28Z
-updated: 2026-09-23T09:41:28Z
+updated: 2026-09-23T15:01:24Z
+started: 2026-09-23T14:22:07Z
 ---
 
 ## Description
