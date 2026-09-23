@@ -26,12 +26,13 @@
 //! locked *layer* protects everything on it, and that is checked here,
 //! by every command, before anything is applied ([`on_locked_layer`]).
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use xarast_doc::fill_edit::set_own_attr;
 use xarast_doc::{
-    Attach, AttrNode, AttrSlot, AttrValue, Document, EditError, NodeId, NodeKind, PathNode,
-    QuickShape, Tx,
+    Attach, AttrNode, AttrSlot, AttrValue, CoalesceKey, Document, EditError, NodeId, NodeKind,
+    PathNode, QuickShape, TextStoryNode, Tx,
 };
 use xarast_geom::{FillRule, Matrix, Mp, Path};
 
@@ -184,7 +185,52 @@ pub enum EditCommand {
         /// The edits, in order. The first names the step.
         edits: Vec<crate::fill_tool::FillCommand>,
     },
+    /// Types into a story (phase 9, T9.4.6), replacing a byte range of its
+    /// text (the selection; empty for a caret). Commands of one typing
+    /// burst merge into one undo step (`burst`, see [`TYPING_KIND`]).
+    TypeText {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The byte range the typing replaces.
+        replace: Range<usize>,
+        /// What was typed.
+        text: String,
+        /// The typing burst it belongs to.
+        burst: u64,
+    },
+    /// Deletes a byte range of a story's text: Backspace, Delete.
+    DeleteText {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The byte range.
+        range: Range<usize>,
+        /// The deletion burst it belongs to.
+        burst: u64,
+    },
+    /// Creates a story as the last object of a layer, carrying the given
+    /// attributes as its own attribute children, holding `text`: the
+    /// first character typed at a pending text caret. It merges with the
+    /// rest of its typing burst.
+    CreateText {
+        /// The layer it goes onto.
+        layer: NodeId,
+        /// The story: its placement and layout.
+        story: Box<TextStoryNode>,
+        /// The current attributes the new story is given.
+        attrs: Vec<AttrValue>,
+        /// What was typed.
+        text: String,
+        /// The typing burst it starts.
+        burst: u64,
+    },
 }
+
+/// The coalescing kind of typing: [`EditCommand::TypeText`] and
+/// [`EditCommand::CreateText`] of one burst merge.
+pub const TYPING_KIND: &str = "text-typing";
+
+/// The coalescing kind of a run of Backspace or Delete presses.
+pub const TEXT_DELETE_KIND: &str = "text-delete";
 
 /// What the linear part of a matrix does, as the Edit menu names it.
 fn transform_label(m: &Matrix) -> &'static str {
@@ -245,6 +291,9 @@ impl EditCommand {
             EditCommand::ConvertToPaths { .. } => "Convert to Editable Shapes",
             EditCommand::SetWindingRule { .. } => "Winding Rule",
             EditCommand::Fill { edits } => edits.first().map_or("Fill", |e| e.command().label()),
+            EditCommand::TypeText { .. } => "Typing",
+            EditCommand::DeleteText { .. } => "Delete Text",
+            EditCommand::CreateText { .. } => "New Text",
         }
     }
 
@@ -296,6 +345,9 @@ impl EditCommand {
             | EditCommand::ConvertToPaths { nodes }
             | EditCommand::SetWindingRule { nodes, .. } => nodes.is_empty(),
             EditCommand::Fill { edits } => edits.is_empty(),
+            EditCommand::TypeText { replace, text, .. } => replace.is_empty() && text.is_empty(),
+            EditCommand::DeleteText { range, .. } => range.is_empty(),
+            EditCommand::CreateText { text, .. } => text.is_empty(),
             EditCommand::CreateShape { .. }
             | EditCommand::SetShapeParams { .. }
             | EditCommand::SetPath { .. }
@@ -469,6 +521,50 @@ impl xarast_doc::Command for EditCommand {
                 }
                 Ok(())
             }
+            EditCommand::TypeText {
+                story,
+                replace,
+                text,
+                ..
+            } => {
+                check_layers(tx, &[*story])?;
+                xarast_doc::delete_range(tx, *story, replace.clone())?;
+                xarast_doc::insert_text(tx, *story, replace.start, text).map(|_| ())
+            }
+            EditCommand::DeleteText { story, range, .. } => {
+                check_layers(tx, &[*story])?;
+                xarast_doc::delete_range(tx, *story, range.clone())
+            }
+            EditCommand::CreateText {
+                layer,
+                story,
+                attrs,
+                text,
+                ..
+            } => {
+                match tx.doc().tree.kind(*layer) {
+                    Some(NodeKind::Layer(l)) if !l.locked && !l.guide => {}
+                    _ => return Err(EditError::NotPermitted(*layer)),
+                }
+                let node = xarast_doc::new_story(tx, *layer, (**story).clone(), attrs)?;
+                xarast_doc::insert_text(tx, node, 0, text).map(|_| ())
+            }
+        }
+    }
+
+    fn coalesce_key(&self) -> Option<CoalesceKey> {
+        match self {
+            EditCommand::TypeText { burst, .. } | EditCommand::CreateText { burst, .. } => {
+                Some(CoalesceKey {
+                    gesture: *burst,
+                    kind: TYPING_KIND,
+                })
+            }
+            EditCommand::DeleteText { burst, .. } => Some(CoalesceKey {
+                gesture: *burst,
+                kind: TEXT_DELETE_KIND,
+            }),
+            _ => None,
         }
     }
 }

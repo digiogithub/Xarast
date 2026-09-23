@@ -237,6 +237,10 @@ pub enum Intent {
     /// Page Up, Page Down, with Ctrl and Shift). The shell sends these
     /// instead of panning while [`crate::Session::text_editing`] is true.
     TextNav(crate::tool::TextNav),
+    /// A typing key for the text being edited: characters, Enter,
+    /// Backspace, Delete. The shell sends these instead of shortcuts while
+    /// [`crate::Session::text_editing`] is true.
+    TextInput(crate::tool::TextInput),
 
     // ── rendering ─────────────────────────────────────────────────────
     /// Set the render quality. The shell drops to
