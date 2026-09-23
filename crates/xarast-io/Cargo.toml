@@ -29,6 +29,8 @@ flate2 = { workspace = true }
 rayon = { workspace = true }
 jpeg-encoder = { workspace = true }
 image-webp = { workspace = true }
+pdf-writer = { workspace = true }
+kurbo = { workspace = true }
 oxipng = { workspace = true, optional = true }
 
 [dev-dependencies]

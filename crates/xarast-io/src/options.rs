@@ -18,6 +18,8 @@ pub enum FormatId {
     Jpeg,
     /// WebP.
     WebP,
+    /// PDF 1.7, vector.
+    Pdf,
 }
 
 impl FormatId {
@@ -28,6 +30,7 @@ impl FormatId {
             FormatId::Png => "png",
             FormatId::Jpeg => "jpg",
             FormatId::WebP => "webp",
+            FormatId::Pdf => "pdf",
         }
     }
 
@@ -38,6 +41,7 @@ impl FormatId {
             FormatId::Png => "PNG",
             FormatId::Jpeg => "JPEG",
             FormatId::WebP => "WebP",
+            FormatId::Pdf => "PDF",
         }
     }
 }
@@ -211,6 +215,68 @@ pub struct WebPOptions {
     pub mode: WebPMode,
 }
 
+/// The PDF version written. Only 1.7 is built: it has every construct
+/// the exporter uses (transparency groups, soft masks, shadings of every
+/// type) and is what PDF/A-2 and PDF/X-4 build on (phase 15).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PdfVersion {
+    /// PDF 1.7 (ISO 32000-1).
+    #[default]
+    #[serde(rename = "1.7")]
+    V1_7,
+}
+
+/// What the PDF exporter does with a Xara transparency family that PDF
+/// names but defines differently (phase 11 W11.4, "the fidelity ladder").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendFidelity {
+    /// Map Stained Glass to `Multiply` and Bleach to `Screen`, the PDF
+    /// modes with the same per-channel shape, and report each object as
+    /// approximated. Smaller files, a possible colour shift. Every other
+    /// family is still rasterised until T11.4.6 measures its ΔE.
+    PreferNative,
+    /// Rasterise every object whose family is not ordinary mixing, with
+    /// everything under it, so what the page shows is what the renderer
+    /// draws. Bigger files, exact. The default until the per-family ΔE
+    /// is measured (T11.4.6).
+    #[default]
+    Exact,
+}
+
+/// PDF options.
+///
+/// Text, image policy and output intent are added with T11.4.7–T11.4.9;
+/// the struct is `#[serde(default)]`, so hints written now still read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PdfOptions {
+    /// The version written.
+    pub version: PdfVersion,
+    /// The resolution of objects the fidelity ladder rasterises, in dots
+    /// per inch, within [`PDF_RASTERISE_DPI`].
+    pub rasterise_dpi: u32,
+    /// How hard to try before rasterising a blend.
+    pub blend_fidelity: BlendFidelity,
+    /// FlateDecode every stream. Off only to read the content streams.
+    pub compress: bool,
+}
+
+/// The range [`PdfOptions::rasterise_dpi`] accepts.
+pub const PDF_RASTERISE_DPI: (u32, u32) = (36, 2400);
+
+impl Default for PdfOptions {
+    /// PDF 1.7, rasterised objects at 300 dpi, exact blends, compressed.
+    fn default() -> PdfOptions {
+        PdfOptions {
+            version: PdfVersion::V1_7,
+            rasterise_dpi: 300,
+            blend_fidelity: BlendFidelity::Exact,
+            compress: true,
+        }
+    }
+}
+
 /// One entry per format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", tag = "format")]
@@ -222,6 +288,8 @@ pub enum FormatOptions {
     /// WebP.
     #[serde(rename = "webp")]
     WebP(WebPOptions),
+    /// PDF.
+    Pdf(PdfOptions),
 }
 
 impl Default for FormatOptions {
@@ -238,6 +306,7 @@ impl FormatOptions {
             FormatOptions::Png(_) => FormatId::Png,
             FormatOptions::Jpeg(_) => FormatId::Jpeg,
             FormatOptions::WebP(_) => FormatId::WebP,
+            FormatOptions::Pdf(_) => FormatId::Pdf,
         }
     }
 
@@ -248,6 +317,7 @@ impl FormatOptions {
             FormatId::Png => FormatOptions::Png(PngOptions::default()),
             FormatId::Jpeg => FormatOptions::Jpeg(JpegOptions::default()),
             FormatId::WebP => FormatOptions::WebP(WebPOptions::default()),
+            FormatId::Pdf => FormatOptions::Pdf(PdfOptions::default()),
         }
     }
 
@@ -257,7 +327,7 @@ impl FormatOptions {
         match self {
             FormatOptions::Png(p) => p.colour.has_alpha(),
             FormatOptions::Jpeg(_) => false,
-            FormatOptions::WebP(_) => true,
+            FormatOptions::WebP(_) | FormatOptions::Pdf(_) => true,
         }
     }
 }
@@ -285,6 +355,12 @@ mod tests {
             }),
             FormatOptions::WebP(WebPOptions {
                 mode: WebPMode::Lossy { quality: 70 },
+            }),
+            FormatOptions::Pdf(PdfOptions {
+                version: PdfVersion::V1_7,
+                rasterise_dpi: 150,
+                blend_fidelity: BlendFidelity::PreferNative,
+                compress: false,
             }),
             FormatOptions::default(),
         ];
@@ -314,6 +390,21 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_pdf_hint_reads_with_defaults() {
+        let o: FormatOptions =
+            serde_json::from_str(r#"{"format":"pdf","blend_fidelity":"prefer_native"}"#).unwrap();
+        assert_eq!(
+            o,
+            FormatOptions::Pdf(PdfOptions {
+                blend_fidelity: BlendFidelity::PreferNative,
+                ..PdfOptions::default()
+            })
+        );
+        let j = serde_json::to_string(&FormatOptions::default_for(FormatId::Pdf)).unwrap();
+        assert!(j.contains(r#""version":"1.7""#), "{j}");
     }
 
     #[test]

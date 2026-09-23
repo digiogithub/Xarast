@@ -5,6 +5,7 @@
 
 use crate::model::ExportRequest;
 use crate::options::{FormatId, FormatOptions};
+use crate::pdf::PdfExporter;
 use crate::raster::{JpegExporter, PngExporter, WebPExporter};
 use crate::report::{ExportError, ExportReport};
 use crate::source::{ExportSource, Progress};
@@ -73,7 +74,7 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// PNG, JPEG and WebP.
+    /// PNG, JPEG, WebP and PDF.
     #[must_use]
     pub fn with_builtin() -> Registry {
         Registry {
@@ -81,6 +82,7 @@ impl Registry {
                 Box::new(PngExporter),
                 Box::new(JpegExporter),
                 Box::new(WebPExporter),
+                Box::new(PdfExporter),
             ],
         }
     }
@@ -139,8 +141,8 @@ mod tests {
     #[test]
     fn lookup_by_id_and_extension() {
         let r = Registry::with_builtin();
-        assert_eq!(r.all().count(), 3);
-        for id in [FormatId::Png, FormatId::Jpeg, FormatId::WebP] {
+        assert_eq!(r.all().count(), 4);
+        for id in [FormatId::Png, FormatId::Jpeg, FormatId::WebP, FormatId::Pdf] {
             assert_eq!(r.get(id).map(Exporter::id), Some(id));
             assert_eq!(r.for_extension(id.extension()).map(Exporter::id), Some(id));
         }
@@ -180,5 +182,7 @@ mod tests {
             assert!(c.deterministic && !c.vector && !c.multipage && !c.embeds_fonts);
         }
         assert_eq!(webp.max_side, crate::webp::MAX_WEBP_SIDE);
+        let pdf = r.get(FormatId::Pdf).unwrap().capabilities();
+        assert!(pdf.vector && pdf.alpha && pdf.deterministic && !pdf.lossy && !pdf.has_dpi);
     }
 }

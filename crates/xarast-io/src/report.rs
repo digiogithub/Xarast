@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use xarast_color::Rgba8;
+use xarast_render::{BlendFamily, SceneNodeId};
 
 use crate::model::SizingError;
 use crate::options::FormatId;
@@ -61,6 +62,36 @@ pub enum Compromise {
     /// A 16-bit PNG was requested: the render is 8-bit, so the extra bits
     /// carry no information (`v × 257`).
     WidenedFrom8Bit,
+    /// A vector format could not express an object, so it was rendered
+    /// to an image on the CPU backend and placed (the fidelity ladder's
+    /// last step).
+    Rasterised {
+        /// The object: the scene node, which is the document tag.
+        node: SceneNodeId,
+        /// Why.
+        reason: Arc<str>,
+        /// At what resolution.
+        dpi: f64,
+    },
+    /// A vector format expressed an object in a different construct that
+    /// is close but not identical (a conical gradient as a wedge fan, a
+    /// three-colour mesh as a sampled grid).
+    Approximated {
+        /// The object.
+        node: SceneNodeId,
+        /// What was approximated, and how.
+        what: Arc<str>,
+    },
+    /// A transparency family was mapped to a same-shaped but differently
+    /// defined blend mode of the target format.
+    BlendModeApproximated {
+        /// The object.
+        node: SceneNodeId,
+        /// Our family.
+        ours: BlendFamily,
+        /// The target's mode.
+        theirs: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for Compromise {
@@ -76,6 +107,15 @@ impl std::fmt::Display for Compromise {
                 write!(f, "font {requested} replaced by {used}")
             }
             Compromise::WidenedFrom8Bit => write!(f, "16-bit samples widened from 8-bit"),
+            Compromise::Rasterised { node, reason, dpi } => {
+                write!(f, "object {} rasterised at {dpi} dpi: {reason}", node.0)
+            }
+            Compromise::Approximated { node, what } => {
+                write!(f, "object {} approximated: {what}", node.0)
+            }
+            Compromise::BlendModeApproximated { node, ours, theirs } => {
+                write!(f, "object {}: {ours:?} drawn as {theirs}", node.0)
+            }
         }
     }
 }
