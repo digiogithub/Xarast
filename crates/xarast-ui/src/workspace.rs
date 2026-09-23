@@ -48,6 +48,7 @@ pub struct Workspace {
     canvas: CanvasWidget,
     status: StatusBar,
     menu: AppMenu,
+    infobar: crate::toolbar::InfobarRow,
     side_width: f32,
 }
 
@@ -70,6 +71,7 @@ impl Workspace {
             canvas: CanvasWidget::new(),
             status: StatusBar::new(),
             menu: AppMenu::new(),
+            infobar: crate::toolbar::InfobarRow::new(),
             side_width: 280.0,
         }
     }
@@ -134,6 +136,13 @@ impl Workspace {
             self.menu.bar(ui, model, &mut out);
         });
 
+        // The context infobar of the tool in force, under the menu.
+        egui::TopBottomPanel::top("xarast_infobar")
+            .exact_height(crate::toolbar::INFOBAR_HEIGHT)
+            .show(ctx, |ui| {
+                self.infobar.ui(ui, model, &tokens, &mut out);
+            });
+
         egui::TopBottomPanel::bottom("xarast_status")
             .exact_height(crate::theme::STATUS_BAR_HEIGHT)
             .show(ctx, |ui| {
@@ -143,6 +152,14 @@ impl Workspace {
                     out: &mut out,
                 };
                 self.status.ui(ui, &mut pctx);
+            });
+
+        // The tool palette, docked on the left.
+        egui::SidePanel::left("xarast_tools")
+            .exact_width(crate::toolbar::PALETTE_WIDTH)
+            .resizable(false)
+            .show(ctx, |ui| {
+                crate::toolbar::ToolPalette::ui(ui, model, &tokens, &mut out);
             });
 
         egui::SidePanel::right("xarast_dock")

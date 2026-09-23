@@ -1,0 +1,388 @@
+//! The tool palette and the context infobar.
+//!
+//! The palette is a vertical strip docked on the left of the workspace, one
+//! button per tool in [`ToolId::ALL`] order. Choosing a tool raises the same
+//! [`AppCommand::Tool`] its key does, so the palette, the menu and the
+//! keyboard cannot disagree. Tools of later phases are shown greyed out,
+//! and the phase-7 tools that are not implemented yet are shown normally but
+//! say "coming soon" in their tooltip and in their infobar.
+//!
+//! The infobar is a row under the menu bar. The tool in force *describes*
+//! its bar ([`xarast_app::Infobar`]); this module draws it, formats lengths
+//! in the document's unit, parses what is typed (`10mm`, `1in`, `3p6`) and
+//! raises [`UiCommand::InfobarEdit`] with the value in millipoints.
+//!
+//! Every button is a real egui widget, reachable with `Tab`, and publishes
+//! its name, its toggled state and its shortcut to AccessKit — the icons are
+//! painted glyphs, which a screen reader cannot read.
+
+use std::collections::HashMap;
+
+use egui::{Color32, Pos2, Rect, Stroke, Vec2, pos2, vec2};
+use xarast_app::{AppCommand, InfobarField, InfobarItem, ToolId};
+
+use crate::model::{CommandSink, UiCommand, UiModel};
+use crate::theme::ThemeTokens;
+use crate::units::{Unit, format_measure, parse_measure};
+
+/// The side of a palette button, in logical points.
+pub const TOOL_BUTTON: f32 = 30.0;
+
+/// The width of the palette strip.
+pub const PALETTE_WIDTH: f32 = TOOL_BUTTON + 10.0;
+
+/// The height of the infobar row.
+pub const INFOBAR_HEIGHT: f32 = 28.0;
+
+/// The accessible name and tooltip of a tool's button: its name, its
+/// shortcut, and whether it works yet.
+#[must_use]
+pub fn tool_tooltip(tool: ToolId) -> String {
+    let key = AppCommand::Tool(tool)
+        .primary_shortcut()
+        .map(|k| format!(" ({k})"))
+        .unwrap_or_default();
+    match tool.planned_phase() {
+        None => format!("{}{key}", tool.label()),
+        Some(p) if tool.is_available() => {
+            format!("{}{key} — coming soon (phase {p})", tool.label())
+        }
+        Some(p) => format!("{} — not available yet (phase {p})", tool.label()),
+    }
+}
+
+/// The tool palette.
+#[derive(Debug, Default)]
+pub struct ToolPalette;
+
+impl ToolPalette {
+    /// Draws the palette into `ui` (the workspace's left panel).
+    pub fn ui(ui: &mut egui::Ui, model: &UiModel, tokens: &ThemeTokens, out: &mut CommandSink) {
+        let active = model.editing.as_ref().map(|e| e.tool);
+        let has_doc = model.document.is_some();
+        ui.add_space(4.0);
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+            for (i, tool) in ToolId::ALL.into_iter().enumerate() {
+                // A gap between the editing tools, the view tools and the
+                // tools of later phases.
+                if matches!(tool, ToolId::Zoom | ToolId::Fill) && i > 0 {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                }
+                let selected = active == Some(tool);
+                let enabled = has_doc && tool.is_available();
+                let (rect, response) = ui.allocate_exact_size(
+                    Vec2::splat(TOOL_BUTTON),
+                    if enabled {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::hover()
+                    },
+                );
+                let tip = tool_tooltip(tool);
+                let response = response.on_hover_text(&tip);
+                if ui.is_rect_visible(rect) {
+                    paint_button(ui, rect, &response, tool, selected, enabled, tokens);
+                }
+                publish(ui.ctx(), &response, tool, selected, enabled, &tip);
+                if enabled && response.clicked() && !selected {
+                    out.push(UiCommand::App(AppCommand::Tool(tool)));
+                }
+            }
+        });
+    }
+}
+
+/// Publishes one palette button to AccessKit: a toggle button named after
+/// the tool, pressed when it is the tool in force, with its shortcut.
+fn publish(
+    ctx: &egui::Context,
+    response: &egui::Response,
+    tool: ToolId,
+    selected: bool,
+    enabled: bool,
+    tip: &str,
+) {
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tool.label())
+    });
+    let shortcut = AppCommand::Tool(tool)
+        .primary_shortcut()
+        .map(|k| k.to_string());
+    let description = tip.to_owned();
+    ctx.accesskit_node_builder(response.id, |node| {
+        node.set_role(egui::accesskit::Role::Button);
+        node.set_label(tool.label());
+        node.set_description(description);
+        node.set_toggled(if selected {
+            egui::accesskit::Toggled::True
+        } else {
+            egui::accesskit::Toggled::False
+        });
+        if let Some(k) = shortcut {
+            node.set_keyboard_shortcut(k);
+        }
+        if !enabled {
+            node.set_disabled();
+        }
+    });
+}
+
+fn paint_button(
+    ui: &egui::Ui,
+    rect: Rect,
+    response: &egui::Response,
+    tool: ToolId,
+    selected: bool,
+    enabled: bool,
+    tokens: &ThemeTokens,
+) {
+    let painter = ui.painter();
+    let bg = if selected {
+        tokens.accent
+    } else if enabled && response.hovered() {
+        tokens.surface_raised
+    } else {
+        Color32::TRANSPARENT
+    };
+    painter.rect_filled(rect, 4.0, bg);
+    if response.has_focus() {
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            4.0,
+            Stroke::new(2.0_f32, tokens.focus),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let ink = if selected {
+        tokens.on_accent
+    } else if enabled {
+        tokens.text
+    } else {
+        tokens.text_muted.gamma_multiply(0.6)
+    };
+    let pending = enabled && !tool.is_implemented();
+    paint_icon(painter, rect.shrink(7.0), tool, ink);
+    if pending {
+        // A small dot in the corner: chosen, but not doing anything yet.
+        painter.circle_filled(rect.right_bottom() - vec2(5.0, 5.0), 2.0, tokens.text_muted);
+    }
+}
+
+/// The tool glyphs: simple strokes, drawn rather than shipped as images,
+/// and original to this project.
+fn paint_icon(p: &egui::Painter, r: Rect, tool: ToolId, ink: Color32) {
+    let s = Stroke::new(1.6_f32, ink);
+    let at = |x: f32, y: f32| pos2(r.left() + x * r.width(), r.top() + y * r.height());
+    match tool {
+        ToolId::Selector => {
+            p.add(egui::Shape::convex_polygon(
+                vec![at(0.2, 0.05), at(0.2, 0.8), at(0.42, 0.62), at(0.78, 0.6)],
+                ink,
+                Stroke::NONE,
+            ));
+            p.line_segment([at(0.42, 0.6), at(0.62, 0.95)], Stroke::new(2.6_f32, ink));
+        }
+        ToolId::ShapeEditor => {
+            let pts = [at(0.1, 0.85), at(0.3, 0.1), at(0.7, 0.9), at(0.9, 0.15)];
+            p.add(egui::Shape::CubicBezier(egui::epaint::CubicBezierShape {
+                points: pts,
+                closed: false,
+                fill: Color32::TRANSPARENT,
+                stroke: s.into(),
+            }));
+            for q in [pts[0], pts[3]] {
+                p.rect_filled(Rect::from_center_size(q, Vec2::splat(4.0)), 0.0, ink);
+            }
+        }
+        ToolId::Rectangle => {
+            p.rect_stroke(
+                Rect::from_min_max(at(0.08, 0.2), at(0.92, 0.8)),
+                0.0,
+                s,
+                egui::StrokeKind::Middle,
+            );
+        }
+        ToolId::Ellipse => {
+            p.add(egui::Shape::ellipse_stroke(
+                r.center(),
+                vec2(r.width() * 0.45, r.height() * 0.32),
+                s,
+            ));
+        }
+        ToolId::Pen => {
+            p.add(egui::Shape::closed_line(
+                vec![at(0.5, 0.05), at(0.8, 0.55), at(0.5, 0.95), at(0.2, 0.55)],
+                s,
+            ));
+            p.line_segment([at(0.5, 0.05), at(0.5, 0.6)], s);
+        }
+        ToolId::Freehand => {
+            let pts: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let t = i as f32 / 16.0;
+                    at(
+                        0.05 + 0.9 * t,
+                        0.5 + 0.3 * (t * std::f32::consts::TAU * 1.5).sin(),
+                    )
+                })
+                .collect();
+            p.add(egui::Shape::line(pts, s));
+        }
+        ToolId::Zoom => {
+            p.circle_stroke(at(0.42, 0.42), r.width() * 0.3, s);
+            p.line_segment([at(0.63, 0.63), at(0.95, 0.95)], Stroke::new(2.4_f32, ink));
+        }
+        ToolId::Pan => {
+            // Four arrows: move the view.
+            let c = r.center();
+            let h = r.width() * 0.45;
+            for d in [
+                vec2(1.0, 0.0),
+                vec2(-1.0, 0.0),
+                vec2(0.0, 1.0),
+                vec2(0.0, -1.0),
+            ] {
+                let tip = c + d * h;
+                p.line_segment([c, tip], s);
+                let n = vec2(-d.y, d.x) * 3.0;
+                p.line_segment([tip, tip - d * 4.0 + n], s);
+                p.line_segment([tip, tip - d * 4.0 - n], s);
+            }
+        }
+        ToolId::Fill => {
+            let steps = 6;
+            for i in 0..steps {
+                let t = i as f32 / steps as f32;
+                let cell = Rect::from_min_max(
+                    at(0.1 + 0.8 * t, 0.15),
+                    at(0.1 + 0.8 * (t + 1.0 / steps as f32), 0.85),
+                );
+                p.rect_filled(cell, 0.0, ink.gamma_multiply(1.0 - t * 0.85));
+            }
+        }
+        ToolId::Transparency => {
+            for i in 0..4 {
+                for j in 0..4 {
+                    if (i + j) % 2 == 0 {
+                        let x = 0.1 + 0.2 * i as f32;
+                        let y = 0.1 + 0.2 * j as f32;
+                        p.rect_filled(Rect::from_min_max(at(x, y), at(x + 0.2, y + 0.2)), 0.0, ink);
+                    }
+                }
+            }
+        }
+        ToolId::Text => {
+            p.line_segment([at(0.15, 0.15), at(0.85, 0.15)], Stroke::new(2.2_f32, ink));
+            p.line_segment([at(0.5, 0.15), at(0.5, 0.9)], Stroke::new(2.2_f32, ink));
+        }
+    }
+}
+
+/// The infobar row, and the text of whichever field is being edited.
+#[derive(Debug, Default)]
+pub struct InfobarRow {
+    /// Text being typed, per field, while that field has the keyboard.
+    editing: HashMap<InfobarField, String>,
+}
+
+impl InfobarRow {
+    /// A row with nothing being edited.
+    pub fn new() -> InfobarRow {
+        InfobarRow::default()
+    }
+
+    /// Draws the tool's infobar into `ui` (the workspace's second top
+    /// panel).
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        model: &UiModel,
+        tokens: &ThemeTokens,
+        out: &mut CommandSink,
+    ) {
+        let Some(editing) = model.editing.as_ref() else {
+            ui.label(egui::RichText::new("No document open").color(tokens.text_muted));
+            return;
+        };
+        let unit = model.document.as_ref().map_or(Unit::default(), |d| d.unit);
+        ui.horizontal_centered(|ui| {
+            ui.label(egui::RichText::new(editing.tool.label()).strong());
+            ui.separator();
+            for item in &editing.infobar.items {
+                match item {
+                    InfobarItem::Measure {
+                        field,
+                        value,
+                        editable,
+                    } => self.measure(ui, *field, *value, *editable, unit, out),
+                    InfobarItem::Note(text) => {
+                        ui.label(egui::RichText::new(text).color(tokens.text_muted));
+                    }
+                }
+            }
+        });
+    }
+
+    fn measure(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: InfobarField,
+        value: Option<xarast_geom::Mp>,
+        editable: bool,
+        unit: Unit,
+        out: &mut CommandSink,
+    ) {
+        ui.label(field.label());
+        let shown = value.map(|v| format_measure(v, unit)).unwrap_or_default();
+        let id = ui.make_persistent_id(("xarast_infobar", field));
+        let has_focus = ui.memory(|m| m.has_focus(id));
+        let text = self.editing.entry(field).or_insert_with(|| shown.clone());
+        if !has_focus {
+            // Not being typed into: always show the live value.
+            text.clone_from(&shown);
+        }
+        let response = ui.add_enabled(
+            editable && value.is_some(),
+            egui::TextEdit::singleline(text)
+                .id(id)
+                .desired_width(72.0)
+                .horizontal_align(egui::Align::RIGHT),
+        );
+        let description = field.description();
+        let label = match value {
+            Some(v) => format!("{description}: {}", format_measure(v, unit)),
+            None => description.to_owned(),
+        };
+        crate::a11y::set_label(ui.ctx(), response.id, label);
+        let commit = response.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if commit {
+            if let Ok(v) = parse_measure(text, unit)
+                && Some(v) != value
+            {
+                out.push(UiCommand::InfobarEdit { field, value: v });
+            }
+            text.clone_from(&shown);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltips_name_the_tool_its_key_and_its_state() {
+        assert_eq!(tool_tooltip(ToolId::Selector), "Selector (F2)");
+        assert_eq!(
+            tool_tooltip(ToolId::Rectangle),
+            "Rectangle (Shift+F3) — coming soon (phase 7)"
+        );
+        assert_eq!(
+            tool_tooltip(ToolId::Text),
+            "Text — not available yet (phase 9)"
+        );
+    }
+}

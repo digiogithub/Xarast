@@ -60,6 +60,7 @@ impl AppMenu {
                 ui.separator();
                 command_item(ui, model, AppCommand::Quit, out);
             });
+            ui.menu_button("Edit", |ui| edit_menu(ui, model, out));
             ui.menu_button("View", |ui| {
                 for c in [AppCommand::ZoomIn, AppCommand::ZoomOut] {
                     command_item(ui, model, c, out);
@@ -134,17 +135,78 @@ impl AppMenu {
 /// One menu item bound to a command: its label, its shortcut, greyed out
 /// when it needs a document and none is open.
 fn command_item(ui: &mut egui::Ui, model: &UiModel, command: AppCommand, out: &mut CommandSink) {
+    let enabled = model.document.is_some() || !command.needs_document();
+    labelled_item(ui, command, command.label(), enabled, out);
+}
+
+/// A menu item for a command with a label of its own ("Undo Move") and an
+/// explicit enabled state.
+fn labelled_item(
+    ui: &mut egui::Ui,
+    command: AppCommand,
+    label: &str,
+    enabled: bool,
+    out: &mut CommandSink,
+) {
     let shortcut = command.primary_shortcut().map(|k| k.to_string());
-    let mut button = egui::Button::new(command.label());
+    let mut button = egui::Button::new(label);
     if let Some(k) = &shortcut {
         button = button.shortcut_text(k.as_str());
     }
-    let enabled = model.document.is_some() || !command.needs_document();
     let response = ui.add_enabled(enabled, button);
-    menu_item_node(ui.ctx(), response.id, command.label(), shortcut);
+    menu_item_node(ui.ctx(), response.id, label, shortcut);
     if response.clicked() {
         out.push(UiCommand::App(command));
+        ui.close();
     }
+}
+
+/// "Undo Move", or plain "Undo" greyed out when there is nothing to undo.
+#[must_use]
+pub fn undo_menu_label(verb: &str, what: Option<&str>) -> String {
+    match what {
+        Some(w) => format!("{verb} {w}"),
+        None => verb.to_owned(),
+    }
+}
+
+/// Edit › Undo, Redo, Delete, Select all.
+fn edit_menu(ui: &mut egui::Ui, model: &UiModel, out: &mut CommandSink) {
+    let editing = model.editing.as_ref();
+    let undo = editing.and_then(|e| e.undo.as_deref());
+    let redo = editing.and_then(|e| e.redo.as_deref());
+    labelled_item(
+        ui,
+        AppCommand::Undo,
+        &undo_menu_label("Undo", undo),
+        undo.is_some(),
+        out,
+    );
+    labelled_item(
+        ui,
+        AppCommand::Redo,
+        &undo_menu_label("Redo", redo),
+        redo.is_some(),
+        out,
+    );
+    ui.separator();
+    let selected = editing.is_some_and(|e| e.selected > 0);
+    labelled_item(
+        ui,
+        AppCommand::Delete,
+        AppCommand::Delete.label(),
+        selected,
+        out,
+    );
+    ui.separator();
+    command_item(ui, model, AppCommand::SelectAll, out);
+    labelled_item(
+        ui,
+        AppCommand::Cancel,
+        AppCommand::Cancel.label(),
+        selected,
+        out,
+    );
 }
 
 /// Publishes a menu item as one: egui names a button after all of its

@@ -349,6 +349,25 @@ pub struct UiModel {
     /// The recently opened files, newest first, for File › Open Recent
     /// and the empty state.
     pub recent: Vec<std::path::PathBuf>,
+    /// The editing state the Edit menu, the tool palette and the infobar
+    /// show. `None` with no document open.
+    pub editing: Option<EditingView>,
+}
+
+/// What the editing chrome shows: the Edit menu's labels, the tool in force
+/// and its infobar.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EditingView {
+    /// The tool in force (the momentary one while its key is held).
+    pub tool: xarast_app::ToolId,
+    /// What Edit › Undo would undo ("Move"), if anything.
+    pub undo: Option<String>,
+    /// What Edit › Redo would redo, if anything.
+    pub redo: Option<String>,
+    /// How many objects are selected.
+    pub selected: usize,
+    /// The tool's infobar, described by the tool.
+    pub infobar: xarast_app::Infobar,
 }
 
 /// Something the interface wants the application to do.
@@ -446,6 +465,14 @@ pub enum UiCommand {
     OpenRecent(std::path::PathBuf),
     /// Forget the recent files.
     ClearRecent,
+    /// A value typed into a field of the tool's infobar, already parsed
+    /// into millipoints.
+    InfobarEdit {
+        /// Which field.
+        field: xarast_app::InfobarField,
+        /// The value.
+        value: Mp,
+    },
     /// The interface needs another frame soon, for example because a drag
     /// is in progress.
     RequestRedraw,

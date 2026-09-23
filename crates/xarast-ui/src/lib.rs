@@ -52,6 +52,7 @@ pub mod panels;
 pub mod rulers;
 pub mod scale;
 pub mod theme;
+pub mod toolbar;
 pub mod units;
 pub mod workspace;
 
@@ -62,13 +63,14 @@ pub use grid::GridSettings;
 pub use guides::{Axis, Guide};
 pub use menus::AppMenu;
 pub use model::{
-    CommandSink, DocumentView, LayerInfo, LayerKey, PaletteEntry, RenderQuality, StatusInfo,
-    UiCommand, UiModel, ViewTransform, ZoomTarget,
+    CommandSink, DocumentView, EditingView, LayerInfo, LayerKey, PaletteEntry, RenderQuality,
+    StatusInfo, UiCommand, UiModel, ViewTransform, ZoomTarget,
 };
 pub use overlay::{HandleKind, OverlayItem, OverlayPainter};
 pub use panel::{LayoutState, Panel, PanelCtx, PanelId, UiHost, UiOutput};
 pub use rulers::{Ruler, Tick};
 pub use scale::{DeviceRect, Scale};
 pub use theme::{ColorScheme, Theme, ThemeTokens};
+pub use toolbar::{InfobarRow, ToolPalette};
 pub use units::{Unit, format_measure, parse_measure};
 pub use workspace::{Workspace, WorkspaceOutput};
