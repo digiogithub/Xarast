@@ -1,23 +1,17 @@
 //! The colour panel: the colour editor and the on-screen colour line.
 //!
-//! Two things in one panel, as `research/04 §1.5` and `§2.2` describe them:
+//! The **colour editor** (phase 8, W8.6), as `research/04 §1.5` describes
+//! it: what it edits — the selection's fill or line (the fill tool's
+//! selected stop, when it has one), or a named colour — a 2D field with a
+//! slider, numeric entry of every component, the colour's derivation when
+//! it is a named colour, and the two explicit actions "Redefine" and "Apply
+//! to the selection". It draws
+//! [`xarast_app::colour_editor::ColourEditorView`] and answers with
+//! [`UiCommand::ColourEditor`]; the model, the live/committed split and the
+//! undo steps are `xarast-app`'s.
 //!
-//! * the **colour editor** (phase 8, W8.6): what it edits — the
-//!   selection's fill or line, or a named colour — a 2D field with a
-//!   slider, numeric entry of every component, the colour's derivation
-//!   when it is a named colour, and the two explicit actions "Redefine"
-//!   and "Apply to the selection". It draws
-//!   [`xarast_app::colour_editor::ColourEditorView`] and answers with
-//!   [`UiCommand::ColourEditor`]; the model, the live/committed split and
-//!   the undo steps are `xarast-app`'s;
-//! * the **colour line**, a scrolling strip of swatches, where a click sets
-//!   the fill and a right-click the line colour, and where the first entry
-//!   is "no colour" — which removes the attribute rather than painting
-//!   white.
-//!
-//! Named document colours are marked: editing one changes every object
-//! that uses it, which is the differentiator `research/04 §3` item 10 calls
-//! out, and a user needs to be told which colours behave that way.
+//! The colour line that used to sit under the editor is now the colour bar
+//! below the canvas ([`crate::colour_bar`], W8.7).
 
 use xarast_app::colour_editor::{
     ColourChange, ColourEditorOp, ColourEditorView, ColourTarget, Derivation, NamedColour,
@@ -180,22 +174,17 @@ impl Panel for ColourPanel {
 
     fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut PanelCtx<'_>) {
         let view = ctx.model.colour_editor.clone();
-        let editing_line = match &view {
+        match &view {
             Some(v) => {
                 egui::ScrollArea::vertical()
                     .id_salt("xarast_colour_editor")
-                    .max_height(ui.available_height() - SWATCH_SIZE * 2.0)
                     .auto_shrink([false, true])
                     .show(ui, |ui| self.editor(ui, v, ctx));
-                v.target == ColourTarget::Selection(PaintSlot::Stroke)
             }
             None => {
                 ui.label("Open a document to edit its colours.");
-                false
             }
-        };
-        ui.separator();
-        colour_line(ui, ctx, editing_line);
+        }
     }
 }
 
@@ -700,68 +689,6 @@ fn preview_row(ui: &mut egui::Ui, v: &ColourEditorView) {
         a11y::set_label(ui.ctx(), r.id, format!("Colour preview {hex}"));
         ui.label(hex);
     });
-}
-
-/// The on-screen colour line: a scrolling strip of swatches.
-///
-/// Click sets the fill, right-click (or a click with the line tab active)
-/// sets the line colour. Every swatch is a focusable widget with a name, so
-/// the palette is reachable with `Tab` and `Enter`.
-pub fn colour_line(ui: &mut egui::Ui, ctx: &mut PanelCtx<'_>, editing_line: bool) {
-    egui::ScrollArea::horizontal()
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                for entry in &ctx.model.palette {
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::vec2(SWATCH_SIZE, SWATCH_SIZE),
-                        egui::Sense::click(),
-                    );
-                    let label = a11y::swatch_label(&entry.name, entry.named);
-                    response.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.clone())
-                    });
-                    match swatch_colour(entry) {
-                        Some(colour) => {
-                            ui.painter().rect_filled(rect, 1.0, colour);
-                        }
-                        None => {
-                            // "No colour": hollow, with a diagonal.
-                            ui.painter().rect_stroke(
-                                rect,
-                                1.0,
-                                egui::Stroke::new(1.0_f32, ctx.tokens.border),
-                                egui::StrokeKind::Inside,
-                            );
-                            ui.painter().line_segment(
-                                [rect.left_bottom(), rect.right_top()],
-                                egui::Stroke::new(1.0_f32, ctx.tokens.error),
-                            );
-                        }
-                    }
-                    if entry.named {
-                        ui.painter().rect_stroke(
-                            rect,
-                            1.0,
-                            egui::Stroke::new(1.0_f32, ctx.tokens.accent),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                    let response = response.on_hover_text(&entry.name);
-                    if response.clicked() {
-                        ctx.out.push(if editing_line {
-                            UiCommand::SetLine(entry.colour)
-                        } else {
-                            UiCommand::SetFill(entry.colour)
-                        });
-                    }
-                    if response.secondary_clicked() {
-                        ctx.out.push(UiCommand::SetLine(entry.colour));
-                    }
-                }
-            });
-        });
 }
 
 #[cfg(test)]

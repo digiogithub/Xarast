@@ -15,7 +15,7 @@
 //!
 //! The layout is fixed in shape and free in arrangement: the menu bar at
 //! the top, rulers and canvas in the centre, docked panels on the right, the
-//! status bar at the foot. With no document the canvas area holds the empty
+//! colour bar under the canvas and the status bar at the foot. With no document the canvas area holds the empty
 //! state (an "Open…" button and the recent files) instead.
 //! The canvas is deliberately not a dockable pane — it shares the surface
 //! with the shell's own passes, and a pane can be dragged into a tab
@@ -26,7 +26,7 @@ use crate::menus::AppMenu;
 use crate::model::{CommandSink, DocumentView, UiCommand, UiModel};
 use crate::overlay::OverlayItem;
 use crate::panel::{LayoutState, Panel, PanelCtx, PanelId, UiHost};
-use crate::panels::{ColourPanel, LayerPanel, StatusBar};
+use crate::panels::{ColourGallery, ColourPanel, LayerPanel, StatusBar};
 use crate::scale::Scale;
 use crate::theme::{self, ResolvedTheme, ThemeTokens};
 
@@ -47,6 +47,7 @@ pub struct Workspace {
     host: UiHost,
     canvas: CanvasWidget,
     status: StatusBar,
+    colour_bar: crate::colour_bar::ColourBar,
     menu: AppMenu,
     infobar: crate::toolbar::InfobarRow,
     side_width: f32,
@@ -65,11 +66,17 @@ impl Workspace {
         let mut host = UiHost::new();
         host.register(Box::new(LayerPanel::new()));
         host.register(Box::new(ColourPanel::new()));
-        host.set_default_layout(&[crate::panels::layers::ID, crate::panels::colour::ID]);
+        host.register(Box::new(ColourGallery::new()));
+        host.set_default_layout(&[
+            crate::panels::layers::ID,
+            crate::panels::colour::ID,
+            crate::panels::gallery::ID,
+        ]);
         Workspace {
             host,
             canvas: CanvasWidget::new(),
             status: StatusBar::new(),
+            colour_bar: crate::colour_bar::ColourBar::new(),
             menu: AppMenu::new(),
             infobar: crate::toolbar::InfobarRow::new(),
             side_width: 280.0,
@@ -153,6 +160,21 @@ impl Workspace {
                 };
                 self.status.ui(ui, &mut pctx);
             });
+
+        // The colour bar, above the status bar and below the canvas
+        // (phase 8, W8.7). With no document there is nothing to colour.
+        if model.document.is_some() {
+            egui::TopBottomPanel::bottom("xarast_colour_bar")
+                .exact_height(crate::colour_bar::COLOUR_BAR_HEIGHT)
+                .show(ctx, |ui| {
+                    let mut pctx = PanelCtx {
+                        model,
+                        tokens: &tokens,
+                        out: &mut out,
+                    };
+                    self.colour_bar.ui(ui, &mut pctx);
+                });
+        }
 
         // The tool palette, docked on the left.
         egui::SidePanel::left("xarast_tools")
