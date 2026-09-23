@@ -235,6 +235,10 @@ pub fn apply(ctx: &egui::Context, theme: ResolvedTheme) {
     s.scroll.bar_width = 8.0;
     s.scroll.floating = false;
 
+    // Scale from egui's defaults, never from the current style: this runs
+    // every frame, and scaling the live sizes would shrink the text by 8 %
+    // per frame until it settled at a few points.
+    style.text_styles = egui::Style::default().text_styles;
     for font in style.text_styles.values_mut() {
         font.size = (font.size * 0.92).round();
     }
@@ -361,6 +365,19 @@ mod tests {
         // with `widgets.active`.
         assert_eq!(style.visuals.widgets.active.bg_stroke.color, DARK.focus);
         assert!(style.visuals.widgets.active.bg_stroke.width >= 2.0);
+    }
+
+    #[test]
+    fn applying_every_frame_does_not_shrink_the_text() {
+        let ctx = egui::Context::default();
+        apply(&ctx, ResolvedTheme::Dark);
+        let first = ctx.style().text_styles.clone();
+        for _ in 0..30 {
+            apply(&ctx, ResolvedTheme::Dark);
+        }
+        assert_eq!(ctx.style().text_styles, first);
+        let body = first[&egui::TextStyle::Body].size;
+        assert!(body >= 11.0, "body text is {body} pt");
     }
 
     #[test]
