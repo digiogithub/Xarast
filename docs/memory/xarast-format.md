@@ -41,16 +41,23 @@ W3 can produce `document.svg`.
 ## Decisions taken (and why)
 
 - **`zip` 8.6** (current stable major; 9.0 is pre-release), `MIT`, **every
-  default feature off**, only `deflate-flate2-zlib-rs`. No AES/bzip2/lzma/xz/
-  ppmd/deflate64 in the reader's attack surface; `zopfli` is too slow for an
-  interactive save. The DEFLATE backend is **pinned by name to `zlib-rs`**
-  rather than left to feature unification (flate2 was already unified to
-  zlib-rs in this graph); the lock file pins its version, so a given lock
-  file always produces the same bytes. `quick-xml` **0.41** (already in the
-  graph, `MIT`), `blake3` 1.8 (`CC0-1.0 OR Apache-2.0`). No `fs4`, no
-  `tempfile` at runtime, no date crate: `std::fs::File::try_lock` (stable
-  1.89) gives `flock`, the temporary name is built by hand, and the two date
-  conversions are the days-to-civil algorithm in `time.rs`.
+  default feature off**, only `deflate-flate2`. No AES/bzip2/lzma/xz/ppmd/
+  deflate64 in the reader's attack surface; `zopfli` is too slow for an
+  interactive save. `quick-xml` **0.41** (already in the graph, `MIT`),
+  `blake3` 1.8 (`CC0-1.0 OR Apache-2.0`). No `fs4`, no `tempfile` at
+  runtime, no date crate: `std::fs::File::try_lock` (stable 1.89) gives
+  `flock`, the temporary name is built by hand, and the two date conversions
+  are the days-to-civil algorithm in `time.rs`.
+- **DEFLATE backend: `miniz_oxide`, the workspace's only one.** The phase
+  plan said "pin to `zlib-rs`"; that was tried and reverted. flate2 selects
+  one backend per *build*, so enabling `zlib-rs` through `zip` switched the
+  `.xar` reader too, and `xarast-xar/tests/fuzz_seeds.rs` failed in
+  `cargo test --workspace` (a committed seed is compressed bytes) while
+  passing with `-p xarast-xar`. The same mechanism would make a
+  deterministic `.xarast` differ between binaries. One backend everywhere,
+  pinned by the lock file, guarded by
+  `tests/container.rs::deterministic_bytes_are_pinned`. Cost: 273 ms vs
+  92 ms per 20 MB save (XARA-T-0090 tracks switching everyone to `zlib-rs`).
 - **Zstandard is not compiled in.** The `compact` profile is v1.0 scope;
   a zstd entry opens (listed, diagnosed `UnsupportedMethod`, raw-copyable on
   save) but cannot be decoded. `WriteOptions::profile = Compact` is refused.
@@ -128,9 +135,9 @@ W3 can produce `document.svg`.
 - `open` never reads `document.svg`
   (`tests/container.rs::open_does_not_parse_the_document`).
 - Deterministic save: DOS 1980-01-01, `0o644`, system `Unix`, canonical
-  order and manifest. An unchanged re-save through `from_package` +
-  `carry_from` + raw copies is **byte-identical**
-  (`resave_from_the_package_is_a_fixed_point`).
+  order and manifest, one DEFLATE backend (the golden digest test). An
+  unchanged re-save through `from_package` + `carry_from` + raw copies is
+  **byte-identical** (`resave_from_the_package_is_a_fixed_point`).
 - Preserved entries are raw-copied (same compressed bytes, same method,
   same CRC) — never recompressed.
 - No `unsafe` (`#![forbid(unsafe_code)]`); parser modules deny indexing,
@@ -175,6 +182,8 @@ the file means", not crashes; each input is now a unit test in
 - `NsReader` for the manifest (cannot enumerate in-scope bindings).
 - Completing foreign fragments with *every* in-scope binding (not a fixed
   point on re-save).
+- Selecting a DEFLATE backend through `zip`'s `deflate-flate2-zlib-rs`
+  feature (changes every crate's backend; see Decisions).
 - Comparing lock-file text to decide ownership on release.
 
 ## Open TODOs
