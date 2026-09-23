@@ -2,12 +2,12 @@
 id: XARA-US-0059
 type: story
 title: W11.4 — PDF export
-status: in_progress
+status: in_review
 parent: XARA-EP-0012
 author: mcp
 labels: [phase-11, io, pdf]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T20:52:45Z
+updated: 2026-09-23T21:41:29Z
 started: 2026-09-23T20:52:45Z
 ---
 
