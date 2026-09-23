@@ -386,6 +386,17 @@ fn fixture() -> Document {
         payload: Arc::from(&b"\x00\x01binary"[..]),
     })))
     .unwrap();
+    // …keeping the objects of its own subtree (XARA-T-0108).
+    b.push_scope().unwrap();
+    b.node(triangle(450_000, 450_000)).unwrap();
+    b.push_scope().unwrap();
+    b.attribute(flat(rgb(0.2, 0.4, 0.6))).unwrap();
+    b.pop_scope();
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(triangle(470_000, 470_000)).unwrap();
+    b.pop_scope();
+    b.pop_scope();
     // A guide layer with a guideline in a palette colour.
     b.pop_scope();
     b.node(NodeKind::Layer(Box::new(LayerNode {
@@ -481,11 +492,38 @@ fn the_fixture_reads_back_to_the_same_normal_form_and_bytes() {
 }
 
 #[test]
-fn key_stops_finer_than_8_bits_settle_on_the_second_re_save() {
+fn an_opaque_node_keeps_its_subtree_where_a_browser_does_not_draw_it() {
+    let doc = fixture();
+    let svg = svg_of(&package(&doc, SvgOptions::default()));
+    let start = svg.find("<xarast:opaque").expect("written");
+    let end = svg[start..].find("</xarast:opaque>").expect("closed") + start;
+    let inside = &svg[start..end];
+    // The payload first, then the subtree: two paths, one in a group.
+    assert!(inside.contains(">AAFiaW5hcnk=\n"), "{inside}");
+    assert_eq!(inside.matches("<path").count(), 2, "{inside}");
+    assert!(inside.contains("<g "), "{inside}");
+    let o = open(&package(&doc, SvgOptions::default()));
+    let opaque = o
+        .document
+        .tree
+        .preorder(o.document.tree.root())
+        .find(|n| matches!(o.document.tree.kind(*n), Some(NodeKind::Opaque(_))))
+        .expect("read");
+    let under = o
+        .document
+        .tree
+        .preorder(opaque)
+        .filter(|n| !matches!(o.document.tree.kind(*n), Some(NodeKind::Attr(_))))
+        .count();
+    // The opaque node, two paths and the group.
+    assert_eq!(under, 4);
+}
+
+#[test]
+fn key_stops_finer_than_8_bits_are_a_fixed_point_from_the_first_re_save() {
     // A profiled ramp's key stops are written as 8-bit sRGB; the baked
-    // stops sampled from them on the first reload may move by one level.
-    // The normal form does not see it (baked stops are derived) and the
-    // second re-save is a fixed point.
+    // stops are sampled from the key as written (XARA-T-0110), so the
+    // reload re-derives the same bytes.
     let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
     b.node(triangle(50_000, 50_000)).unwrap();
     b.push_scope().unwrap();

@@ -751,13 +751,38 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 let mut el = El::new("xarast:opaque");
                 el.a("xarast:tag", o.tag.to_string());
                 el.a("xarast:encoding", "base64");
-                self.open(Some(n), el);
+                let has_kids = self
+                    .doc
+                    .tree
+                    .children(n)
+                    .any(|c| !matches!(self.doc.tree.kind(c), Some(NodeKind::Attr(_)) | None));
+                if !has_kids {
+                    self.open(Some(n), el);
+                    self.body.push('>');
+                    self.body.push_str(&base64(&o.payload));
+                    let mut next = 0usize;
+                    self.fragments(n, &mut next, None);
+                    self.body.push_str("</xarast:opaque>");
+                    self.newline();
+                    return;
+                }
+                // The record's own subtree (the `.xar` importer keeps an
+                // unknown record's children under it): its elements go
+                // inside, after the payload. `<xarast:opaque>` is not an
+                // SVG element, so a browser draws none of them — exactly
+                // as the renderer skips the subtree — and it blocks passes
+                // 4–5 like a nested `<svg>`.
+                self.open_container(Some(n), el);
                 self.body.push('>');
                 self.body.push_str(&base64(&o.payload));
-                let mut next = 0usize;
-                self.fragments(n, &mut next, None);
-                self.body.push_str("</xarast:opaque>");
                 self.newline();
+                self.depth += 1;
+                self.attrs.push_scope();
+                self.children(n, None);
+                self.attrs.pop_scope();
+                self.depth -= 1;
+                self.close_group();
+                self.close("xarast:opaque");
             }
         }
     }

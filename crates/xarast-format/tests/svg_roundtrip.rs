@@ -60,27 +60,6 @@ fn opts(svg: SvgOptions) -> SaveOptions {
     }
 }
 
-/// A normal form with every line nested under an `opaque` node removed.
-fn without_opaque_subtrees(nf: &str) -> String {
-    let indent = |l: &str| l.len() - l.trim_start().len();
-    let mut out = String::new();
-    let mut skip_deeper: Option<usize> = None;
-    for l in nf.lines() {
-        if let Some(d) = skip_deeper {
-            if indent(l) > d {
-                continue;
-            }
-            skip_deeper = None;
-        }
-        if l.trim_start().split(' ').nth(1) == Some("opaque") {
-            skip_deeper = Some(indent(l));
-        }
-        out.push_str(l);
-        out.push('\n');
-    }
-    out
-}
-
 fn first_difference(a: &str, b: &str) -> String {
     for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
         if x != y {
@@ -90,23 +69,6 @@ fn first_difference(a: &str, b: &str) -> String {
     format!("{} vs {} lines", a.lines().count(), b.lines().count())
 }
 
-/// Files whose `.xar` import keeps objects under an unknown record (an
-/// `Opaque` node with children) that the writer does not emit yet, so the
-/// reload has fewer objects (XARA-T-0108). Exactly these differ on the
-/// normal form; everything else in them round-trips. Fixing the writer
-/// empties this list, and the test then demands it.
-const KNOWN_OPAQUE_LOSS: &[&str] = &[
-    "testfiles/ProbeX16.xar",
-    "testfiles/testimp1.xar",
-    "Designs/BLUECAR.xar",
-    "Designs/TextCurve.xar",
-    "Designs/WATCH.xar",
-    "Designs/WATCH2.xar",
-    "Designs/Watch4.xar",
-    "Designs/leafgirl.xar",
-    "Designs/scope3 simple.xar",
-];
-
 #[test]
 fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_point() {
     let Some((root, files)) = corpus() else {
@@ -114,7 +76,6 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
     };
     let mut identical_first = 0usize;
     let mut settled_second = Vec::new();
-    let mut nf_differs: Vec<String> = Vec::new();
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let (doc, _) = xarast_xar::import(&bytes, &xarast_xar::ImportOptions::default())
@@ -134,21 +95,11 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         assert!(warnings.is_empty(), "{rel}: {warnings:?}");
         assert!(opened.preservation.intact(), "{rel}");
         let got = normal_form(&opened.document);
-        if nf != got {
-            assert!(
-                KNOWN_OPAQUE_LOSS.contains(&rel.as_str()),
-                "{rel}: normal form differs at {}",
-                first_difference(&nf, &got)
-            );
-            // Everything but the lost subtrees round-trips.
-            let (a, b) = (without_opaque_subtrees(&nf), without_opaque_subtrees(&got));
-            assert!(
-                a == b,
-                "{rel}: differs beyond XARA-T-0108 at {}",
-                first_difference(&a, &b)
-            );
-            nf_differs.push(rel.clone());
-        }
+        assert!(
+            nf == got,
+            "{rel}: normal form differs at {}",
+            first_difference(&nf, &got)
+        );
 
         // Passes 4–5 off: the same model.
         let mut plain = Cursor::new(Vec::new());
@@ -199,10 +150,6 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
     }
     eprintln!(
         "{identical_first}/59 identical on the first re-save; settled on the second: {settled_second:?}"
-    );
-    assert_eq!(
-        nf_differs, KNOWN_OPAQUE_LOSS,
-        "the files that lose Opaque subtrees changed: update KNOWN_OPAQUE_LOSS (XARA-T-0108)"
     );
     // Known today: four files whose profiled or approximated fills are
     // re-sampled from 8-bit key stops (Fill Types simple, Spitfire, WATCH2,
