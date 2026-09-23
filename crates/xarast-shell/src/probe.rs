@@ -1,5 +1,5 @@
 //! Scripted pan, zoom and editing latency probes
-//! (`xarast --probe pan|zoom|drag|scale|rotate|rect|ellipse`).
+//! (`xarast --probe pan|zoom|drag|scale|rotate|rect|ellipse|nodes|pen|freehand`).
 //!
 //! The probe drives the real viewer with intents it generates itself, one
 //! per frame, never with input injected into the desktop: the maintainer's
@@ -43,6 +43,16 @@ pub enum ProbeKind {
     Rect,
     /// The ellipse tool, likewise.
     Ellipse,
+    /// The shape editor: select the path nearest the canvas centre, then
+    /// drag its node nearest the centre. Every frame previews the path's
+    /// new outline; the release commits one "Move Points".
+    Nodes,
+    /// The pen: click a start point, then drag out a smooth second point.
+    /// The release commits one "Create Path".
+    Pen,
+    /// The freehand tool: one long stroke. The release fits it and
+    /// commits one "Draw Freehand".
+    Freehand,
 }
 
 impl ProbeKind {
@@ -57,6 +67,9 @@ impl ProbeKind {
             "rotate" => Some(ProbeKind::Rotate),
             "rect" => Some(ProbeKind::Rect),
             "ellipse" => Some(ProbeKind::Ellipse),
+            "nodes" => Some(ProbeKind::Nodes),
+            "pen" => Some(ProbeKind::Pen),
+            "freehand" => Some(ProbeKind::Freehand),
             _ => None,
         }
     }
@@ -70,6 +83,9 @@ impl ProbeKind {
             ProbeKind::Rotate => "rotate",
             ProbeKind::Rect => "rect",
             ProbeKind::Ellipse => "ellipse",
+            ProbeKind::Nodes => "nodes",
+            ProbeKind::Pen => "pen",
+            ProbeKind::Freehand => "freehand",
         }
     }
 
@@ -196,7 +212,10 @@ impl Probe {
             | ProbeKind::Scale
             | ProbeKind::Rotate
             | ProbeKind::Rect
-            | ProbeKind::Ellipse => {
+            | ProbeKind::Ellipse
+            | ProbeKind::Nodes
+            | ProbeKind::Pen
+            | ProbeKind::Freehand => {
                 if let Some(intent) = self.prelude.pop_front() {
                     return intent;
                 }
