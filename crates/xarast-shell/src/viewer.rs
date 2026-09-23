@@ -11,7 +11,7 @@
 //!  egui frame ──► Workspace::ui ──► UiCommand ─┘            needs_scene: rebuild_scene
 //!        │                                                   needs_redraw: frame_job
 //!        ▼                                                                    │
-//!  UiFrame ──► ShellCtx::show_ui           RenderThread::submit ◄─────────────┘
+//!  UiFrame ──► ShellCtx::show_ui     Canvas::pump (Draft/Final) ◄─────────────┘
 //!                                                  │ (render thread, CPU backend)
 //!  CanvasFrame ──► ShellCtx::show_canvas ◄─ take_latest ◄─ waker ◄─┘
 //! ```
@@ -31,9 +31,10 @@
 //! * view keys do nothing while a text field has the keyboard.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use xarast_app::{AppState, Changed, Intent, RenderThread, Session};
+use xarast_app::schedule::{Backdrop, Canvas};
+use xarast_app::{AppState, Changed, Intent, Session};
 use xarast_ui::model::{
     DocumentView, LayerInfo, LayerKey, StatusInfo, UiCommand, UiModel, ViewTransform,
 };
@@ -61,7 +62,10 @@ pub struct Viewer {
     adapter: IntentAdapter,
     egui: egui::Context,
     workspace: Workspace,
-    render: Option<RenderThread>,
+    /// The render thread behind the Draft → Final scheduler.
+    render: Option<Canvas>,
+    /// When the owed Final frame is due, if one is.
+    final_due: Option<Instant>,
     /// Files to open at the next frame, from the command line or a drop.
     to_open: Vec<PathBuf>,
     /// The canvas has not been primed with a size and scale yet.
@@ -125,6 +129,7 @@ impl Viewer {
             egui: egui::Context::default(),
             workspace: Workspace::new(),
             render: None,
+            final_due: None,
             to_open: files,
             primed: false,
             fit_pending: false,
@@ -201,6 +206,9 @@ impl Viewer {
         }
         self.scene_stale |= changed.needs_scene();
         self.render_stale |= changed.needs_redraw();
+        if let Some(canvas) = self.render.as_mut() {
+            canvas.note(Instant::now(), changed);
+        }
         changed
     }
 
@@ -409,8 +417,12 @@ impl Viewer {
     fn submit_render(&mut self, ctx: &ShellCtx<'_>) {
         if self.render.is_none() {
             let waker = ctx.waker();
-            match RenderThread::spawn(Box::new(move || waker.wake())) {
-                Ok(rt) => self.render = Some(rt),
+            let backdrop = Backdrop {
+                pasteboard: PASTEBOARD,
+                page: PAGE,
+            };
+            match Canvas::spawn(Box::new(move || waker.wake()), backdrop) {
+                Ok(canvas) => self.render = Some(canvas),
                 Err(e) => {
                     self.message = Some(format!("Could not start the render thread: {e}"));
                     return;
@@ -420,20 +432,22 @@ impl Viewer {
         let Some(session) = self.app.active_mut() else {
             return;
         };
-        if self.scene_stale {
-            if let Err(e) = session.rebuild_scene(None) {
+        let Some(canvas) = self.render.as_mut() else {
+            return;
+        };
+        if self.render_stale || self.scene_stale {
+            canvas.invalidate();
+        }
+        // The canvas rebuilds the scene when the session says it is stale,
+        // and decides between a Draft now and a Final after 120 ms idle.
+        match canvas.pump(Instant::now(), session) {
+            Ok(due) => self.final_due = due,
+            Err(e) => {
                 self.message = Some(e.to_string());
                 return;
             }
-            self.scene_stale = false;
         }
-        if !self.render_stale || session.viewport.size().is_empty() {
-            return;
-        }
-        let job = session.frame_job(PASTEBOARD, PAGE);
-        if let Some(rt) = self.render.as_mut() {
-            rt.submit(job);
-        }
+        self.scene_stale = false;
         self.render_stale = false;
     }
 }
@@ -682,8 +696,8 @@ impl ShellApp for Viewer {
 
         self.submit_render(ctx);
 
-        if let Some(rt) = &self.render
-            && let Some(frame) = rt.take_latest()
+        if let Some(canvas) = self.render.as_mut()
+            && let Some(frame) = canvas.take_latest()
         {
             let active = self.app.active().map(|s| s.id);
             if Some(frame.doc) == active && frame.generation > self.shown {
@@ -694,13 +708,16 @@ impl ShellApp for Viewer {
                 tracing::debug!(
                     generation = frame.generation,
                     total_us = frame.timings.total_us(),
+                    quality = ?frame.view.quality,
+                    reuse = ?frame.reuse,
                     "canvas frame"
                 );
                 let c = self.adapter.canvas();
                 let settled = frame.view.viewport.width() == c.width
                     && frame.view.viewport.height() == c.height
+                    && frame.exact
                     && !self.render_stale
-                    && !rt.has_pending();
+                    && canvas.is_settled();
                 ctx.show_canvas(CanvasFrame {
                     origin: (c.x, c.y),
                     surface: frame.surface,
@@ -719,6 +736,14 @@ impl ShellApp for Viewer {
             ctx.capture(path, true);
         }
 
+        // Wake for the owed Final even when nothing else is animating.
+        let due = self
+            .final_due
+            .map(|t| t.saturating_duration_since(Instant::now()));
+        let repaint = match (repaint, due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         match repaint {
             Some(d) if d.is_zero() => FrameRequest::Redraw,
             Some(d) if d < Duration::from_secs(3600) => FrameRequest::RedrawAfter(d),
@@ -728,8 +753,8 @@ impl ShellApp for Viewer {
     }
 
     fn on_exit(&mut self, _ctx: &mut ShellCtx<'_>) {
-        if let Some(mut rt) = self.render.take() {
-            rt.shutdown();
+        if let Some(mut canvas) = self.render.take() {
+            canvas.shutdown();
         }
     }
 }

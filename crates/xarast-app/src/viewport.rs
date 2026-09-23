@@ -299,10 +299,10 @@ impl Viewport {
         match target {
             ZoomTarget::Page => self.fit_rect(page_rect(doc)),
             ZoomTarget::Spread => self.fit_rect(spread_rect(doc)),
-            ZoomTarget::Drawing => self.fit_rect(drawing_rect(doc)),
+            ZoomTarget::Drawing => self.fit_rect(drawing_or_page_rect(doc)),
             ZoomTarget::Selection => {
                 if selection.is_empty() {
-                    self.fit_rect(drawing_rect(doc));
+                    self.fit_rect(drawing_or_page_rect(doc));
                 } else {
                     self.fit_rect(selection);
                 }
@@ -426,13 +426,46 @@ pub fn spread_rect(doc: &xarast_doc::Document) -> DocRect {
     }
 }
 
-/// The bounding box of everything drawn, computed from the bounds cache
-/// where it is warm and from the geometry where it is not.
+/// The bounding box of the drawing: what the active spread's visible,
+/// non-guide layers hold. **Page nodes are not part of it**, so a small
+/// drawing on an A4 page frames the drawing, not the page.
 ///
-/// Read-only: it never touches the cache, because the walker must not
-/// mutate the document (architecture §4).
+/// Empty when nothing is drawn; a drawing of quick shapes with no cached
+/// path can also have zero area. Callers that frame it fall back to
+/// [`page_rect`] in both cases.
+///
+/// Computed from the bounds cache where it is warm and from the geometry
+/// where it is not. Read-only: it never touches the cache, because the
+/// walker must not mutate the document (architecture §4).
 #[must_use]
 pub fn drawing_rect(doc: &xarast_doc::Document) -> DocRect {
+    let tree = &doc.tree;
+    let content = tree
+        .children(doc.active_spread())
+        .filter(|&id| {
+            matches!(tree.kind(id), Some(xarast_doc::NodeKind::Layer(l)) if l.visible && !l.guide)
+        })
+        .flat_map(|layer| tree.children(layer));
+    nodes_rect(doc, content)
+}
+
+/// The drawing, or the page when the drawing is empty or has no area:
+/// what "fit the drawing" frames.
+#[must_use]
+pub fn drawing_or_page_rect(doc: &xarast_doc::Document) -> DocRect {
+    let d = drawing_rect(doc);
+    if d.is_empty() || d.width() <= Mp::ZERO || d.height() <= Mp::ZERO {
+        page_rect(doc)
+    } else {
+        d
+    }
+}
+
+/// The bounds of the whole tree, pages included: a superset of anything
+/// any walk can draw, which is what culling needs. Not the drawing — see
+/// [`drawing_rect`].
+#[must_use]
+pub fn content_rect(doc: &xarast_doc::Document) -> DocRect {
     let root = doc.tree.root();
     match doc.tree.bounds(root).get() {
         Some(r) if !r.is_empty() => r,

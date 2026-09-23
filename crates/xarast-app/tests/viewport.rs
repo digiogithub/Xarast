@@ -159,3 +159,69 @@ fn a_zero_sized_viewport_does_not_divide_by_zero() {
     assert!(vp.scale().is_finite());
     assert!(vp.visible_doc_rect().is_empty() || vp.visible_doc_rect().width() == Mp::ZERO);
 }
+
+fn small_drawing() -> Document {
+    xarast_doc::synthetic_document(xarast_doc::SynthSpec {
+        nodes: 400,
+        ..xarast_doc::SynthSpec::default()
+    })
+}
+
+#[test]
+fn the_drawing_rect_leaves_the_pages_out() {
+    use xarast_app::viewport::{content_rect, drawing_or_page_rect, drawing_rect, page_rect};
+    let doc = small_drawing();
+    let (drawing, page) = (drawing_rect(&doc), page_rect(&doc));
+    assert!(!drawing.is_empty());
+    assert!(
+        page.contains_rect(drawing) && drawing != page,
+        "{drawing:?} is the ink, strictly inside the page {page:?}"
+    );
+    assert_eq!(drawing_or_page_rect(&doc), drawing);
+    // The superset culling uses does include the page.
+    assert!(content_rect(&doc).contains_rect(page.union(drawing)));
+
+    // Nothing drawn: the drawing is empty and fitting it frames the page.
+    let empty = Document::new_empty();
+    assert!(drawing_rect(&empty).is_empty());
+    assert_eq!(drawing_or_page_rect(&empty), page_rect(&empty));
+}
+
+#[test]
+fn headless_takes_a_fixed_zoom_and_dpi_and_reports_the_walk() {
+    use xarast_app::viewport::drawing_rect;
+    use xarast_app::{DocumentId, HeadlessFrame, HeadlessOptions, Session, headless};
+    let doc = small_drawing();
+    let centre_on = drawing_rect(&doc);
+    let session = Session::adopt(DocumentId(1), doc, None);
+    let out = headless::render(
+        &session,
+        &HeadlessOptions {
+            size: DeviceSize::new(200, 100),
+            frame: HeadlessFrame::Fixed {
+                zoom: 1.0,
+                centre_on,
+            },
+            dpi: Some(192.0),
+            ..HeadlessOptions::default()
+        },
+    )
+    .unwrap();
+    assert!((out.zoom - 1.0).abs() < 1e-12);
+    assert!((out.view.dpi - 192.0).abs() < 1e-12);
+    // One inch of document (72 000 mp) is 192 pixels at 100 %.
+    let a = out.view.transform.to_affine().as_coeffs();
+    assert!((a[0] * 72_000.0 - 192.0).abs() < 1e-6, "{a:?}");
+    // Centred on the drawing's middle.
+    let mid = centre_on.to_kurbo().center();
+    let at = out.view.transform.to_affine() * mid;
+    assert!(
+        (at.x - 100.0).abs() < 1e-6 && (at.y - 50.0).abs() < 1e-6,
+        "{at:?}"
+    );
+    // The walk's findings come back with the pixels.
+    assert!(out.walk.visited > 400, "{:?}", out.walk);
+    assert!(out.scene.primitives() > 0);
+    // The session's own viewport was not touched.
+    assert!((session.viewport.dpi() - 96.0).abs() < 1e-12);
+}
