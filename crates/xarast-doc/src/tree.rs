@@ -554,6 +554,17 @@ impl Tree {
         }
     }
 
+    /// Gives a node a tag no other node has, for when a reader claims its
+    /// current one.
+    pub(crate) fn retag_fresh(&mut self, id: NodeId) {
+        let mut tag = Tag(self.next_tag);
+        // `next_tag` wraps after four billion creations; skip anything taken.
+        while self.by_tag.contains_key(&tag) || tag.0 == 0 {
+            tag = Tag(tag.0.wrapping_add(1));
+        }
+        self.set_tag(id, tag);
+    }
+
     /// Mutable access to a node. `pub(crate)`: only actions use it.
     #[inline]
     pub(crate) fn get_mut(&mut self, id: NodeId) -> Option<&mut NodeData> {
