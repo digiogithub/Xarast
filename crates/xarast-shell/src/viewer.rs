@@ -747,6 +747,8 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
                 ChordKey::Char(c) => Key::char(c),
                 ChordKey::Home => Key::Named(NamedKey::Home),
                 ChordKey::Delete => Key::Named(NamedKey::Delete),
+                ChordKey::Backspace => Key::Named(NamedKey::Backspace),
+                ChordKey::Enter => Key::Named(NamedKey::Enter),
                 ChordKey::Escape => Key::Named(NamedKey::Escape),
                 ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
             };
@@ -1065,10 +1067,11 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     HandleShape::Rotate => HandleKind::Rotate,
                     HandleShape::Skew => HandleKind::Skew,
                     HandleShape::Centre => HandleKind::Centre,
-                    HandleShape::Node => HandleKind::Node,
+                    HandleShape::Node | HandleShape::NodeSelected => HandleKind::Node,
+                    HandleShape::Control => HandleKind::Control,
                     HandleShape::Radius => HandleKind::Radius,
                 },
-                active: false,
+                active: shape == HandleShape::NodeSelected,
             }),
             OverlayShape::Rect { rect, dashed } => out.push(OverlayItem::Rect {
                 bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),
@@ -2350,6 +2353,10 @@ mod tests {
         assert!(format!("{infobar:?}").contains("draw a rectangle"));
         activate(&mut v, "Pen");
         assert_eq!(tool(&v), xarast_app::ToolId::Pen);
+        let infobar = v.ui_model(1.0).editing.unwrap().infobar;
+        assert!(format!("{infobar:?}").contains("drag for a smooth point"));
+        activate(&mut v, "Freehand");
+        assert_eq!(tool(&v), xarast_app::ToolId::Freehand);
         let infobar = v.ui_model(1.0).editing.unwrap().infobar;
         assert!(format!("{infobar:?}").contains("coming soon"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);

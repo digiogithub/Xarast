@@ -30,6 +30,14 @@ pub enum SelectMode {
     Toggle,
 }
 
+impl FromIterator<u32> for ControlPoints {
+    fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> ControlPoints {
+        ControlPoints {
+            points: iter.into_iter().collect(),
+        }
+    }
+}
+
 /// Which control points of one path are selected.
 ///
 /// Indices are into [`xarast_geom::Path::points`]. They are held apart
@@ -208,7 +216,13 @@ impl ToolId {
     pub const fn is_implemented(self) -> bool {
         matches!(
             self,
-            ToolId::Selector | ToolId::Zoom | ToolId::Pan | ToolId::Rectangle | ToolId::Ellipse
+            ToolId::Selector
+                | ToolId::Zoom
+                | ToolId::Pan
+                | ToolId::Rectangle
+                | ToolId::Ellipse
+                | ToolId::ShapeEditor
+                | ToolId::Pen
         )
     }
 
@@ -216,10 +230,14 @@ impl ToolId {
     #[must_use]
     pub const fn planned_phase(self) -> Option<u8> {
         match self {
-            ToolId::Selector | ToolId::Zoom | ToolId::Pan | ToolId::Rectangle | ToolId::Ellipse => {
-                None
-            }
-            ToolId::ShapeEditor | ToolId::Pen | ToolId::Freehand => Some(7),
+            ToolId::Selector
+            | ToolId::Zoom
+            | ToolId::Pan
+            | ToolId::Rectangle
+            | ToolId::Ellipse
+            | ToolId::ShapeEditor
+            | ToolId::Pen => None,
+            ToolId::Freehand => Some(7),
             ToolId::Fill | ToolId::Transparency => Some(8),
             ToolId::Text => Some(9),
         }
@@ -431,6 +449,23 @@ impl EditState {
             return None;
         }
         Some(self.control_points.entry(id).or_default())
+    }
+
+    /// Replaces the whole point selection: path point indices per object.
+    /// Objects that are not selected are skipped. Returns whether anything
+    /// changed.
+    pub fn set_control_points(&mut self, points: Vec<(NodeId, Vec<u32>)>) -> bool {
+        let mut map: IndexMap<NodeId, ControlPoints> = IndexMap::new();
+        for (id, idx) in points {
+            if self.selection.contains(&id) && !idx.is_empty() {
+                map.insert(id, idx.into_iter().collect());
+            }
+        }
+        if map == self.control_points {
+            return false;
+        }
+        self.control_points = map;
+        true
     }
 
     /// Every node with a control-point overlay, in selection order.

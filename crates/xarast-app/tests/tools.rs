@@ -329,9 +329,9 @@ fn delete_is_one_labelled_step_and_undo_brings_the_object_back() {
 fn tools_switch_and_the_reserved_ones_are_refused() {
     let (mut s, _, _) = fixture();
     assert_eq!(s.tools().current(), ToolId::Selector);
-    s.apply(Intent::ChooseTool(ToolId::Pen)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
-    assert_eq!(s.edit.tool.active, ToolId::Pen);
+    s.apply(Intent::ChooseTool(ToolId::Freehand)).unwrap();
+    assert_eq!(s.tools().current(), ToolId::Freehand);
+    assert_eq!(s.edit.tool.active, ToolId::Freehand);
     // A pending tool says so and ignores the canvas.
     assert!(matches!(
         s.infobar().items.as_slice(),
@@ -347,14 +347,14 @@ fn tools_switch_and_the_reserved_ones_are_refused() {
 
     // Phase 8 and 9 tools cannot be chosen yet.
     s.apply(Intent::ChooseTool(ToolId::Text)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
+    assert_eq!(s.tools().current(), ToolId::Freehand);
 
     // A momentary switch restores the chosen tool on release.
     s.apply(Intent::MomentaryTool(Some(ToolId::Selector)))
         .unwrap();
     assert_eq!(s.tools().current(), ToolId::Selector);
     s.apply(Intent::MomentaryTool(None)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
+    assert_eq!(s.tools().current(), ToolId::Freehand);
 }
 
 #[test]

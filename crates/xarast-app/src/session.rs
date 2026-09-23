@@ -27,8 +27,8 @@ use crate::geometry::DeviceSize;
 use crate::intent::{Changed, Intent};
 use crate::ops::EditCommand;
 use crate::tool::{
-    CanvasInput, CursorKind, Infobar, InfobarField, OverlayShape, Preview, ToolCtx, ToolMachine,
-    ToolRequests, ToolView, ViewRequest,
+    CanvasInput, CursorKind, Infobar, InfobarField, OverlayShape, Preview, ToolAction, ToolCtx,
+    ToolMachine, ToolRequests, ToolView, ViewRequest,
 };
 use crate::viewport::Viewport;
 use crate::walker::{SceneWalker, WalkStats};
@@ -716,7 +716,9 @@ impl Session {
         let mut result = Ok(());
         for cmd in commands {
             let created_on = match &cmd {
-                EditCommand::CreateShape { layer, .. } => Some(*layer),
+                EditCommand::CreateShape { layer, .. } | EditCommand::CreatePath { layer, .. } => {
+                    Some(*layer)
+                }
                 _ => None,
             };
             match self.apply_edit(cmd) {
@@ -728,6 +730,9 @@ impl Session {
                         && let Some(n) = self.doc.tree.children(layer).next_back()
                     {
                         self.edit.select([n], SelectMode::Replace);
+                        if let Some(points) = requests.created_points.take() {
+                            self.edit.set_control_points(vec![(n, points)]);
+                        }
                         changed |= Changed::SELECTION;
                     }
                 }
@@ -737,6 +742,12 @@ impl Session {
                     break;
                 }
             }
+        }
+        if result.is_ok()
+            && let Some(points) = requests.points
+            && self.edit.set_control_points(points)
+        {
+            changed |= Changed::SELECTION | Changed::UI;
         }
         if let Some(tool) = requests.tool {
             changed |= self.choose_tool(tool);
@@ -872,14 +883,38 @@ impl Session {
                 }
             }
             Intent::Cancel => {
-                let (c, consumed) = self.canvas_input(CanvasInput::Cancel)?;
+                let (c, mut consumed) = self.canvas_input(CanvasInput::Cancel)?;
                 changed |= c;
+                if !consumed {
+                    let (c, took) = self.tool_action(ToolAction::Cancel)?;
+                    changed |= c;
+                    consumed = took;
+                }
                 if !consumed && self.edit.clear_selection() {
                     changed |= Changed::SELECTION | Changed::UI;
                 }
             }
+            Intent::ToolAction(action) => {
+                changed |= self.cancel_gesture();
+                changed |= self.tool_action(action)?.0;
+            }
+            Intent::ConvertToShapes => {
+                changed |= self.cancel_gesture();
+                let nodes: Vec<_> = self.edit.selection().collect();
+                if self
+                    .apply_edit(EditCommand::ConvertToPaths { nodes })?
+                    .is_some()
+                {
+                    changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+                }
+            }
             Intent::DeleteSelection => {
                 changed |= self.cancel_gesture();
+                let (c, took) = self.tool_action(ToolAction::Delete)?;
+                changed |= c;
+                if took {
+                    return Ok(self.finish_apply(changed));
+                }
                 let nodes: Vec<_> = self.edit.selection().collect();
                 if self
                     .apply_edit(EditCommand::DeleteNodes { nodes })?
@@ -906,7 +941,9 @@ impl Session {
                 }
             }
             Intent::SelectAll => {
-                if self.edit.select_all(&self.doc) {
+                let (c, took) = self.tool_action(ToolAction::SelectAll)?;
+                changed |= c;
+                if !took && self.edit.select_all(&self.doc) {
                     changed |= Changed::SELECTION | Changed::UI;
                 }
             }
@@ -979,12 +1016,23 @@ impl Session {
             | Intent::ClearRecent
             | Intent::Quit => {}
         }
+        Ok(self.finish_apply(changed))
+    }
+
+    /// What every [`Session::apply`] owes the frame for what it changed.
+    fn finish_apply(&mut self, changed: Changed) -> Changed {
         if changed.needs_scene() {
             self.dirty.invalidate(self.viewport.size());
         } else if changed.needs_redraw() {
             self.dirty.add(self.viewport.size().to_rect());
         }
-        Ok(changed)
+        changed
+    }
+
+    /// Offers a command to the tool in force. Returns what changed and
+    /// whether the tool took it.
+    fn tool_action(&mut self, action: ToolAction) -> Result<(Changed, bool), SessionError> {
+        self.run_tool(|m, cx| m.action(action, cx))
     }
 
     /// Whether a drag holds the pointer at the canvas edge, so the shell

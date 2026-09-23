@@ -152,7 +152,7 @@ fn parallelogram(origin: DocPoint, major: xarast_geom::Vector, minor: xarast_geo
 }
 
 /// The geometry a node paints, in document space.
-fn geometry_of(kind: &NodeKind) -> Option<Arc<Path>> {
+pub(crate) fn geometry_of(kind: &NodeKind) -> Option<Arc<Path>> {
     match kind {
         NodeKind::Path(p) => Some(Arc::clone(&p.data)),
         NodeKind::QuickShape(q) => q.path.clone(),

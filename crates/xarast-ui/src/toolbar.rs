@@ -336,6 +336,27 @@ impl InfobarRow {
                         }
                     }
                     InfobarItem::Anchor { value } => anchor_grid(ui, *value, tokens, out),
+                    InfobarItem::Command { command, enabled } => {
+                        command_button(ui, *command, *enabled, out);
+                    }
+                    InfobarItem::Number { field, value, max } => {
+                        let mut v = *value;
+                        ui.label(field.label());
+                        let r = ui
+                            .add(egui::Slider::new(&mut v, 0..=*max))
+                            .on_hover_text(field.description());
+                        crate::a11y::set_label(
+                            ui.ctx(),
+                            r.id,
+                            format!("{}: {v}", field.description()),
+                        );
+                        if v != *value {
+                            out.push(UiCommand::InfobarEdit {
+                                field: *field,
+                                value: InfobarValue::Number(v),
+                            });
+                        }
+                    }
                     InfobarItem::Note(text) => {
                         ui.label(egui::RichText::new(text).color(tokens.text_muted));
                     }
@@ -464,6 +485,24 @@ pub fn parse_angle(text: &str) -> Option<f64> {
     t.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// A button of the infobar that runs a named command, with the command's
+/// key in its tooltip and its accessible name.
+fn command_button(ui: &mut egui::Ui, command: AppCommand, enabled: bool, out: &mut CommandSink) {
+    let label = command.label();
+    let tip = match command.primary_shortcut() {
+        Some(k) => format!("{label} ({k})"),
+        None => label.to_owned(),
+    };
+    let r = ui
+        .add_enabled(enabled, egui::Button::new(label).small())
+        .on_hover_text(tip.as_str())
+        .on_disabled_hover_text(tip.as_str());
+    crate::a11y::set_label(ui.ctx(), r.id, tip);
+    if r.clicked() {
+        out.push(UiCommand::App(command));
+    }
+}
+
 /// The 9-anchor grid: three rows of three small buttons, the chosen one
 /// filled.
 fn anchor_grid(ui: &mut egui::Ui, value: Anchor, tokens: &ThemeTokens, out: &mut CommandSink) {
@@ -533,9 +572,10 @@ mod tests {
     #[test]
     fn tooltips_name_the_tool_its_key_and_its_state() {
         assert_eq!(tool_tooltip(ToolId::Selector), "Selector (F2)");
+        assert_eq!(tool_tooltip(ToolId::Pen), "Pen (Shift+F5)");
         assert_eq!(
-            tool_tooltip(ToolId::Pen),
-            "Pen (Shift+F5) — coming soon (phase 7)"
+            tool_tooltip(ToolId::Freehand),
+            "Freehand (F3) — coming soon (phase 7)"
         );
         assert_eq!(
             tool_tooltip(ToolId::Text),

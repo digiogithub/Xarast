@@ -231,6 +231,10 @@ pub enum HandleShape {
     Centre,
     /// A path node.
     Node,
+    /// A selected path node.
+    NodeSelected,
+    /// A Bézier control handle.
+    Control,
     /// A shape's own handle: the rectangle's corner radius.
     Radius,
 }
@@ -389,6 +393,10 @@ pub enum InfobarField {
     LockAspect,
     /// Whether scaling scales line widths too.
     ScaleLines,
+    /// Whether a path fills by the even-odd rule rather than non-zero.
+    EvenOdd,
+    /// The freehand tool's smoothing, 0 to 100.
+    Smoothing,
 }
 
 impl InfobarField {
@@ -405,6 +413,8 @@ impl InfobarField {
             InfobarField::Anchor => "Anchor",
             InfobarField::LockAspect => "Lock aspect",
             InfobarField::ScaleLines => "Scale lines",
+            InfobarField::EvenOdd => "Even-odd fill",
+            InfobarField::Smoothing => "Smoothing",
         }
     }
 
@@ -421,6 +431,8 @@ impl InfobarField {
             InfobarField::Anchor => "Fixed point for typed values",
             InfobarField::LockAspect => "Keep the width and height in proportion",
             InfobarField::ScaleLines => "Scale line widths with the objects",
+            InfobarField::EvenOdd => "Fill overlapping areas by the even-odd rule",
+            InfobarField::Smoothing => "How smooth freehand lines are, 0 to 100",
         }
     }
 }
@@ -436,6 +448,8 @@ pub enum InfobarValue {
     Toggle(bool),
     /// An anchor of the grid.
     Anchor(Anchor),
+    /// A whole number.
+    Number(u8),
 }
 
 /// One item of a tool's infobar.
@@ -470,6 +484,23 @@ pub enum InfobarItem {
     Anchor {
         /// The anchor chosen.
         value: Anchor,
+    },
+    /// A button running a named command: the path operations, "Convert
+    /// to editable shape".
+    Command {
+        /// The command.
+        command: crate::command::AppCommand,
+        /// Whether it applies to what is selected.
+        enabled: bool,
+    },
+    /// A whole number in a range: the freehand smoothing.
+    Number {
+        /// Which field.
+        field: InfobarField,
+        /// Its value.
+        value: u8,
+        /// The largest value.
+        max: u8,
     },
     /// A line of text.
     Note(String),
@@ -540,6 +571,13 @@ pub struct ToolRequests {
     /// A tool to choose, as if picked in the palette: the selector's
     /// double click on a rectangle opens the rectangle tool.
     pub tool: Option<ToolId>,
+    /// The point selection to set once the commands have run, replacing
+    /// the old one: path point indices per object, as the shape editor
+    /// and the pen leave them.
+    pub points: Option<Vec<(NodeId, Vec<u32>)>>,
+    /// Points to select on the object a creation command makes (the pen
+    /// selects the end it will continue from).
+    pub created_points: Option<Vec<u32>>,
 }
 
 impl ToolRequests {
@@ -661,6 +699,56 @@ fn device_px(vp: &Viewport) -> f64 {
     }
 }
 
+/// A command a key, a menu or an infobar button sends to the tool in
+/// force. The tool says whether it took it: an edit command the tool does
+/// not take falls back to the object-level command (Delete deletes the
+/// objects, Esc selects nothing), or does nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolAction {
+    /// Delete: the selected path points, before the objects.
+    Delete,
+    /// Esc with no gesture in flight: a tool's own state first.
+    Cancel,
+    /// Select all: the points of the edited paths, before the objects.
+    SelectAll,
+    /// Enter: finish what is being drawn, or close the selected ends.
+    Finish,
+    /// Make the segments between selected points straight.
+    MakeLine,
+    /// Make the segments between selected points curves.
+    MakeCurve,
+    /// Make the selected points smooth.
+    Smooth,
+    /// Make the selected points cusps.
+    Cusp,
+    /// Close the open subpaths with a selected point.
+    ClosePath,
+    /// Break the paths at the selected points.
+    Break,
+    /// Join two selected end points.
+    Join,
+}
+
+impl ToolAction {
+    /// The label a menu, a button and a screen reader use.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            ToolAction::Delete => "Delete",
+            ToolAction::Cancel => "Cancel",
+            ToolAction::SelectAll => "Select all",
+            ToolAction::Finish => "Finish",
+            ToolAction::MakeLine => "Make line",
+            ToolAction::MakeCurve => "Make curve",
+            ToolAction::Smooth => "Smooth",
+            ToolAction::Cusp => "Cusp",
+            ToolAction::ClosePath => "Close path",
+            ToolAction::Break => "Break at points",
+            ToolAction::Join => "Join ends",
+        }
+    }
+}
+
 /// A tool: sees the document read-only, writes to a preview, emits commands.
 pub trait Tool: Send + std::fmt::Debug {
     /// Which tool this is.
@@ -696,6 +784,12 @@ pub trait Tool: Send + std::fmt::Debug {
     fn cursor(&self, state: InteractionState) -> CursorKind {
         let _ = state;
         CursorKind::Default
+    }
+
+    /// A command sent to the tool. Returns whether the tool took it.
+    fn action(&mut self, action: ToolAction, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (action, cx);
+        false
     }
 }
 
@@ -1069,6 +1163,16 @@ impl ToolMachine {
         };
         let (dx, dy) = (axis(at.x, w), axis(at.y, h));
         (dx != 0.0 || dy != 0.0).then_some((dx, dy))
+    }
+
+    /// Sends a command to the tool in force, unless a gesture is in
+    /// flight. Returns whether the tool took it.
+    pub fn action(&mut self, action: ToolAction, cx: &mut ToolCtx<'_>) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id).is_some_and(|t| t.action(action, cx))
     }
 
     /// Sends an infobar edit to the tool in force.

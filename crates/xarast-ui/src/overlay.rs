@@ -37,6 +37,8 @@ pub enum HandleKind {
     /// A shape's own handle (a rectangle's corner radius), drawn as a
     /// filled dot.
     Radius,
+    /// A Bézier control handle, drawn as a small dot.
+    Control,
 }
 
 impl HandleKind {
@@ -47,6 +49,7 @@ impl HandleKind {
     pub fn size(self) -> f32 {
         match self {
             HandleKind::Centre => 9.0,
+            HandleKind::Control => 5.0,
             _ => 7.0,
         }
     }
@@ -203,6 +206,10 @@ impl OverlayPainter<'_> {
                     egui::Stroke::new(w, fill),
                     egui::StrokeKind::Inside,
                 );
+            }
+            HandleKind::Control => {
+                painter.circle_filled(c, half, fill);
+                painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));
             }
             HandleKind::Rotate | HandleKind::Centre => {
                 painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));

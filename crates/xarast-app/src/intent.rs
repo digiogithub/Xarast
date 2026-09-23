@@ -180,6 +180,12 @@ pub enum Intent {
     /// Hold a tool for as long as a key is down, then fall back
     /// (`research/04 §4.9`).
     MomentaryTool(Option<ToolId>),
+    /// A command for the tool in force: the shape editor's path
+    /// operations, the pen's Enter.
+    ToolAction(crate::tool::ToolAction),
+    /// Turn the selected rectangles, ellipses and quick shapes into
+    /// editable paths.
+    ConvertToShapes,
 
     // ── rendering ─────────────────────────────────────────────────────
     /// Set the render quality. The shell drops to
