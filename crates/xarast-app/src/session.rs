@@ -9,11 +9,10 @@
 //!
 //! # The Phase 6 seam
 //!
-//! Opening and saving go through [`FileKind`]. `.xar` import is wired;
-//! `.xarast` is not, and [`Session::save`] returns
-//! [`SessionError::Unsupported`] rather than pretending. When
-//! `xarast-format` lands, two match arms change and nothing else does.
-//! Writing `.xar` is a permanent non-goal (architecture §3.5).
+//! Opening and saving go through [`FileKind`]. `.xar` import and `.xarast`
+//! open (`xarast_format::open_reader`) are wired; saving is not yet, and
+//! [`Session::save`] returns [`SessionError::Unsupported`] rather than
+//! pretending. Writing `.xar` is a permanent non-goal (architecture §3.5).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,6 +90,15 @@ pub enum SessionError {
         /// What the importer said.
         #[source]
         source: xarast_xar::XarError,
+    },
+    /// The `.xarast` reader refused the file.
+    #[error("{path}: {source}")]
+    Xarast {
+        /// The path involved.
+        path: PathBuf,
+        /// What the reader said.
+        #[source]
+        source: xarast_format::OpenError,
     },
     /// The format is understood but not implemented yet, or never will
     /// be.
@@ -271,11 +279,22 @@ impl Session {
                     .collect();
                 Ok(s)
             }
-            // Phase 6 replaces this arm with a call into `xarast-format`.
-            FileKind::Xarast => Err(SessionError::Unsupported {
-                what: "opening .xarast",
-                path: path.to_path_buf(),
-            }),
+            FileKind::Xarast => {
+                let opened = xarast_format::open_reader(
+                    std::io::Cursor::new(bytes),
+                    &xarast_format::OpenOptions::default(),
+                )
+                .map_err(|source| SessionError::Xarast {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+                let mut diagnostics: Vec<String> =
+                    opened.container.iter().map(|d| format!("{d:?}")).collect();
+                diagnostics.extend(opened.diagnostics.iter().map(|d| format!("{d:?}")));
+                let mut s = Session::adopt(id, opened.document, Some(path.to_path_buf()));
+                s.diagnostics = diagnostics;
+                Ok(s)
+            }
             // Phase 11 replaces this arm with the `xarast-io` filters.
             FileKind::Other => Err(SessionError::Unsupported {
                 what: "this file type",
