@@ -823,7 +823,10 @@ fn geometry_and_colours_round_trip_through_the_mapping() {
 }
 
 /// Embedded bitmap bytes survive the mapping verbatim and are not
-/// deduplicated onto one another.
+/// deduplicated onto one another. The one exception is a tag-68 PNG with an
+/// alpha channel, which the import rewrites as a standard PNG (its alpha
+/// holds transparency, `research/01 §4.5`); for those the expected bytes are
+/// that rewrite.
 #[test]
 fn embedded_bitmaps_reach_the_document_byte_for_byte() {
     use xarast_geom::Point;
@@ -845,7 +848,14 @@ fn embedded_bitmaps_reach_the_document_byte_for_byte() {
             if let Ok(Decoded::BitmapDefinition(b)) =
                 decode(*tag, data, Point::ORIGIN, &mut diags, (*number, *tag))
             {
-                originals.push(data.get(b.image.clone()).unwrap_or(&[]).to_vec());
+                let image = data.get(b.image.clone()).unwrap_or(&[]);
+                let normalised = if *tag == 68 {
+                    xarast_image::xar::normalise_xar_png(image, &Default::default())
+                        .expect("every corpus PNG decodes")
+                } else {
+                    None
+                };
+                originals.push(normalised.unwrap_or_else(|| image.to_vec()));
             }
         }
         if originals.is_empty() {
@@ -870,6 +880,61 @@ fn embedded_bitmaps_reach_the_document_byte_for_byte() {
     }
     assert!(total > 0);
     println!("{total} bitmaps preserved byte for byte");
+}
+
+/// A `TAG_DEFINEBITMAP_JPEG8BPP` palette reaches the document's resource
+/// intact, so the decoder can map the JPEG back onto the 8 bpp original.
+#[test]
+fn jpeg8bpp_palettes_reach_the_document() {
+    use xarast_geom::Point;
+    use xarast_xar::{Decoded, DiagSink, decode};
+
+    let c = corpus_or_skip!();
+    let mut total = 0usize;
+    for f in &c.files {
+        let bytes = std::fs::read(f.path(&c.root)).unwrap_or_default();
+        let a = analyse(&bytes, ReaderLimits::default()).unwrap();
+        let mut diags = DiagSink::new();
+        let mut palettes: Vec<(Vec<u8>, Vec<[u8; 3]>)> = Vec::new();
+        let mut rows: Vec<(u32, u32, Vec<u8>)> = Vec::new();
+        a.tree.walk(&mut |node, _| {
+            let r = &node.record;
+            if r.tag == 71 {
+                rows.push((r.number, r.tag, r.data.clone()));
+            }
+        });
+        for (number, tag, data) in &rows {
+            if let Ok(Decoded::BitmapDefinition(b)) =
+                decode(*tag, data, Point::ORIGIN, &mut diags, (*number, *tag))
+            {
+                let image = data.get(b.image.clone()).unwrap_or(&[]).to_vec();
+                palettes.push((image, b.palette.clone()));
+            }
+        }
+        if palettes.is_empty() {
+            continue;
+        }
+        let (doc, _) = xarast_xar::import(&bytes, &ImportOptions::default()).unwrap();
+        for (image, palette) in &palettes {
+            assert!(!palette.is_empty(), "{}: an empty tag-71 palette", f.rel);
+            let res = doc
+                .resources
+                .bitmaps()
+                .map(|(_, b)| b)
+                .find(|b| b.original.as_ref().is_some_and(|o| *o.bytes == image[..]))
+                .unwrap_or_else(|| panic!("{}: a tag-71 bitmap is missing", f.rel));
+            let kept: Vec<[u8; 3]> = res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect();
+            assert_eq!(&kept, palette, "{}: the palette changed", f.rel);
+            assert!(
+                res.pixels.pixels.is_empty(),
+                "{}: pixels are the decoder's",
+                f.rel
+            );
+            total += 1;
+        }
+    }
+    assert!(total > 0, "the corpus has tag-71 bitmaps");
+    println!("{total} JPEG8BPP palettes kept");
 }
 
 /// The mapping snapshot: per file, how many records mapped versus were

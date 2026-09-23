@@ -21,6 +21,9 @@ workspace = true
 xarast-geom = { path = "../xarast-geom" }
 xarast-color = { path = "../xarast-color" }
 xarast-doc = { path = "../xarast-doc" }
+# Import rewrites one legacy bitmap convention (tag-68 PNG alpha); see
+# `import::bitmap_bytes`. The reader and decoder layers do not use it.
+xarast-image = { path = "../xarast-image" }
 bitflags = { workspace = true }
 flate2 = { workspace = true }
 thiserror = { workspace = true }

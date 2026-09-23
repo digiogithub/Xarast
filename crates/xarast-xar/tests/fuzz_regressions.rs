@@ -21,6 +21,7 @@ fn opts() -> ImportOptions {
         strict: false,
         skip_text: false,
         skip_bitmaps: false,
+        bitmap_limits: xarast_image::DecodeLimits::tight(),
     }
 }
 
