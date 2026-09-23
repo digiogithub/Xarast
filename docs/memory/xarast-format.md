@@ -506,6 +506,40 @@ warning; the digest reported "rewritten, nothing lost" (Inkscape's
 spelling changes the fragment text). What does not survive yet: its
 `namedview` view state and `<metadata>` additions (XARA-T-0112).
 
+## The `SvgDialect` seam (phase 11 W11.3, XARA-US-0058)
+
+`SvgOptions::dialect` is the one parameter separating the `.xarast`
+writer (`Native`, the default) from SVG export (`Interchange`). The exact
+list of what differs — and nothing else may — is the table in
+`docs/memory/export.md` ("SVG → One mapper, two dialects"): `xarast:`
+vocabulary removed by `svg::interchange::project` (the last step of
+`write_svg`), foreign baggage not written (`Emitter::common`/`fragment`,
+counted in `Stats::foreign_omitted`), no foreign `xmlns`, bitmaps through
+`SvgOptions::bitmaps` (a `BitmapLinker`) instead of the `ResourceIndex`,
+`xlink:href` only on images, the root framed by `SvgOptions::area`, an
+optional background `<rect>`, optional minify.
+
+- **One code path.** A change to the mapper lands in both dialects. If a
+  feature must be written *differently* for browsers than for Xarast (not
+  merely without its twin), branch on `dialect` inside the mapper and add
+  the row to that table. A second, divergent writer needs a recorded
+  decision; that would be the signal to split the mapper properly.
+- **The projection's contract**: it reads only the writer's own output
+  (well-formed, attributes quoted and escaped, no foreign fragments — they
+  are dropped in the emitter in this dialect). Dropping an `xarast:`
+  element drops its subtree; that is correct for every `xarast:` element
+  the writer makes (twins, palette, header, `kern`/`eol`/`char`, opaque
+  records, which the renderer skips too).
+- **Numbers** are the profile's: integer millipoints as points, 3
+  decimals, exact; the phase's default precision is 3, so interchange
+  equals native here. Fewer decimals (XARA-T-0234) must round in `num` /
+  `pathdata`, never in the projection (relative path data would
+  accumulate the error).
+- `SvgOptions::area`, `background`, `minify` and `bitmaps` are
+  export-only; `.xarast` saves leave them at their defaults, so Native
+  output is byte-identical to before (the round-trip and corpus tests
+  guard it).
+
 ## Decisions taken (and why)
 
 - **`zip` 8.6** (current stable major; 9.0 is pre-release), `MIT`, **every
