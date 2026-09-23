@@ -19,8 +19,9 @@
 //! | [`thumbnail`] | Thumbnail validation and the [`ThumbnailProvider`] seam | §3.2.5 |
 //! | [`reader`] | [`XarastReader`]: open without parsing `document.svg` | §3, §10.5 |
 //! | [`writer`] | [`PackageWriter`]: normative order, `mimetype` first, raw copies | §3.2, §13.4 |
+//! | [`durability`] | [`write_atomic`] and [`DocumentLock`] | §10.1, §10.4 |
 //!
-//! The container, the manifest and the resource index
+//! The container, the manifest, the resource index and the durability layer
 //! move bytes and know nothing about the document model. The SVG profile
 //! (workstreams W3/W4) is the layer that turns a `xarast_doc::Document` into
 //! `document.svg` and back; it plugs in through
@@ -55,6 +56,7 @@
 )]
 
 pub mod digest;
+pub mod durability;
 mod eocd;
 pub mod error;
 pub mod limits;
@@ -71,6 +73,7 @@ pub mod writer;
 use std::fmt;
 
 pub use digest::Digest;
+pub use durability::{DocumentLock, LockError, LockHolder, write_atomic};
 pub use error::{Diagnostic, ReadError, WriteError};
 pub use limits::Limits;
 pub use manifest::{FileEntry, Manifest, Role};

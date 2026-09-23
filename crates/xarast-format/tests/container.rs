@@ -762,3 +762,18 @@ fn zip64_above_65535_entries() {
     assert_eq!(r.entries().len(), 66_004);
     assert!(r.diagnostics().is_empty());
 }
+
+#[test]
+fn save_atomic_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("drawing.xarast");
+    let rep =
+        xarast_format::write_atomic(&path, |f| minimal(WriteOptions::default()).finish(f)).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(rep.bytes_written, bytes.len() as u64);
+    let mut f = std::fs::File::open(&path).unwrap();
+    assert!(xarast_format::sniff(&mut f).unwrap());
+    let mut r = XarastReader::open(f).unwrap();
+    assert_eq!(r.document_bytes().unwrap(), SVG);
+    let _ = ResourceId::of(b"");
+}

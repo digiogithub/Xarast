@@ -47,6 +47,15 @@ fn unix_secs(t: SystemTime) -> i64 {
     }
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ`.
+pub(crate) fn rfc3339_utc(t: SystemTime) -> String {
+    let c = civil(unix_secs(t));
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        c.year, c.month, c.day, c.hour, c.minute, c.second
+    )
+}
+
 /// A ZIP DOS timestamp in UTC, clamped to the representable 1980–2107.
 pub(crate) fn dos_datetime(t: SystemTime) -> zip::DateTime {
     let c = civil(unix_secs(t));
@@ -71,6 +80,10 @@ mod tests {
     #[test]
     fn known_dates() {
         let at = |s: u64| UNIX_EPOCH + Duration::from_secs(s);
+        assert_eq!(rfc3339_utc(at(0)), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(at(951_782_400)), "2000-02-29T00:00:00Z");
+        // The example lock file of research/06 §10.4.
+        assert_eq!(rfc3339_utc(at(1_789_837_331)), "2026-09-19T17:02:11Z");
         assert_eq!(dos_datetime(at(0)), zip::DateTime::default());
         let d = dos_datetime(at(1_789_837_331));
         assert_eq!(

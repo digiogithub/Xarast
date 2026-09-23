@@ -24,3 +24,6 @@ blake3 = { workspace = true }
 # Same crate and backend `zip` already uses.
 flate2 = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
