@@ -931,7 +931,8 @@ added to it**, §5.3) (`Kernel/rechdoc.cpp:965-985`).
 **`TAG_CURRENTATTRIBUTES` (4119), 1 byte** — `u8 group_id`
 (1 = `ATTRIBUTEGROUP_INK`, 2 = `ATTRIBUTEGROUP_TEXT`, `Kernel/cxfdefs.h:600-602`).
 It is an **atomic container node**: its children (between DOWN/UP) are the document's
-current attributes, *not* objects in the drawing. An importer that only wants geometry
+current attributes (the next object drawn gets them), *not* objects in the drawing and
+*not* the defaults an unattributed object inherits (§8.1). An importer that only wants geometry
 can skip its whole subtree.
 
 **`TAG_CURRENTATTRIBUTEBOUNDS` (4120), 16 bytes** — `DocCoord lo`, `DocCoord hi`.
@@ -1807,9 +1808,19 @@ is:
   `TAG_UP`, restore it; and the attribute records at the current level modify the local
   copy.
 * The `TAG_CURRENTATTRIBUTES` (4119) records and their children are **not** attributes
-  applied to objects: they describe the document's *default* attributes (what would be
-  applied to the next object the user draws). They form an **atomic** node: if they are of
-  no interest, the whole subtree must be discarded.
+  applied to objects: they are the editor's *current* attributes (what would be applied to
+  the next object the user draws). The loader switches into a "make current" insert mode
+  for them (`Kernel/rechdoc.cpp:1942-1966`). They are **not** the default attributes an
+  unattributed object inherits: those are the factory defaults registered at start-up
+  (`docs/research/02-document-model.md` §4.4), which no file overrides. Taking them for
+  defaults is a real bug with a visible symptom: `Designs/SimpleSphere.xar`'s current fill
+  is black, and its last object, a filled-and-stroked frame with no fill attribute, then
+  covers the whole design. They form an **atomic** node: if they are of no interest, the
+  whole subtree must be discarded.
+* **The factory default fill is "no colour"**: a flat fill whose colour is
+  `COLOUR_NONE`, i.e. an unattributed filled path is not filled at all
+  (`Kernel/fillval.cpp:692-703`). The default transparency is flat, level 0
+  (`Kernel/fillval.cpp:4320-4329`).
 
 ```rust
 #[derive(Clone, Default)]
@@ -1897,6 +1908,25 @@ A real example: an 88-byte `TAG_LINEARFILLMULTISTAGE` = 16 (2 coords) + 8 (2 ref
 | 163 `TAG_FILL_REPEATING` | 2 | repeat |
 | 165 `TAG_FILL_REPEATINGINVERTED` | 3 | repeat inverted (mirrored) |
 | 206 `TAG_FILL_REPEATING_EXTRA` | 4 | "extra" repeat |
+
+On reading, `TAG_FILL_NONREPEATING` becomes 1, never 0
+(`Kernel/fillattr.cpp:22631-22660`; the transparency records 180/181/182/207 likewise,
+`:22677-22705`). Value 4 exists because the build defines `NEW_FEATURES`
+(`Makefile.am:5`). **The factory default is 2, "repeat"**, for both the colour and the
+transparency mapping (`Kernel/fillval.cpp:7942-7945`, `:8358-8361`), so an object with no
+mapping record has mapping 2.
+
+**How the mapping renders** depends on the fill family, and the value is *not* taken at
+face value (`wxOil/grndrgn.cpp`):
+
+| Fill family | Mapping 0–3 | Mapping 4 | Reference |
+|---|---|---|---|
+| Graduated: linear, circular/elliptical, conical, square (diamond) | **ignored — the ramp clamps** to its end colours | tiles, with a long "high-quality repeat" ramp table | `:2585`, `:2683-2740` (colour); `:3967-3995`, `:4159-4161` (transparency) |
+| Three- and four-colour | 1 → simple (clamped); 0, 2, 3 → tiled | tiled | `:2636-2640`, `:2665-2669` (colour); `:4125-4145` (transparency) |
+| Bitmap and procedural | passed through as the tiling style | passed through | `:3538-3539` (colour); `:4302-4304` (transparency) |
+
+The practical consequence: a gradient with the default mapping, or with an explicit
+`TAG_FILL_REPEATING`, does **not** repeat. Only `TAG_FILL_REPEATING_EXTRA` makes one tile.
 
 **Colour interpolation effect** (empty records): 160 `FILLEFFECT_FADE` (linear RGB),
 161 `FILLEFFECT_RAINBOW` (HSV, short way round), 162 `FILLEFFECT_ALTRAINBOW` (HSV, long

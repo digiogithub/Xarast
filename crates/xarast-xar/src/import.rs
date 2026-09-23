@@ -153,11 +153,12 @@ pub struct ImportReport {
     pub bitmaps: usize,
     /// The coordinate origin the last `TAG_SPREADINFORMATION` implied.
     pub spread_origin: Point,
-    /// `TAG_CURRENTATTRIBUTES` children that set a document default.
-    pub defaults_set: u32,
+    /// Attributes read from `TAG_CURRENTATTRIBUTES` blocks. They are the
+    /// editor's current attributes, not document defaults, and are skipped.
+    pub current_attributes: u32,
     /// How many of those differed from
     /// [`DefaultAttrs::xara_compatible`](xarast_doc::DefaultAttrs::xara_compatible).
-    pub defaults_differing: u32,
+    pub current_differing: u32,
     /// Everything the `.xar` layers found.
     pub diagnostics: Vec<Diagnostic>,
     /// Everything the builder found, in the model's shared vocabulary.
@@ -279,8 +280,8 @@ pub fn map(
     let mapped = m.mapped;
     let skipped = m.skipped;
     let opaque = m.opaque;
-    let defaults_set = m.defaults_set;
-    let defaults_differing = m.defaults_differing;
+    let current_attributes = m.current_attributes;
+    let current_differing = m.current_differing;
     let diagnostics = m.diags.items().to_vec();
 
     // The builder validated the document as its last step; reuse that
@@ -327,8 +328,8 @@ pub fn map(
             colours,
             bitmaps,
             spread_origin: origin,
-            defaults_set,
-            defaults_differing,
+            current_attributes,
+            current_differing,
             diagnostics,
             build_diagnostics,
             validation_errors: validation.errors.len(),
@@ -419,8 +420,8 @@ struct Mapper<'o> {
     mapped: u32,
     skipped: u32,
     opaque: u32,
-    defaults_set: u32,
-    defaults_differing: u32,
+    current_attributes: u32,
+    current_differing: u32,
 }
 
 impl<'o> Mapper<'o> {
@@ -436,8 +437,8 @@ impl<'o> Mapper<'o> {
             mapped: 0,
             skipped: 0,
             opaque: 0,
-            defaults_set: 0,
-            defaults_differing: 0,
+            current_attributes: 0,
+            current_differing: 0,
         }
     }
 
@@ -504,9 +505,20 @@ impl<'o> Mapper<'o> {
         }
     }
 
-    /// `TAG_CURRENTATTRIBUTES`' children are the document's defaults, not
-    /// objects in the drawing, so they set the document's default attribute
-    /// block rather than becoming attribute nodes.
+    /// `TAG_CURRENTATTRIBUTES`' children are the editor's *current*
+    /// attributes: what the original applies to the next object the user
+    /// draws (`Kernel/rechdoc.cpp:1942-1966` reads them in a "set current
+    /// attribute" insert mode). They are **not** the document's default
+    /// attribute block, which is fixed at start-up and never written to a
+    /// file (`docs/research/02-document-model.md` §4.4). An object with no
+    /// fill in the file inherits the factory default, "no colour", never the
+    /// current fill; treating these as defaults filled every unfilled frame
+    /// with the current colour (XARA-T-0037).
+    ///
+    /// The model has no current-attribute store yet (the drawing tools own
+    /// it), so they are counted, compared with the defaults and skipped.
+    /// Definitions inside the block (colours) are still registered: later
+    /// records may reference them.
     fn visit_defaults(&mut self, children: &[RecordNode]) {
         for child in children {
             // A default is a single record; a subtree under one is never
@@ -522,19 +534,15 @@ impl<'o> Mapper<'o> {
                 self.mapped = self.mapped.saturating_add(1);
                 continue;
             }
-            match self.attribute(&d, at) {
-                Some(v) => {
-                    self.mapped = self.mapped.saturating_add(1);
-                    self.defaults_set = self.defaults_set.saturating_add(1);
-                    let differs = v
-                        .slot()
-                        .is_some_and(|s| **self.builder.document().defaults.get(s) != v);
-                    if differs {
-                        self.defaults_differing = self.defaults_differing.saturating_add(1);
-                    }
-                    self.builder.default_attribute(v);
+            self.skipped = self.skipped.saturating_add(1);
+            if let Some(v) = self.attribute(&d, at) {
+                self.current_attributes = self.current_attributes.saturating_add(1);
+                let differs = v
+                    .slot()
+                    .is_some_and(|s| **self.builder.document().defaults.get(s) != v);
+                if differs {
+                    self.current_differing = self.current_differing.saturating_add(1);
                 }
-                None => self.skipped = self.skipped.saturating_add(1),
             }
         }
     }
@@ -1451,15 +1459,18 @@ fn quality(v: i32) -> xarast_doc::Quality {
     }
 }
 
-/// `TAG_FILL_REPEATING_EXTRA` (206/207) has no counterpart in the model's
-/// four tilings; it is the "extra" repeat the original added for bitmap
-/// fills, and plain repeating is the closest thing that is not a lie.
+/// The mapping records keep the original's attribute values: a
+/// non-repeating record reads back as 1 (`Tiling::Simple`), and the "extra"
+/// repeat (206/207) as 4, which is the only value that makes a graduated
+/// fill tile. How each fill family interprets them is the walker's business
+/// (`docs/research/01-xar-format.md` §8.3).
 fn tiling(r: crate::decode::FillRepeat) -> Tiling {
     use crate::decode::FillRepeat as R;
     match r {
-        R::None => Tiling::None,
-        R::Repeat | R::Extra => Tiling::Repeat,
+        R::None => Tiling::Simple,
+        R::Repeat => Tiling::Repeat,
         R::RepeatInverted => Tiling::RepeatInverted,
+        R::Extra => Tiling::RepeatExtra,
     }
 }
 
@@ -1910,7 +1921,10 @@ mod tests {
     }
 
     #[test]
-    fn current_attributes_set_document_defaults_rather_than_nodes() {
+    fn current_attributes_are_neither_defaults_nor_nodes() {
+        // A current line width and a current black fill: what the editor
+        // would give the next object drawn, not what an unattributed object
+        // in the file inherits (XARA-T-0037).
         let bytes = XarBuilder::new()
             .record(40, &[])
             .down()
@@ -1918,17 +1932,21 @@ mod tests {
             .record(4119, &[1])
             .down()
             .record(152, &4_242i32.to_le_bytes())
+            .record(191, &[])
             .up()
             .up()
             .end_of_file()
             .finish();
         let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
-        assert_eq!(report.defaults_set, 1);
-        assert_eq!(report.defaults_differing, 1);
-        assert_eq!(
-            **doc.defaults.get(xarast_doc::AttrSlot::LineWidth),
-            AttrValue::LineWidth(Mp::new(4_242))
-        );
+        assert_eq!(report.current_attributes, 2);
+        assert_eq!(report.current_differing, 2);
+        let factory = xarast_doc::DefaultAttrs::xara_compatible();
+        for slot in [
+            xarast_doc::AttrSlot::LineWidth,
+            xarast_doc::AttrSlot::FillGeometry,
+        ] {
+            assert_eq!(doc.defaults.get(slot), factory.get(slot), "{slot:?}");
+        }
         assert_eq!(
             report.nodes_of(
                 NodeKind::Attr(Box::new(xarast_doc::AttrNode::new(AttrValue::LineWidth(

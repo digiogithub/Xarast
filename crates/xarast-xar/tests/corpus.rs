@@ -884,7 +884,7 @@ fn the_import_snapshot_matches() {
          # never a coordinate, a colour value or a string taken from a file.\n\
          # Regenerate with XARAST_UPDATE_SNAPSHOTS=1.\n\
          # file | records | mapped | skipped | stripped | opaque | nodes | \
-         colours | bitmaps | originX | originY | defaultsSet | defaultsDiffering | \
+         colours | bitmaps | originX | originY | currentAttrs | currentDiffering | \
          validateErrors | validateWarnings | ",
     );
     out.push_str(&xarast_xar::NODE_KIND_NAMES.join(" | "));
@@ -903,8 +903,8 @@ fn the_import_snapshot_matches() {
             r.bitmaps,
             r.spread_origin.x.raw(),
             r.spread_origin.y.raw(),
-            r.defaults_set,
-            r.defaults_differing,
+            r.current_attributes,
+            r.current_differing,
             r.validation_errors,
             r.validation_warnings,
         ));

@@ -78,6 +78,22 @@ fn implied_frame(a: Point, c: Point) -> GradMapping {
     }
 }
 
+/// The frame of a radial fill.
+///
+/// A circular fill (`aspect_locked`) carries only its centre and one edge
+/// point: the `.xar` record has no second axis, and the importer repeats the
+/// edge point there. Its minor axis is the major one turned a quarter turn,
+/// as for any circle; taking the stored point instead gives a degenerate
+/// frame, and the fill paints nothing (XARA-T-0025 corpus sweep,
+/// `Fill Types simple.xar`).
+fn radial_frame(centre: Point, major: Point, minor: Point, aspect_locked: bool) -> GradMapping {
+    if aspect_locked || minor == major {
+        implied_frame(centre, major)
+    } else {
+        affine(centre, major, minor)
+    }
+}
+
 /// A projective frame.
 ///
 /// `Perspective` carries the two corners the format adds to a gradient's
@@ -92,10 +108,37 @@ fn perspective(a: Point, c: Point, persp: &Perspective) -> GradMapping {
     }
 }
 
+/// The mapping of a graduated fill (linear, radial, conical, diamond).
+///
+/// The original clamps these whatever the mapping says, *except* for the
+/// "extra" repeat, which tiles with the long, band-free ramp table
+/// (`docs/research/01-xar-format.md` §8.3). Taking a plain `Repeat` at face
+/// value made every gradient wrap into hard bars, since that is also the
+/// original's factory default.
+fn gradient_repeat(t: Tiling) -> Repeat {
+    match t {
+        Tiling::RepeatExtra => Repeat::RepeatHq,
+        Tiling::None | Tiling::Simple | Tiling::Repeat | Tiling::RepeatInverted => Repeat::Simple,
+    }
+}
+
+/// The mapping of a three- or four-colour fill: it clamps only when the
+/// mapping says "do not repeat", and tiles otherwise — including the
+/// default.
+fn mesh_repeat(t: Tiling) -> Repeat {
+    match t {
+        Tiling::Simple => Repeat::Simple,
+        Tiling::None | Tiling::Repeat | Tiling::RepeatInverted | Tiling::RepeatExtra => {
+            Repeat::Repeat
+        }
+    }
+}
+
+/// The mapping of a bitmap fill, taken at face value.
 fn repeat_of(t: Tiling) -> Repeat {
     match t {
         Tiling::None | Tiling::Simple => Repeat::Simple,
-        Tiling::Repeat => Repeat::Repeat,
+        Tiling::Repeat | Tiling::RepeatExtra => Repeat::Repeat,
         Tiling::RepeatInverted => Repeat::Mirror,
     }
 }
@@ -171,7 +214,7 @@ pub(crate) fn colour_paint(
     effect: FillEffect,
     ctx: &mut PaintCtx<'_>,
 ) -> Option<Paint> {
-    let repeat = repeat_of(tiling);
+    let repeat = gradient_repeat(tiling);
     let space = space_of(effect);
     let len = ctx.ramp_length;
 
@@ -210,15 +253,15 @@ pub(crate) fn colour_paint(
             centre,
             major,
             minor,
+            aspect_locked,
             persp,
             from,
             to,
             ramp,
-            ..
         } => {
             let mapping = match persp {
                 Some(p) => perspective(*centre, *major, p),
-                None => affine(*centre, *major, *minor),
+                None => radial_frame(*centre, *major, *minor, *aspect_locked),
             };
             gradient(
                 GradShape::Radial,
@@ -281,7 +324,7 @@ pub(crate) fn colour_paint(
         } => Paint::Gradient {
             shape: GradShape::Mesh3,
             mapping: affine(*origin, *axis1, *axis2),
-            repeat,
+            repeat: mesh_repeat(tiling),
             ramp: GradRamp::Mesh3([
                 rgba(c0, ctx.colours),
                 rgba(c1, ctx.colours),
@@ -305,7 +348,7 @@ pub(crate) fn colour_paint(
                 c: p64(*axis1),
                 d: p64(*axis3),
             },
-            repeat,
+            repeat: mesh_repeat(tiling),
             ramp: GradRamp::Mesh4([
                 rgba(c0, ctx.colours),
                 rgba(c1, ctx.colours),
@@ -422,7 +465,7 @@ pub(crate) fn transparency(
     tiling: Tiling,
     ctx: &mut PaintCtx<'_>,
 ) -> Transparency {
-    let repeat = repeat_of(tiling);
+    let repeat = gradient_repeat(tiling);
     match t {
         FillGeometry::Flat { value } => {
             if value.mode == TranspMode::None {
@@ -449,15 +492,15 @@ pub(crate) fn transparency(
             centre,
             major,
             minor,
+            aspect_locked,
             persp,
             from,
             to,
             ramp,
-            ..
         } => {
             let mapping = match persp {
                 Some(p) => perspective(*centre, *major, p),
-                None => affine(*centre, *major, *minor),
+                None => radial_frame(*centre, *major, *minor, *aspect_locked),
             };
             graduated(GradShape::Radial, mapping, repeat, *from, *to, ramp, ctx)
         }

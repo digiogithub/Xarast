@@ -244,8 +244,9 @@ impl DocumentBuilder {
 
     /// Overrides one of the document's default attributes.
     ///
-    /// This is where `TAG_CURRENTATTRIBUTES` and its children land: they are
-    /// the document's defaults, not attributes applied to any object.
+    /// Not for `.xar`'s `TAG_CURRENTATTRIBUTES`: those are the editor's
+    /// current attributes (what the next object drawn gets), and an object
+    /// with no attribute in the file inherits the factory default instead.
     pub fn default_attribute(&mut self, value: AttrValue) {
         if !self.doc.defaults.set(value) {
             self.diagnostic(Diagnostic::new(
