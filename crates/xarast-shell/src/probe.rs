@@ -1,4 +1,5 @@
-//! Scripted pan and zoom latency probes (`xarast --probe pan|zoom`).
+//! Scripted pan, zoom and drag latency probes
+//! (`xarast --probe pan|zoom|drag`).
 //!
 //! The probe drives the real viewer with intents it generates itself, one
 //! per frame, never with input injected into the desktop: the maintainer's
@@ -12,7 +13,7 @@
 
 use std::time::Instant;
 
-use xarast_app::{DevicePoint, Intent};
+use xarast_app::{DevicePoint, Intent, PointerButton, PointerSample};
 
 use crate::PresentTiming;
 
@@ -25,6 +26,11 @@ pub enum ProbeKind {
     /// A wheel zoom: 1.05× a frame about the canvas centre, ten in, ten
     /// out.
     Zoom,
+    /// A selector drag: press on an object, then move it 3 px right and
+    /// 1.5 px down a frame, reversing every 60 frames, and release at the
+    /// end. Every frame is a live preview (a scene rebuild), and the
+    /// release commits one Move — the whole phase-7 editing path.
+    Drag,
 }
 
 impl ProbeKind {
@@ -34,6 +40,7 @@ impl ProbeKind {
         match s {
             "pan" => Some(ProbeKind::Pan),
             "zoom" => Some(ProbeKind::Zoom),
+            "drag" => Some(ProbeKind::Drag),
             _ => None,
         }
     }
@@ -42,6 +49,7 @@ impl ProbeKind {
         match self {
             ProbeKind::Pan => "pan",
             ProbeKind::Zoom => "zoom",
+            ProbeKind::Drag => "drag",
         }
     }
 }
@@ -60,6 +68,8 @@ pub struct Probe {
     gpu_ms: Vec<f64>,
     /// Canvas frames the render thread delivered during the run.
     pub frames_delivered: u32,
+    /// Where a drag probe's pointer is, in canvas pixels.
+    drag_at: Option<(f64, f64)>,
 }
 
 impl Probe {
@@ -74,6 +84,7 @@ impl Probe {
             present_ms: Vec::new(),
             gpu_ms: Vec::new(),
             frames_delivered: 0,
+            drag_at: None,
         }
     }
 
@@ -102,7 +113,29 @@ impl Probe {
         self.present_ms.len() >= self.wanted
     }
 
-    /// The next intent, stamped now. `centre` is the canvas centre.
+    /// What the probe does.
+    #[must_use]
+    pub const fn kind(&self) -> ProbeKind {
+        self.kind
+    }
+
+    /// Whether a drag probe has chosen where to press.
+    #[must_use]
+    pub const fn has_anchor(&self) -> bool {
+        self.drag_at.is_some()
+    }
+
+    /// The intent that ends the probe cleanly: a drag's release.
+    pub fn finish(&mut self) -> Option<Intent> {
+        let (x, y) = self.drag_at.take()?;
+        Some(Intent::PointerUp {
+            button: PointerButton::Primary,
+            sample: PointerSample::at(DevicePoint::new(x, y)),
+        })
+    }
+
+    /// The next intent, stamped now. `centre` is the canvas centre — for a
+    /// drag, the point to press on.
     pub fn next(&mut self, centre: (f64, f64)) -> Intent {
         self.step += 1;
         self.input_at = Some(Instant::now());
@@ -116,6 +149,27 @@ impl Probe {
                 Intent::Pan {
                     dx: 23.4 * dir,
                     dy: 7.7 * dir,
+                }
+            }
+            ProbeKind::Drag => {
+                let (x, y) = *self.drag_at.get_or_insert(centre);
+                let at = |x: f64, y: f64| PointerSample::at(DevicePoint::new(x, y));
+                match self.step {
+                    1 => Intent::PointerMove(at(x, y)),
+                    2 => Intent::PointerDown {
+                        button: PointerButton::Primary,
+                        sample: at(x, y),
+                    },
+                    s => {
+                        let dir = if ((s - 3) / 60).is_multiple_of(2) {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        let next = (x + 3.0 * dir, y + 1.5 * dir);
+                        self.drag_at = Some(next);
+                        Intent::PointerMove(at(next.0, next.1))
+                    }
                 }
             }
             ProbeKind::Zoom => {

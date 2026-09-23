@@ -40,9 +40,12 @@ OPTIONS:
         --size <WxH>        Initial window size in logical pixels (default 1280x800)
         --synthetic <N>     Open a synthetic document of about N nodes (250000
                             gives about 100 000 paths), for the probes
-        --probe <pan|zoom>  Once the document has rendered, pan or zoom it by
-                            script, one step a frame, print input-to-present
-                            latency and exit. Presents without vsync
+        --probe <pan|zoom|drag>
+                            Once the document has rendered, pan or zoom it, or
+                            drag the object nearest the centre with the
+                            selector, by script, one step a frame; print
+                            input-to-present latency and exit. Presents
+                            without vsync
         --probe-samples <N> How many frames the probe measures (default 300)
 
 ENVIRONMENT:
@@ -123,7 +126,7 @@ fn main() -> ExitCode {
             "--probe" => match args.next().as_deref().and_then(ProbeKind::parse) {
                 Some(k) => probe = Some(k),
                 None => {
-                    eprintln!("--probe needs `pan` or `zoom`");
+                    eprintln!("--probe needs `pan`, `zoom` or `drag`");
                     return ExitCode::FAILURE;
                 }
             },

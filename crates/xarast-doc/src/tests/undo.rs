@@ -551,3 +551,63 @@ fn a_transform_touches_no_spread() {
     assert_eq!(tx.spreads_to_check(), (0, false));
     let _ = tx.commit("nudge");
 }
+
+#[test]
+fn content_revisions_move_only_for_the_nodes_an_edit_touches() {
+    let f = fixture();
+    let (path, group, a, b, gfill) = (f.path, f.group, f.shape_a, f.shape_b, f.group_fill);
+    let mut doc = f.doc;
+    let mut bus = CommandBus::new();
+    for n in [path, group, a, b, gfill] {
+        assert_eq!(doc.tree.content_rev(n), 0, "fresh nodes start at 0");
+    }
+    let move_a = cmd("Move", move |tx: &mut Tx<'_>| {
+        tx.transform(a, Matrix::translate(Vector::raw(1_000, 0)))
+    });
+    bus.dispatch(&mut doc, &move_a).unwrap();
+    let after_move = doc.tree.content_rev(a);
+    assert_ne!(after_move, 0);
+    for n in [path, group, b, gfill] {
+        assert_eq!(doc.tree.content_rev(n), 0, "{n:?} was not edited");
+    }
+    assert_eq!(bus.undo_label(), Some("Move"));
+    assert_eq!(bus.redo_label(), None);
+
+    // Undo is an edit too: the node gets a revision it never had before,
+    // so no cache can serve the moved picture for the restored node.
+    assert_eq!(bus.undo(&mut doc), Some("Move"));
+    let after_undo = doc.tree.content_rev(a);
+    assert!(after_undo != 0 && after_undo != after_move);
+    assert_eq!(bus.redo_label(), Some("Move"));
+    assert_eq!(bus.undo_label(), None);
+    assert_eq!(bus.redo(&mut doc), Some("Move"));
+    assert!(doc.tree.content_rev(a) > after_undo);
+
+    let recolour = cmd("Apply fill", move |tx: &mut Tx<'_>| {
+        tx.set_attr(gfill, black_fill())
+    });
+    let before = doc.tree.content_rev(b);
+    bus.dispatch(&mut doc, &recolour).unwrap();
+    assert_ne!(doc.tree.content_rev(gfill), 0);
+    // A sibling's own revision does not move; the walker folds the
+    // attribute's revision into the sibling's scope instead.
+    assert_eq!(doc.tree.content_rev(b), before);
+}
+
+#[test]
+fn a_restore_never_reuses_a_revision() {
+    let f = fixture();
+    let a = f.shape_a;
+    let mut doc = f.doc;
+    let tag = doc.tree.get(a).unwrap().tag;
+    let snap = doc.snapshot();
+    let mut bus = CommandBus::new();
+    let move_a = cmd("Move", move |tx: &mut Tx<'_>| {
+        tx.transform(a, Matrix::translate(Vector::raw(1_000, 0)))
+    });
+    bus.dispatch(&mut doc, &move_a).unwrap();
+    let moved = doc.tree.content_rev(a);
+    doc.restore(&snap);
+    let restored = doc.tree.by_tag(tag).unwrap();
+    assert!(doc.tree.content_rev(restored) > moved);
+}

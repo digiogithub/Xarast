@@ -14,6 +14,7 @@
 
 use std::fmt;
 
+use crate::edit::ToolId;
 use crate::geometry::DevicePoint;
 use crate::intent::Intent;
 use crate::viewport::ZoomTarget;
@@ -25,6 +26,12 @@ pub enum ChordKey {
     Char(char),
     /// The Home key.
     Home,
+    /// The Delete key.
+    Delete,
+    /// The Escape key.
+    Escape,
+    /// A function key, `F1` to `F24`.
+    Function(u8),
 }
 
 /// A key and the modifiers held with it.
@@ -70,6 +77,32 @@ impl KeyChord {
         KeyChord::plain(ChordKey::Char(c))
     }
 
+    /// The key with the command modifier and Shift.
+    #[must_use]
+    pub const fn ctrl_shift(c: char) -> KeyChord {
+        KeyChord {
+            key: ChordKey::Char(c),
+            ctrl: true,
+            shift: true,
+        }
+    }
+
+    /// A function key on its own.
+    #[must_use]
+    pub const fn f(n: u8) -> KeyChord {
+        KeyChord::plain(ChordKey::Function(n))
+    }
+
+    /// A function key with Shift.
+    #[must_use]
+    pub const fn shift_f(n: u8) -> KeyChord {
+        KeyChord {
+            key: ChordKey::Function(n),
+            ctrl: false,
+            shift: true,
+        }
+    }
+
     /// Whether the character is one some layouts type with Shift and
     /// others without (`+` is Shift+`=` on a US keyboard and a key of its
     /// own on the numeric keypad). Letters and digits are not: Shift
@@ -91,6 +124,9 @@ impl fmt::Display for KeyChord {
         match self.key {
             ChordKey::Char(c) => write!(f, "{}", c.to_ascii_uppercase()),
             ChordKey::Home => f.write_str("Home"),
+            ChordKey::Delete => f.write_str("Del"),
+            ChordKey::Escape => f.write_str("Esc"),
+            ChordKey::Function(n) => write!(f, "F{n}"),
         }
     }
 }
@@ -114,22 +150,48 @@ pub enum AppCommand {
     FitDrawing,
     /// View › 100 %.
     Zoom100,
+    /// Edit › Undo.
+    Undo,
+    /// Edit › Redo.
+    Redo,
+    /// Edit › Delete: delete the selected objects.
+    Delete,
+    /// Edit › Select all.
+    SelectAll,
+    /// `Esc`: cancel the gesture in flight, or select nothing.
+    Cancel,
+    /// Choose a tool from the palette or by its key.
+    Tool(ToolId),
 }
 
 /// How much one zoom-in or zoom-out step multiplies the zoom.
 pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 
 impl AppCommand {
-    /// Every command, in menu order.
-    pub const ALL: [AppCommand; 8] = [
+    /// Every command, in menu order, then the tools in palette order.
+    /// Tools reserved for later phases are not here: they have no key yet.
+    pub const ALL: [AppCommand; 21] = [
         AppCommand::Open,
         AppCommand::Close,
         AppCommand::Quit,
+        AppCommand::Undo,
+        AppCommand::Redo,
+        AppCommand::Delete,
+        AppCommand::SelectAll,
+        AppCommand::Cancel,
         AppCommand::ZoomIn,
         AppCommand::ZoomOut,
         AppCommand::FitPage,
         AppCommand::FitDrawing,
         AppCommand::Zoom100,
+        AppCommand::Tool(ToolId::Selector),
+        AppCommand::Tool(ToolId::ShapeEditor),
+        AppCommand::Tool(ToolId::Rectangle),
+        AppCommand::Tool(ToolId::Ellipse),
+        AppCommand::Tool(ToolId::Pen),
+        AppCommand::Tool(ToolId::Freehand),
+        AppCommand::Tool(ToolId::Zoom),
+        AppCommand::Tool(ToolId::Pan),
     ];
 
     /// The menu label.
@@ -144,7 +206,20 @@ impl AppCommand {
             AppCommand::FitPage => "Fit page",
             AppCommand::FitDrawing => "Fit drawing",
             AppCommand::Zoom100 => "100 %",
+            AppCommand::Undo => "Undo",
+            AppCommand::Redo => "Redo",
+            AppCommand::Delete => "Delete",
+            AppCommand::SelectAll => "Select all",
+            AppCommand::Cancel => "Select none",
+            AppCommand::Tool(t) => t.label(),
         }
+    }
+
+    /// Whether the key works in the middle of a drag (`WorksInDrag` in
+    /// the original): only `Esc`, which cancels it.
+    #[must_use]
+    pub const fn works_in_drag(self) -> bool {
+        matches!(self, AppCommand::Cancel)
     }
 
     /// Every key that runs the command; the first is the one a menu shows.
@@ -163,6 +238,23 @@ impl AppCommand {
         const FIT_PAGE: &[KeyChord] = &[KeyChord::char('0'), KeyChord::plain(ChordKey::Home)];
         const FIT_DRAWING: &[KeyChord] = &[KeyChord::char('d')];
         const ZOOM_100: &[KeyChord] = &[KeyChord::char('1')];
+        const UNDO: &[KeyChord] = &[KeyChord::ctrl('z')];
+        // Ctrl+Shift+Z first because every other Linux program shows it;
+        // Ctrl+Y is the original's (`research/04 §4.1`).
+        const REDO: &[KeyChord] = &[KeyChord::ctrl_shift('z'), KeyChord::ctrl('y')];
+        const DELETE: &[KeyChord] = &[KeyChord::plain(ChordKey::Delete)];
+        const SELECT_ALL: &[KeyChord] = &[KeyChord::ctrl('a')];
+        const CANCEL: &[KeyChord] = &[KeyChord::plain(ChordKey::Escape)];
+        // The tool keys of `research/04 §4.6`.
+        const SELECTOR: &[KeyChord] = &[KeyChord::f(2)];
+        const FREEHAND: &[KeyChord] = &[KeyChord::f(3)];
+        const SHAPE: &[KeyChord] = &[KeyChord::f(4)];
+        const RECTANGLE: &[KeyChord] = &[KeyChord::shift_f(3)];
+        const ELLIPSE: &[KeyChord] = &[KeyChord::shift_f(4)];
+        const PEN: &[KeyChord] = &[KeyChord::shift_f(5)];
+        const ZOOM_TOOL: &[KeyChord] = &[KeyChord::shift_f(7)];
+        const PUSH: &[KeyChord] = &[KeyChord::shift_f(8)];
+        const NONE: &[KeyChord] = &[];
         match self {
             AppCommand::Open => OPEN,
             AppCommand::Close => CLOSE,
@@ -172,6 +264,22 @@ impl AppCommand {
             AppCommand::FitPage => FIT_PAGE,
             AppCommand::FitDrawing => FIT_DRAWING,
             AppCommand::Zoom100 => ZOOM_100,
+            AppCommand::Undo => UNDO,
+            AppCommand::Redo => REDO,
+            AppCommand::Delete => DELETE,
+            AppCommand::SelectAll => SELECT_ALL,
+            AppCommand::Cancel => CANCEL,
+            AppCommand::Tool(t) => match t {
+                ToolId::Selector => SELECTOR,
+                ToolId::Freehand => FREEHAND,
+                ToolId::ShapeEditor => SHAPE,
+                ToolId::Rectangle => RECTANGLE,
+                ToolId::Ellipse => ELLIPSE,
+                ToolId::Pen => PEN,
+                ToolId::Zoom => ZOOM_TOOL,
+                ToolId::Pan => PUSH,
+                ToolId::Fill | ToolId::Transparency | ToolId::Text => NONE,
+            },
         }
     }
 
@@ -208,6 +316,12 @@ impl AppCommand {
             AppCommand::FitPage => Intent::ZoomTo(ZoomTarget::Page),
             AppCommand::FitDrawing => Intent::ZoomTo(ZoomTarget::Drawing),
             AppCommand::Zoom100 => Intent::ZoomTo(ZoomTarget::Percent100),
+            AppCommand::Undo => Intent::Undo,
+            AppCommand::Redo => Intent::Redo,
+            AppCommand::Delete => Intent::DeleteSelection,
+            AppCommand::SelectAll => Intent::SelectAll,
+            AppCommand::Cancel => Intent::Cancel,
+            AppCommand::Tool(t) => Intent::ChooseTool(t),
         }
     }
 }
@@ -226,6 +340,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_edit_and_tool_keys_are_the_documented_ones() {
+        let key = |c: AppCommand| c.primary_shortcut().unwrap().to_string();
+        assert_eq!(key(AppCommand::Undo), "Ctrl+Z");
+        assert_eq!(key(AppCommand::Redo), "Ctrl+Shift+Z");
+        assert_eq!(AppCommand::Redo.shortcuts()[1].to_string(), "Ctrl+Y");
+        assert_eq!(key(AppCommand::Delete), "Del");
+        assert_eq!(key(AppCommand::Cancel), "Esc");
+        assert!(AppCommand::Cancel.works_in_drag());
+        assert!(!AppCommand::Undo.works_in_drag());
+        for (tool, k) in [
+            (ToolId::Selector, "F2"),
+            (ToolId::Freehand, "F3"),
+            (ToolId::ShapeEditor, "F4"),
+            (ToolId::Rectangle, "Shift+F3"),
+            (ToolId::Ellipse, "Shift+F4"),
+            (ToolId::Pen, "Shift+F5"),
+            (ToolId::Zoom, "Shift+F7"),
+            (ToolId::Pan, "Shift+F8"),
+        ] {
+            assert_eq!(key(AppCommand::Tool(tool)), k, "{tool:?}");
+            assert_eq!(
+                AppCommand::Tool(tool).intent(DevicePoint::new(0.0, 0.0)),
+                Intent::ChooseTool(tool)
+            );
+        }
+        assert!(AppCommand::Tool(ToolId::Text).shortcuts().is_empty());
     }
 
     #[test]

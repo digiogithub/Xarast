@@ -131,6 +131,7 @@ impl Action {
                     .ok_or(TreeError::NoSuchNode(*node))?;
                 n.kind = (**new).clone();
                 doc.tree.invalidate_bounds(*node);
+                doc.tree.touch(*node);
             }
             Action::SetFlags { node, new } => {
                 let detached = doc
@@ -149,6 +150,7 @@ impl Action {
                     } else {
                         NodeFlags::empty()
                     };
+                doc.tree.touch(*node);
             }
             Action::Transform { node, matrix } => {
                 let n = doc
@@ -157,6 +159,7 @@ impl Action {
                     .ok_or(TreeError::NoSuchNode(*node))?;
                 transform_kind(&mut n.kind, *matrix);
                 doc.tree.invalidate_bounds(*node);
+                doc.tree.touch(*node);
             }
             Action::SetAttr { node, new } => {
                 let n = doc
@@ -168,6 +171,7 @@ impl Action {
                     _ => return Err(EditError::WrongKind(*node)),
                 }
                 doc.tree.invalidate_bounds(*node);
+                doc.tree.touch(*node);
             }
             Action::SetResource { id, new } => {
                 let ResourceRef::Bitmap(b) = id else {
@@ -176,6 +180,7 @@ impl Action {
                 doc.resources
                     .replace_bitmap_pixels(*b, new.clone())
                     .ok_or(EditError::MissingResource(*id))?;
+                doc.tree.touch_resources();
             }
             Action::SetForeign { node, new } => {
                 if !doc.tree.contains(*node) {
@@ -947,6 +952,18 @@ impl History {
         Some(label)
     }
 
+    /// The label of the step [`History::undo`] would undo, if any.
+    #[must_use]
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.past.last().map(|t| t.label)
+    }
+
+    /// The label of the step [`History::redo`] would redo, if any.
+    #[must_use]
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.future.last().map(|t| t.label)
+    }
+
     /// Whether there is anything to undo.
     #[must_use]
     pub fn can_undo(&self) -> bool {
@@ -1146,6 +1163,34 @@ impl CommandBus {
         if self.open_gesture == Some(gesture) {
             self.open_gesture = None;
         }
+    }
+
+    /// Undoes the last step, returning its label.
+    pub fn undo(&mut self, doc: &mut Document) -> Option<&'static str> {
+        self.history.undo(doc)
+    }
+
+    /// Redoes the last undone step, returning its label.
+    pub fn redo(&mut self, doc: &mut Document) -> Option<&'static str> {
+        self.history.redo(doc)
+    }
+
+    /// What Edit › Undo would undo ("Move", "Delete").
+    #[must_use]
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.history.undo_label()
+    }
+
+    /// What Edit › Redo would redo.
+    #[must_use]
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.history.redo_label()
+    }
+
+    /// Whether a coalescing group is open.
+    #[must_use]
+    pub fn gesture_open(&self) -> bool {
+        self.open_gesture.is_some()
     }
 
     /// The undo log.

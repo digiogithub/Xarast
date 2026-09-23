@@ -149,6 +149,10 @@ impl Document {
             }
         }
 
+        // Tags survive a restore but content may not match what an earlier
+        // tree had under the same tag, so every restored node gets a
+        // revision no earlier tree of this document handed out.
+        tree.continue_revisions_from(&self.tree);
         self.tree = tree;
         self.resources = (*s.resources).clone();
         self.defaults = s.defaults.clone();

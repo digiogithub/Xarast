@@ -121,6 +121,9 @@ scale factor and calls `Intent::SetDpi`.
 | `app` | `AppState` (with `open_replacing`, `with_recent_store`, `take_requests`), `DocumentSessions`, `DiagnosticLog` |
 | `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `FrameReuse`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread, and the worker that reuses pixels |
 | `reuse` (private) | the pixel-reuse policy: `plan`, scroll, nearest-neighbour rescale, the zoom-out ring, Final columns |
+| `ops` | `EditCommand`, `CommandSink` — the commands tools emit (phase 7) |
+| `tool` | `ToolMachine`, `Tool`, `ToolCtx`, `GestureEvent`, `Preview`, `Infobar`, `OverlayShape`, `pick` |
+| `tools` | the selector, push, zoom and pending tools |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
 
 Tests: 13 viewport, 11 session/selection/command, 8 corpus (the 59 real
@@ -389,7 +392,14 @@ reason the walker *reports*, which is its own test.
    else.** The scene is always rebuilt whole; culling may only ever
    remove work, which is a corpus test.
 9. **Tools never touch the arena.** Every mutation is a
-   `xarast_doc::Command` dispatched through `Session::dispatch`.
+   `xarast_doc::Command` dispatched through `Session::dispatch`; tools
+   emit `EditCommand`s through `ToolCtx::commands` and hold only
+   `&Document` (compile-fail doctest in `tool.rs`).
+11. **Scroll bounds are refreshed at `rebuild_scene`**, never in
+    `after_mutation` (34 ms per undo at 250 000 nodes; `tools.md`).
+12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
+    `InfobarEdit`, `AutoScroll`; pointer intents now drive the
+    `ToolMachine`, and `ChooseTool`/`MomentaryTool` switch its tool.
 10. **No two commands share a key chord** (`no_two_commands_share_a_key`),
     and the core never performs a platform action: it queues a
     `PlatformRequest`.
@@ -500,14 +510,13 @@ be better run once at `Tx::commit` than after every call.
       is 13 of the 21 blank corpus files.
 - [ ] **Live effects draw nothing** (`WalkStats::live_pending`).
       Phase 13.
-- [ ] **`ContentHash` is coarse**: the node's tag plus the document
-      epoch, so any edit invalidates every cached node. Correct — it
-      only over-invalidates — but the per-node render cache cannot pay
-      for itself until this is a real content hash. Phase 7.
-- [ ] **Hit testing is a bounding-box test.** `Session::select_in_rect`
-      exists so the selection plumbing is real and testable;
-      `xarast_geom::hit_fill`/`hit_stroke` and the click path are
-      Phase 7.
+- [x] **`ContentHash` is per node** (phase 7): tag + `content_rev` + a
+      fold of the attribute scope's node versions + the resources'
+      revision. An edit re-keys only what it touched and the siblings its
+      attribute applies to (`tests/tools.rs`). See `tools.md`.
+- [ ] **Hit testing is a bounding-box test.** The click path now exists
+      (`tool::pick`, topmost selectable object by bbox); precise fill and
+      stroke picking is W3 (`tools.md`).
 - [x] **Render-thread protocol** (XARA-T-0002): `render_thread`, see
       decisions 18–22. The running binary uses it (XARA-T-0003).
 - [x] **Draft/Final scheduling (U5.6)** (XARA-US-0005): `schedule`,

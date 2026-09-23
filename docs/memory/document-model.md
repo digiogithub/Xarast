@@ -322,6 +322,29 @@ New in Phase 2:
     `MAGNETIC` only, `root` replaces the `DocumentNode`, `colour_parent`
     points a palette entry at a later one, `current_scope` names the node
     being appended to.
+34. **Every node has a content revision** (`Tree::content_rev`, phase 7,
+    XARA-US-0029). A lazy `SecondaryMap<NodeId, u64>` beside the bounds
+    cache (so `NodeData` stays at 64 bytes); absent reads as 0. Every
+    `Action` that changes a node's kind, geometry, attribute value or flags
+    — **undo and redo included** — gives it `next_rev`, a per-tree counter,
+    so `(tag, rev)` names one version of one node and is never reused within
+    a tree. Relinks (attach, detach) do not touch it: structure is the
+    walker's business (it folds attribute-node versions into a scope
+    fingerprint). `SetResource` bumps `Tree::resources_rev`. `restore`
+    continues the old tree's numbering and re-touches every node, because a
+    restored tag may carry content the old tree never had under that
+    revision. Per tree, not global, on purpose: two imports of the same file
+    must produce identical revisions (the walk-stability corpus test).
+    Undo getting a *new* revision rather than the pre-edit one only
+    over-invalidates; restoring old revisions would need the inverse to
+    carry them, for no measured gain.
+35. **`History::undo_label`/`redo_label`, `CommandBus::undo`/`redo`/
+    `gesture_open`** exist for the Edit menu ("Undo Move") and for the app's
+    per-kind coalescing, which splits a gesture when a command does not
+    coalesce with the previous one (`xarast_app::Session::apply_edit`).
+    The F4.7 foreign-baggage marks ride in the same `Tx` calls
+    (`transform`, `set_attr`, `set_kind`), so every `EditCommand` gets them
+    for free; `tests/tools.rs` pins it for a selector move.
 
 ## The `.xar` attribute tag reconciliation
 
