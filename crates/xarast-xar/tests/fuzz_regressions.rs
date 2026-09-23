@@ -84,3 +84,44 @@ fn a_subtree_under_a_default_attribute_is_accounted_for() {
         .finish();
     assert_import_invariants(&bytes);
 }
+
+/// `fuzz_xar_import`, minimised: `GROUP DOWN GROUP UP DOWN` — a node
+/// descended into twice. The tree builder assigned the second group of
+/// children over the first, silently dropping the inner group from the
+/// tree while still counting it as a node.
+#[test]
+fn a_node_descended_into_twice_keeps_both_groups_of_children() {
+    let bytes = XarBuilder::new()
+        .record(104, &[])
+        .down()
+        .record(104, &[])
+        .up()
+        .down()
+        .record(104, &[])
+        .up()
+        .end_of_file()
+        .finish();
+    let a = xarast_xar::analyse(&bytes, opts().reader).expect("the file is read");
+    let group = a
+        .tree
+        .roots
+        .iter()
+        .find(|n| n.record.tag == 104)
+        .expect("the outer group is a root");
+    assert_eq!(
+        group.children.len(),
+        2,
+        "both inner groups are its children"
+    );
+    assert_import_invariants(&bytes);
+
+    // The same, with the second scope left open at the end of the file.
+    let bytes = XarBuilder::new()
+        .record(104, &[])
+        .down()
+        .record(104, &[])
+        .up()
+        .down()
+        .finish();
+    assert_import_invariants(&bytes);
+}

@@ -246,9 +246,13 @@ fn build(mut reader: RecordReader<'_>, limits: ReaderLimits) -> Result<FileAnaly
                 if over_depth > 0 {
                     over_depth = over_depth.saturating_sub(1);
                 } else if let Some(parent_level) = stack.pop() {
-                    let finished = core::mem::replace(&mut cur, parent_level);
+                    let mut finished = core::mem::replace(&mut cur, parent_level);
+                    // Appended, not assigned: a node descended into twice
+                    // (`N DOWN a UP DOWN b UP`) keeps both groups of
+                    // children, since each `DOWN` makes the records after
+                    // it children of the last node inserted.
                     match cur.last_mut() {
-                        Some(parent) => parent.children = finished,
+                        Some(parent) => parent.children.append(&mut finished),
                         None => cur.extend(finished),
                     }
                 } else {
@@ -306,9 +310,9 @@ fn build(mut reader: RecordReader<'_>, limits: ReaderLimits) -> Result<FileAnaly
         diags.push(Diagnostic::new(DiagCode::UnbalancedScope).with_detail(stack.len() as u64));
     }
     while let Some(parent_level) = stack.pop() {
-        let finished = core::mem::replace(&mut cur, parent_level);
+        let mut finished = core::mem::replace(&mut cur, parent_level);
         match cur.last_mut() {
-            Some(parent) => parent.children = finished,
+            Some(parent) => parent.children.append(&mut finished),
             None => cur.extend(finished),
         }
     }
