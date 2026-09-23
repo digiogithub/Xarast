@@ -65,6 +65,7 @@ pub mod cache;
 pub mod compose;
 pub mod corpus;
 pub mod display_list;
+pub mod export;
 pub mod golden;
 pub mod paint;
 pub mod path;
@@ -75,7 +76,7 @@ pub mod stroke_cull;
 pub mod surface;
 pub mod tiling;
 
-pub use backend::cpu::{CpuBackend, CpuConfig, CpuRasterizer, Resolver};
+pub use backend::cpu::{CpuBackend, CpuConfig, CpuRasterizer, Resolver, RowsOutcome};
 pub use backend::{BackendError, FrameTimings, LayerId, Rasterizer, RasterizerCaps};
 pub use blend::{
     ALL_FAMILIES, BlendFamily, BlendLut, BlendLuts, LumaWeights, TranspSource, Transparency,

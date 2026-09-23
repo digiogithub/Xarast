@@ -271,6 +271,122 @@ impl CpuBackend {
         }
         Ok(timings)
     }
+
+    /// Renders the rows `y0 .. y0 + target.height()` of a display list
+    /// into `target`, whose first row is device row `y0`: the export
+    /// path's strip entry ([`crate::export`]).
+    ///
+    /// Unlike [`CpuBackend::render`] the band height is the caller's,
+    /// `band_lines`, and bands sit on the **absolute** grid
+    /// `k × band_lines`, so a strip rendered on its own is byte-identical
+    /// to the same rows of a whole-image render with the same band height
+    /// — provided `y0` is itself a multiple of `band_lines`, which
+    /// the export planner guarantees. The configured `band_budget_bytes`
+    /// is ignored. Bands run in parallel and merge by index, so the thread
+    /// count cannot change a byte.
+    ///
+    /// `cancelled` is polled before each band; once it returns `true` the
+    /// remaining bands are skipped and [`RowsOutcome::Cancelled`] is
+    /// returned, leaving `target` partly drawn.
+    ///
+    /// # Errors
+    ///
+    /// When the strip is wider or taller than the rasteriser accepts.
+    pub fn render_rows(
+        &mut self,
+        dl: &DisplayList,
+        res: &Resolver,
+        y0: u32,
+        band_lines: u32,
+        target: &mut Surface,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<RowsOutcome, BackendError> {
+        let max = u32::from(u16::MAX);
+        if target.width() > max || target.height() > max {
+            return Err(BackendError::SurfaceTooLarge {
+                width: target.width(),
+                height: target.height(),
+                max,
+            });
+        }
+        let top = i32::try_from(y0).unwrap_or(i32::MAX);
+        let region = DeviceRect::new(
+            0,
+            top,
+            i32::try_from(target.width()).unwrap_or(i32::MAX),
+            top.saturating_add(i32::try_from(target.height()).unwrap_or(i32::MAX)),
+        );
+        let t0 = Instant::now();
+        let area = dl.bounds().intersection(region);
+        if area.is_empty() || target.data().is_empty() {
+            return Ok(RowsOutcome::Done(FrameTimings::default()));
+        }
+        let stride = target.width() as usize * 4;
+        let rows_per_band = band_lines.max(1) as usize;
+        let chunk = rows_per_band * stride;
+        let cfg = self.cfg;
+        let luts = &self.luts;
+        let band_of = |i: usize, rows: &[u8]| {
+            let y0 = i64::from(region.y0) + (i * rows_per_band) as i64;
+            let h = (rows.len() / stride) as i64;
+            DeviceRect::new(
+                region.x0,
+                i32::try_from(y0).unwrap_or(i32::MAX),
+                region.x1,
+                i32::try_from(y0 + h).unwrap_or(i32::MAX),
+            )
+        };
+        let run = |(i, rows): (usize, &mut [u8])| {
+            if cancelled() {
+                return None;
+            }
+            Some(render_band(
+                dl,
+                res,
+                luts,
+                &cfg,
+                band_of(i, rows),
+                rows,
+                area,
+            ))
+        };
+        let results: Vec<Option<BandStats>> = if cfg.threads == 1 {
+            target
+                .data_mut()
+                .chunks_mut(chunk)
+                .enumerate()
+                .map(run)
+                .collect()
+        } else {
+            target
+                .data_mut()
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .map(run)
+                .collect()
+        };
+        if results.iter().any(Option::is_none) {
+            return Ok(RowsOutcome::Cancelled);
+        }
+        let mut timings = FrameTimings {
+            raster_us: elapsed_us(t0),
+            ..FrameTimings::default()
+        };
+        for r in results.iter().flatten() {
+            timings.tiles += u32::from(r.drew);
+            timings.rasterised_pixels += r.pixels;
+        }
+        Ok(RowsOutcome::Done(timings))
+    }
+}
+
+/// How [`CpuBackend::render_rows`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowsOutcome {
+    /// Every band was drawn.
+    Done(FrameTimings),
+    /// The caller cancelled; the strip is incomplete.
+    Cancelled,
 }
 
 #[derive(Debug, Default)]
