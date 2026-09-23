@@ -2,13 +2,14 @@
 id: XARA-T-0015
 type: task
 title: Workspace clippy gate fails on the 1.98 toolchain (pre-existing lints outside xarast-cli)
-status: backlog
+status: in_progress
 priority: high
 parent: XARA-US-0001
 author: mcp
 labels: [ci, lint]
 created: 2026-09-23T10:04:32Z
-updated: 2026-09-23T10:04:32Z
+updated: 2026-09-23T10:09:51Z
+started: 2026-09-23T10:09:51Z
 ---
 
 ## Description
