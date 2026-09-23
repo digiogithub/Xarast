@@ -33,10 +33,13 @@ depth limit) stay in [`geometry.md`](geometry.md).
 | Colour editor model: `ColourEditorModel`, `ColourEditorView`, `ColourEditorOp`, `Intent::ColourEditor` | `xarast-app/src/colour_editor.rs` | done (XARA-US-0041) |
 | Colour editor UI: 2D field + slider, numeric entry, derivation editor, Redefine / Apply | `xarast-ui/src/colour_field.rs`, `panels/colour.rs` | done (XARA-US-0041) |
 | `History::discard_redo` | `xarast-doc/src/history.rs` | done (for the editor's Esc) |
+| `History::{hold_redo, restore_held_redo, release_held_redo}` | `xarast-doc/src/history.rs` | done (Esc brings back the redo branch) |
 
-Tests: `xarast-app/tests/colour_editor.rs` (13: a 60-event drag is one
+Tests: `xarast-app/tests/colour_editor.rs` (14: a 60-event drag is one
 step and undoes by digest; Esc mid-drag leaves digest, labels, serial and
-redo list untouched; hue kept through S = 0; editing a linked object
+redo list untouched; Esc after an undo brings the redo branch back (redo
+re-applies it by digest), a committed drag drops it, a drag that changed
+nothing keeps it; hue kept through S = 0; editing a linked object
 unlinks only it and Redefine repaints every user; current attribute with
 nothing selected; line target; tint drag = one "Link Colour" step, cycle
 refused by digest; HSV link inheriting the hue follows the parent; new
@@ -171,8 +174,8 @@ Plain round-to-nearest would get **545** of them wrong.
     walker, and the phase asks for the coalescing mechanism. **Esc** undoes
     the step (walks back to the serial recorded at the first preview) and
     `History::discard_redo` drops it: digest, labels and state serial
-    return. Known loss: a redo branch that existed before the drag was
-    already dropped by its first command and does not come back.
+    return. The redo branch that existed before the drag comes back too
+    (decision 24).
 20. **Editor targets.** `Selection(PaintSlot)` edits each selected
     object's `StopTarget::From` via `SetStopValue` ("Set Fill Colour"):
     the colour of a flat fill, the start colour of a gradient — never
@@ -200,6 +203,21 @@ Plain round-to-nearest would get **545** of them wrong.
     document still resolves to exactly the value it wrote, so a hue
     survives a saturation dragged to zero; any other change (undo, another
     edit) and the view re-derives from the document.
+24. **A drag sets the redo branch aside; it does not drop it.**
+    `start_drag` calls `History::hold_redo`, which moves the redo steps
+    and their serials out of `future` *without reaping* their retained
+    nodes, so the drag's commits find nothing to drop. When the drag ends
+    (`end_hold`): if the history is back at the serial the drag started
+    from (Esc undid it all, or it never touched the document) the branch
+    is restored (`restore_held_redo`); otherwise it is released
+    (`release_held_redo` reaps it — exactly what the first commit would
+    have done). Chosen over applying previews outside the history until
+    release (the fill tool's route, `tools.md` decision 45) because a
+    palette redefinition has no preview override in the walker; it is
+    three small `History` methods and one call at each end of the drag.
+    `settle` (an Undo/Redo mid-drag) goes through the same end, so redo
+    after a drag that changed nothing still works. `History::clear` reaps
+    a held branch too.
 
 ## Invariants that must not be broken
 
@@ -215,6 +233,8 @@ Plain round-to-nearest would get **545** of them wrong.
    the epoch and the order cache): palette undo is proved by digest.
 7. A refused command (palette or fill) leaves the digest and history
    unchanged.
+8. A cancelled colour-editor drag leaves the document, the undo list, the
+   redo list and the state serial exactly as they were before it.
 
 ## Dead ends (do not retry)
 
@@ -224,6 +244,9 @@ Plain round-to-nearest would get **545** of them wrong.
 - **`round(v × 255)` for cached values**: 545 corpus entries off by one.
 - **Shade as `s × x, v × y`** (phase 1's guess): the original's shade is a
   signed move towards 0 or 1; the guess made `(0, 0)` black.
+- **Dropping the drag's step with `discard_redo` alone on Esc**: the
+  redo branch from before the drag is already gone by then (the first
+  preview's commit dropped it). Hold it for the drag's lifetime instead.
 - **Re-inserting a deleted palette entry on undo**: a slot map cannot put
   it back under the same key.
 
