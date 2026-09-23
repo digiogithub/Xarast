@@ -2,13 +2,14 @@
 id: XARA-US-0044
 type: story
 title: W9.1 — Font database, system enumeration and fallback
-status: in_review
+status: done
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T17:24:47Z
+updated: 2026-09-23T17:30:40Z
 started: 2026-09-23T17:24:04Z
+closed: 2026-09-23T17:30:40Z
 ---
 
 ## Tasks (full table: phase-09 §W9.1)
