@@ -434,19 +434,92 @@ pub fn spread_rect(doc: &xarast_doc::Document) -> DocRect {
 /// path can also have zero area. Callers that frame it fall back to
 /// [`page_rect`] in both cases.
 ///
-/// Computed from the bounds cache where it is warm and from the geometry
-/// where it is not. Read-only: it never touches the cache, because the
-/// walker must not mutate the document (architecture §4).
+/// Computed from the bounds cache where it is warm and, where it is not,
+/// from the geometry **with each object's stroke extent**, resolved with an
+/// attribute stack. A cold cache used to be read with a zero extent, so a
+/// thick stroke on the drawing's edge was framed out and cut by the image
+/// border (`testfiles/Broken Butt Cap.xar`). Read-only: it never touches
+/// the cache, because the walker must not mutate the document
+/// (architecture §4).
 #[must_use]
 pub fn drawing_rect(doc: &xarast_doc::Document) -> DocRect {
     let tree = &doc.tree;
-    let content = tree
-        .children(doc.active_spread())
-        .filter(|&id| {
-            matches!(tree.kind(id), Some(xarast_doc::NodeKind::Layer(l)) if l.visible && !l.guide)
-        })
-        .flat_map(|layer| tree.children(layer));
-    nodes_rect(doc, content)
+    let mut r = DocRect::EMPTY;
+    for layer in tree.children(doc.active_spread()).filter(|&id| {
+        matches!(tree.kind(id), Some(xarast_doc::NodeKind::Layer(l)) if l.visible && !l.guide)
+    }) {
+        let b = match tree.bounds(layer).get() {
+            Some(b) => b,
+            None => ink_rect(doc, layer),
+        };
+        if !b.is_empty() {
+            r = if r.is_empty() { b } else { r.union(b) };
+        }
+    }
+    r
+}
+
+/// The bounds of everything under `root`, each object inflated by half
+/// its own line width. That is tighter than the culling extent
+/// ([`xarast_doc::AttrStack::stroke_extent`] allows for a mitre spike at the
+/// full mitre limit, four times as far), which framed a thick stroke in a
+/// margin as wide as the drawing; a spike that pokes past the frame costs
+/// less than that. The walk mirrors
+/// [`xarast_doc::Document::update_bounds`] without writing the cache, and
+/// starts from the defaults: attributes above a layer are not a thing a
+/// `.xar` file writes.
+fn ink_rect(doc: &xarast_doc::Document, root: xarast_doc::NodeId) -> DocRect {
+    use xarast_doc::{NodeKind, WalkEvent};
+    let tree = &doc.tree;
+    let mut stack = xarast_doc::AttrStack::with_defaults(&doc.defaults);
+    let mut r = DocRect::EMPTY;
+    let mut add = |b: DocRect| {
+        if !b.is_empty() {
+            r = if r.is_empty() { b } else { r.union(b) };
+        }
+    };
+    // A container's box is the union of its children's, which the walk
+    // adds one by one; only an object with ink of its own adds itself.
+    let own_ink = |node| {
+        !matches!(
+            tree.kind(node),
+            None | Some(
+                NodeKind::Attr(_)
+                    | NodeKind::Document(_)
+                    | NodeKind::Chapter
+                    | NodeKind::Spread(_)
+                    | NodeKind::Layer(_)
+                    | NodeKind::Group(_)
+                    | NodeKind::Live(_)
+                    | NodeKind::ClipView(_)
+                    | NodeKind::TextStory(_)
+                    | NodeKind::TextLine(_)
+            )
+        )
+    };
+    for ev in tree.walk_render(root) {
+        match ev {
+            WalkEvent::EnterScope { .. } => stack.push_scope(),
+            WalkEvent::Visit { node } => match tree.kind(node) {
+                Some(NodeKind::Attr(a)) => stack.push(std::sync::Arc::new(a.value.clone())),
+                _ if own_ink(node) && tree.links(node).first_child.is_none() => add(
+                    xarast_doc::bounds::compute_bounds_with(tree, node, half_width(&stack)),
+                ),
+                _ => {}
+            },
+            WalkEvent::LeaveScope { parent } => {
+                if own_ink(parent) {
+                    add(xarast_doc::bounds::compute_bounds_with(
+                        tree,
+                        parent,
+                        half_width(&stack),
+                    ));
+                }
+                stack.pop_scope();
+            }
+        }
+    }
+    r
 }
 
 /// The drawing, or the page when the drawing is empty or has no area:
@@ -494,6 +567,13 @@ where
         r = if r.is_empty() { b } else { r.union(b) };
     }
     r
+}
+
+fn half_width(stack: &xarast_doc::AttrStack) -> Mp {
+    match stack.get(xarast_doc::AttrSlot::LineWidth) {
+        xarast_doc::AttrValue::LineWidth(w) => Mp::new(w.raw() / 2),
+        _ => Mp::ZERO,
+    }
 }
 
 /// Rounds a document rectangle out to whole device pixels.

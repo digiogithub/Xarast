@@ -173,3 +173,13 @@ fn only_the_extra_repeat_makes_a_gradient_tile() {
         "the ramp did not wrap: {right:?}"
     );
 }
+
+#[test]
+fn the_drawing_rect_includes_half_of_each_stroke() {
+    // The frame's 500 mp stroke reaches 250 mp outside the square; framing
+    // it with a zero extent cut thick strokes off at the image border.
+    let (doc, _) = import(&drawing(TAG_FILL_REPEATING), &ImportOptions::default()).unwrap();
+    let r = drawing_rect(&doc);
+    let side = HI - LO + 500;
+    assert_eq!((r.width().raw(), r.height().raw()), (side, side), "{r:?}");
+}
