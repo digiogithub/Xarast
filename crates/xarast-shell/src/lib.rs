@@ -36,6 +36,7 @@
 //! | [`scale`] | The single owner of the fractional scale factor |
 //! | [`decorations`] | Who draws the window frame |
 //! | [`input`] | The platform-neutral event model and its translation |
+//! | [`egui_input`] | [`ShellEvent`]s to `egui` input, and who owns the canvas's input |
 //! | [`intents`] | Physical [`ShellEvent`]s to semantic `xarast_app::Intent`s |
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
@@ -51,6 +52,7 @@ use std::time::{Duration, Instant};
 pub mod clipboard;
 pub mod decorations;
 pub mod display;
+pub mod egui_input;
 pub mod gpu_errors;
 pub mod input;
 pub mod intents;
@@ -85,7 +87,7 @@ pub use portal::{
     FileFilter, OpenFileRequest, PortalEvent, PortalHandle, PortalRequestId, SaveFileRequest,
 };
 pub use scale::{LogicalSize, PhysicalPos, PhysicalSize, ScaleFactor};
-pub use window::{ShellCtx, ShellWaker};
+pub use window::{CursorShape, ShellCtx, ShellWaker};
 
 /// The Wayland and X11 application identifier.
 ///

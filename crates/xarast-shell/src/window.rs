@@ -69,6 +69,47 @@ impl ShellWaker {
     }
 }
 
+/// A pointer shape, named by what it means rather than by any toolkit's
+/// spelling. The shell maps it onto the platform's cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// The platform's arrow.
+    #[default]
+    Default,
+    /// No cursor at all.
+    Hidden,
+    /// A text caret, over editable text.
+    Text,
+    /// A pointing hand, over a link.
+    Hand,
+    /// An open hand: something can be dragged.
+    Grab,
+    /// A closed hand: something is being dragged.
+    Grabbing,
+    /// Four arrows: something moves freely.
+    Move,
+    /// Crosshair, for precise placement.
+    Crosshair,
+    /// The action is not allowed here.
+    NotAllowed,
+    /// Resize left–right.
+    ResizeHorizontal,
+    /// Resize up–down.
+    ResizeVertical,
+    /// Resize along the top-left/bottom-right diagonal.
+    ResizeNwSe,
+    /// Resize along the top-right/bottom-left diagonal.
+    ResizeNeSw,
+    /// Busy.
+    Wait,
+    /// Help is available.
+    Help,
+    /// Zoom in.
+    ZoomIn,
+    /// Zoom out.
+    ZoomOut,
+}
+
 /// What the application handed over for the next present.
 #[derive(Debug, Default)]
 pub(crate) struct PendingFrame {
@@ -139,6 +180,47 @@ impl ShellCtx<'_> {
         if let Some(w) = self.window {
             w.set_ime_allowed(allowed);
         }
+    }
+
+    /// Tells the input method where the caret is, in device pixels, so
+    /// the candidate window opens next to it rather than at the corner.
+    pub fn set_ime_cursor_area(&self, x: f64, y: f64, width: f64, height: f64) {
+        if let Some(w) = self.window {
+            w.set_ime_cursor_area(
+                winit::dpi::PhysicalPosition::new(x, y),
+                winit::dpi::PhysicalSize::new(width.max(1.0), height.max(1.0)),
+            );
+        }
+    }
+
+    /// Sets the pointer's shape over the window.
+    pub fn set_cursor(&self, shape: CursorShape) {
+        use winit::window::CursorIcon as C;
+        let Some(w) = self.window else { return };
+        let icon = match shape {
+            CursorShape::Hidden => {
+                w.set_cursor_visible(false);
+                return;
+            }
+            CursorShape::Default => C::Default,
+            CursorShape::Text => C::Text,
+            CursorShape::Hand => C::Pointer,
+            CursorShape::Grab => C::Grab,
+            CursorShape::Grabbing => C::Grabbing,
+            CursorShape::Move => C::Move,
+            CursorShape::Crosshair => C::Crosshair,
+            CursorShape::NotAllowed => C::NotAllowed,
+            CursorShape::ResizeHorizontal => C::EwResize,
+            CursorShape::ResizeVertical => C::NsResize,
+            CursorShape::ResizeNwSe => C::NwseResize,
+            CursorShape::ResizeNeSw => C::NeswResize,
+            CursorShape::Wait => C::Wait,
+            CursorShape::Help => C::Help,
+            CursorShape::ZoomIn => C::ZoomIn,
+            CursorShape::ZoomOut => C::ZoomOut,
+        };
+        w.set_cursor_visible(true);
+        w.set_cursor(icon);
     }
 
     /// A handle another thread can use to wake the loop.

@@ -16,13 +16,19 @@
 //!  CanvasFrame ──► ShellCtx::show_canvas ◄─ take_latest ◄─ waker ◄─┘
 //! ```
 //!
-//! What this module does **not** do yet: feed input to `egui`. The panels
-//! are drawn and laid out — the canvas region comes from their layout —
-//! but they do not respond to the pointer or the keyboard until the `egui`
-//! input shim lands (XARA-US-0002). Pan and zoom reach the canvas through
-//! [`crate::intents`] directly, which is the path that shim must not
-//! duplicate: when it lands, the canvas widget's own navigation and this
-//! module's must be reconciled so that a wheel notch is not applied twice.
+//! # Input ownership
+//!
+//! Every [`ShellEvent`] goes to `egui` through [`crate::egui_input`], so
+//! the panels respond to the pointer, the keyboard, the wheel and the input
+//! method. Canvas **navigation** has exactly one owner, the
+//! [`IntentAdapter`]: the canvas widget runs with
+//! [`xarast_ui::CanvasNavigation::External`] and emits no pan or zoom of its
+//! own, so one wheel notch is one zoom step. Two gates keep the adapter out
+//! of `egui`'s way:
+//!
+//! * a press or a wheel at a point where `egui` shows something above the
+//!   canvas (a popup, a menu, a floating window) is not the canvas's;
+//! * view keys do nothing while a text field has the keyboard.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -33,12 +39,14 @@ use xarast_ui::model::{
 };
 use xarast_ui::{Scale, Workspace};
 
-use crate::input::event::{ColorScheme, DragEvent, ShellEvent};
+use crate::egui_input::{EguiInput, cursor_shape};
+use crate::input::event::{ColorScheme, DragEvent, PointerPhase, ShellEvent};
 use crate::input::keyboard::{Key, KeyState, NamedKey};
 use crate::intents::{CanvasRegion, IntentAdapter};
 use crate::paint::{CanvasFrame, UiFrame};
 use crate::portal::PortalEvent;
-use crate::{FrameRequest, ShellApp, ShellCtx};
+use crate::scale::{PhysicalPos, PhysicalSize, ScaleFactor};
+use crate::{CursorShape, FrameRequest, ShellApp, ShellCtx};
 
 /// The pasteboard, premultiplied sRGB: a neutral mid grey that reads as
 /// "not the page" under both themes.
@@ -73,6 +81,25 @@ pub struct Viewer {
     renderer_label: String,
     /// Write the first settled frame here and quit.
     screenshot: Option<PathBuf>,
+    /// `egui`'s input for the next interface frame.
+    input: EguiInput,
+    /// The scale of the last event or frame, in pixels per point.
+    ppp: f32,
+    /// A text field had the keyboard in the last interface frame.
+    text_input: bool,
+    /// The canvas had keyboard focus in the last interface frame.
+    canvas_focused: bool,
+    ime_allowed: bool,
+    ime_area: Option<[i32; 4]>,
+    cursor: CursorShape,
+}
+
+/// One interface frame, before it is handed to the shell.
+struct UiStep {
+    frame: UiFrame,
+    region: Option<CanvasRegion>,
+    repaint: Option<Duration>,
+    output: egui::PlatformOutput,
 }
 
 impl std::fmt::Debug for Viewer {
@@ -107,7 +134,22 @@ impl Viewer {
             message: None,
             renderer_label: "CPU".to_owned(),
             screenshot: None,
+            input: EguiInput::new(),
+            ppp: 1.0,
+            text_input: false,
+            canvas_focused: false,
+            ime_allowed: false,
+            ime_area: None,
+            cursor: CursorShape::Default,
         }
+        .with_external_navigation()
+    }
+
+    /// The adapter owns canvas navigation; see the module documentation.
+    fn with_external_navigation(mut self) -> Viewer {
+        self.workspace
+            .set_canvas_navigation(xarast_ui::CanvasNavigation::External);
+        self
     }
 
     /// Writes the composed window to `path` as a PNG as soon as the
@@ -209,50 +251,111 @@ impl Viewer {
         }
     }
 
-    /// Runs one interface frame and hands its output to the shell.
-    /// Returns the canvas region it laid out and how soon it wants another.
-    fn run_ui(&mut self, ctx: &mut ShellCtx<'_>) -> (Option<CanvasRegion>, Option<Duration>) {
-        let scale = ctx.scale();
+    /// Runs one interface frame: feeds `egui` the input gathered since the
+    /// last one, lays out the workspace and applies what it asked for.
+    /// Needs no window, which is what lets the input path be tested whole.
+    fn ui_step(&mut self, scale: ScaleFactor, size: PhysicalSize) -> UiStep {
         let ppp = scale.pixels_per_point();
-        let size = ctx.surface_size();
+        self.ppp = ppp;
         let model = self.ui_model(f64::from(ppp));
-        let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(size.width as f32 / ppp, size.height as f32 / ppp),
-            )),
-            ..egui::RawInput::default()
-        };
+        let raw = self.input.take(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(size.width as f32 / ppp, size.height as f32 / ppp),
+        ));
         let mut out = None;
         let workspace = &mut self.workspace;
         let full = self.egui.run(raw, |c| {
             out = Some(workspace.ui(c, &model, Scale::new(f64::from(ppp)), &[]));
         });
         let primitives = self.egui.tessellate(full.shapes, full.pixels_per_point);
-        ctx.show_ui(UiFrame {
+        let frame = UiFrame {
             primitives,
             textures: full.textures_delta,
             pixels_per_point: full.pixels_per_point,
-        });
+        };
         let repaint = full
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay);
+        // A focused text field is exactly when egui asks for an input
+        // method, so that is the signal that the keyboard is egui's.
+        self.text_input = full.platform_output.ime.is_some();
 
-        let Some(out) = out else {
-            return (None, repaint);
-        };
-        let intents: Vec<Intent> = out
-            .commands
-            .into_iter()
-            .filter_map(|c| self.ui_intent(c, f64::from(ppp)))
-            .collect();
+        let mut region = None;
+        if let Some(out) = out {
+            self.canvas_focused = out.canvas.as_ref().is_some_and(|c| c.focused);
+            let intents: Vec<Intent> = out
+                .commands
+                .into_iter()
+                .filter_map(|c| self.ui_intent(c, f64::from(ppp)))
+                .collect();
+            self.apply(intents);
+            region = out.canvas.map(|c| {
+                let r = c.rect_device;
+                CanvasRegion::new(r.x, r.y, r.width, r.height)
+            });
+        }
+        UiStep {
+            frame,
+            region,
+            repaint,
+            output: full.platform_output,
+        }
+    }
+
+    /// Carries the interface's requests to the platform: the clipboard,
+    /// the input method and the pointer shape.
+    fn platform_output(&mut self, output: egui::PlatformOutput, ctx: &mut ShellCtx<'_>) {
+        for command in output.commands {
+            if let egui::OutputCommand::CopyText(text) = command
+                && let Err(e) = ctx.clipboard().set_text(&text)
+            {
+                self.message = Some(format!("Could not copy: {e}"));
+            }
+        }
+        let wants_ime = output.ime.is_some();
+        if wants_ime != self.ime_allowed {
+            ctx.set_ime_allowed(wants_ime);
+            self.ime_allowed = wants_ime;
+            self.ime_area = None;
+        }
+        if let Some(ime) = output.ime {
+            let ppp = self.ppp;
+            let r = ime.cursor_rect;
+            let area = [r.min.x, r.min.y, r.width(), r.height()].map(|v| (v * ppp).round() as i32);
+            if self.ime_area != Some(area) {
+                self.ime_area = Some(area);
+                let [x, y, w, h] = area.map(f64::from);
+                ctx.set_ime_cursor_area(x, y, w, h);
+            }
+        }
+        let shape = cursor_shape(output.cursor_icon);
+        if shape != self.cursor {
+            self.cursor = shape;
+            ctx.set_cursor(shape);
+        }
+    }
+
+    /// Sizes and places the canvas from the interface's layout. Returns
+    /// the new origin when the canvas moved without being resized.
+    fn place_canvas(&mut self, region: CanvasRegion, scale: ScaleFactor) -> Option<(i32, i32)> {
+        let mut intents = Vec::new();
+        let mut moved = None;
+        if self.primed {
+            if region != self.adapter.canvas() {
+                moved = Some((region.x, region.y));
+            }
+            self.adapter.set_canvas(region, &mut intents);
+        } else {
+            self.adapter.prime(region, scale, &mut intents);
+            self.primed = true;
+        }
         self.apply(intents);
-        let region = out.canvas.map(|c| {
-            let r = c.rect_device;
-            CanvasRegion::new(r.x, r.y, r.width, r.height)
-        });
-        (region, repaint)
+        if self.fit_pending {
+            self.fit_pending = false;
+            self.apply(vec![Intent::ZoomTo(xarast_app::ZoomTarget::Page)]);
+        }
+        moved
     }
 
     /// Maps an interface command onto an intent. The interface speaks in
@@ -370,7 +473,14 @@ impl Viewer {
                 self.scheme = *s;
                 redraw = true;
             }
-            ShellEvent::Key(k) if k.state == KeyState::Pressed && !k.modifiers.constrain() => {
+            // A text field has the keyboard: typing "1" into a layer name
+            // must not zoom to 100 %.
+            ShellEvent::Key(k)
+                if k.state == KeyState::Pressed && !k.modifiers.constrain() && !self.text_input =>
+            {
+                if let Some(pan) = self.arrow_pan(&k.key) {
+                    redraw |= self.apply(vec![pan]).needs_redraw();
+                }
                 if let Some(mut intent) = Self::key_intent(&k.key) {
                     // Keyboard zoom is about the canvas centre.
                     if let Intent::Zoom { anchor, .. } = &mut intent {
@@ -385,6 +495,9 @@ impl Viewer {
             }
             _ => {}
         }
+        if self.egui_is_above_the_canvas(event) {
+            return redraw;
+        }
         let mut intents = Vec::new();
         self.adapter.translate(event, &mut intents);
         if !intents.is_empty() {
@@ -392,6 +505,51 @@ impl Viewer {
         }
         redraw
     }
+}
+
+impl Viewer {
+    /// Arrow keys pan the view when the canvas has the keyboard, or when
+    /// nothing does; otherwise they belong to the focused widget.
+    fn arrow_pan(&self, key: &Key) -> Option<Intent> {
+        let nothing_focused = self.egui.memory(|m| m.focused().is_none());
+        if !(self.canvas_focused || nothing_focused) {
+            return None;
+        }
+        let step = xarast_ui::canvas::KEY_PAN_STEP * f64::from(self.ppp);
+        let (dx, dy) = match key {
+            Key::Named(NamedKey::ArrowLeft) => (step, 0.0),
+            Key::Named(NamedKey::ArrowRight) => (-step, 0.0),
+            Key::Named(NamedKey::ArrowUp) => (0.0, step),
+            Key::Named(NamedKey::ArrowDown) => (0.0, -step),
+            _ => return None,
+        };
+        Some(Intent::Pan { dx, dy })
+    }
+
+    /// Whether this press or wheel lands on something `egui` shows above
+    /// the canvas — a popup, a menu, a floating window — and so is not the
+    /// canvas's. Panels share the background layer with the canvas and are
+    /// told apart by the adapter's own region test instead. Motion and
+    /// releases always reach the adapter, so a drag it owns is never cut.
+    fn egui_is_above_the_canvas(&self, event: &ShellEvent) -> bool {
+        let ShellEvent::Pointer(p) = event else {
+            return false;
+        };
+        if !matches!(
+            p.phase,
+            PointerPhase::Pressed(_) | PointerPhase::Scroll { .. }
+        ) {
+            return false;
+        }
+        let at = points(p.position, self.ppp);
+        self.egui
+            .layer_id_at(at)
+            .is_some_and(|l| l.order != egui::Order::Background)
+    }
+}
+
+fn points(p: PhysicalPos, ppp: f32) -> egui::Pos2 {
+    egui::pos2(p.x as f32 / ppp, p.y as f32 / ppp)
 }
 
 /// Projects a session for the interface.
@@ -454,7 +612,11 @@ fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> D
 
 impl ShellApp for Viewer {
     fn on_event(&mut self, event: ShellEvent, ctx: &mut ShellCtx<'_>) {
-        if self.handle(&event) {
+        self.ppp = ctx.scale().pixels_per_point();
+        self.input.push(&event, self.ppp, Some(ctx.clipboard()));
+        // Anything egui was told about needs an interface frame to act on.
+        let for_egui = !self.input.is_empty();
+        if self.handle(&event) || for_egui {
             ctx.request_redraw();
         }
     }
@@ -475,25 +637,15 @@ impl ShellApp for Viewer {
             }
         }
 
-        let (region, repaint) = self.run_ui(ctx);
+        let step = self.ui_step(ctx.scale(), ctx.surface_size());
+        ctx.show_ui(step.frame);
+        self.platform_output(step.output, ctx);
+        let repaint = step.repaint;
 
-        if let Some(region) = region.filter(|r| r.width > 0 && r.height > 0) {
-            let mut intents = Vec::new();
-            if self.primed {
-                let moved = region != self.adapter.canvas();
-                self.adapter.set_canvas(region, &mut intents);
-                if moved {
-                    ctx.move_canvas((region.x, region.y));
-                }
-            } else {
-                self.adapter.prime(region, ctx.scale(), &mut intents);
-                self.primed = true;
-            }
-            self.apply(intents);
-            if self.fit_pending {
-                self.fit_pending = false;
-                self.apply(vec![Intent::ZoomTo(xarast_app::ZoomTarget::Page)]);
-            }
+        if let Some(region) = step.region.filter(|r| r.width > 0 && r.height > 0)
+            && let Some(origin) = self.place_canvas(region, ctx.scale())
+        {
+            ctx.move_canvas(origin);
         }
 
         self.submit_render(ctx);
@@ -738,5 +890,270 @@ mod tests {
             Some(Intent::Zoom { factor, .. }) if factor > 1.0
         ));
         assert!(Viewer::key_intent(&Key::char('q')).is_none());
+    }
+
+    // ---- The egui input shim, end to end (XARA-US-0002) ----------------
+    //
+    // These drive the real path with no window: ShellEvent → EguiInput and
+    // IntentAdapter → egui frame → UiCommand/Intent → Session.
+
+    const SIZE: (u32, u32) = (1280, 800);
+
+    fn one() -> ScaleFactor {
+        ScaleFactor::new(1.0)
+    }
+
+    /// Runs `n` interface frames and returns the last accessibility tree.
+    fn ui_frames(v: &mut Viewer, n: usize) -> Option<egui::accesskit::TreeUpdate> {
+        let mut tree = None;
+        for _ in 0..n {
+            let step = v.ui_step(one(), PhysicalSize::new(SIZE.0, SIZE.1));
+            if let Some(r) = step.region.filter(|r| r.width > 0 && r.height > 0) {
+                v.place_canvas(r, one());
+            }
+            if step.output.accesskit_update.is_some() {
+                tree = step.output.accesskit_update;
+            }
+        }
+        tree
+    }
+
+    /// A viewer with a document, laid out by real interface frames.
+    fn live_viewer() -> Viewer {
+        let mut v = Viewer::new(Vec::new());
+        v.app.new_document();
+        v.egui.enable_accesskit();
+        ui_frames(&mut v, 3);
+        v
+    }
+
+    /// Delivers events the way `on_event` does.
+    fn send(v: &mut Viewer, events: &[ShellEvent]) {
+        for e in events {
+            v.input.push(e, 1.0, None);
+            v.handle(e);
+        }
+    }
+
+    fn ptr_mod(
+        phase: crate::input::event::PointerPhase,
+        x: f64,
+        y: f64,
+        modifiers: crate::input::keyboard::Modifiers,
+    ) -> ShellEvent {
+        let ShellEvent::Pointer(mut p) = pointer(phase, x, y) else {
+            unreachable!()
+        };
+        p.modifiers = modifiers;
+        ShellEvent::Pointer(p)
+    }
+
+    fn click(v: &mut Viewer, x: f64, y: f64) {
+        use crate::input::event::{PointerButton, PointerPhase};
+        send(v, &[pointer(PointerPhase::Moved, x, y)]);
+        ui_frames(v, 1);
+        send(
+            v,
+            &[pointer(PointerPhase::Pressed(PointerButton::Primary), x, y)],
+        );
+        ui_frames(v, 1);
+        send(
+            v,
+            &[pointer(
+                PointerPhase::Released(PointerButton::Primary),
+                x,
+                y,
+            )],
+        );
+        ui_frames(v, 1);
+    }
+
+    fn type_key(v: &mut Viewer, key: Key, text: Option<&str>) {
+        use crate::input::keyboard::{KeyEvent, KeyLocation, Modifiers};
+        for state in [KeyState::Pressed, KeyState::Released] {
+            send(
+                v,
+                &[ShellEvent::Key(KeyEvent {
+                    key: key.clone(),
+                    location: KeyLocation::Standard,
+                    state,
+                    repeat: false,
+                    text: text
+                        .filter(|_| state == KeyState::Pressed)
+                        .map(str::to_owned),
+                    modifiers: Modifiers::NONE,
+                })],
+            );
+        }
+    }
+
+    /// The centre of the first accessible node whose name matches.
+    fn centre_of(tree: &egui::accesskit::TreeUpdate, want: impl Fn(&str) -> bool) -> (f64, f64) {
+        tree.nodes
+            .iter()
+            .find_map(|(_, n)| {
+                let label = n.label()?;
+                if !want(label) {
+                    return None;
+                }
+                let b = n.bounds()?;
+                Some(((b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0))
+            })
+            .expect("the node is in the accessibility tree")
+    }
+
+    fn canvas_centre(v: &Viewer) -> (f64, f64) {
+        let c = v.adapter.canvas();
+        (
+            f64::from(c.x) + f64::from(c.width) / 2.0,
+            f64::from(c.y) + f64::from(c.height) / 2.0,
+        )
+    }
+
+    fn zoom(v: &Viewer) -> f64 {
+        v.app.active().unwrap().viewport.zoom()
+    }
+
+    #[test]
+    fn one_ctrl_wheel_notch_over_the_canvas_zooms_exactly_one_step() {
+        use crate::input::event::{PointerPhase, ScrollUnit};
+        let mut v = live_viewer();
+        let (x, y) = canvas_centre(&v);
+        let ctrl = crate::input::keyboard::Modifiers::NONE.with_ctrl();
+        send(
+            &mut v,
+            &[
+                ShellEvent::ModifiersChanged(ctrl),
+                ptr_mod(PointerPhase::Moved, x, y, ctrl),
+            ],
+        );
+        ui_frames(&mut v, 2);
+        let before = zoom(&v);
+        send(
+            &mut v,
+            &[ptr_mod(
+                PointerPhase::Scroll {
+                    dx: 0.0,
+                    dy: 1.0,
+                    unit: ScrollUnit::Lines,
+                },
+                x,
+                y,
+                ctrl,
+            )],
+        );
+        // egui spreads one wheel notch over about ten frames; run past it,
+        // so a second, smoothed zoom would have had time to land.
+        ui_frames(&mut v, 20);
+        let ratio = zoom(&v) / before;
+        assert!(
+            (ratio - std::f64::consts::SQRT_2).abs() < 1e-9,
+            "one notch zoomed by {ratio}, not √2"
+        );
+    }
+
+    #[test]
+    fn a_plain_wheel_notch_pans_exactly_once() {
+        use crate::input::event::{PointerPhase, ScrollUnit};
+        let mut v = live_viewer();
+        let (x, y) = canvas_centre(&v);
+        send(&mut v, &[pointer(PointerPhase::Moved, x, y)]);
+        ui_frames(&mut v, 2);
+        let before = v.app.active().unwrap().viewport.centre();
+        send(
+            &mut v,
+            &[pointer(
+                PointerPhase::Scroll {
+                    dx: 0.0,
+                    dy: 1.0,
+                    unit: ScrollUnit::Lines,
+                },
+                x,
+                y,
+            )],
+        );
+        let after_adapter = v.app.active().unwrap().viewport.centre();
+        ui_frames(&mut v, 20);
+        let after_egui = v.app.active().unwrap().viewport.centre();
+        assert_ne!(before, after_adapter, "the adapter pans");
+        assert_eq!(after_adapter, after_egui, "and nothing pans a second time");
+    }
+
+    #[test]
+    fn a_wheel_over_the_dock_does_not_move_the_document() {
+        use crate::input::event::{PointerPhase, ScrollUnit};
+        let mut v = live_viewer();
+        let at = (f64::from(SIZE.0) - 40.0, 400.0);
+        assert!(
+            !v.adapter
+                .canvas()
+                .contains(crate::scale::PhysicalPos::new(at.0, at.1))
+        );
+        send(&mut v, &[pointer(PointerPhase::Moved, at.0, at.1)]);
+        ui_frames(&mut v, 2);
+        let before = v.app.active().unwrap().viewport.centre();
+        send(
+            &mut v,
+            &[pointer(
+                PointerPhase::Scroll {
+                    dx: 0.0,
+                    dy: 3.0,
+                    unit: ScrollUnit::Lines,
+                },
+                at.0,
+                at.1,
+            )],
+        );
+        ui_frames(&mut v, 20);
+        assert_eq!(before, v.app.active().unwrap().viewport.centre());
+    }
+
+    #[test]
+    fn clicking_a_layer_toggle_in_the_panel_hides_the_layer() {
+        let mut v = live_viewer();
+        let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+        let (x, y) = centre_of(&tree, |l| l.starts_with("Hide layer"));
+        click(&mut v, x, y);
+        let layers = v.ui_model(1.0).document.unwrap().layers;
+        assert!(
+            layers.iter().any(|l| !l.visible),
+            "a click on the toggle reached the document: {layers:?}"
+        );
+    }
+
+    #[test]
+    fn typing_in_a_rename_field_does_not_trigger_view_keys() {
+        let mut v = live_viewer();
+        let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+        let original = v.ui_model(1.0).document.unwrap().layers[0].name.clone();
+        let (x, y) = centre_of(&tree, |l| l.starts_with(&format!("{original}, ")));
+        // Double-click the name to rename it.
+        click(&mut v, x, y);
+        click(&mut v, x, y);
+        ui_frames(&mut v, 2);
+        assert!(v.text_input, "the rename field has the keyboard");
+
+        let before = zoom(&v);
+        type_key(&mut v, Key::char('1'), Some("1"));
+        ui_frames(&mut v, 2);
+        assert!(
+            (zoom(&v) - before).abs() < 1e-12,
+            "'1' typed into a text field zoomed the view"
+        );
+        type_key(&mut v, Key::Named(NamedKey::Enter), None);
+        ui_frames(&mut v, 3);
+        let renamed = v.ui_model(1.0).document.unwrap().layers[0].name.clone();
+        assert!(
+            renamed.contains('1') && renamed != original,
+            "{original} -> {renamed}"
+        );
+        assert!(!v.text_input, "Enter gave the keyboard back");
+
+        // And with no text field, the same key is a view key again.
+        type_key(&mut v, Key::char('1'), Some("1"));
+        assert!(
+            (zoom(&v) - before).abs() > 1e-9 || (before - 1.0).abs() < 1e-9,
+            "'1' outside a text field zooms to 100 %"
+        );
     }
 }
