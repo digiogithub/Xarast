@@ -12,15 +12,16 @@
 //! [`PortalEvent::Failed`] with a reason a user can act on. The application
 //! keeps running with the command line as its way in.
 //!
-//! The GTK backend of `rfd` is deliberately not compiled: the portal path is
-//! the one that works inside an AppImage and a Flatpak sandbox, and the GTK
-//! backend would pull a C toolkit into the image that
-//! `docs/memory/packaging.md` says must not be there.
+//! File dialogs go straight to `org.freedesktop.portal.FileChooser` through
+//! `ashpd`, never through a toolkit: the portal path is the one that works
+//! inside an AppImage and a Flatpak sandbox, and a cancelled dialog must stay
+//! distinguishable from a portal that is not there (`docs/memory/ui.md`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
+use std::time::Duration;
 
 use crate::input::event::ColorScheme;
 
@@ -181,13 +182,22 @@ impl PortalHandle {
 
 /// The services thread and its answer queue.
 ///
-/// Dropping it shuts the thread down and joins it, so that a portal call in
-/// flight cannot outlive the process teardown and write to a dead channel.
+/// Dropping it shuts the thread down. Queued requests are discarded. The
+/// thread is joined when it is idle; when it is still inside a dialog it is
+/// left to end with the process, because a join would hold the application
+/// open until someone answered a dialog whose window is already gone
+/// (measured: quitting with a dialog open hung until it was dismissed, and
+/// then opened the next queued one).
 #[derive(Debug)]
 pub struct PortalService {
     handle: PortalHandle,
     answers: Receiver<PortalEvent>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Set on drop: requests still queued behind an open dialog are
+    /// discarded instead of opening one dialog after another.
+    stopping: Arc<AtomicBool>,
+    /// Disconnects when the services thread ends.
+    finished: Receiver<()>,
 }
 
 impl PortalService {
@@ -209,20 +219,47 @@ impl PortalService {
     /// notices a dialog closing or the desktop turning dark.
     #[must_use]
     pub fn start_with_waker(wake: impl Fn() + Send + Sync + 'static) -> Self {
-        let wake: Wake = Arc::new(wake);
-        let (tx, rx) = channel::<PortalCommand>();
-        let (atx, answers) = channel::<PortalEvent>();
         let availability = portal_availability();
         if let Err(reason) = &availability {
             tracing::info!(reason, "XDG portals unavailable; file dialogs are disabled");
         }
+        Self::spawn(availability, Arc::new(wake))
+    }
+
+    /// A service that never touches D-Bus: every request answers
+    /// [`PortalEvent::Failed`] with `reason`, and the colour scheme is
+    /// [`ColorScheme::NoPreference`].
+    ///
+    /// For tests and headless tools. A test that posted a request to a real
+    /// service on a desktop machine would open a real dialog on the
+    /// developer's screen and then wait for a human to close it.
+    #[must_use]
+    pub fn offline(reason: impl Into<String>) -> Self {
+        Self::spawn(Err(reason.into()), Arc::new(|| {}))
+    }
+
+    fn spawn(availability: Result<(), String>, wake: Wake) -> Self {
+        let (tx, rx) = channel::<PortalCommand>();
+        let (atx, answers) = channel::<PortalEvent>();
         if availability.is_ok() {
             watch_color_scheme(atx.clone(), wake.clone());
         }
 
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (done, finished) = channel::<()>();
+        let stop = stopping.clone();
         let thread = std::thread::Builder::new()
             .name("xarast-services".to_owned())
-            .spawn(move || service_loop(&rx, &atx, availability.as_ref().err().cloned(), &*wake))
+            .spawn(move || {
+                let _done = done;
+                service_loop(
+                    &rx,
+                    &atx,
+                    availability.as_ref().err().cloned(),
+                    &*wake,
+                    &stop,
+                );
+            })
             .ok();
 
         Self {
@@ -232,6 +269,8 @@ impl PortalService {
             },
             answers,
             thread,
+            stopping,
+            finished,
         }
     }
 
@@ -254,12 +293,22 @@ impl PortalService {
 
 impl Drop for PortalService {
     fn drop(&mut self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let _ = self.handle.tx.send(PortalCommand::Shutdown);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        let Some(t) = self.thread.take() else { return };
+        match self.finished.recv_timeout(SHUTDOWN_GRACE) {
+            Err(RecvTimeoutError::Timeout) => {
+                tracing::info!("a portal dialog is still open; not waiting for it");
+            }
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => {
+                let _ = t.join();
+            }
         }
     }
 }
+
+/// How long dropping the service waits for an idle services thread.
+const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
 /// Called from a services thread after it queues an answer.
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -269,8 +318,12 @@ fn service_loop(
     answers: &Sender<PortalEvent>,
     unavailable: Option<String>,
     wake: &(dyn Fn() + Send + Sync),
+    stopping: &AtomicBool,
 ) {
     while let Ok(cmd) = rx.recv() {
+        if stopping.load(Ordering::SeqCst) {
+            return;
+        }
         let answer = match cmd {
             PortalCommand::Shutdown => return,
             PortalCommand::Open(id, req) => match &unavailable {
@@ -358,46 +411,125 @@ const fn from_portal(scheme: ashpd::desktop::settings::ColorScheme) -> ColorSche
     }
 }
 
-#[cfg(feature = "portals")]
-fn dialog_with_filters(mut d: rfd::FileDialog, filters: &[FileFilter]) -> rfd::FileDialog {
-    for f in filters {
-        let exts: Vec<&str> = f.extensions.iter().map(String::as_str).collect();
-        d = d.add_filter(&f.name, &exts);
+/// How a file-chooser request ended, before it becomes a [`PortalEvent`].
+///
+/// Kept apart from the D-Bus call so that the classification — the part
+/// that decides what the user is told — is testable without a portal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(not(feature = "portals"), allow(dead_code))]
+enum Chosen {
+    Paths(Vec<PathBuf>),
+    Cancelled,
+    Failed(String),
+}
+
+#[cfg_attr(not(feature = "portals"), allow(dead_code))]
+impl Chosen {
+    /// Turns the portal's list of URIs into local paths. The file chooser
+    /// hands back `file:` URIs (document-portal paths inside a sandbox); a
+    /// choice that holds none is reported rather than treated as a cancel.
+    fn from_uris<'a>(uris: impl IntoIterator<Item = &'a str>) -> Chosen {
+        let mut any = false;
+        let mut paths = Vec::new();
+        for uri in uris {
+            any = true;
+            paths.extend(crate::input::translate::parse_uri_list(uri));
+        }
+        match (any, paths.is_empty()) {
+            (false, _) => Chosen::Cancelled,
+            (true, true) => Chosen::Failed(
+                "the portal returned no local file (only remote locations)".to_owned(),
+            ),
+            (true, false) => Chosen::Paths(paths),
+        }
     }
-    d
+}
+
+/// The classification of an `ashpd` result. A dismissal is the user's
+/// choice; everything else is a failure with a reason a user can act on.
+#[cfg(feature = "portals")]
+fn classify(result: Result<Chosen, ashpd::Error>) -> Chosen {
+    use ashpd::desktop::ResponseError;
+    match result {
+        Ok(chosen) => chosen,
+        // Response code 2, "ended in some other way", is how
+        // xdg-desktop-portal-gtk reports a dialog dismissed with Escape or
+        // its close button (measured on GNOME 46): a dismissal, not a fault.
+        Err(ashpd::Error::Response(ResponseError::Cancelled | ResponseError::Other)) => {
+            Chosen::Cancelled
+        }
+        Err(ashpd::Error::PortalNotFound(_)) => Chosen::Failed(
+            "no XDG desktop portal provides a file chooser; install xdg-desktop-portal and a \
+             backend for this desktop (-gnome, -gtk, -kde, -wlr, -cosmic)"
+                .to_owned(),
+        ),
+        Err(e) => Chosen::Failed(format!("the file chooser portal could not be used: {e}")),
+    }
+}
+
+#[cfg(feature = "portals")]
+fn portal_filters(filters: &[FileFilter]) -> Vec<ashpd::desktop::file_chooser::FileFilter> {
+    filters
+        .iter()
+        .map(|f| {
+            f.extensions.iter().fold(
+                ashpd::desktop::file_chooser::FileFilter::new(&f.name),
+                |acc, ext| acc.glob(&format!("*.{ext}")),
+            )
+        })
+        .collect()
 }
 
 #[cfg(feature = "portals")]
 fn open_files(id: PortalRequestId, req: &OpenFileRequest) -> PortalEvent {
-    let mut dialog = rfd::FileDialog::new().set_title(&req.title);
-    dialog = dialog_with_filters(dialog, &req.filters);
-    if let Some(dir) = &req.directory {
-        dialog = dialog.set_directory(dir);
-    }
-    let chosen = if req.multiple {
-        dialog.pick_files()
-    } else {
-        dialog.pick_file().map(|p| vec![p])
-    };
-    match chosen {
-        Some(paths) if !paths.is_empty() => PortalEvent::FilesChosen { request: id, paths },
-        _ => PortalEvent::Cancelled { request: id },
+    use ashpd::desktop::file_chooser::SelectedFiles;
+    let result = pollster::block_on(async {
+        let mut builder = SelectedFiles::open_file()
+            .title(req.title.as_str())
+            .modal(true)
+            .multiple(req.multiple)
+            .filters(portal_filters(&req.filters));
+        if let Some(dir) = &req.directory {
+            builder = builder.current_folder(dir)?;
+        }
+        let files = builder.send().await?.response()?;
+        Ok(Chosen::from_uris(files.uris().iter().map(|u| u.as_str())))
+    });
+    match classify(result) {
+        Chosen::Paths(paths) => PortalEvent::FilesChosen { request: id, paths },
+        Chosen::Cancelled => PortalEvent::Cancelled { request: id },
+        Chosen::Failed(reason) => PortalEvent::Failed {
+            request: id,
+            reason,
+        },
     }
 }
 
 #[cfg(feature = "portals")]
 fn save_file(id: PortalRequestId, req: &SaveFileRequest) -> PortalEvent {
-    let mut dialog = rfd::FileDialog::new().set_title(&req.title);
-    dialog = dialog_with_filters(dialog, &req.filters);
-    if let Some(dir) = &req.directory {
-        dialog = dialog.set_directory(dir);
-    }
-    if let Some(name) = &req.file_name {
-        dialog = dialog.set_file_name(name);
-    }
-    match dialog.save_file() {
-        Some(path) => PortalEvent::SaveChosen { request: id, path },
-        None => PortalEvent::Cancelled { request: id },
+    use ashpd::desktop::file_chooser::SelectedFiles;
+    let result = pollster::block_on(async {
+        let mut builder = SelectedFiles::save_file()
+            .title(req.title.as_str())
+            .modal(true)
+            .current_name(req.file_name.as_deref())
+            .filters(portal_filters(&req.filters));
+        if let Some(dir) = &req.directory {
+            builder = builder.current_folder(dir)?;
+        }
+        let files = builder.send().await?.response()?;
+        Ok(Chosen::from_uris(files.uris().iter().map(|u| u.as_str())))
+    });
+    match classify(result) {
+        Chosen::Paths(mut paths) => PortalEvent::SaveChosen {
+            request: id,
+            path: paths.swap_remove(0),
+        },
+        Chosen::Cancelled => PortalEvent::Cancelled { request: id },
+        Chosen::Failed(reason) => PortalEvent::Failed {
+            request: id,
+            reason,
+        },
     }
 }
 
@@ -459,7 +591,7 @@ mod tests {
 
     #[test]
     fn request_ids_are_unique_and_increasing() {
-        let service = PortalService::start();
+        let service = PortalService::offline("test");
         let a = service.handle().open_files(OpenFileRequest::default());
         let b = service.handle().open_files(OpenFileRequest::default());
         let c = service.handle().save_file(SaveFileRequest::default());
@@ -468,12 +600,10 @@ mod tests {
 
     #[test]
     fn a_machine_without_portals_answers_with_a_reason_rather_than_hanging() {
-        if portal_availability().is_ok() {
-            // A real session bus is present; opening a dialog here would
-            // block on a human, so there is nothing to assert.
-            return;
-        }
-        let service = PortalService::start();
+        // Offline by construction: on a desktop with a session bus a real
+        // dialog would open on the developer's screen and wait for a human.
+        let service =
+            PortalService::offline("no D-Bus session bus: DBUS_SESSION_BUS_ADDRESS is unset");
         let id = service.handle().open_files(OpenFileRequest {
             title: "Open".to_owned(),
             filters: vec![FileFilter::new("Xara drawings", &["xar"])],
@@ -537,7 +667,7 @@ mod tests {
 
     #[test]
     fn dropping_the_service_stops_its_thread() {
-        let service = PortalService::start();
+        let service = PortalService::offline("test");
         let handle = service.handle().clone();
         drop(service);
         // The handle outlives the service; posting to a shut-down service is
@@ -558,5 +688,101 @@ mod tests {
         let f = FileFilter::new("Xara drawings", &["xar", "web"]);
         assert_eq!(f.name, "Xara drawings");
         assert_eq!(f.extensions, vec!["xar".to_owned(), "web".to_owned()]);
+    }
+
+    #[test]
+    fn chosen_uris_become_paths_with_escapes_decoded() {
+        let c = Chosen::from_uris(["file:///home/a/My%20Drawing.xar", "file:///tmp/b.xar"]);
+        assert_eq!(
+            c,
+            Chosen::Paths(vec![
+                PathBuf::from("/home/a/My Drawing.xar"),
+                PathBuf::from("/tmp/b.xar")
+            ])
+        );
+    }
+
+    #[test]
+    fn an_empty_choice_is_a_cancel_and_a_remote_only_choice_is_a_failure() {
+        assert_eq!(Chosen::from_uris([]), Chosen::Cancelled);
+        assert!(matches!(
+            Chosen::from_uris(["sftp://host/x.xar"]),
+            Chosen::Failed(r) if r.contains("no local file")
+        ));
+    }
+
+    #[cfg(feature = "portals")]
+    #[test]
+    fn a_cancel_is_the_users_and_everything_else_is_a_failure_with_a_reason() {
+        use ashpd::desktop::ResponseError;
+        assert_eq!(
+            classify(Err(ashpd::Error::Response(ResponseError::Cancelled))),
+            Chosen::Cancelled
+        );
+        assert_eq!(
+            classify(Err(ashpd::Error::Response(ResponseError::Other))),
+            Chosen::Cancelled,
+            "Escape in the GTK portal dialog answers 2, not 1"
+        );
+        let missing =
+            ashpd::Error::PortalNotFound(zbus_names_owned("org.freedesktop.portal.FileChooser"));
+        assert!(
+            matches!(classify(Err(missing)), Chosen::Failed(r) if r.contains("xdg-desktop-portal"))
+        );
+        assert!(matches!(
+            classify(Err(ashpd::Error::NoResponse)),
+            Chosen::Failed(_)
+        ));
+    }
+
+    #[cfg(feature = "portals")]
+    fn zbus_names_owned(name: &str) -> ashpd::zbus::names::OwnedInterfaceName {
+        ashpd::zbus::names::InterfaceName::try_from(name)
+            .expect("a valid interface name")
+            .into()
+    }
+
+    #[cfg(feature = "portals")]
+    #[test]
+    fn filters_become_portal_globs() {
+        let f = portal_filters(&[FileFilter::new("Xara drawings", &["xar", "web"])]);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].label(), "Xara drawings");
+        assert_eq!(f[0].pattern_filters(), vec!["*.xar", "*.web"]);
+    }
+
+    #[test]
+    fn dropping_a_busy_service_neither_hangs_nor_serves_the_queue() {
+        // A request that blocks like an open dialog: the offline service
+        // answers at once, so block the thread with a slow waker instead.
+        let gate = Arc::new(std::sync::Barrier::new(2));
+        let g = gate.clone();
+        let served = Arc::new(AtomicU64::new(0));
+        let count = served.clone();
+        let service = PortalService::spawn(
+            Err("offline".to_owned()),
+            Arc::new(move || {
+                if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    g.wait(); // the first answer blocks like a dialog
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            }),
+        );
+        for _ in 0..3 {
+            let _ = service.handle().open_files(OpenFileRequest::default());
+        }
+        gate.wait(); // the thread is now "inside a dialog"
+        let t0 = std::time::Instant::now();
+        drop(service);
+        assert!(
+            t0.elapsed() < Duration::from_secs(1),
+            "drop did not wait on the dialog"
+        );
+        std::thread::sleep(Duration::from_millis(2300));
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "the queued requests were discarded"
+        );
     }
 }
