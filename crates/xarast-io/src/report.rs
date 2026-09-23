@@ -114,6 +114,22 @@ pub enum Compromise {
         /// The target's mode.
         theirs: Arc<str>,
     },
+    /// Colours defined in a model the file cannot carry (CMYK, a spot
+    /// ink) were written as their sRGB conversion: no output profile or
+    /// separation exists to keep them (phase 11 T11.5.3).
+    ColourConverted {
+        /// The model or kind converted: `"CMYK"` or `"spot"`.
+        model: Arc<str>,
+        /// How many colour attributes (fill and line colours) use it.
+        count: usize,
+    },
+    /// Images carrying an embedded ICC profile were drawn as if they
+    /// were sRGB: the renderer does not colour-manage yet, so the profile
+    /// is not applied and not written (phase 11 T11.5.2).
+    ProfileDropped {
+        /// How many images.
+        images: usize,
+    },
 }
 
 impl std::fmt::Display for Compromise {
@@ -145,6 +161,16 @@ impl std::fmt::Display for Compromise {
             Compromise::BlendModeApproximated { node, ours, theirs } => {
                 write!(f, "object {}: {ours:?} drawn as {theirs}", node.0)
             }
+            Compromise::ColourConverted { model, count } => write!(
+                f,
+                "{model} colours written as their sRGB conversion (no output profile): \
+                 {count} colour attributes"
+            ),
+            Compromise::ProfileDropped { images } => write!(
+                f,
+                "images with an embedded ICC profile drawn as sRGB (profile not applied): \
+                 {images}"
+            ),
         }
     }
 }

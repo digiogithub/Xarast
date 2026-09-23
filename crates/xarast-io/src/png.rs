@@ -140,6 +140,51 @@ fn write_chunk(w: &mut dyn Write, kind: &[u8; 4], data: &[u8]) -> std::io::Resul
     w.write_all(&crc.sum().to_be_bytes())
 }
 
+/// Replaces a PNG's `sRGB` chunk with an `iCCP` chunk carrying `icc`
+/// (phase 11 T11.5.2): the image's own profile travels with pixels that
+/// were decoded without converting them. PNG allows only one of the two
+/// (PNG 1.2 §4.2.2.4), so `sRGB` goes; `iCCP` goes right after `IHDR`,
+/// before `PLTE` and `IDAT` as the specification requires. The profile
+/// is compressed at zlib level 6 through the workspace's one DEFLATE
+/// backend, so the bytes are a function of the input only.
+///
+/// Returns `None` when `png` is not a well-formed chunk stream starting
+/// with `IHDR`, or `icc` is empty.
+#[must_use]
+pub fn with_icc_profile(png: &[u8], icc: &[u8]) -> Option<Vec<u8>> {
+    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    if icc.is_empty() || !png.starts_with(&SIGNATURE) {
+        return None;
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    z.write_all(icc).ok()?;
+    // Profile name, its NUL, compression method 0.
+    let mut iccp = b"ICC profile\0\0".to_vec();
+    iccp.extend_from_slice(&z.finish().ok()?);
+    let mut out = Vec::with_capacity(png.len() + iccp.len() + 12);
+    out.extend_from_slice(&SIGNATURE);
+    let mut at = SIGNATURE.len();
+    let mut first = true;
+    while at < png.len() {
+        let len = u32::from_be_bytes(png.get(at..at + 4)?.try_into().ok()?) as usize;
+        let end = at.checked_add(12)?.checked_add(len)?;
+        let chunk = png.get(at..end)?;
+        let kind = &chunk[4..8];
+        if first && kind != b"IHDR" {
+            return None;
+        }
+        if kind != b"sRGB" && kind != b"iCCP" {
+            out.extend_from_slice(chunk);
+        }
+        if first {
+            write_chunk(&mut out, b"iCCP", &iccp).ok()?;
+            first = false;
+        }
+        at = end;
+    }
+    Some(out)
+}
+
 /// Splits a zlib stream into IDAT chunks.
 struct IdatWriter<'w> {
     out: &'w mut dyn Write,
@@ -725,5 +770,36 @@ mod tests {
         let mut s = PngStream::begin(&mut out, hd).unwrap();
         s.write_rgba_rows(&[0; 16]).unwrap();
         assert!(s.finish().is_err());
+    }
+
+    #[test]
+    fn an_icc_profile_replaces_the_srgb_chunk_and_keeps_the_pixels() {
+        let (w, h) = (5, 3);
+        let src = pattern(w, h);
+        let hd = PngHeader {
+            width: w,
+            height: h,
+            colour: PngColour::Rgba,
+            depth: PngDepth::Eight,
+            interlace: false,
+            ppm: Some(2835),
+            level: 6,
+        };
+        let mut plain = Vec::new();
+        encode_png(&mut plain, hd, &src).unwrap();
+        let profile: Vec<u8> = (0..=255u8).cycle().take(3000).collect();
+        let tagged = with_icc_profile(&plain, &profile).expect("a PNG we wrote");
+        let (_, pixels, meta) = decode(&tagged);
+        assert_eq!(pixels, src);
+        assert!(meta.srgb.is_none(), "sRGB and iCCP are exclusive");
+        assert_eq!(meta.icc_profile.as_deref(), Some(&profile[..]));
+        assert!(meta.pixel_dims.is_some(), "the other chunks stay");
+        // iCCP right after IHDR.
+        assert_eq!(&tagged[33 + 4..33 + 8], b"iCCP");
+        // Deterministic, and refuses what is not a PNG.
+        assert_eq!(with_icc_profile(&plain, &profile).unwrap(), tagged);
+        assert!(with_icc_profile(b"GIF89a", &profile).is_none());
+        assert!(with_icc_profile(&plain, &[]).is_none());
+        assert!(with_icc_profile(&plain[..40], &profile).is_none());
     }
 }

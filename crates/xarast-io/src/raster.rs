@@ -227,6 +227,7 @@ impl Drop for AtomicFile {
 }
 
 fn finish(
+    src: &dyn ExportSource,
     mut report: ExportReport,
     built: SourceScene,
     p: RasterPlan,
@@ -236,6 +237,12 @@ fn finish(
     report.dpi = p.dpi;
     report.compromises.extend(p.compromises);
     report.compromises.extend(built.compromises);
+    report
+        .compromises
+        .extend(crate::fidelity::document_compromises(
+            src,
+            crate::fidelity::Target::Raster,
+        ));
     report.duration = t0.elapsed();
     report
 }
@@ -358,7 +365,7 @@ impl Exporter for PngExporter {
             report.bytes_written = file.write_all(&bytes)?;
             report.encode_time = te.elapsed();
         }
-        Ok(finish(report, built, p, t0))
+        Ok(finish(src, report, built, p, t0))
     }
 }
 
@@ -429,7 +436,7 @@ impl Exporter for JpegExporter {
         drop(surface);
         report.bytes_written = AtomicFile::new(&req.destination).write_all(&bytes)?;
         report.encode_time = te.elapsed();
-        Ok(finish(report, built, p, t0))
+        Ok(finish(src, report, built, p, t0))
     }
 }
 
@@ -494,6 +501,6 @@ impl Exporter for WebPExporter {
         drop(surface);
         report.bytes_written = AtomicFile::new(&req.destination).write_all(&bytes)?;
         report.encode_time = te.elapsed();
-        Ok(finish(report, built, p, t0))
+        Ok(finish(src, report, built, p, t0))
     }
 }

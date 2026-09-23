@@ -12,6 +12,7 @@
 //! | [`raster`] | PNG, JPEG and WebP through the deterministic CPU rasteriser |
 //! | [`pdf`] | PDF 1.7, vector, with the fidelity ladder (T11.4) |
 //! | [`svg`] | SVG 1.1: the `.xarast` profile's mapper in its interchange dialect (W11.3) |
+//! | [`fidelity`] | Colour fidelity across formats (W11.5): what the document holds that no output carries |
 //! | [`report`] | [`ExportReport`], [`Compromise`], [`ExportError`] |
 //!
 //! # Three rules
@@ -33,6 +34,7 @@
 #![deny(missing_docs)]
 
 pub mod deflate;
+pub mod fidelity;
 pub mod jpeg;
 pub mod model;
 pub mod options;
