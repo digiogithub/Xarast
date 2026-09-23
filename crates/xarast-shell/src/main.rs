@@ -185,6 +185,10 @@ fn main() -> ExitCode {
         };
     }
 
+    // System font enumeration (~40 ms) runs in the background from here, so
+    // a document without text never waits for it and one with text rarely
+    // does.
+    xarast_app::fonts::prewarm();
     let mut viewer = xarast_shell::viewer::Viewer::new(files);
     if let Some(store) = xarast_app::recent::default_store_path() {
         viewer = viewer.with_recent_store(store);
