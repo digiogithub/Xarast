@@ -255,9 +255,13 @@ duotone.
 (normalised) original bytes and, for tag 71, the snap palette as a blob
 (`xarast:palette`, XARA-T-0154). The render round trip is pixel-identical
 for 59/59; the writer gaps bitmaps first exposed (palette, contone,
-fill mapping, transparency image) are all closed. Open: the CPU backend
-samples bitmap fills and transparencies vertically flipped relative to
-the documented mapping (XARA-T-0171, found against resvg).
+fill mapping, transparency image) are all closed. Bitmap fills and
+transparencies used to be drawn upside down (XARA-T-0171, found against
+resvg): a fill's start point is the image's **bottom**-left corner, while
+the renderer samples decoded (top-down) rows from `v = 0`.
+`paint::bitmap_frame` now starts the frame at the top edge; facts,
+`file:line` and SSIM in `render.md`, "Bitmap fill orientation". Contone
+and duotone tiles and the mirrored mapping are upright too.
 
 ## Dead ends (do not retry)
 

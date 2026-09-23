@@ -667,6 +667,31 @@ over a thousand tabulated triples and asserts it stays below 1e-4 — it is a
 few times 1e-5, a hundredth of an 8-bit step, invisible in any table. If
 `xarast-geom` ever adopts 1e-5 the test says so.
 
+**Bitmap fill orientation (XARA-T-0171, 2026-09-23).** `Paint::Image` and
+`TranspSource::Image` sample `v = 0` at the image's **top** row: decoded
+images are top-down, and a placed bitmap's walker frame starts at its
+top-left corner. A bitmap *fill's* control points start at the image's
+**bottom-left**: start = bottom-left, end = bottom-right, second end =
+top-left (and, with perspective, `p2` = top-left, `p3` = top-right). The
+original passes start, end, second end as the tile plotter's first three
+corners (`wxOil/grndrgn.cpp:3501-3521`), and the plotter maps its first
+corner to the first stored row of a bottom-up DIB — the plain bitmap plot
+passes a rectangle's low corner first (`wxOil/grndrgn.cpp:4862-4865`);
+converting a bitmap object into a fill makes its bottom-left corner the
+start point and its top-left the second end (`Kernel/nodebmp.cpp:1210-1212`).
+The `.xarast` writer's `<pattern>` agrees (its tile starts at `axis_y`).
+The translation lives in `xarast-app::paint::bitmap_frame`, which starts
+the renderer's frame at the top edge; the renderer keeps its one
+convention. This is not a Y flip between document and device — that stays
+the `Viewport`'s — but the image's own row order. Mirror tiling is
+symmetric about tile edges, so shifting the frame origin by one tile keeps
+the mirrored tiles where the original puts them. Measured against resvg on
+the `.xarast` SVG (8 × 8 grey SSIM, before → after): Fill Types simple
+0.844 → 0.880, scope3 simple 0.926 → 0.959, JagSS100 simple 0.969 → 0.995,
+WATCH 0.980 → 0.991, Spitfire 0.850 → 0.958, TestBitmapFill 0.985 → 0.999.
+No golden encoded the bug (none has a bitmap fill); pinned by
+`crates/xarast-app/tests/bitmap_orientation.rs`.
+
 **A two-row guard band on every band's coverage.** Without it the band height
 changed the picture by 1/255 at band boundaries, because the rasteriser's
 strips start at the viewport edge. Antialiasing influence is local to one
@@ -724,6 +749,10 @@ determinism suite asserts it over four band heights.
 13. **Composition replaces and never blends.** A tile is an opaque piece of
     the canvas, background included. Anything that needs blending belongs
     in the rasteriser, where the families and the goldens are.
+14. **An image paint's `v = 0` is the image's top row**; a bitmap fill's
+    start point is its bottom row. Only `paint::bitmap_frame` in
+    `xarast-app` translates between the two (see "Bitmap fill
+    orientation").
 
 ---
 
@@ -772,6 +801,10 @@ determinism suite asserts it over four band heights.
   iGPU). `vello` is 72–86 ms on the iGPU and needs a second `wgpu`; a WGSL
   pass over CPU coverage pays 27–33 ms per 64 MiB of masks on the iGPU.
   Re-open only on the triggers in "The GPU decision".
+- **Checking bitmap orientation with the `.xarast` round trip.** Both sides
+  go through our renderer, so an upside-down bitmap fill round-trips
+  pixel-identical (XARA-T-0171 survived it). Compare against resvg on the
+  exported SVG, or pin it with a synthetic asymmetric bitmap.
 - **Rasterising tile by tile.** Each call pays a culled display-list build
   linear in the scene (6.5–10 ms at 900k ops), and the assembled frame is
   not byte-identical to a whole one. Rasterise one dirty rectangle and
