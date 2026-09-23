@@ -154,6 +154,22 @@ pub enum Intent {
     Undo,
     /// Redo the last undone transaction.
     Redo,
+    /// Delete the selected objects.
+    DeleteSelection,
+    /// `Esc`: cancel the gesture in flight, or, when there is none,
+    /// select nothing (`research/04 §4.1`).
+    Cancel,
+    /// A value typed into a field of the active tool's infobar.
+    InfobarEdit {
+        /// Which field.
+        field: crate::tool::InfobarField,
+        /// The value, already parsed from its units.
+        value: xarast_geom::Mp,
+    },
+    /// A frame tick while a drag holds the pointer at the canvas edge:
+    /// scroll the view one step and carry the gesture along. The shell
+    /// sends it while [`crate::Session::wants_autoscroll`] says so.
+    AutoScroll,
 
     // ── the tools ─────────────────────────────────────────────────────
     /// Choose a tool.

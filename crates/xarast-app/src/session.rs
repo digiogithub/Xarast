@@ -22,9 +22,14 @@ use xarast_render::{
     DeviceRect, DirtyRect, RenderQuality, Scene, SceneError, SceneStats, ViewParams,
 };
 
-use crate::edit::{EditState, SelectMode};
+use crate::edit::{EditState, SelectMode, ToolId};
 use crate::geometry::DeviceSize;
 use crate::intent::{Changed, Intent};
+use crate::ops::EditCommand;
+use crate::tool::{
+    CanvasInput, CursorKind, Infobar, InfobarField, OverlayShape, Preview, ToolCtx, ToolMachine,
+    ToolRequests, ToolView, ViewRequest,
+};
 use crate::viewport::Viewport;
 use crate::walker::{SceneWalker, WalkStats};
 
@@ -192,6 +197,15 @@ pub struct Session {
     /// last rebuild: the render thread skips strips outside it.
     scene_ink: crate::geometry::DocRect,
     walker: SceneWalker,
+    /// The tools and the shared interaction machine.
+    tools: ToolMachine,
+    /// What the tool in force wants drawn while its gesture is in flight.
+    preview: Preview,
+    /// The last command applied, for the coalescing rule.
+    last_edit: Option<EditCommand>,
+    /// The document changed since the viewport's scroll bounds were
+    /// derived from it.
+    scroll_bounds_stale: bool,
     /// The resolver as of the last walk, shared with the render thread.
     /// Taken lazily and dropped by every rebuild, so a pan (which does not
     /// rebuild) sends the same `Arc` frame after frame.
@@ -232,6 +246,10 @@ impl Session {
             scene_epoch: 0,
             scene_ink: crate::geometry::DocRect::EMPTY,
             walker: SceneWalker::new(),
+            tools: ToolMachine::new(),
+            preview: Preview::default(),
+            last_edit: None,
+            scroll_bounds_stale: false,
             resolver_snapshot: None,
             dirty: Dirty::everything(size),
             modified: false,
@@ -393,6 +411,9 @@ impl Session {
     /// [`SessionError::Scene`] if the recording came out unbalanced,
     /// which would be a bug in the walker.
     pub fn rebuild_scene(&mut self, dirty: Option<DeviceRect>) -> Result<SceneStats, SessionError> {
+        if std::mem::take(&mut self.scroll_bounds_stale) {
+            self.viewport.fit_bounds_to(&self.doc);
+        }
         // The render thread may still hold the previous scene. Cloning it
         // only to clear it would be waste, so start from an empty one.
         if Arc::get_mut(&mut self.scene).is_none() {
@@ -400,17 +421,33 @@ impl Session {
         }
         // Unique now, so this never clones.
         let scene = Arc::make_mut(&mut self.scene);
-        let stats = self.walker.rebuild(
+        let stats = self.walker.rebuild_previewed(
             &self.doc,
             &self.edit,
             &self.viewport,
             self.quality,
             dirty,
+            &self.preview,
             scene,
         )?;
         self.dirty.scene = false;
         self.scene_epoch += 1;
         self.scene_ink = crate::viewport::content_rect(&self.doc);
+        // A previewed move draws its nodes outside the committed bounds;
+        // the render thread skips strips outside the ink, so widen it.
+        if let Some((nodes, m)) = &self.preview.transform {
+            let moved = m.transform_rect(crate::viewport::nodes_rect(
+                &self.doc,
+                nodes.iter().copied(),
+            ));
+            if !moved.is_empty() {
+                self.scene_ink = if self.scene_ink.is_empty() {
+                    moved
+                } else {
+                    self.scene_ink.union(moved)
+                };
+            }
+        }
         self.resolver_snapshot = None;
         Ok(stats)
     }
@@ -497,9 +534,50 @@ impl Session {
         Ok(label)
     }
 
+    /// Applies one editing command, as a tool emitted it.
+    ///
+    /// A command that changes nothing ([`EditCommand::is_noop`]) records
+    /// no undo step. Inside an open gesture
+    /// ([`Session::begin_gesture`]) a command merges with the previous one
+    /// only when [`EditCommand::coalesces_with`] allows it; otherwise the
+    /// gesture is split so that, say, a move followed by a delete stays two
+    /// steps.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the command returns; the document is left as it was.
+    pub fn apply_edit(&mut self, cmd: EditCommand) -> Result<Option<&'static str>, SessionError> {
+        if cmd.is_noop() {
+            return Ok(None);
+        }
+        if self.bus.gesture_open()
+            && let Some(prev) = &self.last_edit
+            && !cmd.coalesces_with(prev)
+        {
+            self.bus.begin_gesture();
+        }
+        let label = self.dispatch(&cmd)?;
+        self.last_edit = Some(cmd);
+        Ok(Some(label))
+    }
+
+    /// Opens a coalescing window: every [`Session::apply_edit`] until
+    /// [`Session::end_gesture`] that coalesces with the one before it
+    /// joins one undo step (keyboard nudges, a bump-button hold).
+    pub fn begin_gesture(&mut self) -> u64 {
+        self.last_edit = None;
+        self.bus.begin_gesture()
+    }
+
+    /// Closes the coalescing window `begin_gesture` opened.
+    pub fn end_gesture(&mut self, gesture: u64) {
+        self.bus.end_gesture(gesture);
+    }
+
     /// Undoes the last transaction. Returns its label.
     pub fn undo(&mut self) -> Option<&'static str> {
-        let label = self.bus.history_mut().undo(&mut self.doc);
+        self.cancel_gesture();
+        let label = self.bus.undo(&mut self.doc);
         if label.is_some() {
             self.after_mutation();
         }
@@ -508,17 +586,175 @@ impl Session {
 
     /// Redoes the last undone transaction. Returns its label.
     pub fn redo(&mut self) -> Option<&'static str> {
-        let label = self.bus.history_mut().redo(&mut self.doc);
+        self.cancel_gesture();
+        let label = self.bus.redo(&mut self.doc);
         if label.is_some() {
             self.after_mutation();
         }
         label
     }
 
+    /// What Edit › Undo would undo: "Move", "Delete".
+    #[must_use]
+    pub fn undo_label(&self) -> Option<&'static str> {
+        self.bus.undo_label()
+    }
+
+    /// What Edit › Redo would redo.
+    #[must_use]
+    pub fn redo_label(&self) -> Option<&'static str> {
+        self.bus.redo_label()
+    }
+
+    /// The live preview of the gesture in flight.
+    #[must_use]
+    pub const fn preview(&self) -> &Preview {
+        &self.preview
+    }
+
+    /// The tools and the interaction machine, read-only.
+    #[must_use]
+    pub const fn tools(&self) -> &ToolMachine {
+        &self.tools
+    }
+
+    fn view(&self) -> ToolView<'_> {
+        ToolView {
+            doc: &self.doc,
+            edit: &self.edit,
+            viewport: &self.viewport,
+            preview: &self.preview,
+        }
+    }
+
+    /// What the tool in force wants drawn over the document this frame.
+    #[must_use]
+    pub fn overlay(&self) -> Vec<OverlayShape> {
+        if !self.edit.show_overlays {
+            return Vec::new();
+        }
+        self.tools.overlay(self.view())
+    }
+
+    /// The infobar of the tool in force.
+    #[must_use]
+    pub fn infobar(&self) -> Infobar {
+        self.tools.infobar(self.view())
+    }
+
+    /// The pointer shape the tool in force wants over the canvas.
+    #[must_use]
+    pub fn cursor(&self) -> CursorKind {
+        self.tools.cursor()
+    }
+
+    /// Runs one step of the tool machinery and carries out what the tool
+    /// asked for: selection changes, view changes, and commands through
+    /// the bus. Returns what changed and whether the input was consumed.
+    fn run_tool<F>(&mut self, f: F) -> Result<(Changed, bool), SessionError>
+    where
+        F: FnOnce(&mut ToolMachine, &mut ToolCtx<'_>) -> bool,
+    {
+        let mut commands: Vec<EditCommand> = Vec::new();
+        let mut requests = ToolRequests::default();
+        let preview_before = self.preview.clone();
+        let state_before = self.tools.state();
+        let tool_before = self.tools.current();
+        let cursor_before = self.tools.cursor();
+        let consumed = {
+            let mut cx = ToolCtx {
+                doc: &self.doc,
+                edit: &self.edit,
+                viewport: &self.viewport,
+                modifiers: self.edit.modifiers,
+                preview: &mut self.preview,
+                commands: &mut commands,
+                requests: &mut requests,
+            };
+            f(&mut self.tools, &mut cx)
+        };
+        let mut changed = Changed::empty();
+        if self.preview != preview_before {
+            changed |= Changed::DOCUMENT;
+        }
+        if requests.overlay_changed {
+            changed |= Changed::SELECTION;
+        }
+        if self.tools.state() != state_before
+            || self.tools.current() != tool_before
+            || self.tools.cursor() != cursor_before
+        {
+            changed |= Changed::UI;
+        }
+        for (nodes, mode) in requests.select {
+            let did = if mode == SelectMode::Replace && nodes.is_empty() {
+                self.edit.clear_selection()
+            } else {
+                self.edit.select(nodes, mode)
+            };
+            if did {
+                changed |= Changed::SELECTION | Changed::UI;
+            }
+        }
+        for v in requests.view {
+            match v {
+                ViewRequest::Pan { dx, dy } => self.viewport.pan_by(dx, dy),
+                ViewRequest::ZoomAbout { factor, anchor } => {
+                    self.viewport.zoom_about(factor, anchor);
+                }
+                ViewRequest::ZoomToRect(r) => {
+                    self.viewport
+                        .zoom_to(crate::viewport::ZoomTarget::Selection, &self.doc, r);
+                }
+            }
+            changed |= Changed::VIEW | Changed::UI;
+        }
+        let mut result = Ok(());
+        for cmd in commands {
+            match self.apply_edit(cmd) {
+                Ok(Some(_)) => changed |= Changed::DOCUMENT | Changed::UI,
+                Ok(None) => {}
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        self.edit.tool.drag_from = if self.tools.is_pressed() {
+            self.tools.last_pointer()
+        } else {
+            None
+        };
+        result.map(|()| (changed, consumed))
+    }
+
+    /// Cancels the gesture in flight, if any. Returns what changed.
+    fn cancel_gesture(&mut self) -> Changed {
+        self.run_tool(|m, cx| m.cancel(cx))
+            .map(|(c, _)| c)
+            .unwrap_or_default()
+    }
+
+    /// Makes the tool in force `id`, cancelling a gesture in flight.
+    fn switch_tool(&mut self, id: ToolId) -> Changed {
+        self.run_tool(|m, cx| m.switch_to(id, cx))
+            .map(|(c, _)| c)
+            .unwrap_or_default()
+    }
+
+    /// Feeds canvas input to the machine.
+    fn canvas_input(&mut self, input: CanvasInput) -> Result<(Changed, bool), SessionError> {
+        self.run_tool(|m, cx| m.handle(input, cx))
+    }
+
     fn after_mutation(&mut self) {
         self.modified = true;
         self.edit.prune(&self.doc);
-        self.viewport.fit_bounds_to(&self.doc);
+        // The scroll bounds need the drawing's extent, which is a walk of
+        // the whole document while the bounds cache is cold: 30 ms at
+        // 250 000 nodes, thirty times the undo budget. The next scene
+        // rebuild walks the document anyway, so it refreshes them there.
+        self.scroll_bounds_stale = true;
         self.invalidate();
     }
 
@@ -568,17 +804,64 @@ impl Session {
                 self.viewport.zoom_to(target, &self.doc, sel);
                 changed |= Changed::VIEW | Changed::UI;
             }
-            Intent::PointerDown { sample, .. } => {
-                self.edit.tool.drag_from = Some(sample.at);
+            Intent::PointerDown { button, sample } => {
+                changed |= self
+                    .canvas_input(CanvasInput::Down {
+                        button,
+                        at: sample.at,
+                        time_ms: sample.time_ms,
+                    })?
+                    .0;
             }
-            Intent::PointerMove(_) | Intent::PointerLeft => {}
-            Intent::PointerUp { .. } => {
-                self.edit.tool.drag_from = None;
+            Intent::PointerMove(sample) => {
+                changed |= self.canvas_input(CanvasInput::Move { at: sample.at })?.0;
+            }
+            Intent::PointerLeft => {
+                changed |= self.canvas_input(CanvasInput::Left)?.0;
+            }
+            Intent::PointerUp { button, sample } => {
+                changed |= self
+                    .canvas_input(CanvasInput::Up {
+                        button,
+                        at: sample.at,
+                        time_ms: sample.time_ms,
+                    })?
+                    .0;
             }
             Intent::ModifiersChanged(m) => {
                 if m != self.edit.modifiers {
                     self.edit.modifiers = m;
                     changed |= Changed::UI;
+                    changed |= self.canvas_input(CanvasInput::Modifiers(m))?.0;
+                }
+            }
+            Intent::Cancel => {
+                let (c, consumed) = self.canvas_input(CanvasInput::Cancel)?;
+                changed |= c;
+                if !consumed && self.edit.clear_selection() {
+                    changed |= Changed::SELECTION | Changed::UI;
+                }
+            }
+            Intent::DeleteSelection => {
+                changed |= self.cancel_gesture();
+                let nodes: Vec<_> = self.edit.selection().collect();
+                if self
+                    .apply_edit(EditCommand::DeleteNodes { nodes })?
+                    .is_some()
+                {
+                    changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+                }
+            }
+            Intent::InfobarEdit { field, value } => {
+                changed |= self.infobar_edit(field, value)?;
+            }
+            Intent::AutoScroll => {
+                if let Some((dx, dy)) = self.tools.autoscroll(self.viewport.size())
+                    && let Some(at) = self.tools.last_pointer()
+                {
+                    self.viewport.pan_by(dx, dy);
+                    changed |= Changed::VIEW;
+                    changed |= self.canvas_input(CanvasInput::Move { at })?.0;
                 }
             }
             Intent::Select { nodes, mode } => {
@@ -617,25 +900,31 @@ impl Session {
                 changed |= Changed::UI;
             }
             Intent::Undo => {
+                changed |= self.cancel_gesture();
                 if self.undo().is_some() {
-                    changed |= Changed::DOCUMENT | Changed::UI;
+                    changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
                 }
             }
             Intent::Redo => {
+                changed |= self.cancel_gesture();
                 if self.redo().is_some() {
-                    changed |= Changed::DOCUMENT | Changed::UI;
+                    changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
                 }
             }
             Intent::ChooseTool(tool) => {
-                if self.edit.tool.active != tool {
+                if self.edit.tool.active != tool && tool.is_available() {
                     self.edit.tool.active = tool;
                     changed |= Changed::UI | Changed::SELECTION;
+                    if self.edit.tool.momentary.is_none() {
+                        changed |= self.switch_tool(tool);
+                    }
                 }
             }
             Intent::MomentaryTool(tool) => {
-                if self.edit.tool.momentary != tool {
+                if self.edit.tool.momentary != tool && tool.is_none_or(ToolId::is_available) {
                     self.edit.tool.momentary = tool;
-                    changed |= Changed::UI;
+                    changed |= Changed::UI | Changed::SELECTION;
+                    changed |= self.switch_tool(self.edit.tool.effective());
                 }
             }
             Intent::SetQuality(q) => {
@@ -662,6 +951,26 @@ impl Session {
             self.dirty.add(self.viewport.size().to_rect());
         }
         Ok(changed)
+    }
+
+    /// Whether a drag holds the pointer at the canvas edge, so the shell
+    /// should keep sending [`Intent::AutoScroll`] every frame.
+    #[must_use]
+    pub fn wants_autoscroll(&self) -> bool {
+        self.tools.autoscroll(self.viewport.size()).is_some()
+    }
+
+    fn infobar_edit(
+        &mut self,
+        field: InfobarField,
+        value: xarast_geom::Mp,
+    ) -> Result<Changed, SessionError> {
+        Ok(self
+            .run_tool(|m, cx| {
+                m.infobar_edit(field, value, cx);
+                true
+            })?
+            .0)
     }
 
     /// Selects everything inside a device-space rectangle — the marquee.
@@ -708,12 +1017,13 @@ pub fn build_scene(session: &Session, dirty: Option<DeviceRect>) -> BuiltScene {
     let mut walker = SceneWalker::new();
     let mut scene = Scene::new();
     let stats = walker
-        .rebuild(
+        .rebuild_previewed(
             &session.doc,
             &session.edit,
             &session.viewport,
             session.quality,
             dirty,
+            &session.preview,
             &mut scene,
         )
         .unwrap_or_default();

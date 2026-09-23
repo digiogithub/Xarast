@@ -34,3 +34,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "viewport"
 harness = false
+
+[[bench]]
+name = "undo"
+harness = false

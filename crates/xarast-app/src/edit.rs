@@ -112,32 +112,123 @@ pub struct Modifiers {
 
 /// Which tool has the pointer.
 ///
-/// Phase 5 ships the infrastructure, not the tools: only the three view
-/// tools do anything. Phase 7 adds variants; the shortcut table and the
-/// intent plumbing do not change when it does.
+/// The phase-7 tool set (`research/04 §4.6`) plus the three reserved for
+/// later phases, which the palette shows greyed out. The shortcut table
+/// and the intent plumbing do not change when a tool gains an
+/// implementation; [`ToolId::is_implemented`] does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, PartialOrd, Ord)]
 pub enum ToolId {
     /// Select and transform objects.
     #[default]
     Selector,
-    /// Drag the view.
-    Pan,
-    /// Marquee-zoom the view.
-    Zoom,
-    /// Edit path control points.
+    /// Edit path nodes and control handles: the Bézier / shape tool.
     ShapeEditor,
+    /// Draw live rectangles.
+    Rectangle,
+    /// Draw live ellipses.
+    Ellipse,
+    /// Draw point by point.
+    Pen,
+    /// Draw freehand.
+    Freehand,
+    /// Zoom the view.
+    Zoom,
+    /// Drag the view: the push tool.
+    Pan,
+    /// Graduated fills. Phase 8.
+    Fill,
+    /// Transparency. Phase 8.
+    Transparency,
+    /// Text. Phase 9.
+    Text,
 }
 
 impl ToolId {
+    /// Every tool, in the order the palette shows them.
+    pub const ALL: [ToolId; 11] = [
+        ToolId::Selector,
+        ToolId::ShapeEditor,
+        ToolId::Rectangle,
+        ToolId::Ellipse,
+        ToolId::Pen,
+        ToolId::Freehand,
+        ToolId::Zoom,
+        ToolId::Pan,
+        ToolId::Fill,
+        ToolId::Transparency,
+        ToolId::Text,
+    ];
+
     /// A stable, lower-case identifier for preferences and shortcuts.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             ToolId::Selector => "selector",
-            ToolId::Pan => "pan",
-            ToolId::Zoom => "zoom",
             ToolId::ShapeEditor => "shape-editor",
+            ToolId::Rectangle => "rectangle",
+            ToolId::Ellipse => "ellipse",
+            ToolId::Pen => "pen",
+            ToolId::Freehand => "freehand",
+            ToolId::Zoom => "zoom",
+            ToolId::Pan => "pan",
+            ToolId::Fill => "fill",
+            ToolId::Transparency => "transparency",
+            ToolId::Text => "text",
         }
+    }
+
+    /// The name the palette, the tooltip and a screen reader use.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            ToolId::Selector => "Selector",
+            ToolId::ShapeEditor => "Shape editor",
+            ToolId::Rectangle => "Rectangle",
+            ToolId::Ellipse => "Ellipse",
+            ToolId::Pen => "Pen",
+            ToolId::Freehand => "Freehand",
+            ToolId::Zoom => "Zoom",
+            ToolId::Pan => "Push",
+            ToolId::Fill => "Fill",
+            ToolId::Transparency => "Transparency",
+            ToolId::Text => "Text",
+        }
+    }
+
+    /// Whether the tool can be chosen in this build. The reserved tools
+    /// of later phases cannot; the palette greys them out.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        !matches!(self, ToolId::Fill | ToolId::Transparency | ToolId::Text)
+    }
+
+    /// Whether the tool does anything on the canvas yet. A tool that can be
+    /// chosen but is not implemented says "coming soon" in its infobar.
+    #[must_use]
+    pub const fn is_implemented(self) -> bool {
+        matches!(self, ToolId::Selector | ToolId::Zoom | ToolId::Pan)
+    }
+
+    /// The phase that brings a tool that is not implemented yet.
+    #[must_use]
+    pub const fn planned_phase(self) -> Option<u8> {
+        match self {
+            ToolId::Selector | ToolId::Zoom | ToolId::Pan => None,
+            ToolId::ShapeEditor
+            | ToolId::Rectangle
+            | ToolId::Ellipse
+            | ToolId::Pen
+            | ToolId::Freehand => Some(7),
+            ToolId::Fill | ToolId::Transparency => Some(8),
+            ToolId::Text => Some(9),
+        }
+    }
+
+    /// Whether a drag with this tool scrolls the view at the canvas edge.
+    /// The push tool moves the view itself; scrolling it too would fight.
+    #[must_use]
+    pub const fn autoscrolls(self) -> bool {
+        !matches!(self, ToolId::Pan)
     }
 }
 

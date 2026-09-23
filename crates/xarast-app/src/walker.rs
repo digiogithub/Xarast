@@ -52,6 +52,7 @@ use xarast_render::{
 
 use crate::edit::EditState;
 use crate::paint::PaintCtx;
+use crate::tool::Preview;
 use crate::viewport::Viewport;
 
 /// What one walk found that the user may want to know about.
@@ -102,6 +103,10 @@ pub struct SceneWalker {
     attr_epoch: Epoch,
     stats: WalkStats,
     scene_stats: SceneStats,
+    /// The attribute-scope fingerprint in force at the node being painted:
+    /// a fold of the tag and content revision of every attribute node
+    /// pushed in the enclosing scopes, in order. See [`content_hash`].
+    scope: u64,
 }
 
 /// What a scope opened in the scene, so that `LeaveScope` can close it.
@@ -179,6 +184,42 @@ impl SceneWalker {
         dirty: Option<DeviceRect>,
         scene: &mut Scene,
     ) -> Result<SceneStats, SceneError> {
+        self.rebuild_previewed(doc, edit, vp, quality, dirty, &Preview::default(), scene)
+    }
+
+    /// [`SceneWalker::rebuild`] with a tool's live [`Preview`] applied.
+    ///
+    /// A previewed node is wrapped in a scene group carrying the preview's
+    /// transform, so the document is never touched and the display list
+    /// moves the node's paths, fills and strokes as one. Hidden nodes are
+    /// skipped with their subtrees. With a non-empty preview the dirty
+    /// rectangle is ignored: culling reads the committed bounds, which a
+    /// moved node has left.
+    ///
+    /// # Errors
+    ///
+    /// As [`SceneWalker::rebuild`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn rebuild_previewed(
+        &mut self,
+        doc: &Document,
+        edit: &EditState,
+        vp: &Viewport,
+        quality: RenderQuality,
+        dirty: Option<DeviceRect>,
+        preview: &Preview,
+        scene: &mut Scene,
+    ) -> Result<SceneStats, SceneError> {
+        let dirty = if preview.is_empty() { dirty } else { None };
+        let moved = preview.transformed_set();
+        let hidden: std::collections::HashSet<NodeId> = preview.hidden.iter().copied().collect();
+        let preview_xf = preview
+            .transform
+            .as_ref()
+            .map(|(_, m)| xarast_render::Transform2D::from_document(*m));
+        // Previewed nodes with children whose group is still open, closed
+        // at their `LeaveScope` after the node's own frame.
+        let mut preview_open: Vec<NodeId> = Vec::new();
         self.sync_caches(doc);
         self.stats = WalkStats::default();
 
@@ -186,6 +227,10 @@ impl SceneWalker {
         let mut b = SceneBuilder::begin(scene, quality);
         let mut attrs = AttrStack::with_defaults(&doc.defaults);
         let mut frames: Vec<Frame> = Vec::new();
+        // The scope fingerprint, pushed and popped with the attribute
+        // scopes; seeded with the resources' revision.
+        self.scope = mix64(SCOPE_SEED, doc.tree.resources_rev());
+        let mut scopes: Vec<u64> = Vec::new();
 
         let root = doc.tree.root();
         let mut walk = doc.tree.walk_render(root);
@@ -207,6 +252,7 @@ impl SceneWalker {
                     match kind {
                         NodeKind::Attr(a) => {
                             attrs.push(self.attr_value(node, a));
+                            self.scope = mix64(self.scope, node_version(doc, node));
                             continue;
                         }
                         NodeKind::Opaque(_) | NodeKind::Guideline(_) => {
@@ -228,12 +274,28 @@ impl SceneWalker {
                         walk.control(xarast_doc::Descend::Skip);
                         continue;
                     }
-                    if doc.tree.links(node).first_child.is_none() {
+                    if !hidden.is_empty() && hidden.contains(&node) {
+                        walk.control(xarast_doc::Descend::Skip);
+                        continue;
+                    }
+                    let leaf = doc.tree.links(node).first_child.is_none();
+                    let previewed = !moved.is_empty() && moved.contains(&node);
+                    if previewed && let Some(xf) = preview_xf {
+                        b.push_group(preview_id(doc, node), xf, CacheHint::Never);
+                        if !leaf {
+                            preview_open.push(node);
+                        }
+                    }
+                    if leaf {
                         self.paint(doc, edit, node, &attrs, quality, &mut b);
+                        if previewed && preview_xf.is_some() {
+                            b.pop_group();
+                        }
                     }
                 }
                 WalkEvent::EnterScope { parent } => {
                     attrs.push_scope();
+                    scopes.push(self.scope);
                     frames.push(self.open(doc, parent, &attrs, &mut b));
                 }
                 WalkEvent::LeaveScope { parent } => {
@@ -248,6 +310,13 @@ impl SceneWalker {
                         }
                     }
                     attrs.pop_scope();
+                    if let Some(fp) = scopes.pop() {
+                        self.scope = fp;
+                    }
+                    if preview_open.last() == Some(&parent) {
+                        preview_open.pop();
+                        b.pop_group();
+                    }
                 }
             }
         }
@@ -425,7 +494,7 @@ impl SceneWalker {
             emit(b, t, |b| b.stroke(id, &path, style.clone(), paint.clone()));
         }
 
-        b.finish_node(id, content_hash(doc, node));
+        b.finish_node(id, content_hash(doc, node, self.scope));
     }
 
     fn shapes_pending_inc(&mut self) {
@@ -468,7 +537,7 @@ impl SceneWalker {
         let t = object_transparency(attrs, AttrSlot::TranspFillGeometry, &mut ctx);
         let id = scene_id(doc, node);
         emit(b, t, |b| b.image(id, image, mapping, paint.clone()));
-        b.finish_node(id, content_hash(doc, node));
+        b.finish_node(id, content_hash(doc, node, self.scope));
     }
 }
 
@@ -607,18 +676,61 @@ fn scene_id(doc: &Document, node: NodeId) -> SceneNodeId {
     SceneNodeId(u64::from(doc.tree.get(node).map_or(0, |d| d.tag.0)))
 }
 
-/// A content hash that changes when the node's content may have changed.
+/// The scene id of the group a preview wraps a node in: the node's own id
+/// with the top bit set, which no tag (a `u32`) can reach.
+fn preview_id(doc: &Document, node: NodeId) -> SceneNodeId {
+    SceneNodeId(scene_id(doc, node).0 | (1 << 63))
+}
+
+/// The per-node content hash the render cache keys on.
 ///
-/// It is deliberately coarse: the node's tag plus the document's epoch,
-/// which is bumped by every committed transaction. A finer hash is worth
-/// having once the per-node render cache is driven from this crate
-/// (Phase 7); a coarse one is correct meanwhile because it only ever
-/// over-invalidates.
-fn content_hash(doc: &Document, node: NodeId) -> ContentHash {
+/// It names one *version* of what a node paints, from three things:
+///
+/// 1. the node's own version — its [`Tag`](xarast_doc::Tag) and
+///    [`content_rev`](xarast_doc::Tree::content_rev), which every action
+///    that changes its payload, geometry or flags (undo and redo included)
+///    moves to a value the tree never handed out before;
+/// 2. the attribute scope it is painted in — `scope`, a fold of the
+///    version of every attribute node the walk pushed on the way down, in
+///    order, so that recolouring a group's fill attribute changes the hash
+///    of every sibling it applies to and of nothing else;
+/// 3. the resources' revision, folded into the scope's seed.
+///
+/// Editing one object therefore changes that object's hash and leaves the
+/// rest of the document's alone, which is what lets a per-node cache pay
+/// for itself. The first half is the node's version verbatim (collision
+/// free within a document); the second is the 64-bit scope fold. Caches
+/// keyed on it must be per document: tags and revisions are numbered per
+/// tree.
+fn content_hash(doc: &Document, node: NodeId, scope: u64) -> ContentHash {
     let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&u64::from(doc.tree.get(node).map_or(0, |d| d.tag.0)).to_le_bytes());
-    bytes[8..].copy_from_slice(&doc.epoch.0.to_le_bytes());
+    let tag = doc.tree.get(node).map_or(0, |d| d.tag.0);
+    let rev = doc.tree.content_rev(node);
+    // Tags are u32; revisions stay far below 2^32 in any session, but fold
+    // the high half in rather than drop it.
+    bytes[..4].copy_from_slice(&tag.to_le_bytes());
+    bytes[4..8].copy_from_slice(&((rev as u32) ^ ((rev >> 32) as u32)).to_le_bytes());
+    bytes[8..].copy_from_slice(&scope.to_le_bytes());
     ContentHash(bytes)
+}
+
+/// The seed of the scope fold.
+const SCOPE_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// One node's version as a single number: its tag and content revision.
+fn node_version(doc: &Document, node: NodeId) -> u64 {
+    let tag = u64::from(doc.tree.get(node).map_or(0, |d| d.tag.0));
+    (tag << 32) ^ doc.tree.content_rev(node)
+}
+
+/// Folds `v` into `h`: order-dependent, and well mixed (the SplitMix64
+/// finaliser), so that two scopes differing in one attribute's revision
+/// differ in about half their bits.
+fn mix64(h: u64, v: u64) -> u64 {
+    let mut z = h.rotate_left(5) ^ v.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// Scales a displacement by a factor, saturating.
