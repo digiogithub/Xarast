@@ -2,12 +2,12 @@
 id: XARA-US-0034
 type: story
 title: W6 — Bézier and path node editing tools
-status: in_progress
+status: in_review
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, tools, geometry]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T18:15:31Z
+updated: 2026-09-23T19:00:32Z
 started: 2026-09-23T18:15:31Z
 ---
 

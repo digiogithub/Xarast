@@ -2,13 +2,14 @@
 id: XARA-T-0172
 type: task
 title: ".xarast writer: write text with the W9 layout instead of one approximate <tspan> per line"
-status: backlog
+status: in_progress
 priority: high
 parent: XARA-US-0050
 author: mcp
 labels: [phase-9, text, format]
 created: 2026-09-23T18:36:06Z
-updated: 2026-09-23T18:48:20Z
+updated: 2026-09-23T18:56:25Z
+started: 2026-09-23T18:56:25Z
 ---
 
 ## Description
