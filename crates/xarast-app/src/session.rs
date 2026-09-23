@@ -201,6 +201,8 @@ pub struct Session {
     tools: ToolMachine,
     /// What the tool in force wants drawn while its gesture is in flight.
     preview: Preview,
+    /// The pick index, rebuilt lazily after a change.
+    picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
     last_edit: Option<EditCommand>,
     /// The document changed since the viewport's scroll bounds were
@@ -248,6 +250,7 @@ impl Session {
             walker: SceneWalker::new(),
             tools: ToolMachine::new(),
             preview: Preview::default(),
+            picker: crate::tool::Picker::new(),
             last_edit: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
@@ -670,6 +673,7 @@ impl Session {
                 preview: &mut self.preview,
                 commands: &mut commands,
                 requests: &mut requests,
+                picker: &self.picker,
             };
             f(&mut self.tools, &mut cx)
         };
@@ -780,6 +784,7 @@ impl Session {
 
     fn after_mutation(&mut self) {
         self.modified = true;
+        self.picker.invalidate();
         self.edit.prune(&self.doc);
         // The scroll bounds need the drawing's extent, which is a walk of
         // the whole document while the bounds cache is cold: 30 ms at
@@ -963,6 +968,7 @@ impl Session {
             }
             Intent::InvalidateAll => {
                 self.walker.reset();
+                self.picker.invalidate();
                 changed |= Changed::CACHE | Changed::DOCUMENT;
             }
             // Application-level: `AppState::apply` handles these before a

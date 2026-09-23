@@ -2288,7 +2288,17 @@ mod tests {
                     minor: xarast_geom::Vector::raw(0, 100_000),
                 },
             )))?;
-            tx.attach(n, layer, xarast_doc::Attach::LastChild)
+            tx.attach(n, layer, xarast_doc::Attach::LastChild)?;
+            // Filled (with the default line colour, black), so a click on
+            // its interior picks it: a transparent interior does not.
+            let black = match xarast_doc::default_for(xarast_doc::AttrSlot::StrokeColour) {
+                xarast_doc::AttrValue::StrokeColour(p) => p,
+                _ => unreachable!("the stroke colour slot holds a stroke colour"),
+            };
+            let fill = tx.create(xarast_doc::NodeKind::Attr(Box::new(
+                xarast_doc::AttrNode::new(xarast_doc::AttrValue::Fill(black)),
+            )))?;
+            tx.attach(fill, n, xarast_doc::Attach::LastChild)
         }
     }
 

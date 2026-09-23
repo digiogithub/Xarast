@@ -32,6 +32,16 @@ impl Command for AddRects {
                 minor: Vector::raw(0, side),
             })))?;
             tx.attach(n, layer, Attach::LastChild)?;
+            // A painted fill, so the interior picks (a transparent one
+            // does not).
+            let fill = tx.create(NodeKind::Attr(Box::new(xarast_doc::AttrNode::new(
+                xarast_doc::AttrValue::Fill(xarast_doc::fill::Paint::Flat {
+                    value: xarast_color::Colour::Direct(xarast_color::ColourValue::rgbt(
+                        0.8, 0.2, 0.2, 0.0,
+                    )),
+                }),
+            ))))?;
+            tx.attach(fill, n, Attach::LastChild)?;
         }
         Ok(())
     }
@@ -679,7 +689,8 @@ fn a_double_click_on_a_rectangle_opens_the_rectangle_tool() {
     );
     s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
     s.apply(Intent::SelectNone).unwrap();
-    let p = Point::raw(200_000, 150_000);
+    // On its outline: an unfilled interior does not pick.
+    let p = Point::raw(100_000, 150_000);
     click(&mut s, p, 5000);
     assert_eq!(s.tools().current(), ToolId::Selector);
     click(&mut s, p, 5100);

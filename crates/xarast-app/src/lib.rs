@@ -71,6 +71,7 @@ pub mod headless;
 pub mod intent;
 pub mod ops;
 mod paint;
+pub mod picking;
 pub mod prefs;
 pub mod recent;
 pub mod render_thread;

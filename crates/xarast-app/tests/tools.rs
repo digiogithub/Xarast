@@ -28,6 +28,16 @@ impl Command for AddRects {
                 minor: Vector::raw(0, side),
             })))?;
             tx.attach(n, layer, Attach::LastChild)?;
+            // A painted fill, so the interior picks (a transparent one
+            // does not).
+            let fill = tx.create(NodeKind::Attr(Box::new(xarast_doc::AttrNode::new(
+                xarast_doc::AttrValue::Fill(xarast_doc::fill::Paint::Flat {
+                    value: xarast_color::Colour::Direct(xarast_color::ColourValue::rgbt(
+                        0.8, 0.2, 0.2, 0.0,
+                    )),
+                }),
+            ))))?;
+            tx.attach(fill, n, Attach::LastChild)?;
         }
         Ok(())
     }

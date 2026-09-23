@@ -110,60 +110,22 @@ pub enum InteractionState {
     Cancelled,
 }
 
-/// Which part of an object a pick landed on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum HitPart {
-    /// Inside the object's bounding box. Precise fill and stroke picking
-    /// (`xarast-geom`'s hit index) replaces this in W3.
-    Bounds,
-}
+pub use crate::picking::{HitPart, HitResult, PickMode, Picker};
 
-/// What a pick found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HitResult {
-    /// The object hit.
-    pub node: NodeId,
-    /// The outermost selectable object containing it: what a plain click
-    /// selects. Equal to `node` until leaf picking lands.
-    pub top_group: NodeId,
-    /// Which part.
-    pub part: HitPart,
-}
-
-/// Finds the topmost selectable object under a document point.
+/// Finds the topmost selectable object under a document point, by its
+/// painted fill and stroke, within `tolerance` millipoints.
 ///
-/// Objects are the ones [`crate::edit::selectable_objects`] yields — ink
-/// directly under a visible, unlocked layer — tested in paint order so
-/// the last hit is the one drawn on top. The test is the object's
-/// bounding box widened by `tolerance`; W3 replaces it with fill and
-/// stroke geometry, behind this same signature.
+/// Builds a throwaway index: use a session's [`Picker`] (through
+/// [`ToolCtx::pick`]) for anything interactive.
 #[must_use]
 pub fn pick(doc: &Document, at: DocPoint, tolerance: Mp) -> Option<HitResult> {
-    let mut hit = None;
-    for id in crate::edit::selectable_objects(doc) {
-        let b = crate::viewport::nodes_rect(doc, [id]);
-        if !b.is_empty() && b.inflated(tolerance).contains(at) {
-            hit = Some(HitResult {
-                node: id,
-                top_group: id,
-                part: HitPart::Bounds,
-            });
-        }
-    }
-    hit
-}
-
-/// Every selectable object whose bounding box lies inside `rect`: the
-/// marquee's "enclose" rule.
-#[must_use]
-pub fn pick_enclosed(doc: &Document, rect: DocRect) -> Vec<NodeId> {
-    crate::edit::selectable_objects(doc)
-        .filter(|id| {
-            let b = crate::viewport::nodes_rect(doc, [*id]);
-            !b.is_empty() && rect.contains_rect(b)
-        })
-        .collect()
+    Picker::new().pick(
+        doc,
+        at,
+        1.0,
+        tolerance.to_f64().max(1.0),
+        PickMode::TopGroup,
+    )
 }
 
 /// Events the machine delivers to a tool. Tools never see raw input.
@@ -607,6 +569,8 @@ pub struct ToolCtx<'a> {
     pub commands: &'a mut dyn CommandSink,
     /// Selection and view requests.
     pub requests: &'a mut ToolRequests,
+    /// The document's pick index.
+    pub picker: &'a Picker,
 }
 
 impl std::fmt::Debug for ToolCtx<'_> {
@@ -643,15 +607,34 @@ impl ToolCtx<'_> {
         near_on_screen(self.viewport, handle, at, HANDLE_TOLERANCE_PX)
     }
 
-    /// Picks the topmost object under a point, with the standard
-    /// on-screen tolerance.
+    /// Picks the object under a point, with the standard on-screen
+    /// tolerance. Constrain picks the leaf inside its groups; Alternative
+    /// picks the object beneath the selected one under the pointer.
     #[must_use]
     pub fn pick(&self, at: DocPoint) -> Option<HitResult> {
-        pick(
-            self.doc,
-            at,
-            Mp::new((PICK_TOLERANCE_PX * self.device_px()).round() as i32),
-        )
+        let (doc, px) = (self.doc, self.device_px());
+        let mode = if self.modifiers.alternative {
+            match self
+                .picker
+                .pick(doc, at, PICK_TOLERANCE_PX, px, PickMode::TopGroup)
+            {
+                Some(h) if self.edit.is_selected(h.top_group) => {
+                    PickMode::Under { below: h.top_group }
+                }
+                _ => PickMode::TopGroup,
+            }
+        } else if self.modifiers.constrain {
+            PickMode::Leaf
+        } else {
+            PickMode::TopGroup
+        };
+        self.picker.pick(doc, at, PICK_TOLERANCE_PX, px, mode)
+    }
+
+    /// Every selectable object inside a marquee.
+    #[must_use]
+    pub fn enclosed(&self, rect: DocRect) -> Vec<NodeId> {
+        self.picker.enclosed(self.doc, rect)
     }
 }
 
@@ -1173,6 +1156,7 @@ mod tests {
         fn feed(&mut self, input: CanvasInput) -> bool {
             let mut cmds: Vec<crate::ops::EditCommand> = Vec::new();
             let mut req = ToolRequests::default();
+            let picker = Picker::new();
             let mut cx = ToolCtx {
                 doc: &self.doc,
                 edit: &self.edit,
@@ -1181,6 +1165,7 @@ mod tests {
                 preview: &mut self.preview,
                 commands: &mut cmds,
                 requests: &mut req,
+                picker: &picker,
             };
             let consumed = self.machine.handle(input, &mut cx);
             assert!(cmds.is_empty(), "the recorder never emits");

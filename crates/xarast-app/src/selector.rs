@@ -39,7 +39,7 @@ use crate::ops::EditCommand;
 use crate::tool::{
     Anchor, CursorKind, GestureEvent, HANDLE_TOLERANCE_PX, HandleShape, Infobar, InfobarField,
     InfobarItem, InfobarValue, InteractionState, OverlayShape, Tool, ToolCtx, ToolView,
-    near_on_screen, pick_enclosed,
+    near_on_screen,
 };
 use crate::tools::constrain_45;
 
@@ -614,7 +614,7 @@ impl Tool for SelectorTool {
                         self.commit(cx, nodes, Matrix::translate(delta), false);
                     }
                     Some(SelectorDrag::Marquee { from, to }) => {
-                        let hits = pick_enclosed(cx.doc, DocRect::new(from, to));
+                        let hits = cx.enclosed(DocRect::new(from, to));
                         let mode = if cx.modifiers.adjust {
                             SelectMode::Add
                         } else {
