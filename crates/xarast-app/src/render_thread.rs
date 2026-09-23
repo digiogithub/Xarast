@@ -143,8 +143,8 @@ pub enum FrameReuse {
         /// Pixels moved down.
         dy: i32,
     },
-    /// The previous frame resampled to a new zoom, plus the border a
-    /// zoom-out uncovered. `Draft` only.
+    /// The previous frame resampled to a new zoom; the border a zoom-out
+    /// uncovers shows the backdrop until the `Final`. `Draft` only.
     Rescaled,
 }
 
@@ -476,10 +476,7 @@ impl<R: FrameRenderer> Worker<'_, R> {
         target: &mut Surface,
         timings: &mut FrameTimings,
     ) -> Option<BackendError> {
-        reuse::fill_rect(target, rect, job.background);
-        if let Some((page, colour)) = job.page {
-            reuse::fill_rect(target, page.intersection(rect), colour);
-        }
+        backdrop(job, rect, target);
         match self.renderer.render(job, list, target) {
             Ok(t) => {
                 add_timings(timings, &t);
@@ -499,10 +496,7 @@ impl<R: FrameRenderer> Worker<'_, R> {
         timings: &mut FrameTimings,
     ) -> Option<BackendError> {
         if !rect.intersects(job.ink) {
-            reuse::fill_rect(target, rect, job.background);
-            if let Some((page, colour)) = job.page {
-                reuse::fill_rect(target, page.intersection(rect), colour);
-            }
+            backdrop(job, rect, target);
             return None;
         }
         let t = Instant::now();
@@ -574,10 +568,13 @@ impl<R: FrameRenderer> Worker<'_, R> {
                 let Some((mut surface, covered)) = rescaled else {
                     return self.produce_full(job, timings);
                 };
-                let mut error = None;
+                // The border a zoom-out uncovers gets the backdrop only. A
+                // border is short, wide strips, which the CPU backend runs
+                // on one core each: rasterising it cost ~190 ms a frame
+                // over 100 000 objects (`docs/memory/perf.md`), so the
+                // Final after the gesture fills it in instead.
                 for strip in reuse::ring(job.view.viewport, covered) {
-                    let e = self.draw_rect(job, &job.view, strip, &mut surface, &mut timings);
-                    error = error.or(e);
+                    backdrop(job, strip, &mut surface);
                 }
                 Ok(Produced {
                     surface,
@@ -585,7 +582,7 @@ impl<R: FrameRenderer> Worker<'_, R> {
                     timings,
                     reuse: FrameReuse::Rescaled,
                     exact: false,
-                    error,
+                    error: None,
                 })
             }
             Plan::Full => self.produce_full(job, timings),
@@ -606,6 +603,14 @@ impl<R: FrameRenderer> Worker<'_, R> {
             exact: job.view.quality == RenderQuality::Final && error.is_none(),
             error,
         })
+    }
+}
+
+/// Paints the pasteboard and the page into `rect`: what is under the ink.
+fn backdrop(job: &FrameJob, rect: DeviceRect, target: &mut Surface) {
+    reuse::fill_rect(target, rect, job.background);
+    if let Some((page, colour)) = job.page {
+        reuse::fill_rect(target, page.intersection(rect), colour);
     }
 }
 
@@ -1090,8 +1095,9 @@ mod tests {
         let f = next_frame(&rt, &woken);
         assert_eq!(f.reuse, FrameReuse::Rescaled);
         assert!(!f.exact);
-        // A zoom-out uncovers a border, and only the border is rasterised.
-        assert!(f.timings.rasterised_pixels < 240 * 180 / 2);
+        // Nothing is rasterised: the uncovered border is backdrop.
+        assert_eq!(f.timings.rasterised_pixels, 0);
+        assert_eq!(f.surface.pixel(0, 0), Some(BG));
 
         let fin = s.frame_job(BG, PAGE);
         rt.submit(fin.clone());

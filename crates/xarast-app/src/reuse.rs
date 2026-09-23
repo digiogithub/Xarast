@@ -10,8 +10,9 @@
 //!   A `Draft` pan snaps a fractional offset to whole pixels and reports
 //!   the snapped view; the `Final` that follows is drawn at the exact one.
 //! * **Zoom** — a `Draft` frame resamples the kept frame to the new scale
-//!   and rasterises only the border a zoom-out uncovers. It is blurry by
-//!   design; the `Final` that follows re-rasterises everything.
+//!   and paints only the backdrop into the border a zoom-out uncovers. It
+//!   is blurry and incomplete by design; the `Final` that follows
+//!   re-rasterises everything.
 //! * **Anything else** — a new scene, a resize, a colour change, a
 //!   rotation — is a full frame.
 //!
