@@ -249,6 +249,10 @@ pub enum HandleShape {
     FillBlob,
     /// The selected fill control point.
     FillBlobSelected,
+    /// A radial, conical or diamond fill's centre: a round blob.
+    FillCentre,
+    /// The selected centre.
+    FillCentreSelected,
     /// An intermediate ramp stop: a diamond on the arm.
     FillStop,
     /// The selected ramp stop.

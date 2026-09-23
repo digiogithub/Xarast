@@ -1414,12 +1414,16 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     HandleShape::Radius => HandleKind::Radius,
                     HandleShape::Snap => HandleKind::Snap,
                     HandleShape::FillBlob | HandleShape::FillBlobSelected => HandleKind::FillBlob,
+                    HandleShape::FillCentre | HandleShape::FillCentreSelected => {
+                        HandleKind::FillCentre
+                    }
                     HandleShape::FillStop | HandleShape::FillStopSelected => HandleKind::Fill,
                 },
                 active: matches!(
                     shape,
                     HandleShape::NodeSelected
                         | HandleShape::FillBlobSelected
+                        | HandleShape::FillCentreSelected
                         | HandleShape::FillStopSelected
                 ),
             }),

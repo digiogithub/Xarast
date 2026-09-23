@@ -357,6 +357,8 @@ pub fn overlay_of(h: &FillHandles, selected: Option<FillHandle>, out: &mut Vec<O
         let shape = match (x.kind, sel) {
             (HandleKind::StopDiamond, false) => HandleShape::FillStop,
             (HandleKind::StopDiamond, true) => HandleShape::FillStopSelected,
+            (HandleKind::Blob, false) => HandleShape::FillCentre,
+            (HandleKind::Blob, true) => HandleShape::FillCentreSelected,
             (_, false) => HandleShape::FillBlob,
             (_, true) => HandleShape::FillBlobSelected,
         };

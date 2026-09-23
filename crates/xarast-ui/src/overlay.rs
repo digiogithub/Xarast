@@ -43,6 +43,8 @@ pub enum HandleKind {
     Snap,
     /// A fill's control point or colour blob, drawn as a square.
     FillBlob,
+    /// A fill's centre, drawn as a round blob.
+    FillCentre,
 }
 
 impl HandleKind {
@@ -261,7 +263,7 @@ impl OverlayPainter<'_> {
                     egui::StrokeKind::Inside,
                 );
             }
-            HandleKind::Control => {
+            HandleKind::Control | HandleKind::FillCentre => {
                 painter.circle_filled(c, half, fill);
                 painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));
             }
@@ -481,6 +483,12 @@ mod tests {
                         y: Mp::from_pt(10.0),
                         kind: HandleKind::FillBlob,
                         active: true,
+                    },
+                    OverlayItem::Handle {
+                        x: Mp::ZERO,
+                        y: Mp::from_pt(10.0),
+                        kind: HandleKind::FillCentre,
+                        active: false,
                     },
                 ];
                 p.paint(ui.painter(), &items);
