@@ -201,22 +201,22 @@ pub fn apply(ctx: &egui::Context, theme: ResolvedTheme) {
     v.override_text_color = Some(t.text);
     v.hyperlink_color = t.accent;
     v.selection.bg_fill = t.accent.linear_multiply(0.45);
-    v.selection.stroke = egui::Stroke::new(1.0, t.on_accent);
-    v.window_stroke = egui::Stroke::new(1.0, t.border);
+    v.selection.stroke = egui::Stroke::new(1.0_f32, t.on_accent);
+    v.window_stroke = egui::Stroke::new(1.0_f32, t.border);
     v.widgets.noninteractive.bg_fill = t.surface;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, t.border);
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, t.text_muted);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, t.border);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, t.text_muted);
     v.widgets.inactive.bg_fill = t.surface_raised;
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, t.text);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, t.text);
     v.widgets.hovered.bg_fill = t.surface_raised;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, t.accent);
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, t.text);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, t.accent);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, t.text);
     v.widgets.active.bg_fill = t.accent;
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.0, t.on_accent);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, t.on_accent);
     // egui 0.33 paints a focused widget with the `active` visuals, so the
     // focus ring lives here: two points of the focus token, which is not
     // the accent, so "selected" and "focused" never look the same.
-    v.widgets.active.bg_stroke = egui::Stroke::new(2.0, t.focus);
+    v.widgets.active.bg_stroke = egui::Stroke::new(2.0_f32, t.focus);
     v.widgets.open.bg_fill = t.surface_sunken;
 
     // Density. Everything here is a departure from egui's defaults and is
@@ -235,7 +235,7 @@ pub fn apply(ctx: &egui::Context, theme: ResolvedTheme) {
     s.scroll.bar_width = 8.0;
     s.scroll.floating = false;
 
-    for (_, font) in style.text_styles.iter_mut() {
+    for font in style.text_styles.values_mut() {
         font.size = (font.size * 0.92).round();
     }
 

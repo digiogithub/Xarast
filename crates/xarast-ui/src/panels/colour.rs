@@ -260,12 +260,12 @@ pub fn colour_line(ui: &mut egui::Ui, ctx: &mut PanelCtx<'_>, editing_line: bool
                             ui.painter().rect_stroke(
                                 rect,
                                 1.0,
-                                egui::Stroke::new(1.0, ctx.tokens.border),
+                                egui::Stroke::new(1.0_f32, ctx.tokens.border),
                                 egui::StrokeKind::Inside,
                             );
                             ui.painter().line_segment(
                                 [rect.left_bottom(), rect.right_top()],
-                                egui::Stroke::new(1.0, ctx.tokens.error),
+                                egui::Stroke::new(1.0_f32, ctx.tokens.error),
                             );
                         }
                     }
@@ -273,7 +273,7 @@ pub fn colour_line(ui: &mut egui::Ui, ctx: &mut PanelCtx<'_>, editing_line: bool
                         ui.painter().rect_stroke(
                             rect,
                             1.0,
-                            egui::Stroke::new(1.0, ctx.tokens.accent),
+                            egui::Stroke::new(1.0_f32, ctx.tokens.accent),
                             egui::StrokeKind::Outside,
                         );
                     }
