@@ -57,7 +57,10 @@ vello_cpu = { version = "0.2", default-features = false, features = [
 ] }
 # The GPU backend, behind the `gpu` feature of `xarast-render`. Never built
 # in CI's default job, because CI has no adapter. Both `Apache-2.0 OR MIT`.
-vello = { version = "0.10", default-features = false, features = ["wgpu", "wgpu_default"] }
+# Note: `vello` 0.10 depends on `wgpu` 29, not the 30 below. Only the W0
+# spike bench (`xarast-render`'s `spike-gpu` feature) uses it today; R5.1 has
+# to reconcile the two before `vello` joins the GPU backend.
+vello ={ version = "0.10", default-features = false, features = ["wgpu", "wgpu_default"] }
 # Default features on purpose: with none, no backend is compiled in and
 # `Instance::new` panics outright rather than reporting no adapter.
 wgpu = "30"

@@ -18,6 +18,11 @@ default = []
 # `wgpu` only: `vello` joins when the WGSL compositing pass lands (R5.1),
 # which is also when it would first be executed. See `backend::gpu`.
 gpu = ["dep:wgpu"]
+# The GPU half of the W0 rasteriser spike (`benches/spike.rs`): candidates B
+# (`vello`) and C (`vello_hybrid`) timed on every hardware adapter. Bench
+# only; nothing in the library uses these crates. Both pin `wgpu` 29, not the
+# workspace's 30, which is itself a finding for task R5.1.
+spike-gpu = ["dep:vello", "dep:vello_hybrid", "dep:pollster"]
 
 [dependencies]
 xarast-geom = { path = "../xarast-geom" }
@@ -29,6 +34,9 @@ thiserror = { workspace = true }
 png = { workspace = true }
 sha2 = { workspace = true }
 wgpu = { workspace = true, optional = true }
+vello = { workspace = true, optional = true }
+vello_hybrid = { version = "0.2", default-features = false, features = ["wgpu", "wgpu_default"], optional = true }
+pollster = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -37,4 +45,8 @@ tiny-skia = { workspace = true }
 
 [[bench]]
 name = "render"
+harness = false
+
+[[bench]]
+name = "spike"
 harness = false

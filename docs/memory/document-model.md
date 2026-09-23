@@ -483,3 +483,12 @@ findings.
       fuzz_doc_builder.rs` (2026-09-23), nightly in CI. It drives every node
       kind, unbalanced scopes, and colour/bitmap keys forged with
       `slotmap::KeyData::from_ffi`, and treats `Inconsistent` as a finding.
+- [ ] **`Tx::commit` is O(document size).** `keep_one_active_layer` runs
+      `preorder` over the whole tree on every commit to find the spreads. On
+      the reference machine that makes a single-node edit cost **1.04 ms** to
+      dispatch at 100 000 nodes, while the undo itself costs 0.28 µs. It was
+      found on 2026-09-23 when the `undo/single_node_edit` bench, which timed
+      dispatch and undo together, jumped from 0.27 µs to 1.13 ms. The bench is
+      now split (`dispatch/` and `undo/`). The fix is to keep a spread index,
+      or to check only the spreads whose layers the transaction touched.
+      `docs/memory/perf.md` has the numbers.

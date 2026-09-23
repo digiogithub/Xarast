@@ -120,10 +120,32 @@ fn benches(c: &mut Criterion) {
             .preorder(d3.tree.root())
             .nth(500)
             .expect("a node to nudge");
+        // The undo budget is for the undo alone; dispatching the edit is timed
+        // separately, because the commit path does whole-document work of its
+        // own (`Tx::commit` re-checks the active layer of every spread) and
+        // folding it into "undo" hid which of the two the time belonged to.
+        c.bench_function("dispatch/single_node_edit", |b| {
+            b.iter_custom(|iters| {
+                let mut spent = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    let t = std::time::Instant::now();
+                    bus.dispatch(&mut d3, &Nudge(target)).expect("nudge");
+                    spent += t.elapsed();
+                    bus.history_mut().undo(&mut d3).expect("undo");
+                }
+                spent
+            });
+        });
         c.bench_function("undo/single_node_edit", |b| {
-            b.iter(|| {
-                bus.dispatch(&mut d3, &Nudge(target)).expect("nudge");
-                bus.history_mut().undo(&mut d3).expect("undo");
+            b.iter_custom(|iters| {
+                let mut spent = std::time::Duration::ZERO;
+                for _ in 0..iters {
+                    bus.dispatch(&mut d3, &Nudge(target)).expect("nudge");
+                    let t = std::time::Instant::now();
+                    bus.history_mut().undo(&mut d3).expect("undo");
+                    spent += t.elapsed();
+                }
+                spent
             });
         });
         c.bench_function("redo/single_node_edit", |b| {

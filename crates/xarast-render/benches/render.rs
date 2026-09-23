@@ -84,7 +84,11 @@ fn rect_path(x0: f64, y0: f64, x1: f64, y1: f64) -> PathRef {
 fn full_frame(c: &mut Criterion) {
     let mut g = c.benchmark_group("full_frame");
     g.sample_size(10);
-    for (w, h, n) in [(1920u32, 1080u32, 20_000u64), (960, 540, 20_000)] {
+    for (w, h, n) in [
+        (1920u32, 1080u32, 20_000u64),
+        (1920, 1080, 100_000),
+        (960, 540, 20_000),
+    ] {
         let scene = bulk(w, h, n);
         let view = view(w, h);
         let res = Resolver::new();
@@ -123,6 +127,23 @@ fn incremental(c: &mut Criterion) {
     g.bench_function("display_list_build", |b| {
         b.iter(|| black_box(DisplayList::build(&scene, &view, &DirtyRect::NONE)));
     });
+    g.finish();
+}
+
+/// `DisplayList::build` over a warm scene, at the two sizes the budget
+/// table cares about: 20 000 (what the phase measured) and 100 000 (what
+/// the ≤ 3 ms budget is written for). Story XARA-US-0016 tracks the gap.
+fn display_list(c: &mut Criterion) {
+    let mut g = c.benchmark_group("display_list");
+    g.sample_size(20);
+    let (w, h) = (1920u32, 1080u32);
+    let view = view(w, h);
+    for n in [20_000u64, 100_000] {
+        let scene = bulk(w, h, n);
+        g.bench_function(format!("build_{n}"), |b| {
+            b.iter(|| black_box(DisplayList::build(&scene, &view, &DirtyRect::NONE)));
+        });
+    }
     g.finish();
 }
 
@@ -217,5 +238,12 @@ fn cache_threshold(c: &mut Criterion) {
     g.finish();
 }
 
-criterion_group!(benches, full_frame, incremental, paints, cache_threshold);
+criterion_group!(
+    benches,
+    full_frame,
+    incremental,
+    display_list,
+    paints,
+    cache_threshold
+);
 criterion_main!(benches);

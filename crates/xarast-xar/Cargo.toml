@@ -29,3 +29,7 @@ thiserror = { workspace = true }
 flate2 = { workspace = true }
 proptest = { workspace = true }
 sha2 = { workspace = true }
+
+[[bench]]
+name = "import"
+harness = false

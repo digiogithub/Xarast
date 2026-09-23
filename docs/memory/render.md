@@ -70,6 +70,12 @@ integrated GPU. This one has half the cores, slower ones, and no GPU at all.
 Read every throughput verdict below as "on this machine", and re-measure
 before treating G1 or G2 as settled.
 
+*Update 2026-09-23:* there is a reference machine now
+(`docs/memory/perf.md` §Reference machine), and G1 and G2 have been
+re-measured and settled on it. See "Re-run on the reference machine" after
+the decision. The quality gates G3–G7 below were not re-run: they do not
+depend on the machine, apart from G4's SIMD-level caveat.
+
 ### The candidates, and what could be measured
 
 | | A `vello_cpu` 0.2 | B `vello` 0.10 | C `vello_hybrid` 0.2 | D `tiny-skia` 0.12 (control) | E `lyon` + own pipeline |
@@ -85,7 +91,8 @@ produced before the branch is taken.
 
 ### The numbers
 
-The spike harness itself is not in the repository: it drives `tiny-skia` as a
+The throughput half of the harness is now in the repository as
+`benches/spike.rs` (see the re-run section). The quality half is not: it drives `tiny-skia` as a
 *renderer* rather than as a test oracle, and it carries its own ground-truth
 supersampler. Its five scenes survive in two places, which is what matters
 for rebuilding it — the `edges`, `hairlines`, `seams` and `aa_*` cases of
@@ -114,7 +121,8 @@ the argument for the per-node cache holding *pixels*, which is what the phase
 specifies. And **`tiny-skia` is 3.2× slower**, which settles it as a control
 rather than a candidate.
 
-**M2 — GPU throughput. Unmeasured.** Zero adapters.
+**M2 — GPU throughput. Unmeasured on the container** (zero adapters).
+Measured on the reference machine in the re-run below.
 
 **M3 — incremental cost.** A 64 × 64 dirty rect of the 100 000-object scene,
 with binning done once outside the timed loop:
@@ -220,8 +228,8 @@ No C++ toolchain anywhere.
 
 | Gate | Verdict | Number |
 |---|---|---|
-| G1 CPU throughput ≤ 120 ms single, ≤ 25 ms on 8 cores | **fails as measured; unsettled** | 442 / 194 ms on 4 slow cores (250 / 91 ms on the lighter scene) |
-| G2 GPU throughput ≤ 8 ms | **unmeasured** | no adapter |
+| G1 CPU throughput ≤ 120 ms single, ≤ 25 ms on 8 cores | **fails — settled on the reference machine** | container: 442 / 194 ms on 4 slow cores. Reference machine: **159–164 / 53–58 ms** (see the re-run below) |
+| G2 GPU throughput ≤ 8 ms | **fails on the integrated GPU — settled**; at the line on the discrete GPU | container: no adapter. Reference machine: Intel iGPU **72–86 ms**, RTX 4000 SFF Ada 7.8–8.0 ms |
 | G3 AA: mean ΔE < 1.0, p99 < 3.0, ≥ 132 levels | **passes**, with the reference corrected | 0.072 / 0.647, 256 levels |
 | G4 determinism, byte-identical per architecture | **passes**, with the SIMD level pinned | 1 hash / 100 runs; 3 of 786 432 samples move if it is not |
 | G5 conflation ≤ 0.05 % | **passes** for a single path with consistent winding | 0.0000 %; 1.63 % with mixed winding; see the invariant |
@@ -261,7 +269,101 @@ anyone claims the budgets are met.
 Do **not** re-open the rasteriser question on intuition. Re-open it if, on
 real hardware, `bulk` at 1920 × 1080 cannot reach 25 ms on eight cores, or if
 `vello_cpu`'s alpha status produces a correctness regression the golden suite
-catches.
+catches. *(The first condition fired on 2026-09-23. It was reviewed and the
+decision stands; see the next section.)*
+
+### Re-run on the reference machine (2026-09-23): G1 and G2 settled
+
+The machine is described in `docs/memory/perf.md` §Reference machine: Intel
+Core Ultra 9 285 (8 P + 16 E cores), an Intel Arrow Lake iGPU (Mesa 26.1.6)
+and an NVIDIA RTX 4000 SFF Ada (580.173.02), COSMIC Wayland, rustc 1.98.1.
+Other agents were fuzzing and compiling throughout. Each figure is the median
+of 30–50 frames, and a range spans 3–5 runs at load average 6–25.
+
+**The harness now exists in the repository:** `crates/xarast-render/benches/spike.rs`
+is the throughput half of the spike (G1, G2, candidate C). It talks to
+`vello_cpu`, `vello` and `vello_hybrid` directly, uses the same `bulk`
+generator in both object sizes, times the CPU from recording to the finished
+pixmap and the GPU from submit to `poll(wait)`, and checks every GPU frame
+against the `vello_cpu` one (mean absolute channel difference). Run it with:
+
+```text
+cargo bench -p xarast-render --bench spike                        # G1
+cargo bench -p xarast-render --bench spike --features spike-gpu   # + G2, every adapter
+SPIKE_THREADS=0,7 taskset -c 0-7 cargo bench -p xarast-render --bench spike   # 8 P-cores
+```
+
+**M1 / G1 — `vello_cpu` 0.2, u8 pipeline, detected SIMD (AVX2):**
+
+| `bulk` variant | 1 thread | 8 threads (7 workers + 1) | 24 threads |
+|---|---|---|---|
+| r3..28 px, overdraw ≈ ×27 (the gate scene) | **159–164 ms** (record 104 + raster 56); 175 pinned to the P-cores | **53–58 ms**; 55.6 pinned to the P-cores | 49–51 ms |
+| r2..8 px, overdraw ≈ ×2.6 | 83–88 ms (record 64 + raster 20) | 34–37 ms | 35–39 ms |
+| r3..28 px, E-cores only (`taskset -c 8-23`) | 227 ms | 119 ms (15 workers; one noisy run, 68–246) | — |
+
+Against the container this is 2.8× faster single-threaded and 3.5× faster in
+parallel, and **G1 still fails on both halves.** Parallel scaling stops at
+about 3×, and 8, 16 and 24 threads land within 10 % of each other. The serial
+part is the recording thread, which feeds paths to the workers. Recording was
+already the dominant cost on one thread (104 of 164 ms). More cores do not
+close this gate. Only not re-recording does.
+
+**M2 / G2 — `vello` 0.10, area AA, scene retained, submit → `poll(wait)`:**
+
+| Adapter | r3..28 px | r2..8 px | Scene encoding, CPU, once per scene change | Δ vs `vello_cpu` |
+|---|---|---|---|---|
+| **Intel Arrow Lake iGPU** (the gate's "integrated GPU") | **72–86 ms** (min 48); 197 ms at load 34 | 32–48 ms | 17–25 ms | 0.019 / 0.68 |
+| NVIDIA RTX 4000 SFF Ada | **7.8–8.0 ms**; 9.3 ms at load 34 | 5.8–6.0 ms | 17–25 ms | 0.019 / 0.67 |
+
+The Δ column is the mean absolute channel difference against the
+`vello_cpu` frame. It is 0.02 where the frame is covered, and it rises on the
+light scene's many antialiased edges. `vello` writes straight alpha, so the
+comparison is made against the unpremultiplied reference.
+
+**Candidate C, `vello_hybrid` 0.2** (not a gate, recorded for the Phase 5
+re-evaluation the decision rule asks for): the GPU half is quick, 5.4–6.0 ms
+(light) and 17–18 ms (heavy) on the RTX, but every frame re-records strips on
+the CPU at **63–110 ms**, the same cost as `vello_cpu`. It also misbehaved: one
+run took 2.5 s per heavy frame on the RTX, and on the Intel iGPU the heavy
+frame differs from `vello_cpu` by a mean of 1.77 (0.03 on the RTX).
+**Rejected:** it removes nothing that matters.
+
+**Verdicts.**
+
+- **G1 fails, settled.** One thread is 1.3× over and eight P-cores are 2.2×
+  over. The machine is no longer the excuse.
+- **G2 fails on the integrated GPU, settled**, by 9–11× on the gate scene. On
+  the discrete RTX 4000 it sits exactly at the 8 ms line. The integrated GPU
+  is also the more fragile of the two: under CPU load its time more than
+  doubles.
+
+**What this changes, and what it does not.**
+
+1. **The rasteriser choice stands.** The re-open trigger fired and was
+   reviewed. No measured alternative is faster: `tiny-skia` is 3.2× slower,
+   and `vello_hybrid` records strips at the same cost. The things `vello_cpu`
+   was chosen for (256 levels, determinism, interposability) are unaffected.
+2. **A 100k-object full frame is a cold-path cost, not an interactive one.**
+   First paint, export and zoom-settle may pay 35–160 ms. A pan or zoom frame
+   must not re-record the scene. It must composite cached pixels, per node or
+   per tile (the per-node cache the phase already specifies), and re-raster
+   only the dirty part: 64 × 64 costs 0.12 ms. This makes the Draft → Final
+   scheduler (TODO 8) the thing the 16 ms pan/zoom budget depends on.
+3. **The GPU backend does not rescue the integrated-GPU budget on its own.**
+   At 72–86 ms for a full `vello` raster, the pan/zoom ≤ 16 ms budget on the
+   iGPU also has to come from reusing pixels (transforming cached tiles or
+   layers while the gesture runs), not from re-rasterising. On a discrete GPU
+   a full re-raster fits in 8 ms.
+4. **`vello` 0.10 and `vello_hybrid` 0.2 pin `wgpu` 29**, but the workspace
+   and the shell are on `wgpu` 30. The workspace manifest's comment says
+   "`vello` 0.10 on `wgpu` 30", and that is wrong. The spike builds against
+   `vello::wgpu` behind the bench-only `spike-gpu` feature. Task R5.1 must
+   pick one: pin the shell to `wgpu` 29, or wait for a `vello` release on 30.
+   Two `wgpu` versions in one
+   binary cannot share a device.
+5. **Scene encoding for `vello` costs 17–25 ms per 100k objects.** A retained
+   `vello::Scene` has to be rebuilt, or appended, when the document changes.
+   That is another reason to keep the encoding per node and not per frame.
 
 ---
 
@@ -443,17 +545,18 @@ determinism suite asserts it over four band heights.
 
 | # | Item | Owner |
 |---|---|---|
-| 1 | Re-run the W0 spike on a real reference machine and settle G1 and G2 | Phase 5 gate |
+| 1 | ~~Re-run the W0 spike on a real reference machine and settle G1 and G2~~. **Done 2026-09-23**: both fail, settled. See "Re-run on the reference machine" above | done (XARA-US-0010) |
 | 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4) | Phase 4 follow-up, on hardware |
 | 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
 | 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the comparison against the original is Phase 11 |
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
-| 7 | `DisplayList::build` costs 106 ns per command (2.12 ms for 20 000), so 100 000 nodes is ~10.6 ms against a 3 ms budget. The cause is the size of `DrawCmd`; boxing the stroke payload is the obvious next step | Phase 4 follow-up |
-| 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not | Phase 5, which owns the idle timer |
+| 7 | `DisplayList::build` on the reference machine: 1.11 ms at 20 000 (55 ns/cmd) but **20.8 ms at 100 000** (208 ns/cmd), against a 3 ms budget. It is **superlinear**, so the old linear estimate of 10.6 ms was wrong. Suspects: the size of `DrawCmd` and a fresh, large allocation per build, both of which make the working set fall out of cache (not yet profiled). Boxing the stroke payload and reusing the command vector are the first two steps. Bench: `display_list/build_{20000,100000}` | XARA-US-0016 |
+| 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not. After the G1/G2 re-run this is **what the 16 ms pan/zoom budget depends on**: a 100k full frame costs 35–160 ms on the CPU and 72–86 ms on the iGPU | Phase 5, which owns the idle timer |
 | 9 | ~~Fuzz targets `fuzz_display_list` and `fuzz_ramp`~~ — done 2026-09-23, nightly in CI; see below | — |
 | 10 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | deferred, no phase |
 | 11 | The CPU backend strokes and dashes the **whole** path in document space before clipping to the band. A thick, round-capped, finely dashed stroke along a long path at deep zoom exhausts memory (two 1.8 GB allocations found by `fuzz_display_list`). Needs culling to the band plus the stroke's reach, with the dash phase preserved, or a work budget. `fuzz_display_list` bounds geometry (±10 000 000 mp) and dash counts (≤ 2 000 per path) until then; lift both when fixed. gintrack XARA-T-0022 | Phase 4 follow-up |
+| 12 | Reconcile `wgpu` versions: `vello` 0.10 / `vello_hybrid` 0.2 pin `wgpu` 29, and the workspace is on 30 | R5.1 |
 
 ### Fuzzing, first runs (2026-09-23)
 
