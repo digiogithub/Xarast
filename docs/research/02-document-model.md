@@ -697,6 +697,13 @@ attribute node per registered slot, all of them ahead of the content.
 
 A comment in the code itself (`document.cpp:481`): *"The Attribute optimisation routines will not work if the document does not contain the default attributes."* The defaults are the **base case** of the inheritance algorithm.
 
+Two defaults with visible consequences: the **fill is "no colour"** (a flat fill of
+`COLOUR_NONE`, `fillval.cpp:692-703`), so an unattributed filled path is not filled; and
+the **fill mapping is 2, "repeat"** (`fillval.cpp:7942-7945`), which a graduated fill
+ignores (`01-xar-format.md` §8.3, "How the mapping renders"). The defaults are never read
+from a file: a `.xar`'s `TAG_CURRENTATTRIBUTES` block sets the *current* attributes of
+§4.5, not these.
+
 ### 4.5 Current attributes, groups and application
 
 #### Groups of current attributes
