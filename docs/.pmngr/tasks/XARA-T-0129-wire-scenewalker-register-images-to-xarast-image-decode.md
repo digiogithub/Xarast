@@ -2,12 +2,14 @@
 id: XARA-T-0129
 type: task
 title: Wire SceneWalker::register_images to xarast-image (decode original bytes, register straight RGBA)
-status: todo
+status: done
 parent: XARA-US-0051
 author: mcp
 labels: [phase-10, image, xarast-app]
 created: 2026-09-23T17:06:23Z
-updated: 2026-09-23T17:06:23Z
+updated: 2026-09-23T17:56:31Z
+started: 2026-09-23T17:56:11Z
+closed: 2026-09-23T17:56:31Z
 ---
 
 ## Description

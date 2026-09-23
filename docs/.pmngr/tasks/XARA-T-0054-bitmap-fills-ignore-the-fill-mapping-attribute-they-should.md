@@ -2,13 +2,15 @@
 id: XARA-T-0054
 type: task
 title: Bitmap fills ignore the fill-mapping attribute (they should tile by default)
-status: backlog
+status: done
 priority: low
 parent: XARA-US-0052
 author: mcp
 labels: [app-core, xar-import, bitmap]
 created: 2026-09-23T12:28:41Z
-updated: 2026-09-23T12:32:44Z
+updated: 2026-09-23T17:56:35Z
+started: 2026-09-23T17:56:21Z
+closed: 2026-09-23T17:56:35Z
 ---
 
 ## Description
