@@ -194,11 +194,18 @@ reason the walker *reports*, which is its own test.
 13. **A guide layer may not become the active layer.** The model's own
     repair never elects one, so letting a command do it would produce a
     document the next repair silently undoes.
-14. **`FileKind` is the Phase 6 seam.** `.xar` import is wired;
-    `.xarast` open and every save return `SessionError::Unsupported`
-    with the reason in the message. Writing `.xar` says "a permanent
-    non-goal" and a test asserts that wording, because that is a
-    decision, not a gap.
+14. **`FileKind` is the Phase 6 seam.** `.xar` import and `.xarast` open
+    are wired (`.xarast` since W4, 2026-09-23: `Session::open_bytes` →
+    `xarast_format::open_reader` over the bytes; container and reader
+    diagnostics go into `Session::diagnostics`; a refusal is
+    `SessionError::Xarast`). `Session::open`, argv and File › Open all go
+    through `open_bytes`; the Open dialog lists "Xarast documents
+    (*.xarast)" first. Every save still returns
+    `SessionError::Unsupported` with the reason in the message. The
+    session does not keep the package reader yet: the save path will want
+    `OpenedDocument::package` for `save_opened`'s raw copies. Writing
+    `.xar` says "a permanent non-goal" and a test asserts that wording,
+    because that is a decision, not a gap.
 15. **Session state is flat and public.** `Session`'s fields are `pub`
     because reading them is the whole point; mutation is still funnelled
     through `dispatch`, `undo`, `redo` and `apply`, which are the only

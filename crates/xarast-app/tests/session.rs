@@ -204,6 +204,36 @@ fn intents_report_only_what_they_changed() {
 }
 
 #[test]
+fn a_xarast_package_opens_like_a_xar_file() {
+    // The open path File › Open and the command line share.
+    let doc = Document::new_empty();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    let opts = xarast_format::SaveOptions {
+        write: xarast_format::WriteOptions::deterministic(),
+        ..xarast_format::SaveOptions::default()
+    };
+    xarast_format::save_to(&doc, &mut bytes, &opts).expect("save");
+    let s = Session::open_bytes(
+        DocumentId(7),
+        std::path::Path::new("drawing.XARAST"),
+        &bytes.into_inner(),
+    )
+    .expect("opens");
+    assert_eq!(layers(&s.doc).len(), layers(&doc).len());
+    assert_eq!(
+        xarast_format::svg::normal_form(&s.doc),
+        xarast_format::svg::normal_form(&doc)
+    );
+    let err = Session::open_bytes(
+        DocumentId(8),
+        std::path::Path::new("broken.xarast"),
+        b"not a package",
+    )
+    .expect_err("garbage is refused");
+    assert!(matches!(err, xarast_app::SessionError::Xarast { .. }));
+}
+
+#[test]
 fn saving_fails_honestly_until_phase_six() {
     let mut s = Session::new_empty(DocumentId(1));
     let err = s

@@ -103,7 +103,13 @@ fn baggage_survives_the_preservation_battery() {
     // Delete, which the history retains.
     run(&mut bus, &mut doc, |tx| tx.delete(shape));
 
-    assert_eq!(doc.tree.foreign(path), Some(&baggage("p")));
+    // Moved and recoloured: kept, and marked dirty (§8.5 rule 2). Regrouped,
+    // moved to another layer and deleted: kept as it was (rules 1 and 4).
+    let dirty = ForeignBaggage {
+        marks: ForeignMarks::DIRTY,
+        ..baggage("p")
+    };
+    assert_eq!(doc.tree.foreign(path), Some(&dirty));
     assert_eq!(doc.tree.foreign(shape), Some(&baggage("s")));
     doc.validate().assert_clean();
     let end = doc.canonical_digest();
@@ -209,6 +215,67 @@ fn the_builder_attaches_baggage() {
     let with: Vec<NodeId> = doc.tree.foreign_iter().map(|(n, _)| n).collect();
     assert_eq!(with.len(), 1);
     assert_eq!(doc.tree.foreign(with[0]), Some(&baggage("built")));
+}
+
+#[test]
+fn edits_mark_the_baggage_they_may_invalidate() {
+    // F4.7, `research/06 §8.5`: an orthogonal edit (move, recolour) marks
+    // dirty; editing an ink node's geometry marks stale; an edit elsewhere
+    // marks nothing. Undo takes the marks back with the edit.
+    let f = fixture();
+    let mut doc = f.doc;
+    let mut bus = CommandBus::new();
+    run(&mut bus, &mut doc, |tx| {
+        tx.set_foreign(f.path, Some(baggage("p")))?;
+        tx.set_foreign(f.shape_a, Some(baggage("a")))?;
+        tx.set_foreign(f.shape_b, Some(baggage("b")))
+    });
+    let marks = |doc: &crate::Document, n: NodeId| doc.tree.foreign(n).map(|b| b.marks);
+
+    // Recolouring the group through its attribute: both shapes, not the path.
+    run(&mut bus, &mut doc, |tx| {
+        tx.set_attr(f.group_fill, black_fill())
+    });
+    assert_eq!(marks(&doc, f.shape_a), Some(ForeignMarks::DIRTY));
+    assert_eq!(marks(&doc, f.shape_b), Some(ForeignMarks::DIRTY));
+    assert_eq!(marks(&doc, f.path), Some(ForeignMarks::empty()));
+    bus.history_mut().undo(&mut doc).unwrap();
+    assert_eq!(marks(&doc, f.shape_a), Some(ForeignMarks::empty()));
+
+    // Editing the path's geometry: stale.
+    run(&mut bus, &mut doc, |tx| {
+        let k = tx.doc().tree.kind(f.path).cloned().unwrap();
+        tx.set_kind(f.path, k)
+    });
+    assert_eq!(marks(&doc, f.path), Some(ForeignMarks::STALE));
+    // Moving the group: dirty on what it holds, the stale path untouched.
+    run(&mut bus, &mut doc, |tx| {
+        tx.transform(f.group, Matrix::translate(Vector::raw(10, 10)))
+    });
+    assert_eq!(marks(&doc, f.shape_b), Some(ForeignMarks::DIRTY));
+    assert_eq!(marks(&doc, f.path), Some(ForeignMarks::STALE));
+}
+
+#[test]
+fn the_builder_restores_tags_and_flags() {
+    use crate::tree::{NodeFlags, Tag};
+    let mut b = crate::builder::skeleton(crate::BuildLimits::default()).unwrap();
+    let a = b.node(NodeKind::Group(Box::default())).unwrap();
+    let c = b.node(NodeKind::Group(Box::default())).unwrap();
+    // Claiming a tag another node holds moves that node to a fresh one.
+    let held = b.document().tree.get(c.node_id()).unwrap().tag;
+    assert!(b.tag(a, held));
+    assert!(!b.tag(a, Tag(0)), "the root's tag is not claimable");
+    b.flags(a, NodeFlags::LOCKED | NodeFlags::MARKED);
+    let (doc, _) = b.finish().unwrap();
+    assert_eq!(doc.tree.get(a.node_id()).unwrap().tag, held);
+    let other = doc.tree.get(c.node_id()).unwrap().tag;
+    assert_ne!(other, held);
+    assert_eq!(doc.tree.by_tag(other), Some(c.node_id()));
+    let flags = doc.tree.get(a.node_id()).unwrap().flags;
+    assert!(flags.contains(NodeFlags::LOCKED));
+    assert!(!flags.contains(NodeFlags::MARKED), "only persistent flags");
+    doc.validate().assert_clean();
 }
 
 #[test]

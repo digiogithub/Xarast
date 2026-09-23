@@ -362,6 +362,67 @@ impl DocumentBuilder {
             .set_foreign(id.0, Some(std::sync::Arc::new(baggage)));
     }
 
+    /// Replaces the root's own properties.
+    pub fn root(&mut self, node: crate::structure::DocumentNode) {
+        let root = self.doc.tree.root();
+        if let Some(d) = self.doc.tree.get_mut(root) {
+            d.kind = NodeKind::Document(Box::new(node));
+        }
+    }
+
+    /// The node new nodes are currently appended under.
+    #[must_use]
+    pub fn current_scope(&self) -> Option<BuildId> {
+        self.scopes.last().copied().map(BuildId)
+    }
+
+    /// Gives a node the persistent tag a reader found in the file
+    /// (`research/06 §5.7`: ids survive a save and a reload).
+    ///
+    /// If another node already holds the tag, that node is given a fresh
+    /// one: the caller is expected to claim each tag once (a reader that
+    /// finds a duplicate id in a file reassigns it, F4.9), so the holder is
+    /// a node the builder numbered itself — an attribute, a character —
+    /// whose tag nobody has written down. The root's tag 0 cannot be
+    /// claimed. Returns whether the tag was applied.
+    pub fn tag(&mut self, id: BuildId, tag: crate::tree::Tag) -> bool {
+        if tag.0 == 0 || !self.doc.tree.contains(id.0) || id.0 == self.doc.tree.root() {
+            return false;
+        }
+        if let Some(holder) = self.doc.tree.by_tag(tag) {
+            if holder == id.0 {
+                return true;
+            }
+            self.doc.tree.retag_fresh(holder);
+        }
+        self.doc.tree.set_tag(id.0, tag);
+        true
+    }
+
+    /// Sets the persistent flags of a node: [`NodeFlags::LOCKED`] and
+    /// [`NodeFlags::MAGNETIC`]. The transient and structural bits are the
+    /// tree's own and are left alone.
+    ///
+    /// [`NodeFlags::LOCKED`]: crate::NodeFlags::LOCKED
+    /// [`NodeFlags::MAGNETIC`]: crate::NodeFlags::MAGNETIC
+    pub fn flags(&mut self, id: BuildId, flags: crate::tree::NodeFlags) {
+        use crate::tree::NodeFlags as F;
+        let keep = F::LOCKED | F::MAGNETIC;
+        if let Some(d) = self.doc.tree.get_mut(id.0) {
+            d.flags = (d.flags - keep) | (flags & keep);
+        }
+    }
+
+    /// Points a colour at its parent, for tints, shades and links whose
+    /// parent is defined after them.
+    pub fn colour_parent(
+        &mut self,
+        id: xarast_color::ColourId,
+        parent: Option<xarast_color::ColourId>,
+    ) -> bool {
+        self.doc.resources.colours.set_parent(id, parent)
+    }
+
     /// Appends an attribute node at the current level.
     ///
     /// # Errors

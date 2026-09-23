@@ -723,6 +723,7 @@ fn open_request(parent: Option<String>) -> OpenFileRequest {
     OpenFileRequest {
         title: "Open".to_owned(),
         filters: vec![
+            FileFilter::new("Xarast documents (*.xarast)", &["xarast"]),
             FileFilter::new("Xara documents (*.xar)", &["xar"]),
             FileFilter::new("All files", &["*"]),
         ],

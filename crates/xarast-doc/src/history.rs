@@ -473,6 +473,12 @@ impl<'d> Tx<'d> {
     pub fn attach(&mut self, node: NodeId, anchor: NodeId, how: Attach) -> Result<(), EditError> {
         self.check_permitted(anchor)?;
         self.act(Action::Attach { node, anchor, how })?;
+        // A new attribute recolours what it applies to (§8.5 rule 2).
+        if matches!(self.doc.tree.kind(node), Some(NodeKind::Attr(_)))
+            && let Some(owner) = self.doc.tree.links(node).parent
+        {
+            self.mark_edited(owner, ForeignMarks::DIRTY)?;
+        }
         Ok(())
     }
 
@@ -518,11 +524,18 @@ impl<'d> Tx<'d> {
     /// Replaces a node's payload.
     pub fn set_kind(&mut self, node: NodeId, kind: NodeKind) -> Result<(), EditError> {
         self.check_permitted(node)?;
+        // Replacing an ink node's payload edits its geometry, which unknown
+        // data may depend on (§8.5 rule 3); anything else is orthogonal.
+        let marks = if kind.is_ink() {
+            ForeignMarks::STALE
+        } else {
+            ForeignMarks::DIRTY
+        };
         self.act(Action::SetKind {
             node,
             new: Box::new(kind),
         })?;
-        Ok(())
+        self.mark_foreign(node, marks)
     }
 
     /// Replaces a node's flags.
@@ -536,7 +549,11 @@ impl<'d> Tx<'d> {
         self.act(Action::SetAttr {
             node,
             new: Arc::new(value),
-        })
+        })?;
+        match self.doc.tree.links(node).parent {
+            Some(owner) => self.mark_edited(owner, ForeignMarks::DIRTY),
+            None => Ok(()),
+        }
     }
 
     /// Transforms a node and everything under it.
@@ -547,7 +564,29 @@ impl<'d> Tx<'d> {
             .into_iter()
             .map(|n| Action::Transform { node: n, matrix: m })
             .collect();
-        self.act(Action::Batch(batch))
+        self.act(Action::Batch(batch))?;
+        // Moving an object is an orthogonal edit (§8.5 rule 2).
+        self.mark_edited(node, ForeignMarks::DIRTY)
+    }
+
+    /// Marks every node of the subtree at `root` that carries foreign
+    /// baggage (`research/06 §8.5`, F4.7): the policy lives in the commands
+    /// that edit, never in the arena. A subtree with no baggage costs one
+    /// lookup per node and records nothing.
+    fn mark_edited(&mut self, root: NodeId, marks: ForeignMarks) -> Result<(), EditError> {
+        if self.doc.tree.foreign_len() == 0 {
+            return Ok(());
+        }
+        let carrying: Vec<NodeId> = self
+            .doc
+            .tree
+            .preorder(root)
+            .filter(|n| self.doc.tree.foreign(*n).is_some())
+            .collect();
+        for n in carrying {
+            self.mark_foreign(n, marks)?;
+        }
+        Ok(())
     }
 
     /// Replaces a bitmap resource's pixels.

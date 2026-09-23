@@ -22,6 +22,7 @@ cover the native `.xarast` container (Phase 6).
 | `fuzz_doc_builder` | `xarast-doc` | arbitrary build scripts: "valid or nothing" |
 | `fuzz_xarast_open` | `xarast-format` | `XarastReader::open`, every read path, and a re-save of whatever opens |
 | `fuzz_xarast_manifest` | `xarast-format` | the manifest parser and its write–parse fixed point |
+| `fuzz_xarast_svg_read` | `xarast-format` | the SVG profile reader on arbitrary text, and the read–save–read fixed point of what it accepts |
 
 The five structured targets take their input through `arbitrary`; the
 helpers they share are in `fuzz_targets/common.rs`.
