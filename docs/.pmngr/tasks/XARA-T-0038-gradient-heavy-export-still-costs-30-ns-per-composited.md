@@ -4,11 +4,11 @@ type: task
 title: Gradient-heavy export still costs ~30 ns per composited pixel over only three bands
 status: backlog
 priority: low
-parent: XARA-US-0081
+parent: XARA-US-0057
 author: mcp
 labels: [render, perf]
 created: 2026-09-23T11:55:47Z
-updated: 2026-09-23T12:01:26Z
+updated: 2026-09-23T12:32:44Z
 ---
 
 ## Description

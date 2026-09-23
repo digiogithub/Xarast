@@ -4,11 +4,11 @@ type: task
 title: "Bounds cache: an attribute edit leaves its siblings' cached boxes stale"
 status: backlog
 priority: low
-parent: XARA-US-0081
+parent: XARA-US-0029
 author: mcp
 labels: [document-model]
 created: 2026-09-23T12:28:41Z
-updated: 2026-09-23T12:28:41Z
+updated: 2026-09-23T12:32:44Z
 ---
 
 ## Description
