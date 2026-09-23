@@ -129,6 +129,8 @@ pub struct Viewer {
     empty_frames: u32,
     /// The keys of the command table.
     shortcuts: ShortcutMap<AppCommand>,
+    /// The momentary tool switch held down, if any (Space, Alt+S/Z/X).
+    momentary: crate::input::momentary::MomentarySwitch,
     /// What the core asked the platform to do, not yet done.
     requests: Vec<PlatformRequest>,
     /// The file chooser on screen, if one is.
@@ -192,6 +194,7 @@ impl Viewer {
             view_shown: false,
             empty_frames: 0,
             shortcuts: command_shortcuts(),
+            momentary: crate::input::momentary::MomentarySwitch::new(),
             requests: Vec::new(),
             open_dialog: None,
             title_stale: false,
@@ -848,13 +851,35 @@ impl Viewer {
             }
             // A text field has the keyboard: typing "1" into a layer name
             // must not zoom to 100 %.
+            // The release of a momentary switch's key restores the tool
+            // even while a text field has the keyboard.
+            ShellEvent::Key(k) if k.state == KeyState::Released => {
+                if let (Some(intent), _) = self.momentary.key(k) {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+            }
+            ShellEvent::Focused(false) => {
+                if let Some(intent) = self.momentary.release() {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+            }
             ShellEvent::Key(k) if k.state == KeyState::Pressed && !self.text_input => {
                 if !k.modifiers.constrain()
                     && let Some(pan) = self.arrow_pan(&k.key)
                 {
                     redraw |= self.apply(vec![pan]).needs_redraw();
                 }
-                if let Some(command) = self.shortcut(k) {
+                let (momentary, consumed) = if self.app.active().is_some() {
+                    self.momentary.key(k)
+                } else {
+                    (None, false)
+                };
+                if let Some(intent) = momentary {
+                    redraw |= self.apply(vec![intent]).needs_redraw();
+                }
+                if consumed {
+                    // A momentary switch, not a shortcut.
+                } else if let Some(command) = self.shortcut(k) {
                     let changed = self.run_command(command);
                     redraw |= changed.needs_redraw()
                         || changed.contains(Changed::ACTIVE)
@@ -1825,6 +1850,58 @@ mod tests {
                 })],
             );
         }
+    }
+
+    fn key_state(
+        v: &mut Viewer,
+        key: Key,
+        modifiers: crate::input::keyboard::Modifiers,
+        state: KeyState,
+    ) {
+        use crate::input::keyboard::{KeyEvent, KeyLocation};
+        send(
+            v,
+            &[ShellEvent::Key(KeyEvent {
+                key,
+                location: KeyLocation::Standard,
+                state,
+                repeat: false,
+                text: None,
+                modifiers,
+            })],
+        );
+    }
+
+    #[test]
+    fn held_switch_keys_change_the_tool_until_released() {
+        let (mut v, _) = viewer_with_square();
+        press(
+            &mut v,
+            Key::Named(NamedKey::Function(3)),
+            Modifiers::NONE.with_shift(),
+        );
+        assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+        let alt = Modifiers::NONE.with_alt();
+        for (key, mods, want) in [
+            (
+                Key::Named(NamedKey::Space),
+                Modifiers::NONE,
+                xarast_app::ToolId::Selector,
+            ),
+            (Key::char('s'), alt, xarast_app::ToolId::Selector),
+            (Key::char('z'), alt, xarast_app::ToolId::Zoom),
+            (Key::char('x'), alt, xarast_app::ToolId::Pan),
+        ] {
+            key_state(&mut v, key.clone(), mods, KeyState::Pressed);
+            assert_eq!(tool(&v), want, "{key:?} held");
+            // Alt let go before the letter: the switch still ends.
+            key_state(&mut v, key.clone(), Modifiers::NONE, KeyState::Released);
+            assert_eq!(tool(&v), xarast_app::ToolId::Rectangle, "{key:?} released");
+        }
+        // Focus loss while held restores too.
+        key_state(&mut v, Key::char('z'), alt, KeyState::Pressed);
+        send(&mut v, &[ShellEvent::Focused(false)]);
+        assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
     }
 
     /// Clicks the first accessible node with this label, as a screen
