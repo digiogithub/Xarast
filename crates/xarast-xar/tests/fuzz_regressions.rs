@@ -25,11 +25,11 @@ fn opts() -> ImportOptions {
 }
 
 /// Imports and asserts the two whole-file properties `fuzz_xar_import`
-/// checks: "valid or nothing", and the record accounting balances.
+/// checks: "valid or nothing", and the record accounting balances. Every
+/// input below is built so that the import succeeds, so that the
+/// accounting is actually checked; an `Err` fails the test.
 fn assert_import_invariants(bytes: &[u8]) {
-    let Ok((doc, report)) = import(bytes, &opts()) else {
-        return;
-    };
+    let (doc, report) = import(bytes, &opts()).expect("the import succeeds");
     let check = doc.validate();
     assert!(check.errors.is_empty(), "{:?}", check.errors.first());
     assert_eq!(
@@ -45,7 +45,41 @@ fn assert_import_invariants(bytes: &[u8]) {
 #[test]
 fn an_unresolved_node_bitmap_is_counted_once() {
     let bytes = XarBuilder::new()
+        .record(104, &[])
         .record(198, &[0u8; 36])
+        .end_of_file()
+        .finish();
+    assert_import_invariants(&bytes);
+}
+
+/// `fuzz_xar_import`, minimised: `GROUP { GRIDRULERORIGIN { GROUP } }`. The
+/// grid record is consumed by its sibling scan and its children were never
+/// visited, so they were counted nowhere.
+#[test]
+fn a_subtree_under_a_grid_record_is_accounted_for() {
+    let bytes = XarBuilder::new()
+        .record(104, &[])
+        .down()
+        .record(47, &[])
+        .down()
+        .record(104, &[])
+        .finish();
+    assert_import_invariants(&bytes);
+}
+
+/// The same shape one level down in `TAG_CURRENTATTRIBUTES`: its children
+/// are single-record defaults, and a subtree under one was never visited.
+#[test]
+fn a_subtree_under_a_default_attribute_is_accounted_for() {
+    let bytes = XarBuilder::new()
+        .record(104, &[])
+        .record(4119, &[0])
+        .down()
+        .record(104, &[])
+        .down()
+        .record(104, &[])
+        .up()
+        .up()
         .end_of_file()
         .finish();
     assert_import_invariants(&bytes);

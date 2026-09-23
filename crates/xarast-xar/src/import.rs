@@ -444,6 +444,10 @@ impl<'o> Mapper<'o> {
                     self.emit_grid(children)?;
                 }
                 self.mapped = self.mapped.saturating_add(1);
+                // A grid record has no children in any real file; anything
+                // a corrupt one nests under it is not visited, so it is
+                // accounted for here as skipped.
+                self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
                 continue;
             }
             self.visit(child)?;
@@ -493,6 +497,9 @@ impl<'o> Mapper<'o> {
     /// block rather than becoming attribute nodes.
     fn visit_defaults(&mut self, children: &[RecordNode]) {
         for child in children {
+            // A default is a single record; a subtree under one is never
+            // visited, so it is accounted for as skipped.
+            self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
             let rec = &child.record;
             let at = (rec.number, rec.tag);
             let Ok(d) = decode(rec.tag, &rec.data, self.origin, &mut self.diags, at) else {
