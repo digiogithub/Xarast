@@ -222,6 +222,8 @@ pub struct Session {
     picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
     last_edit: Option<EditCommand>,
+    /// The colour editor's target, model and live drag (phase 8, W8.6).
+    pub(crate) colour_editor: crate::colour_editor::ColourEditorModel,
     /// Where the drag in flight last snapped, for the feedback marker.
     last_snap: Option<crate::snap::SnapHit>,
     /// The document changed since the viewport's scroll bounds were
@@ -285,6 +287,7 @@ impl Session {
             preview: Preview::default(),
             picker: crate::tool::Picker::new(),
             last_edit: None,
+            colour_editor: crate::colour_editor::ColourEditorModel::default(),
             last_snap: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
@@ -772,6 +775,18 @@ impl Session {
         &self.picker
     }
 
+    /// The colour editor's state (phase 8, W8.6), read-only.
+    #[must_use]
+    pub const fn colour_editor(&self) -> &crate::colour_editor::ColourEditorModel {
+        &self.colour_editor
+    }
+
+    /// What the colour editor shows this frame.
+    #[must_use]
+    pub fn colour_editor_view(&self) -> Option<crate::colour_editor::ColourEditorView> {
+        crate::colour_editor::view(self)
+    }
+
     /// The tools and the interaction machine, read-only.
     #[must_use]
     pub const fn tools(&self) -> &ToolMachine {
@@ -1238,12 +1253,14 @@ impl Session {
                 changed |= Changed::UI;
             }
             Intent::Undo => {
+                changed |= crate::colour_editor::settle(self);
                 changed |= self.cancel_gesture();
                 if self.undo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
                 }
             }
             Intent::Redo => {
+                changed |= crate::colour_editor::settle(self);
                 changed |= self.cancel_gesture();
                 if self.redo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
@@ -1254,6 +1271,9 @@ impl Session {
                 if self.edit.current.set(value) {
                     changed |= Changed::UI;
                 }
+            }
+            Intent::ColourEditor(op) => {
+                changed |= crate::colour_editor::run(self, op)?;
             }
             Intent::MomentaryTool(tool) => {
                 if self.edit.tool.momentary != tool && tool.is_none_or(ToolId::is_available) {
