@@ -151,12 +151,6 @@ impl SaveJob {
     fn write(&self, started: Instant) -> Result<SaveSummary, String> {
         let mut doc = Document::new_empty();
         doc.restore(&self.snapshot);
-        let thumbnail = if self.thumbnail {
-            crate::thumbnail::thumbnail_png(&doc).map(Arc::from)
-        } else {
-            None
-        };
-        let has_thumbnail = thumbnail.is_some();
         let mut write = if self.deterministic {
             WriteOptions::deterministic()
         } else {
@@ -168,7 +162,6 @@ impl SaveJob {
         }
         let opts = SaveOptions {
             write,
-            thumbnail,
             ..SaveOptions::default()
         };
         if let Some(dir) = self.path.parent()
@@ -177,17 +170,42 @@ impl SaveJob {
         {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let report = match &self.source {
-            Some(bytes) => {
-                let mut source = xarast_format::XarastReader::open(Cursor::new(Arc::clone(bytes)))
-                    .map_err(|e| format!("the package it was opened from: {e}"))?;
-                xarast_format::save_opened(&doc, &mut source, &self.path, &opts)
-            }
-            None => xarast_format::save(&doc, &self.path, &opts),
-        }
-        .map_err(|e| e.to_string())?;
+        let mut source = match &self.source {
+            Some(bytes) => Some(
+                xarast_format::XarastReader::open(Cursor::new(Arc::clone(bytes)))
+                    .map_err(|e| format!("the package it was opened from: {e}"))?,
+            ),
+            None => None,
+        };
+        // The thumbnail renders while the SVG is serialised: on ProbeX16
+        // (518 000 nodes) that is ~0.4 s off a ~1 s save.
+        let (prepared, thumbnail) = std::thread::scope(|scope| {
+            let doc = &doc;
+            let render = self
+                .thumbnail
+                .then(|| scope.spawn(move || crate::thumbnail::thumbnail_png(doc)));
+            let prepared = match &source {
+                Some(src) => xarast_format::prepare_resave(doc, src, &opts),
+                None => xarast_format::prepare_save(doc, &opts),
+            };
+            let thumbnail = render.and_then(|h| h.join().ok().flatten());
+            (prepared, thumbnail)
+        });
+        let (mut writer, _) = prepared.map_err(|e| e.to_string())?;
+        let has_thumbnail = match thumbnail {
+            Some(png) => writer.set_thumbnail(png).is_ok(),
+            None => false,
+        };
+        let package =
+            xarast_format::durability::write_atomic_with(&self.path, opts.atomic, |f| match source
+                .as_mut()
+            {
+                Some(src) => writer.finish_with_source(f, Some(src)),
+                None => writer.finish(f),
+            })
+            .map_err(|e| e.to_string())?;
         Ok(SaveSummary {
-            bytes: report.package.bytes_written,
+            bytes: package.bytes_written,
             elapsed: started.elapsed(),
             thumbnail: has_thumbnail,
         })

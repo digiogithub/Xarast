@@ -5,8 +5,8 @@
 //! renders; this is the implementation every save hands it. It frames the
 //! active spread's first page exactly — no fit margin, the page edge is the
 //! image edge — fills it with the page colour and draws the document over
-//! it with the deterministic CPU configuration, so the same document always
-//! gives the same bytes.
+//! it with the CPU backend (the parallel configuration by default; the
+//! single-threaded reference one on request).
 
 use xarast_doc::Document;
 use xarast_format::ThumbnailProvider;
@@ -25,12 +25,16 @@ pub struct CpuThumbnails {
     /// The colour under the page, straight RGBA. The page is opaque white
     /// unless a document says otherwise.
     pub page: [u8; 4],
+    /// Render with the single-threaded reference configuration rather than
+    /// the parallel one (2.7× slower on ProbeX16: 456 against 167 ms).
+    pub deterministic: bool,
 }
 
 impl Default for CpuThumbnails {
     fn default() -> CpuThumbnails {
         CpuThumbnails {
             page: [0xff, 0xff, 0xff, 0xff],
+            deterministic: false,
         }
     }
 }
@@ -79,7 +83,12 @@ impl CpuThumbnails {
         };
         let dl = DisplayList::build(&scene, &params, &DirtyRect::of(size.to_rect()));
         let mut surface = Surface::filled(size.width, size.height, self.page);
-        CpuBackend::new(CpuConfig::deterministic())
+        let config = if self.deterministic {
+            CpuConfig::deterministic()
+        } else {
+            CpuConfig::interactive()
+        };
+        CpuBackend::new(config)
             .render(&dl, walker.resolver(), &mut surface)
             .map_err(|e| ThumbnailError(e.to_string()))?;
         Ok(surface)
