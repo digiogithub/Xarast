@@ -11,7 +11,7 @@ use xarast_color::{
 use xarast_doc::fill_edit::fill_in_force;
 use xarast_doc::{
     AttrSlot, AttrValue, BuildLimits, ColourUses, Command, CommandBus, CreateColour, DeleteColour,
-    Document, EditError, FillChannel, FillGeometry, FillHandle, FillValue, InsertStop,
+    Document, EditError, FillChannel, FillGeometry, FillHandle, FillValue, InsertStop, MoveColour,
     MoveFillControl, MoveStop, NodeFlags, NodeId, NodeKind, PaintSlot, PaletteResolver, PathNode,
     Perspective, RampMapping, RampStop, RedefineColour, RemoveStop, RenameColour, ReparentColour,
     SetFillEffect, SetFillGeometry, SetFillProfile, SetRampMapping, SetStopValue, SetTiling,
@@ -898,6 +898,42 @@ fn palette_commands_are_exactly_undoable() {
     let e = fx.doc.palette_epoch();
     bus.undo(&mut fx.doc).unwrap();
     assert!(fx.doc.palette_epoch() > e);
+}
+
+/// The colour line's order is the entries' `entry_index`: a new colour
+/// joins the end, a move renumbers, and both undo exactly.
+#[test]
+fn colours_join_the_end_of_the_line_and_move_along_it() {
+    let mut fx = fixture(1);
+    let mut bus = CommandBus::new();
+    let create =
+        CreateColour::new(ColourDef::normal(ColourValue::rgb(0.1, 0.9, 0.1)).named("Leaf"));
+    round_trip(&mut fx.doc, &mut bus, &create);
+    let leaf = create.created.get().unwrap();
+    let listed = |doc: &Document| doc.resources.colours.listed();
+    assert_eq!(listed(&fx.doc), vec![fx.base, fx.tint, leaf]);
+
+    let label = round_trip(&mut fx.doc, &mut bus, &MoveColour { id: leaf, to: 0 });
+    assert_eq!(label, "Move Colour");
+    assert_eq!(listed(&fx.doc), vec![leaf, fx.base, fx.tint]);
+    let indices: Vec<u32> = listed(&fx.doc)
+        .iter()
+        .map(|id| fx.doc.resources.colours.get(*id).unwrap().entry_index)
+        .collect();
+    assert_eq!(indices, vec![1, 2, 3]);
+    // Past the end clamps; an unnamed colour is not on the line.
+    round_trip(&mut fx.doc, &mut bus, &MoveColour { id: leaf, to: 99 });
+    assert_eq!(listed(&fx.doc), vec![fx.base, fx.tint, leaf]);
+    let local = CreateColour::new(ColourDef::normal(ColourValue::BLACK));
+    round_trip(&mut fx.doc, &mut bus, &local);
+    let local = local.created.get().unwrap();
+    assert!(!listed(&fx.doc).contains(&local));
+    let before = fx.doc.canonical_digest();
+    assert_eq!(
+        bus.dispatch(&mut fx.doc, &MoveColour { id: local, to: 0 }),
+        Err(EditError::Palette(ColourEditError::NotFound))
+    );
+    assert_eq!(fx.doc.canonical_digest(), before);
 }
 
 /// Acceptance criterion 12: deleting a used entry with `Detach` leaves

@@ -246,6 +246,65 @@ impl ColourTable {
         Ok(self.refresh_from(id))
     }
 
+    /// The named entries in colour-line order: by
+    /// [`ColourDef::entry_index`], then by slot for equal indices (a file
+    /// that wrote none, or colours created before an order was ever set).
+    /// Unnamed entries are the document's local colours and are not listed.
+    #[must_use]
+    pub fn listed(&self) -> Vec<ColourId> {
+        let mut v: Vec<(u32, usize, ColourId)> = self
+            .defs
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, d))| d.name.is_some())
+            .map(|(slot, (id, d))| (d.entry_index, slot, id))
+            .collect();
+        v.sort_unstable_by_key(|e| (e.0, e.1));
+        v.into_iter().map(|e| e.2).collect()
+    }
+
+    /// The `entry_index` a colour added now takes so that it lists last.
+    #[must_use]
+    pub fn next_entry_index(&self) -> u32 {
+        self.defs
+            .values()
+            .filter(|d| d.name.is_some())
+            .map(|d| d.entry_index)
+            .max()
+            .map_or(1, |m| m.saturating_add(1))
+    }
+
+    /// Moves a named entry to position `to` of [`ColourTable::listed`]
+    /// (clamped to the end), renumbering every listed entry's
+    /// `entry_index` as `1..=n` in the new order. Returns whether the order
+    /// changed; an unchanged order leaves the table, epoch included, as it
+    /// was.
+    ///
+    /// # Errors
+    ///
+    /// [`ColourEditError::NotFound`] when `id` is not a listed (named)
+    /// entry.
+    pub fn move_listed(&mut self, id: ColourId, to: usize) -> Result<bool, ColourEditError> {
+        let mut order = self.listed();
+        let from = order
+            .iter()
+            .position(|x| *x == id)
+            .ok_or(ColourEditError::NotFound)?;
+        order.remove(from);
+        let to = to.min(order.len());
+        order.insert(to, id);
+        if from == to {
+            return Ok(false);
+        }
+        for (i, x) in order.iter().enumerate() {
+            if let Some(d) = self.defs.get_mut(*x) {
+                d.entry_index = u32::try_from(i + 1).unwrap_or(u32::MAX);
+            }
+        }
+        self.epoch = self.epoch.next();
+        Ok(true)
+    }
+
     /// Renames an entry.
     ///
     /// # Errors

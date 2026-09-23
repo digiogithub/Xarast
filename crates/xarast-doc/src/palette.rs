@@ -384,6 +384,10 @@ impl Command for CreateColour {
             return Err(xarast_color::ColourEditError::NameInUse.into());
         }
         let mut def = self.def.clone();
+        // A new named colour joins the end of the colour line.
+        if def.name.is_some() && def.entry_index == 0 {
+            def.entry_index = t.next_entry_index();
+        }
         let (kind, parent) = (def.kind.clone(), def.parent);
         def.kind = ColourKind::Normal;
         def.parent = None;
@@ -396,6 +400,34 @@ impl Command for CreateColour {
         commit_table(tx, t)?;
         self.created.set(Some(id));
         Ok(())
+    }
+}
+
+/// Moves a named colour along the colour line, to position `to` of
+/// [`ColourTable::listed`]. The order is the entries' `entry_index`, which
+/// both file formats keep. Moving an entry to where it already is leaves
+/// the palette untouched (a caller that wants no empty undo step checks
+/// [`ColourTable::listed`] first).
+#[derive(Clone, Debug)]
+pub struct MoveColour {
+    /// The entry; it must be named.
+    pub id: ColourId,
+    /// Its new position in the listed order.
+    pub to: usize,
+}
+
+impl Command for MoveColour {
+    fn label(&self) -> &'static str {
+        "Move Colour"
+    }
+
+    fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+        let mut t = tx.doc().resources.colours.clone();
+        if t.move_listed(self.id, self.to)? {
+            commit_table(tx, t)
+        } else {
+            Ok(())
+        }
     }
 }
 
