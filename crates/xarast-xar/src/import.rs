@@ -616,9 +616,9 @@ impl<'o> Mapper<'o> {
                 After::Child
             }
             Decoded::NodeBitmap { corners, bitmap } => {
-                self.mapped = self.mapped.saturating_add(1);
                 match self.bitmap(*bitmap, at) {
                     Some(image) => {
+                        self.mapped = self.mapped.saturating_add(1);
                         let origin = corners.first().copied().unwrap_or(Point::ORIGIN);
                         let p1 = corners.get(1).copied().unwrap_or(origin);
                         let p2 = corners.get(2).copied().unwrap_or(origin);
@@ -639,6 +639,8 @@ impl<'o> Mapper<'o> {
                                 minor,
                             })))?;
                     }
+                    // `opaque_node` counts the record itself; counting it
+                    // here too would map it twice.
                     None => {
                         self.opaque_node(rec)?;
                     }
