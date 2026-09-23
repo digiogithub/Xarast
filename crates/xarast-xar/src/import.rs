@@ -41,10 +41,11 @@ use std::time::{Duration, Instant};
 
 use xarast_color::{Colour, ColourValue, Transparency};
 use xarast_doc::{
-    ArrowSpec, AttrValue, BitmapData, BitmapId, BitmapInfo, BitmapResource, BuildLimits,
-    DocumentBuilder, DocumentMeta, GridKind, GridNode, ImageFormat, LayerNode, NodeKind,
-    OpaqueNode, OriginalEncoded, PageNode, Paint, PathNode, ProceduralParams, QuickShape, Ramp,
-    RampStop, SpreadNode, TextItem, TextLayout, TextStoryNode, Tiling, TranspPaint, TypefaceRef,
+    ArrowSpec, AttrSlot, AttrStack, AttrValue, BitmapData, BitmapId, BitmapInfo, BitmapResource,
+    BuildLimits, DocumentBuilder, DocumentMeta, GridKind, GridNode, ImageFormat, LayerNode,
+    NodeKind, OpaqueNode, OriginalEncoded, PageNode, Paint, PathNode, ProceduralParams, QuickShape,
+    Ramp, RampStop, SpreadNode, TextItem, TextLayout, TextStoryNode, Tiling, TranspPaint,
+    TypefaceRef,
 };
 use xarast_geom::{BiasGain, Cap, DashPattern, FillRule, Join, Matrix, Mp, Point, Rect, Vector};
 
@@ -427,6 +428,16 @@ struct Mapper<'o> {
     opaque: u32,
     current_attributes: u32,
     current_differing: u32,
+    /// The attribute state the emitted document puts in force at the
+    /// builder's insertion point, mirrored as nodes are emitted. Text
+    /// records need it to scope a string's attributes to that string.
+    attrs: AttrStack,
+    /// Values to restore before the next text record at a given scope
+    /// depth: what a string's own attributes overrode (see
+    /// [`Mapper::text_items`]).
+    text_restore: Vec<(usize, AttrValue)>,
+    /// A `TAG_TEXT_CHAR` high surrogate waiting for its low half.
+    pending_high: Option<u16>,
 }
 
 impl<'o> Mapper<'o> {
@@ -444,7 +455,150 @@ impl<'o> Mapper<'o> {
             opaque: 0,
             current_attributes: 0,
             current_differing: 0,
+            attrs: AttrStack::with_defaults(&xarast_doc::DefaultAttrs::default()),
+            text_restore: Vec::new(),
+            pending_high: None,
         }
+    }
+
+    // ── Scopes and attributes, mirrored ─────────────────────────────────────
+
+    fn push_scope(&mut self) -> Result<(), XarError> {
+        self.builder.push_scope()?;
+        self.attrs.push_scope();
+        Ok(())
+    }
+
+    fn pop_scope(&mut self) {
+        let depth = self.attrs.depth();
+        self.text_restore.retain(|(d, _)| *d < depth);
+        if self.pending_high.take().is_some() {
+            // A lone high surrogate ends the line: keep its place. The
+            // error is only in the tree the builder refuses.
+            let _ = self
+                .builder
+                .node(NodeKind::TextItem(TextItem::Char('\u{fffd}')));
+        }
+        self.builder.pop_scope();
+        self.attrs.pop_scope();
+    }
+
+    fn apply_attribute(&mut self, v: AttrValue) -> Result<(), XarError> {
+        self.attrs.push(Arc::new(v.clone()));
+        self.builder.attribute(v)?;
+        Ok(())
+    }
+
+    // ── Text items ──────────────────────────────────────────────────────────
+
+    /// Emits the items one text record stands for, with the attributes the
+    /// record carries as children scoped to **those items only**.
+    ///
+    /// In the format a string's or character's attributes are its children
+    /// and apply to it alone; a string is a run of characters that carried
+    /// identical attribute children (`Kernel/cxftext.cpp:1260-1300`, and
+    /// `Kernel/impstr.cpp`, which copies the string's attributes onto every
+    /// character on import). The model's attribute scope is "the following
+    /// siblings", so the attributes go *before* the items, and whatever
+    /// they overrode is restored before the next text record that does not
+    /// set the same slot. Emitting them after the items, as the structural
+    /// import did, handed every string's style to the string after it.
+    ///
+    /// Definitions among the children (a font, a colour) are registered;
+    /// any other child is visited after the items, at the same level.
+    fn text_items(&mut self, items: &[TextItem], node: &RecordNode) -> Result<(), XarError> {
+        let depth = self.attrs.depth();
+        let mut own: Vec<AttrValue> = Vec::new();
+        let mut rest: Vec<&RecordNode> = Vec::new();
+        for child in &node.children {
+            let rec = &child.record;
+            let at = (rec.number, rec.tag);
+            let Ok(d) = decode(rec.tag, &rec.data, self.origin, &mut self.diags, at) else {
+                rest.push(child);
+                continue;
+            };
+            if self.definition(&d, rec) {
+                self.mapped = self.mapped.saturating_add(1);
+                self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
+                continue;
+            }
+            match self.attribute(&d, at) {
+                Some(v) if v.slot().is_some() => {
+                    self.mapped = self.mapped.saturating_add(1);
+                    self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
+                    own.push(v);
+                }
+                _ => rest.push(child),
+            }
+        }
+        // Restore what the previous record overrode, unless this one sets
+        // the same slot anyway.
+        let restore = std::mem::take(&mut self.text_restore);
+        for (d, v) in restore {
+            if d != depth {
+                self.text_restore.push((d, v));
+            } else if !own.iter().any(|o| o.slot() == v.slot()) {
+                if *self.attrs.get(v.slot().unwrap_or(AttrSlot::FillGeometry)) != v {
+                    self.apply_attribute(v)?;
+                }
+            } else {
+                // Still pending: the record below overrides it again.
+                self.text_restore.push((d, v));
+            }
+        }
+        for v in own {
+            let Some(slot) = v.slot() else { continue };
+            let prev = self.attrs.get(slot).clone();
+            if prev == v {
+                continue;
+            }
+            if !self
+                .text_restore
+                .iter()
+                .any(|(d, r)| *d == depth && r.slot() == Some(slot))
+            {
+                self.text_restore.push((depth, prev));
+            }
+            self.apply_attribute(v)?;
+        }
+        for item in items {
+            self.builder.node(NodeKind::TextItem(*item))?;
+        }
+        for child in rest {
+            self.visit(child)?;
+        }
+        Ok(())
+    }
+
+    /// A high surrogate's record: its definitions are registered and its
+    /// attributes counted — the low half's record carries the same ones and
+    /// they are applied there.
+    fn visit_text_leftovers(&mut self, node: &RecordNode) -> Result<(), XarError> {
+        for child in &node.children {
+            let rec = &child.record;
+            let at = (rec.number, rec.tag);
+            let Ok(d) = decode(rec.tag, &rec.data, self.origin, &mut self.diags, at) else {
+                self.visit(child)?;
+                continue;
+            };
+            if self.definition(&d, rec) || self.attribute(&d, at).is_some() {
+                self.mapped = self.mapped.saturating_add(1);
+                self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
+            } else {
+                self.visit(child)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A high surrogate followed by anything but its low half is lone: it
+    /// becomes U+FFFD, as an unpaired code unit always has.
+    fn flush_high(&mut self) -> Result<(), XarError> {
+        if self.pending_high.take().is_some() {
+            self.builder
+                .node(NodeKind::TextItem(TextItem::Char('\u{fffd}')))?;
+        }
+        Ok(())
     }
 
     // ── Traversal ───────────────────────────────────────────────────────────
@@ -498,9 +652,9 @@ impl<'o> Mapper<'o> {
                 if node.children.is_empty() {
                     return Ok(());
                 }
-                self.builder.push_scope()?;
+                self.push_scope()?;
                 let r = self.visit_children(&node.children);
-                self.builder.pop_scope();
+                self.pop_scope();
                 r
             }
             After::Defaults => {
@@ -569,7 +723,7 @@ impl<'o> Mapper<'o> {
         // Attributes next: they are much the commonest thing in a file.
         if let Some(v) = self.attribute(d, at) {
             self.mapped = self.mapped.saturating_add(1);
-            self.builder.attribute(v)?;
+            self.apply_attribute(v)?;
             return Ok(After::Same);
         }
 
@@ -704,33 +858,57 @@ impl<'o> Mapper<'o> {
             }
             Decoded::TextString(s) => {
                 self.mapped = self.mapped.saturating_add(1);
-                for ch in s.chars() {
-                    self.builder.node(NodeKind::TextItem(TextItem::Char(ch)))?;
-                }
-                After::Same
+                let items: Vec<TextItem> = s.chars().map(TextItem::Char).collect();
+                self.text_items(&items, node)?;
+                After::Drop
             }
             Decoded::TextChar(u) => {
                 self.mapped = self.mapped.saturating_add(1);
-                let ch = char::from_u32(u32::from(*u)).unwrap_or('\u{fffd}');
-                self.builder.node(NodeKind::TextItem(TextItem::Char(ch)))?;
-                After::Same
+                let u = *u;
+                // A character outside the BMP is written as two
+                // `TAG_TEXT_CHAR` records, one UTF-16 code unit each: hold a
+                // high surrogate until its low half arrives. The pair takes
+                // the first record's attributes (both carry the same).
+                let ch = if (0xD800..0xDC00).contains(&u) {
+                    if self.pending_high.replace(u).is_some() {
+                        // Two high halves in a row: the first is lone.
+                        self.builder
+                            .node(NodeKind::TextItem(TextItem::Char('\u{fffd}')))?;
+                    }
+                    self.visit_text_leftovers(node)?;
+                    return Ok(After::Drop);
+                } else if (0xDC00..0xE000).contains(&u) {
+                    match self.pending_high.take() {
+                        Some(hi) => {
+                            let c = char::decode_utf16([hi, u]).next().and_then(Result::ok);
+                            c.unwrap_or('\u{fffd}')
+                        }
+                        None => '\u{fffd}',
+                    }
+                } else {
+                    self.flush_high()?;
+                    char::from_u32(u32::from(u)).unwrap_or('\u{fffd}')
+                };
+                self.text_items(&[TextItem::Char(ch)], node)?;
+                After::Drop
             }
             Decoded::TextEol => {
                 self.mapped = self.mapped.saturating_add(1);
-                self.builder
-                    .node(NodeKind::TextItem(TextItem::LineBreak(true)))?;
-                After::Same
+                self.flush_high()?;
+                self.text_items(&[TextItem::LineBreak(true)], node)?;
+                After::Drop
             }
             Decoded::TextTab => {
                 self.mapped = self.mapped.saturating_add(1);
-                self.builder.node(NodeKind::TextItem(TextItem::Tab))?;
-                After::Same
+                self.flush_high()?;
+                self.text_items(&[TextItem::Tab], node)?;
+                After::Drop
             }
             Decoded::TextKern(v) => {
                 self.mapped = self.mapped.saturating_add(1);
-                self.builder
-                    .node(NodeKind::TextItem(TextItem::Kern(v.dx)))?;
-                After::Same
+                self.flush_high()?;
+                self.text_items(&[TextItem::Kern(v.dx)], node)?;
+                After::Drop
             }
             // Line metrics are Phase 9's derived cache, not node data.
             Decoded::TextLineInfo { .. } => {
@@ -887,7 +1065,7 @@ impl<'o> Mapper<'o> {
         if node.children.is_empty() {
             return Ok(());
         }
-        self.builder.push_scope()?;
+        self.push_scope()?;
         // `.xar` has no page record: the pages are implied by the spread's
         // size and its double-page flag.
         if double {
@@ -907,7 +1085,7 @@ impl<'o> Mapper<'o> {
             })))?;
         }
         let r = self.visit_children(&node.children);
-        self.builder.pop_scope();
+        self.pop_scope();
         r
     }
 
@@ -1076,8 +1254,9 @@ impl<'o> Mapper<'o> {
                 offset: -0.15,
                 size: 0.6,
             }),
-            // Carried through unconverted: the effective unit is still open
-            // (`research/01 §11` item 15, `docs/memory/xar-import.md`).
+            // Carried through raw: the value is thousandths of an em
+            // (`Kernel/nodetext.cpp:1781-1792`), not millipoints, whatever
+            // the `Mp` type says. Layout converts it (`docs/memory/text.md`).
             TextAttr::Tracking(v) => AttrValue::Tracking(Mp::new(v)),
             TextAttr::AspectRatio(v) => AttrValue::AspectRatio(v as f32),
             TextAttr::Baseline(v) => AttrValue::Baseline(v),
@@ -1846,6 +2025,96 @@ mod tests {
     fn interleave(x: i32, y: i32) -> [u8; 8] {
         let (x, y) = (x.to_be_bytes(), y.to_be_bytes());
         [x[0], y[0], x[1], y[1], x[2], y[2], x[3], y[3]]
+    }
+
+    /// A layer holding one story: a string with its own font size, a string
+    /// without, a non-BMP character as two `TAG_TEXT_CHAR` records, an EOL.
+    fn text_drawing() -> Vec<u8> {
+        let mut spread = Vec::new();
+        for v in [600_000i32, 450_000, 0, 0] {
+            spread.extend_from_slice(&v.to_le_bytes());
+        }
+        spread.push(2);
+        let mut layer = vec![0x01 | 0x04 | 0x08];
+        for u in "L".encode_utf16() {
+            layer.extend_from_slice(&u.to_le_bytes());
+        }
+        layer.extend_from_slice(&0u16.to_le_bytes());
+        let mut story = Vec::new();
+        for v in [10_000i32, 20_000, 1] {
+            story.extend_from_slice(&v.to_le_bytes());
+        }
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+        XarBuilder::new()
+            .record(40, &[])
+            .down()
+            .record(41, &[])
+            .down()
+            .record(42, &[])
+            .down()
+            .record(45, &spread)
+            .record(43, &[])
+            .down()
+            .record(48, &layer)
+            .record(2100, &story)
+            .down()
+            .record(2200, &[])
+            .down()
+            .record(2201, &utf16("ab"))
+            .down()
+            .record(2906, &20_000i32.to_le_bytes())
+            .up()
+            .record(2201, &utf16("cd"))
+            .record(2202, &0xD83Du16.to_le_bytes())
+            .record(2202, &0xDE00u16.to_le_bytes())
+            .record(2202, &0xDC00u16.to_le_bytes())
+            .record(2203, &[])
+            .up()
+            .up()
+            .up()
+            .up()
+            .up()
+            .up()
+            .end_of_file()
+            .finish()
+    }
+
+    #[test]
+    fn a_string_s_attributes_apply_to_that_string_only_and_surrogates_pair() {
+        let (doc, _) = import(&text_drawing(), &ImportOptions::default()).unwrap();
+        assert_eq!(doc.validate().errors, Vec::new());
+        let line = doc
+            .tree
+            .preorder(doc.tree.root())
+            .find(|n| matches!(doc.tree.kind(*n), Some(NodeKind::TextLine(_))))
+            .unwrap();
+        let got: Vec<String> = doc
+            .tree
+            .children(line)
+            .map(|c| match doc.tree.kind(c) {
+                Some(NodeKind::TextItem(TextItem::Char(ch))) => ch.to_string(),
+                Some(NodeKind::TextItem(TextItem::LineBreak(_))) => "EOL".into(),
+                Some(NodeKind::Attr(a)) => match &a.value {
+                    AttrValue::FontSize(v) => format!("size {}", v.raw()),
+                    other => format!("{other:?}"),
+                },
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "size 20000",
+                "a",
+                "b",
+                "size 12000",
+                "c",
+                "d",
+                "\u{1F600}",
+                "\u{FFFD}",
+                "EOL"
+            ]
+        );
     }
 
     #[test]
