@@ -11,5 +11,22 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# A leaf crate: it knows nothing about the document model or the `.xar`
+# reader. The `.xar`-specific wrappings (headerless DIB, BMPZIP, the 8 bpp
+# JPEG palette) are handled from the tag number and the bytes alone, so the
+# importer, the walker and the fuzzer can all reach them without a cycle.
 [dependencies]
-xarast-color = { path = "../xarast-color" }
+blake3 = { workspace = true }
+flate2 = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Read-only: the corpus test walks every bitmap record in the 59 files.
+xarast-xar = { path = "../xarast-xar" }
+xarast-geom = { path = "../xarast-geom" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "decode"
+harness = false

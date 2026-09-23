@@ -108,6 +108,27 @@ png = "0.18"
 # Band and tile parallelism. `MIT OR Apache-2.0`.
 rayon = "1.12"
 
+# ── Images (`xarast-image`, phase 10) ────────────────────────────────────────
+# The decoding façade (`research/05 §6`). Default features are off: no
+# `rayon`, no AVIF/EXR/HDR/DDS/QOI/TGA/ICO/farbfeld. Exactly the seven formats
+# phase 10 decodes are on: PNG (`png`), JPEG (`zune-jpeg`, the fast decoder
+# `research/05 §6` picks, reached through this façade rather than declared a
+# second time), WebP (`image-webp`, pure Rust), GIF (`gif`), TIFF (`tiff`),
+# BMP and PNM (built in). EXIF orientation and the raw EXIF/ICC blocks come
+# from the same decoders, so `kamadak-exif` is not needed for import. Already
+# in the graph through `arboard`; the formats enabled here unify into its
+# build too. `image` and every codec are `MIT OR Apache-2.0`; zune is
+# `MIT OR Apache-2.0 OR Zlib`.
+image = { version = "0.25.10", default-features = false, features = [
+    "png",
+    "jpeg",
+    "webp",
+    "gif",
+    "tiff",
+    "bmp",
+    "pnm",
+] }
+
 # ── Application core ─────────────────────────────────────────────────────────
 # Insertion-ordered set/map. The selection is an ordered set: "the first
 # object selected" and "the last" are both user-visible, and iteration order
