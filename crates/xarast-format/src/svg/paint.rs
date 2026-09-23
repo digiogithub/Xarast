@@ -15,14 +15,19 @@ use xarast_geom::{BiasGain, Point};
 use super::Stats;
 use super::defs::Defs;
 use super::frame::Frame;
-use super::num::{f32s, f64s, mp};
+use super::num::{f32s, f64s, f64s_exact, mp};
 use super::xml::attr;
 
-/// The largest per-channel error a baked ramp may have (`§6.4`): 2/255.
-const MAX_RAMP_ERROR: f32 = 2.0 / 255.0;
-/// Baked stops per key span, at least and at most (`§6.4`).
+/// What a probe inside a baked span may miss the curve by. The bound of
+/// `§6.4` is 2/255 per channel; the 8-bit stops and the 8-bit reference
+/// each round half a level away, and the curve bends between probes, so
+/// the probes hold to half the bound (measured worst over the fill test
+/// document: 1.9/255, `tests/fill_round_trip.rs`).
+const PROBE_ERROR: f32 = 1.0 / 255.0;
+/// Equal spans a baked ramp starts from: at least nine stops (`§6.4`).
 const MIN_SEGMENTS: usize = 8;
-const MAX_DEPTH: u32 = 5;
+/// The offsets a baked stop may take: `<stop offset>` has four decimals.
+const GRID: u32 = 10_000;
 
 /// Everything a paint needs besides the paint.
 pub(crate) struct PaintCtx<'a> {
@@ -134,8 +139,10 @@ fn effect_attr(out: &mut String, e: FillEffect) {
     }
 }
 
+/// `bias gain`, each in its shortest exact spelling: the twin must give
+/// the reader the model's profile bit for bit (acceptance criterion 9).
 fn profile_attr(p: BiasGain) -> String {
-    format!("{} {}", f64s(p.bias, 6), f64s(p.gain, 6))
+    format!("{} {}", f64s_exact(p.bias), f64s_exact(p.gain))
 }
 
 /// `x y` in points, SVG space.
@@ -237,43 +244,100 @@ impl KeyRamp {
 }
 
 /// Samples `f` over `0..=1` until piecewise-linear interpolation is within
-/// [`MAX_RAMP_ERROR`] per channel: at least [`MIN_SEGMENTS`] segments, each
-/// bisected at most [`MAX_DEPTH`] times (so at most 33 stops per eighth).
-fn bake(f: &dyn Fn(f32) -> Rgba8) -> Vec<(f32, Rgba8)> {
-    fn err(a: Rgba8, b: Rgba8, mid: Rgba8) -> f32 {
+/// 2/255 per channel (`§6.4`; probing to [`PROBE_ERROR`]).
+///
+/// Stops sit on the grid of `<stop offset>`'s four decimals ([`GRID`]), so
+/// the offset written is the offset sampled. The ramp starts as
+/// [`MIN_SEGMENTS`] equal spans; a span is split in two while the straight
+/// line between its ends misses `f` by more than the bound at any of its
+/// quarter points, down to one grid step. Checking three points rather
+/// than the midpoint alone catches S-shaped spans, and going down to the
+/// grid rather than a fixed depth follows a steep profile wherever it
+/// crowds the keys together (a gain of 0.6 packs seven keys into the last
+/// 1 % of the ramp). `breaks` are grid points every span must end at: the
+/// two grid points around each key stop ([`key_breaks`]), where the curve
+/// has a kink no probe inside a span would find.
+fn bake(f: &dyn Fn(f32) -> Rgba8, breaks: &[u32]) -> Vec<(f32, Rgba8)> {
+    fn at(f: &dyn Fn(f32) -> Rgba8, i: u32) -> Rgba8 {
+        f(i as f32 / GRID as f32)
+    }
+    fn err(a: Rgba8, b: Rgba8, u: f32, m: Rgba8) -> f32 {
         let ch = |x: u8, y: u8, m: u8| {
-            ((f32::from(x) + f32::from(y)) / 2.0 - f32::from(m)).abs() / 255.0
+            (f32::from(x) + (f32::from(y) - f32::from(x)) * u - f32::from(m)).abs() / 255.0
         };
-        ch(a.r, b.r, mid.r)
-            .max(ch(a.g, b.g, mid.g))
-            .max(ch(a.b, b.b, mid.b))
-            .max(ch(a.a, b.a, mid.a))
+        ch(a.r, b.r, m.r)
+            .max(ch(a.g, b.g, m.g))
+            .max(ch(a.b, b.b, m.b))
+            .max(ch(a.a, b.a, m.a))
     }
     fn split(
         f: &dyn Fn(f32) -> Rgba8,
-        t0: f32,
+        i0: u32,
         c0: Rgba8,
-        t1: f32,
+        i1: u32,
         c1: Rgba8,
-        depth: u32,
         out: &mut Vec<(f32, Rgba8)>,
     ) {
-        let tm = (t0 + t1) / 2.0;
-        let cm = f(tm);
-        if depth < MAX_DEPTH && err(c0, c1, cm) > MAX_RAMP_ERROR {
-            split(f, t0, c0, tm, cm, depth + 1, out);
-            split(f, tm, cm, t1, c1, depth + 1, out);
-        } else {
-            out.push((t1, c1));
+        let span = i1 - i0;
+        if span >= 2 {
+            let probes = [i0 + span / 4, i0 + span / 2, i1 - span / 4];
+            let off = probes.iter().any(|&m| {
+                m > i0
+                    && m < i1
+                    && err(c0, c1, (m - i0) as f32 / span as f32, at(f, m)) > PROBE_ERROR
+            });
+            if off {
+                let m = i0 + span / 2;
+                let cm = at(f, m);
+                split(f, i0, c0, m, cm, out);
+                split(f, m, cm, i1, c1, out);
+                return;
+            }
         }
+        out.push((i1 as f32 / GRID as f32, c1));
     }
-    let mut out = vec![(0.0, f(0.0))];
-    for i in 0..MIN_SEGMENTS {
-        let t0 = i as f32 / MIN_SEGMENTS as f32;
-        let t1 = (i + 1) as f32 / MIN_SEGMENTS as f32;
-        let c0 = out.last().map_or_else(|| f(t0), |l| l.1);
-        let c1 = f(t1);
-        split(f, t0, c0, t1, c1, 0, &mut out);
+    let mut bounds: Vec<u32> = (0..=MIN_SEGMENTS as u32)
+        .map(|k| k * GRID / MIN_SEGMENTS as u32)
+        .chain(breaks.iter().copied().filter(|&i| i < GRID))
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out = vec![(0.0, at(f, 0))];
+    for (&i0, &i1) in bounds.iter().zip(bounds.iter().skip(1)) {
+        let c0 = out.last().map_or_else(|| at(f, i0), |l| l.1);
+        let c1 = at(f, i1);
+        split(f, i0, c0, i1, c1, &mut out);
+    }
+    out
+}
+
+/// The grid points on either side of where each intermediate key of `ramp`
+/// falls once its ramp mapping and profile have moved it: the kinks of the
+/// sampled curve, as [`Ramp::sample`] computes the parameter.
+fn key_breaks<S: xarast_color::Stop>(ramp: &Ramp<S>) -> Vec<u32> {
+    let param = |i: u32| {
+        let t = i as f32 / GRID as f32;
+        let t = match ramp.mapping {
+            RampMapping::Linear => t,
+            RampMapping::Sin => (1.0 - (t * std::f32::consts::PI).cos()) * 0.5,
+        };
+        ramp.profile.map(f64::from(t)) as f32
+    };
+    let mut out = Vec::new();
+    for s in ramp.stops() {
+        // The first grid point at or past the key (the parameter only
+        // grows with `t`).
+        let (mut lo, mut hi) = (0u32, GRID);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if param(mid) < s.pos {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        out.push(lo.saturating_sub(1));
+        out.push(lo);
     }
     out
 }
@@ -314,7 +378,7 @@ fn ramp_body(k: &KeyRamp, ext: &mut String, stats: &mut Stats) -> Vec<(f32, Rgba
     }
     attr(ext, "xarast:stops", &colour_keys(&k.keys()));
     refs_attr(ext, "xarast:stop-refs", &k.refs);
-    bake(&|t| k.sample(t))
+    bake(&|t| k.sample(t), &key_breaks(&k.ramp))
 }
 
 /// `pos:#rrggbb[aa] …`: a colour ramp's keys.
@@ -1341,7 +1405,10 @@ fn transparency_mask(
             attr(&mut ext, "xarast:ramp-mapping", "sin");
         }
         attr(&mut ext, "xarast:levels", &level_keys(&from, &to, ramp));
-        bake(&|t| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level))
+        bake(
+            &|t| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level),
+            &key_breaks(ramp),
+        )
     };
     attr(&mut ext, "color-interpolation", "sRGB");
     let g = gradient(ctx, geometry, linear, persp, tiling, &stops, &ext, "");
@@ -1387,9 +1454,9 @@ mod tests {
                 a: 255,
             }
         };
-        let stops = bake(&f);
+        let stops = bake(&f, &[]);
         assert!(stops.len() >= 9, "{}", stops.len());
-        assert!(stops.len() <= 8 * 32 + 1);
+        assert!(stops.len() <= 64, "{}", stops.len());
         assert_eq!(stops.first().map(|s| s.0), Some(0.0));
         assert_eq!(stops.last().map(|s| s.0), Some(1.0));
         // Check the bound between every pair of baked stops.
@@ -1402,7 +1469,7 @@ mod tests {
                 let k = (t - t0) / (t1 - t0);
                 let lerp = |a: u8, b: u8| f32::from(a) + (f32::from(b) - f32::from(a)) * k;
                 let e = (lerp(c0.r, c1.r) - f32::from(want.r)).abs() / 255.0;
-                assert!(e <= 3.0 / 255.0, "error {e} at {t}");
+                assert!(e <= 2.0 / 255.0, "error {e} at {t}");
             }
         }
     }

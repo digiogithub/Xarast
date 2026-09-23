@@ -191,8 +191,26 @@ pub(crate) struct Decimal {
 
 impl Decimal {
     /// The value as a float.
+    ///
+    /// Correctly rounded: `.35` is the `f64` nearest to 0.35, so a value
+    /// written in its shortest round-trip spelling reads back bit for bit.
+    /// Multiplying by `10^scale` would not be (`35 × 0.01` is
+    /// `0.35000000000000003`).
     pub(crate) fn to_f64(self) -> f64 {
-        let v = self.mant as f64 * 10f64.powi(self.scale);
+        const EXACT: i128 = 1 << 53;
+        let v = if self.mant < EXACT && (-22..=22).contains(&self.scale) {
+            // Both operands are exact, so one IEEE operation rounds once.
+            let m = self.mant as f64;
+            if self.scale < 0 {
+                m / 10f64.powi(self.scale.saturating_neg())
+            } else {
+                m * 10f64.powi(self.scale)
+            }
+        } else {
+            format!("{}e{}", self.mant, self.scale)
+                .parse()
+                .unwrap_or(f64::INFINITY)
+        };
         if self.neg { -v } else { v }
     }
 
@@ -987,6 +1005,25 @@ pub(crate) fn base64(s: &str, max: usize) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floats_are_correctly_rounded() {
+        for v in [
+            0.35f64,
+            -0.4,
+            0.6,
+            0.1,
+            0.123_456_789_012_345_67,
+            1e-7,
+            123.456,
+        ] {
+            let s = crate::svg::num::f64s_exact(v);
+            assert_eq!(float(&s), Some(v), "{s}");
+        }
+        assert_eq!(float(".35"), Some(0.35));
+        assert_eq!(float("1e-30"), Some(1e-30));
+        assert_eq!(float("35e-2"), Some(0.35));
+    }
 
     #[test]
     fn numbers_are_exact_millipoints() {
