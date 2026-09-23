@@ -13,13 +13,16 @@
 //! // canvas pass; `out.commands` is what the user asked for.
 //! ```
 //!
-//! The layout is fixed in shape and free in arrangement: rulers and canvas
-//! in the centre, docked panels on the right, the status bar at the foot.
+//! The layout is fixed in shape and free in arrangement: the menu bar at
+//! the top, rulers and canvas in the centre, docked panels on the right, the
+//! status bar at the foot. With no document the canvas area holds the empty
+//! state (an "Open…" button and the recent files) instead.
 //! The canvas is deliberately not a dockable pane — it shares the surface
 //! with the shell's own passes, and a pane can be dragged into a tab
 //! group, which the canvas cannot survive.
 
 use crate::canvas::{CanvasResponse, CanvasWidget};
+use crate::menus::AppMenu;
 use crate::model::{CommandSink, DocumentView, UiCommand, UiModel};
 use crate::overlay::OverlayItem;
 use crate::panel::{LayoutState, Panel, PanelCtx, PanelId, UiHost};
@@ -44,6 +47,7 @@ pub struct Workspace {
     host: UiHost,
     canvas: CanvasWidget,
     status: StatusBar,
+    menu: AppMenu,
     side_width: f32,
 }
 
@@ -65,6 +69,7 @@ impl Workspace {
             host,
             canvas: CanvasWidget::new(),
             status: StatusBar::new(),
+            menu: AppMenu::new(),
             side_width: 280.0,
         }
     }
@@ -98,6 +103,11 @@ impl Workspace {
         self.canvas.set_navigation(navigation);
     }
 
+    /// The menu bar, for opening the About box from outside.
+    pub fn menu(&mut self) -> &mut AppMenu {
+        &mut self.menu
+    }
+
     /// The status bar, for a transient note.
     pub fn status_bar(&mut self) -> &mut StatusBar {
         &mut self.status
@@ -118,6 +128,11 @@ impl Workspace {
 
         let mut out = CommandSink::new();
         let mut canvas_response = None;
+
+        // First, so that it spans the whole width above the dock.
+        egui::TopBottomPanel::top("xarast_menu").show(ctx, |ui| {
+            self.menu.bar(ui, model, &mut out);
+        });
 
         egui::TopBottomPanel::bottom("xarast_status")
             .exact_height(crate::theme::STATUS_BAR_HEIGHT)
@@ -155,12 +170,10 @@ impl Workspace {
                     canvas_response =
                         Some(self.canvas.show(ui, doc, scale, &tokens, overlay, &mut out));
                 }
-                None => {
-                    ui.centered_and_justified(|ui| {
-                        ui.label("Open a document to start");
-                    });
-                }
+                None => crate::menus::empty_state(ui, model, &tokens, &mut out),
             });
+
+        self.menu.windows(ctx, &tokens);
 
         WorkspaceOutput {
             commands: out.drain(),

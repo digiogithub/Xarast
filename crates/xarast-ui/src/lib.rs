@@ -44,6 +44,7 @@ pub mod canvas;
 pub mod density;
 pub mod grid;
 pub mod guides;
+pub mod menus;
 pub mod model;
 pub mod overlay;
 pub mod panel;
@@ -59,6 +60,7 @@ mod serde_mp;
 pub use canvas::{CanvasInput, CanvasNavigation, CanvasResponse, CanvasWidget};
 pub use grid::GridSettings;
 pub use guides::{Axis, Guide};
+pub use menus::AppMenu;
 pub use model::{
     CommandSink, DocumentView, LayerInfo, LayerKey, PaletteEntry, RenderQuality, StatusInfo,
     UiCommand, UiModel, ViewTransform, ZoomTarget,
