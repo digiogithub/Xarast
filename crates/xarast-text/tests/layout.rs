@@ -560,3 +560,46 @@ fn a_column_without_word_wrap_aligns_but_never_wraps() {
     assert_eq!(l.lines.len(), 1);
     assert_eq!(l.lines[0].x + l.lines[0].width, Mp::new(60_000));
 }
+
+/// What text on a path places by: a cluster's glyph pen (after a manual
+/// kern) and its own advance (without tracking), W9.5.
+#[test]
+fn a_cluster_knows_its_glyph_pen_and_its_own_advance() {
+    let s = shaper();
+    let text = "HHH";
+    let mut tracked = run(text, "Noto Sans", 10);
+    tracked.tracking = 100;
+    let kerns = [ManualKern { at: 1, amount: 500 }];
+    let l = s.layout(&StoryInput {
+        text,
+        runs: &[tracked],
+        paragraphs: &[ParagraphStyle::default()],
+        kerns: &kerns,
+        mode: StoryMode::Point,
+    });
+    let m = |c: char| {
+        s.char_metrics(&FontQuery::new("Noto Sans"), Mp::new(10_000), 1.0, c)
+            .unwrap()
+    };
+    let (h, em) = (m('H').advance, m('M').em_width);
+    let line = &l.lines[0];
+    let c = &line.clusters;
+    assert_eq!(c.len(), 3);
+    for k in c {
+        assert_eq!(k.advance, h, "the glyph's own advance");
+    }
+    assert_eq!(c[0].pen, c[0].x);
+    assert_eq!(c[1].pen, c[1].x + em.mul_ratio(500, 1000), "after the kern");
+    assert_eq!(
+        c[0].width,
+        h + em.mul_ratio(100, 1000),
+        "tracking in the box"
+    );
+    // The glyphs start at the pen, and the lookup by cluster finds it.
+    for r in &line.runs {
+        for g in &r.glyphs {
+            assert_eq!(line.cluster_at(g.cluster).unwrap().pen, g.x);
+        }
+    }
+    assert!(line.cluster_at(1_000).is_none());
+}

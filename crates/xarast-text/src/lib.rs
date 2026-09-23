@@ -8,6 +8,8 @@
 //! * [`Shaper`] — shaping through `parley` (HarfBuzz-class shaping by
 //!   `harfrust`), UAX #14 line breaking through ICU4X, UAX #9 reordering,
 //!   Xara-style justification and line spacing, in millipoints.
+//! * [`path`] — text on a path: a laid-out story carried onto a curve by
+//!   arc length ([`PathFit`]).
 //! * [`FontDb::glyph_outline`] — cached glyph outlines as `kurbo::BezPath`,
 //!   what the renderer and convert-to-shapes draw.
 //!
@@ -20,6 +22,7 @@ pub mod font;
 mod layout;
 pub mod metrics;
 mod outline;
+pub mod path;
 pub mod segment;
 mod shape;
 pub mod style;
@@ -30,6 +33,7 @@ pub use font::{
 };
 pub use layout::{DEFAULT_TAB_INTERVAL, GlyphRun, LaidCluster, LaidLine, Layout, PlacedGlyph};
 pub use metrics::{CharMetrics, FaceMetrics, FontMetrics, ScaledMetrics};
+pub use path::{PathFit, PathFitStyle, TextPath};
 pub use segment::{WordSegment, next_grapheme, prev_grapheme, word_segments};
 pub use shape::{NOMINAL_SIZE, Shaper};
 pub use style::{

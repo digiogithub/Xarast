@@ -93,6 +93,13 @@ pub struct LaidCluster {
     pub x: Mp,
     /// Width of the box: advance, tracking, kerning and justification slack.
     pub width: Mp,
+    /// Where the cluster's glyphs start: the box's left edge plus whatever
+    /// the layout put before them (a manual kern, or tracking and slack in
+    /// right-to-left text). The original's "position in line".
+    pub pen: Mp,
+    /// The glyphs' own advance, without tracking, kerning or slack (the
+    /// original's character width). Zero for a tab.
+    pub advance: Mp,
     /// Right to left.
     pub rtl: bool,
 }
@@ -130,6 +137,17 @@ pub struct LaidLine {
     pub runs: Vec<GlyphRun>,
     /// Clusters in **logical** order.
     pub clusters: Vec<LaidCluster>,
+}
+
+impl LaidLine {
+    /// The cluster starting at byte `start` (a [`PlacedGlyph::cluster`]).
+    #[must_use]
+    pub fn cluster_at(&self, start: usize) -> Option<&LaidCluster> {
+        self.clusters
+            .binary_search_by_key(&start, |c| c.range.start)
+            .ok()
+            .and_then(|i| self.clusters.get(i))
+    }
 }
 
 /// The result of laying out one story.
@@ -588,6 +606,8 @@ impl Shaper {
                 range: 0..0,
                 x: Mp::ZERO,
                 width: Mp::ZERO,
+                pen: Mp::ZERO,
+                advance: Mp::ZERO,
                 rtl: false
             };
             clusters.len()
@@ -613,6 +633,12 @@ impl Shaper {
                 range: c.range.clone(),
                 x: box_start,
                 width: pen - box_start,
+                pen: glyph_pen,
+                advance: if c.kind == ClusterKind::Tab {
+                    Mp::ZERO
+                } else {
+                    c.advance
+                },
                 rtl,
             };
             if c.kind == ClusterKind::Tab {
