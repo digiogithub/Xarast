@@ -261,12 +261,16 @@ impl Preview {
 pub enum HandleShape {
     /// A bounding-box corner or edge handle.
     Bounds,
-    /// A rotation or skew handle.
+    /// A rotation handle (a corner, in rotate/skew mode).
     Rotate,
+    /// A skew handle (an edge, in rotate/skew mode).
+    Skew,
     /// The rotation centre.
     Centre,
     /// A path node.
     Node,
+    /// A shape's own handle: the rectangle's corner radius.
+    Radius,
 }
 
 /// One thing a tool wants drawn over the document, in document space.
@@ -289,19 +293,140 @@ pub enum OverlayShape {
         /// Dashed: a rubber band.
         dashed: bool,
     },
+    /// An outline through document points: a shape being drawn, or a
+    /// shape's new outline while one of its handles is dragged.
+    Polyline {
+        /// The points, in order.
+        points: Vec<DocPoint>,
+        /// Whether the last point joins the first.
+        closed: bool,
+        /// Dashed: a construction line.
+        dashed: bool,
+    },
 }
 
-/// A numeric field of an infobar.
+/// The outline of a path as an overlay polyline, flattened to within a
+/// quarter of a device pixel at the current zoom.
+#[must_use]
+pub fn outline_overlay(path: &xarast_geom::Path, vp: &Viewport, dashed: bool) -> OverlayShape {
+    let tol = (0.25 * device_px(vp)).max(1.0);
+    let mut points = Vec::new();
+    kurbo::flatten(path.to_bez_path(), tol, |el| match el {
+        kurbo::PathEl::MoveTo(p) | kurbo::PathEl::LineTo(p) => {
+            points.push(DocPoint::from_f64_round(p.x, p.y));
+        }
+        _ => {}
+    });
+    OverlayShape::Polyline {
+        points,
+        closed: true,
+        dashed,
+    }
+}
+
+/// The point of a bounding box that stays put when a number is typed
+/// into the infobar: the 9-anchor grid (`phase-07 §W4`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Anchor {
+    /// Top left.
+    NW,
+    /// Top centre.
+    N,
+    /// Top right.
+    NE,
+    /// Middle left.
+    W,
+    /// The centre.
+    Centre,
+    /// Middle right.
+    E,
+    /// Bottom left: the default, so X and Y are the box's left and bottom
+    /// edges.
+    #[default]
+    SW,
+    /// Bottom centre.
+    S,
+    /// Bottom right.
+    SE,
+}
+
+impl Anchor {
+    /// Every anchor, row by row from the top, as the grid shows them.
+    pub const ALL: [Anchor; 9] = [
+        Anchor::NW,
+        Anchor::N,
+        Anchor::NE,
+        Anchor::W,
+        Anchor::Centre,
+        Anchor::E,
+        Anchor::SW,
+        Anchor::S,
+        Anchor::SE,
+    ];
+
+    /// Where the anchor sits across and up the box, each 0, ½ or 1.
+    #[must_use]
+    pub const fn fractions(self) -> (f64, f64) {
+        match self {
+            Anchor::NW => (0.0, 1.0),
+            Anchor::N => (0.5, 1.0),
+            Anchor::NE => (1.0, 1.0),
+            Anchor::W => (0.0, 0.5),
+            Anchor::Centre => (0.5, 0.5),
+            Anchor::E => (1.0, 0.5),
+            Anchor::SW => (0.0, 0.0),
+            Anchor::S => (0.5, 0.0),
+            Anchor::SE => (1.0, 0.0),
+        }
+    }
+
+    /// The anchor's point on a rectangle.
+    #[must_use]
+    pub fn point_on(self, r: DocRect) -> DocPoint {
+        let (fx, fy) = self.fractions();
+        let (x0, y0) = r.lo.to_f64();
+        let (x1, y1) = r.hi.to_f64();
+        DocPoint::from_f64_round(x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy)
+    }
+
+    /// What the grid's button says to a screen reader.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Anchor::NW => "Top left",
+            Anchor::N => "Top centre",
+            Anchor::NE => "Top right",
+            Anchor::W => "Middle left",
+            Anchor::Centre => "Centre",
+            Anchor::E => "Middle right",
+            Anchor::SW => "Bottom left",
+            Anchor::S => "Bottom centre",
+            Anchor::SE => "Bottom right",
+        }
+    }
+}
+
+/// A field of an infobar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InfobarField {
-    /// The selection's left edge.
+    /// The anchor point's horizontal position.
     X,
-    /// The selection's bottom edge.
+    /// The anchor point's vertical position.
     Y,
-    /// The selection's width.
+    /// The width.
     W,
-    /// The selection's height.
+    /// The height.
     H,
+    /// The rotation, in degrees.
+    Angle,
+    /// A rectangle's corner radius.
+    Radius,
+    /// Which point of the box stays put: the 9-anchor grid.
+    Anchor,
+    /// Whether W and H keep their ratio: the padlock.
+    LockAspect,
+    /// Whether scaling scales line widths too.
+    ScaleLines,
 }
 
 impl InfobarField {
@@ -313,6 +438,11 @@ impl InfobarField {
             InfobarField::Y => "Y",
             InfobarField::W => "W",
             InfobarField::H => "H",
+            InfobarField::Angle => "Angle",
+            InfobarField::Radius => "Radius",
+            InfobarField::Anchor => "Anchor",
+            InfobarField::LockAspect => "Lock aspect",
+            InfobarField::ScaleLines => "Scale lines",
         }
     }
 
@@ -324,8 +454,26 @@ impl InfobarField {
             InfobarField::Y => "Vertical position",
             InfobarField::W => "Width",
             InfobarField::H => "Height",
+            InfobarField::Angle => "Rotation angle in degrees",
+            InfobarField::Radius => "Corner radius",
+            InfobarField::Anchor => "Fixed point for typed values",
+            InfobarField::LockAspect => "Keep the width and height in proportion",
+            InfobarField::ScaleLines => "Scale line widths with the objects",
         }
     }
+}
+
+/// A value typed, ticked or chosen in the infobar.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InfobarValue {
+    /// A length, in millipoints.
+    Length(Mp),
+    /// An angle, in degrees, counter-clockwise.
+    Angle(f64),
+    /// A check box.
+    Toggle(bool),
+    /// An anchor of the grid.
+    Anchor(Anchor),
 }
 
 /// One item of a tool's infobar.
@@ -339,6 +487,27 @@ pub enum InfobarItem {
         value: Option<Mp>,
         /// Whether typing into it does anything yet.
         editable: bool,
+    },
+    /// An angle field, in degrees.
+    Angle {
+        /// Which field.
+        field: InfobarField,
+        /// Its value.
+        value: Option<f64>,
+        /// Whether typing into it does anything.
+        editable: bool,
+    },
+    /// A check box.
+    Toggle {
+        /// Which field.
+        field: InfobarField,
+        /// Whether it is ticked.
+        on: bool,
+    },
+    /// The 9-anchor grid.
+    Anchor {
+        /// The anchor chosen.
+        value: Anchor,
     },
     /// A line of text.
     Note(String),
@@ -361,6 +530,10 @@ pub enum CursorKind {
     Move,
     /// A drawing tool.
     Crosshair,
+    /// Scaling or skewing from a handle.
+    Resize,
+    /// Rotating about the rotation centre.
+    Rotate,
     /// The push tool, idle.
     Grab,
     /// The push tool, dragging.
@@ -402,6 +575,9 @@ pub struct ToolRequests {
     pub view: Vec<ViewRequest>,
     /// Whether the overlay (handles, a rubber band) changed.
     pub overlay_changed: bool,
+    /// A tool to choose, as if picked in the palette: the selector's
+    /// double click on a rectangle opens the rectangle tool.
+    pub tool: Option<ToolId>,
 }
 
 impl ToolRequests {
@@ -442,11 +618,29 @@ impl std::fmt::Debug for ToolCtx<'_> {
     }
 }
 
+/// How close, in device pixels, the pointer must be to a handle to grab
+/// it: constant on screen at any zoom (`phase-07 §W3`).
+pub const HANDLE_TOLERANCE_PX: f64 = 6.0;
+
+/// Whether two document points are within `px` device pixels of each
+/// other on screen.
+#[must_use]
+pub fn near_on_screen(vp: &Viewport, a: DocPoint, b: DocPoint, px: f64) -> bool {
+    let (da, db) = (vp.doc_to_device(a), vp.doc_to_device(b));
+    (da.x - db.x).hypot(da.y - db.y) <= px
+}
+
 impl ToolCtx<'_> {
     /// One device pixel in document millipoints, at the current zoom.
     #[must_use]
     pub fn device_px(&self) -> f64 {
         device_px(self.viewport)
+    }
+
+    /// Whether `at` grabs a handle drawn at `handle`.
+    #[must_use]
+    pub fn grabs(&self, handle: DocPoint, at: DocPoint) -> bool {
+        near_on_screen(self.viewport, handle, at, HANDLE_TOLERANCE_PX)
     }
 
     /// Picks the topmost object under a point, with the standard
@@ -510,8 +704,8 @@ pub trait Tool: Send + std::fmt::Debug {
     /// The tool's infobar.
     fn infobar(&self, view: ToolView<'_>) -> Infobar;
 
-    /// A value typed into one of the infobar's fields.
-    fn infobar_edit(&mut self, field: InfobarField, value: Mp, cx: &mut ToolCtx<'_>) {
+    /// A value typed, ticked or chosen in one of the infobar's fields.
+    fn infobar_edit(&mut self, field: InfobarField, value: InfobarValue, cx: &mut ToolCtx<'_>) {
         let _ = (field, value, cx);
     }
 
@@ -895,7 +1089,7 @@ impl ToolMachine {
     }
 
     /// Sends an infobar edit to the tool in force.
-    pub fn infobar_edit(&mut self, field: InfobarField, value: Mp, cx: &mut ToolCtx<'_>) {
+    pub fn infobar_edit(&mut self, field: InfobarField, value: InfobarValue, cx: &mut ToolCtx<'_>) {
         let id = self.current;
         if let Some(t) = self.tool_mut(id) {
             t.infobar_edit(field, value, cx);

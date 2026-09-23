@@ -206,19 +206,20 @@ impl ToolId {
     /// chosen but is not implemented says "coming soon" in its infobar.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, ToolId::Selector | ToolId::Zoom | ToolId::Pan)
+        matches!(
+            self,
+            ToolId::Selector | ToolId::Zoom | ToolId::Pan | ToolId::Rectangle | ToolId::Ellipse
+        )
     }
 
     /// The phase that brings a tool that is not implemented yet.
     #[must_use]
     pub const fn planned_phase(self) -> Option<u8> {
         match self {
-            ToolId::Selector | ToolId::Zoom | ToolId::Pan => None,
-            ToolId::ShapeEditor
-            | ToolId::Rectangle
-            | ToolId::Ellipse
-            | ToolId::Pen
-            | ToolId::Freehand => Some(7),
+            ToolId::Selector | ToolId::Zoom | ToolId::Pan | ToolId::Rectangle | ToolId::Ellipse => {
+                None
+            }
+            ToolId::ShapeEditor | ToolId::Pen | ToolId::Freehand => Some(7),
             ToolId::Fill | ToolId::Transparency => Some(8),
             ToolId::Text => Some(9),
         }
@@ -253,6 +254,50 @@ impl ToolState {
     }
 }
 
+/// The current attributes: what a newly drawn object is given.
+///
+/// Held per document session, never in the arena, never undone. Empty
+/// means "the document's defaults" (a black 0.25 pt outline, no fill). A
+/// `.xar` file's `TAG_CURRENTATTRIBUTES` block is the same notion; the
+/// importer counts and skips it (`xar-import.md`), so a session always
+/// starts empty.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CurrentAttributes {
+    values: Vec<xarast_doc::AttrValue>,
+}
+
+impl CurrentAttributes {
+    /// Sets one attribute, replacing any value in the same slot. A value
+    /// with no slot (a multi-valued attribute) is appended. Returns
+    /// whether anything changed.
+    pub fn set(&mut self, value: xarast_doc::AttrValue) -> bool {
+        let slot = value.slot();
+        match slot.and_then(|s| self.values.iter().position(|v| v.slot() == Some(s))) {
+            Some(i) if self.values[i] == value => false,
+            Some(i) => {
+                self.values[i] = value;
+                true
+            }
+            None => {
+                self.values.push(value);
+                true
+            }
+        }
+    }
+
+    /// The attributes, in the order they were first set.
+    #[must_use]
+    pub fn values(&self) -> &[xarast_doc::AttrValue] {
+        &self.values
+    }
+
+    /// Whether none is set: new objects take the document's defaults.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
 /// Everything about one open document that belongs to the session rather
 /// than to the document.
 #[derive(Debug, Clone, Default)]
@@ -268,6 +313,8 @@ pub struct EditState {
     /// Whether the selection's handles and blobs should be drawn. The
     /// shell turns this off during a pan so that overlays do not smear.
     pub show_overlays: bool,
+    /// What newly drawn objects are given.
+    pub current: CurrentAttributes,
 }
 
 impl EditState {
@@ -284,6 +331,7 @@ impl EditState {
             tool: ToolState::default(),
             modifiers: Modifiers::default(),
             show_overlays: true,
+            current: CurrentAttributes::default(),
         }
     }
 

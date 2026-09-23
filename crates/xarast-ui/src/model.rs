@@ -465,13 +465,13 @@ pub enum UiCommand {
     OpenRecent(std::path::PathBuf),
     /// Forget the recent files.
     ClearRecent,
-    /// A value typed into a field of the tool's infobar, already parsed
-    /// into millipoints.
+    /// A value typed, ticked or chosen in the tool's infobar, already
+    /// parsed (lengths into millipoints, angles into degrees).
     InfobarEdit {
         /// Which field.
         field: xarast_app::InfobarField,
         /// The value.
-        value: Mp,
+        value: xarast_app::InfobarValue,
     },
     /// The interface needs another frame soon, for example because a drag
     /// is in progress.

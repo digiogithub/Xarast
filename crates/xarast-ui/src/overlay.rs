@@ -32,6 +32,11 @@ pub enum HandleKind {
     Fill,
     /// The centre of rotation.
     Centre,
+    /// A skew handle, drawn as a hollow square.
+    Skew,
+    /// A shape's own handle (a rectangle's corner radius), drawn as a
+    /// filled dot.
+    Radius,
 }
 
 impl HandleKind {
@@ -181,6 +186,24 @@ impl OverlayPainter<'_> {
         };
         let w = self.scale.hairline_width() as f32;
         match kind {
+            HandleKind::Radius => {
+                painter.circle_filled(c, half - w, self.tokens.accent);
+                painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));
+            }
+            HandleKind::Skew => {
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(w, self.tokens.surface_sunken),
+                    egui::StrokeKind::Inside,
+                );
+                painter.rect_stroke(
+                    rect.shrink(w),
+                    0.0,
+                    egui::Stroke::new(w, fill),
+                    egui::StrokeKind::Inside,
+                );
+            }
             HandleKind::Rotate | HandleKind::Centre => {
                 painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));
                 painter.circle_stroke(c, half - w, egui::Stroke::new(w, fill));

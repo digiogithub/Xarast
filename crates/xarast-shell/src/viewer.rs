@@ -961,26 +961,45 @@ fn drag_target(s: &Session) -> Option<(f64, f64)> {
 fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
     use xarast_app::{HandleShape, OverlayShape};
     use xarast_ui::{HandleKind, OverlayItem};
-    s.overlay()
-        .into_iter()
-        .map(|o| match o {
-            OverlayShape::Handle { at, shape } => OverlayItem::Handle {
+    let mut out = Vec::new();
+    for o in s.overlay() {
+        match o {
+            OverlayShape::Handle { at, shape } => out.push(OverlayItem::Handle {
                 x: at.x,
                 y: at.y,
                 kind: match shape {
                     HandleShape::Bounds => HandleKind::Bounds,
                     HandleShape::Rotate => HandleKind::Rotate,
+                    HandleShape::Skew => HandleKind::Skew,
                     HandleShape::Centre => HandleKind::Centre,
                     HandleShape::Node => HandleKind::Node,
+                    HandleShape::Radius => HandleKind::Radius,
                 },
                 active: false,
-            },
-            OverlayShape::Rect { rect, dashed } => OverlayItem::Rect {
+            }),
+            OverlayShape::Rect { rect, dashed } => out.push(OverlayItem::Rect {
                 bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),
                 dashed,
-            },
-        })
-        .collect()
+            }),
+            OverlayShape::Polyline {
+                points,
+                closed,
+                dashed,
+            } => {
+                let n = points.len();
+                let segments = if closed { n } else { n.saturating_sub(1) };
+                for i in 0..segments {
+                    let (a, b) = (points[i], points[(i + 1) % n]);
+                    out.push(OverlayItem::Line {
+                        from: (a.x, a.y),
+                        to: (b.x, b.y),
+                        dashed,
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The pointer shape for a tool's request.
@@ -990,6 +1009,8 @@ const fn tool_cursor(c: xarast_app::CursorKind) -> CursorShape {
         K::Default => CursorShape::Default,
         K::Move => CursorShape::Move,
         K::Crosshair => CursorShape::Crosshair,
+        K::Resize => CursorShape::ResizeNwSe,
+        K::Rotate => CursorShape::Grabbing,
         K::Grab => CursorShape::Grab,
         K::Grabbing => CursorShape::Grabbing,
         K::ZoomIn => CursorShape::ZoomIn,
@@ -2170,6 +2191,10 @@ mod tests {
         // The palette button, as a screen reader clicks it.
         activate(&mut v, "Rectangle");
         assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+        let infobar = v.ui_model(1.0).editing.unwrap().infobar;
+        assert!(format!("{infobar:?}").contains("draw a rectangle"));
+        activate(&mut v, "Pen");
+        assert_eq!(tool(&v), xarast_app::ToolId::Pen);
         let infobar = v.ui_model(1.0).editing.unwrap().infobar;
         assert!(format!("{infobar:?}").contains("coming soon"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
