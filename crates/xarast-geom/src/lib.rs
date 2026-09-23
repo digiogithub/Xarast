@@ -40,6 +40,7 @@
 #![doc(html_no_source)]
 
 pub mod boolean;
+pub mod fit;
 pub mod fixed;
 pub mod flatten;
 pub mod hit;
@@ -56,6 +57,7 @@ pub mod regular;
 pub mod stroke;
 
 pub use boolean::{BoolOp, boolean, self_union};
+pub use fit::{fit_stroke, fit_stroke_indexed, max_sample_deviation};
 pub use fixed::Fixed16;
 pub use flatten::{
     Polyline, SegmentTrace, Tolerance, VertexSource, flatten, flatten_traced, max_deviation,
