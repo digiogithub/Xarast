@@ -88,10 +88,13 @@ const MAX_DEPTH: u32 = 16;
 /// 20 ms of work.
 const WORK_LIMIT: u64 = 20_000_000;
 
+/// The most flattened edges one disc test may collect.
+const MAX_EDGES: usize = 1 << 21;
+
 /// More dashes than this along one path and the pattern is treated as
 /// solid: at that density it is solid on screen, and generating them would
 /// cost unbounded time on hostile input.
-const MAX_DASHES: f64 = 100_000.0;
+const MAX_DASHES: f64 = 10_000.0;
 
 /// The pick tolerance, in document millipoints.
 ///
@@ -600,26 +603,53 @@ impl Seg {
         }
     }
 
-    fn flatten_into(&self, tol: f64, out: &mut Vec<Edge>) {
+    fn flatten_into(&self, tol: f64, band: &Band, out: &mut Vec<Edge>) {
         match self {
             Seg::Line(a, b) => out.push((*a, *b)),
-            Seg::Cubic(c) => flatten_cubic(*c, tol, 0, out),
+            Seg::Cubic(c) => flatten_cubic(*c, tol, band, 0, out),
         }
+    }
+}
+
+/// The part of the plane whose winding numbers a disc test asks about: a
+/// horizontal strip, from its left edge rightwards. Geometry wholly outside
+/// it contributes no crossing to any ray cast from inside it towards +x.
+struct Band {
+    y0: f64,
+    y1: f64,
+    x0: f64,
+}
+
+impl Band {
+    fn meets(&self, b: kurbo::Rect) -> bool {
+        b.y1 >= self.y0 && b.y0 <= self.y1 && b.x1 >= self.x0
     }
 }
 
 type Edge = (KPoint, KPoint);
 
 /// Rigorous `f64` flattening with the crate's chord bound, as
-/// [`flatten`](crate::flatten) does in integers.
-fn flatten_cubic(c: CubicBez, tol: f64, depth: u32, out: &mut Vec<Edge>) {
+/// [`flatten`](crate::flatten) does in integers — but only where it
+/// matters. A piece whose control box misses the band is emitted as its
+/// chord: the chord lies in the same box, so it contributes the same
+/// (zero) crossings and keeps the polyline connected, and a huge curve
+/// that merely passes through the band costs O(depth) edges rather than
+/// O(length / tolerance).
+fn flatten_cubic(c: CubicBez, tol: f64, band: &Band, depth: u32, out: &mut Vec<Edge>) {
     if depth >= MAX_DEPTH || crate::flatten::chord_bound(c) <= tol {
         out.push((c.p0, c.p3));
         return;
     }
+    let bb = kurbo::Rect::from_points(c.p0, c.p1)
+        .union_pt(c.p2)
+        .union_pt(c.p3);
+    if !band.meets(bb) {
+        out.push((c.p0, c.p3));
+        return;
+    }
     let (a, b) = kurbo::ParamCurve::subdivide(&c);
-    flatten_cubic(a, tol, depth + 1, out);
-    flatten_cubic(b, tol, depth + 1, out);
+    flatten_cubic(a, tol, band, depth + 1, out);
+    flatten_cubic(b, tol, band, depth + 1, out);
 }
 
 #[derive(Debug, Default)]
@@ -825,13 +855,21 @@ fn disc_touches_region(
     flat_tol: f64,
 ) -> bool {
     let reach = r + 2.0 * PROBE + 1.0;
+    let band = Band {
+        y0: p.y - reach,
+        y1: p.y + reach,
+        x0: p.x - reach,
+    };
     let mut edges: Vec<Edge> = Vec::new();
     for s in segs {
-        let b = s.bbox();
-        if b.y1 < p.y - reach || b.y0 > p.y + reach || b.x1 < p.x - reach {
-            continue;
+        if band.meets(s.bbox()) {
+            s.flatten_into(flat_tol, &band, &mut edges);
         }
-        s.flatten_into(flat_tol, &mut edges);
+        if edges.len() > MAX_EDGES {
+            // Only hostile geometry gets here; see `WORK_LIMIT` for why
+            // the answer is a hit.
+            return true;
+        }
     }
     let work = std::cell::Cell::new(0u64);
     let covers = |q: KPoint| {
@@ -1062,6 +1100,40 @@ mod tests {
     fn stroke_to_path_hit(p: &Path, style: &StrokeStyle, q: Point) -> bool {
         let o = crate::stroke_to_path(p, style, crate::Tolerance(0.1)).unwrap();
         crate::measure::fill_contains(&o, q, FillRule::NonZero)
+    }
+
+    /// `fuzz_hit_test`'s first timeout (37 s and out of memory): a singular
+    /// 1000x transform, an extent-sized ellipse, a 1 000 000 mp stroke and a
+    /// `[0, 2815]` dash pattern. Every huge cubic crossing the band used to
+    /// be flattened whole at 0.25 mp.
+    #[test]
+    fn huge_curves_through_the_band_are_cheap() {
+        let mut b = Path::builder();
+        b.ellipse(Point::raw(0, 0), Mp::new(7_000), Mp::new(-1_073_741_823));
+        let p = b.build();
+        let m = Matrix {
+            a: 1.4e-309,
+            b: -1_000.0,
+            c: 4.6e-310,
+            d: 1.0e-307,
+            e: Mp::ZERO,
+            f: Mp::ZERO,
+        };
+        let style = StrokeStyle {
+            width: Mp::new(1_000_000),
+            mitre_limit: 1.4e-309,
+            dash: Some(DashPattern {
+                elements: vec![Mp::new(-1), Mp::new(2_815)],
+                offset: Mp::ZERO,
+                reference_width: None,
+            }),
+            ..StrokeStyle::default()
+        };
+        let start = std::time::Instant::now();
+        let _ = hit_stroke_transformed(&p, m, &style, Point::ORIGIN, HitTolerance::EXACT);
+        let _ = hit_fill_transformed(&p, m, FillRule::NonZero, Point::ORIGIN, HitTolerance::EXACT);
+        // Generous for a debug build on a loaded machine; it was 37 s.
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
     }
 
     #[test]
