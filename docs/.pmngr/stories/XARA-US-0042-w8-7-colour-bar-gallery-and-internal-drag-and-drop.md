@@ -2,12 +2,13 @@
 id: XARA-US-0042
 type: story
 title: W8.7 — Colour bar, gallery and internal drag-and-drop
-status: backlog
+status: in_progress
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, ui]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T09:42:03Z
+updated: 2026-09-23T23:21:48Z
+started: 2026-09-23T23:21:48Z
 ---
 
 ## Tasks (full table: phase-08 §W8.7)
