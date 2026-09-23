@@ -172,6 +172,7 @@ fn add(t: &mut WalkStats, w: &WalkStats) {
     t.visited += w.visited;
     t.culled += w.culled;
     t.images_pending += w.images_pending;
+    t.images_failed += w.images_failed;
     t.clips_unsupported += w.clips_unsupported;
     t.text_pending += w.text_pending;
     t.live_pending += w.live_pending;

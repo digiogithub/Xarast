@@ -108,6 +108,11 @@ pub struct ImportOptions {
     pub skip_text: bool,
     /// Keep bitmap metadata but not the embedded bytes.
     pub skip_bitmaps: bool,
+    /// Caps on the one decode the import does itself: a `TAG_DEFINEBITMAP_PNG`
+    /// with an alpha channel is rewritten as a standard PNG
+    /// ([`xarast_image::xar::normalise_xar_png`]). A PNG that trips them is
+    /// kept verbatim, with a warning.
+    pub bitmap_limits: xarast_image::DecodeLimits,
 }
 
 /// What one import did. Facts only: no coordinate, colour or string taken
@@ -802,13 +807,29 @@ impl<'o> Mapper<'o> {
                 } else {
                     Some(Arc::new(OriginalEncoded {
                         format: image_format(b.format),
-                        bytes: Arc::from(bytes),
+                        bytes: self.bitmap_bytes(b.format, bytes, (rec.number, rec.tag)),
                     }))
                 };
                 let id = self.builder.define_bitmap(BitmapResource {
                     name: Arc::from(b.name.as_str()),
                     info: BitmapInfo::default(),
-                    pixels: Arc::new(BitmapData::default()),
+                    // Tag 71 (JPEG8BPP) carries the palette of the 8 bpp
+                    // original; keeping it is what lets the decoder map
+                    // the 24 bpp JPEG back onto it (`research/01 §4.5`).
+                    // The pixels stay empty: decoding is the renderer's.
+                    pixels: Arc::new(BitmapData {
+                        pixels: Arc::from(&[][..]),
+                        palette: b
+                            .palette
+                            .iter()
+                            .map(|&[r, g, bl]| xarast_color::Rgba8 {
+                                r,
+                                g,
+                                b: bl,
+                                a: 255,
+                            })
+                            .collect(),
+                    }),
                     original,
                     procedural: None,
                     transparent_index: None,
@@ -1114,6 +1135,38 @@ impl<'o> Mapper<'o> {
                         .with_detail(u64::from(n)),
                 );
                 None
+            }
+        }
+    }
+
+    /// The bytes a bitmap definition's resource keeps.
+    ///
+    /// Verbatim, except for a PNG under tag 68 with an alpha channel: the
+    /// original stores *transparency* in that channel (0 = opaque;
+    /// `research/01 §4.5`), so it is rewritten, losslessly, as a standard
+    /// PNG. The `.xar` convention stays at the `.xar` boundary, and the
+    /// document, the renderer, a `.xarast` package and a browser all read the
+    /// same bytes the same way. A file the rewrite cannot decode is kept as
+    /// it is, with a warning; the renderer will count it as failed.
+    fn bitmap_bytes(
+        &mut self,
+        format: crate::decode::BitmapFormat,
+        bytes: &[u8],
+        at: (u32, u32),
+    ) -> Arc<[u8]> {
+        if format != crate::decode::BitmapFormat::Png {
+            return Arc::from(bytes);
+        }
+        match xarast_image::xar::normalise_xar_png(bytes, &self.opts.bitmap_limits) {
+            Ok(Some(fixed)) => Arc::from(fixed),
+            Ok(None) => Arc::from(bytes),
+            Err(_) => {
+                self.diags.push(
+                    Diagnostic::new(DiagCode::BitmapNotNormalised)
+                        .at(at.0, at.1)
+                        .with_detail(bytes.len() as u64),
+                );
+                Arc::from(bytes)
             }
         }
     }

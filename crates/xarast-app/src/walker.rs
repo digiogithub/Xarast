@@ -38,7 +38,7 @@
 //! never pruned, and a pruned node's own attribute children only ever
 //! applied to that node.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use xarast_doc::fill::Tiling;
@@ -62,9 +62,14 @@ pub struct WalkStats {
     pub visited: usize,
     /// Subtrees pruned because they missed the dirty rectangle.
     pub culled: usize,
-    /// Objects whose bitmap resource has not been decoded yet, so they
-    /// were left out. Decoding is Phase 10.
+    /// Objects whose bitmap resource has neither pixels nor encoded bytes
+    /// the walker could decode (a `.xar` read with `skip_bitmaps`, say), so
+    /// they were left out.
     pub images_pending: usize,
+    /// Objects whose bitmap resource failed to decode — corrupt, refused
+    /// by the decode limits, or in a format we do not read — so they were
+    /// left out. The failure is cached: it is not retried every frame.
+    pub images_failed: usize,
     /// `ClipView` nodes whose "keep the outside" mode the renderer cannot
     /// express yet, so the clip was dropped.
     pub clips_unsupported: usize,
@@ -83,6 +88,7 @@ impl WalkStats {
     #[must_use]
     pub const fn is_complete(&self) -> bool {
         self.images_pending == 0
+            && self.images_failed == 0
             && self.clips_unsupported == 0
             && self.text_pending == 0
             && self.live_pending == 0
@@ -99,6 +105,9 @@ impl WalkStats {
 pub struct SceneWalker {
     resolver: Resolver,
     images: HashMap<BitmapId, ImageId>,
+    /// Bitmaps whose decode failed: the negative cache, so that a bad
+    /// bitmap costs one decode per walker, not one per frame.
+    failed: HashSet<BitmapId>,
     attr_cache: HashMap<NodeId, Arc<AttrValue>>,
     attr_epoch: Epoch,
     stats: WalkStats,
@@ -160,6 +169,7 @@ impl SceneWalker {
     pub fn reset(&mut self) {
         self.resolver = Resolver::new();
         self.images.clear();
+        self.failed.clear();
         self.attr_cache.clear();
         self.attr_epoch = Epoch::default();
     }
@@ -335,26 +345,63 @@ impl SceneWalker {
         self.register_images(doc);
     }
 
-    /// Registers every decoded bitmap with the renderer.
+    /// Registers every bitmap with the renderer, decoding it first when
+    /// all the document holds is its encoded original.
     ///
     /// The `.xar` importer keeps a bitmap's encoded bytes and leaves
-    /// `pixels` empty until Phase 10 decodes them, so most documents
-    /// register nothing today. The seam is here and not in the walk
-    /// itself so that the registry is built once per frame rather than
-    /// once per object.
+    /// `pixels` empty; decoding happens here, once per walker and bitmap,
+    /// on the first frame that sees the resource (`docs/memory/image.md`,
+    /// "Walker integration contract"). A failed decode goes into the
+    /// negative cache and is never retried by this walker. The seam is
+    /// here and not in the walk itself so that the registry is built once
+    /// per frame rather than once per object.
     fn register_images(&mut self, doc: &Document) {
+        let mut todo: Vec<(BitmapId, &xarast_doc::BitmapResource)> = Vec::new();
         for (id, res) in doc.resources.bitmaps() {
-            if self.images.contains_key(&id) {
+            if self.images.contains_key(&id) || self.failed.contains(&id) {
                 continue;
             }
             let (w, h) = (res.info.width, res.info.height);
             let expected = w as usize * h as usize * 4;
-            if expected == 0 || res.pixels.pixels.len() != expected {
-                continue;
+            if expected != 0 && res.pixels.pixels.len() == expected {
+                let image = ImageRef::new(w, h, res.pixels.pixels.to_vec());
+                let rid = self.resolver.images.insert(image);
+                self.images.insert(id, rid);
+            } else if res.pixels.pixels.is_empty() && res.original.is_some() {
+                todo.push((id, res));
             }
-            let image = ImageRef::new(w, h, res.pixels.pixels.to_vec());
-            let rid = self.resolver.images.insert(image);
-            self.images.insert(id, rid);
+        }
+        for (id, decoded) in decode_all(&todo) {
+            match decoded {
+                Some(image) => {
+                    let rid = self.resolver.images.insert(image);
+                    self.images.insert(id, rid);
+                }
+                None => {
+                    self.failed.insert(id);
+                }
+            }
+        }
+    }
+
+    /// Counts an object whose bitmap is not registered, as failed or as
+    /// pending.
+    fn image_missing(&mut self, id: BitmapId) {
+        if self.failed.contains(&id) {
+            self.stats.images_failed += 1;
+        } else {
+            self.stats.images_pending += 1;
+        }
+    }
+
+    /// Counts the object when the transparency in force is a bitmap whose
+    /// image is not registered: the renderer then composites it opaque.
+    fn check_transparency_image(&mut self, attrs: &AttrStack) {
+        if let AttrValue::TranspFill(t) = attrs.get(AttrSlot::TranspFillGeometry)
+            && let Some(image) = t.bitmap()
+            && !self.images.contains_key(&image)
+        {
+            self.image_missing(image);
         }
     }
 
@@ -461,8 +508,11 @@ impl SceneWalker {
                 attrs.get(AttrSlot::FillGeometry)
             && !self.images.contains_key(image)
         {
-            self.stats.images_pending += 1;
+            self.image_missing(*image);
         }
+        // A bitmap *transparency* without its image renders opaque, which
+        // turns a soft shadow into a black box: count it as well.
+        self.check_transparency_image(attrs);
         let mut ctx = PaintCtx {
             colours: &doc.resources.colours,
             ramp_length: quality.ramp_length(),
@@ -511,9 +561,10 @@ impl SceneWalker {
         b: &mut SceneBuilder<'_>,
     ) {
         let Some(image) = self.images.get(&bm.image).copied() else {
-            self.stats.images_pending += 1;
+            self.image_missing(bm.image);
             return;
         };
+        self.check_transparency_image(attrs);
         let mapping = xarast_render::GradMapping::Affine {
             a: point64(bm.origin),
             b: point64(bm.origin + bm.minor),
@@ -539,6 +590,82 @@ impl SceneWalker {
         emit(b, t, |b| b.image(id, image, mapping, paint.clone()));
         b.finish_node(id, content_hash(doc, node, self.scope));
     }
+}
+
+/// Decodes a batch of encoded bitmaps, in parallel when there is more
+/// than one, and returns them in input order (`None` for a failure).
+///
+/// Every decode runs under `DecodeLimits::default()`, which bounds its
+/// memory and wall clock whatever the bytes claim. Spreading a document's
+/// bitmaps over the cores keeps the first frame of a bitmap-heavy file
+/// close to the cost of its largest image rather than the sum of all.
+fn decode_all(
+    todo: &[(BitmapId, &xarast_doc::BitmapResource)],
+) -> Vec<(BitmapId, Option<ImageRef>)> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(todo.len());
+    if threads <= 1 {
+        return todo
+            .iter()
+            .map(|(id, res)| (*id, decode_resource(res)))
+            .collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<(BitmapId, Option<ImageRef>)> =
+        todo.iter().map(|(id, _)| (*id, None)).collect();
+    let results: Vec<Vec<(usize, Option<ImageRef>)>> = std::thread::scope(|s| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((_, res)) = todo.get(i) else { break };
+                        mine.push((i, decode_resource(res)));
+                    }
+                    mine
+                })
+            })
+            .collect();
+        // A panicking decoder is a decode failure, not a crashed frame.
+        workers
+            .into_iter()
+            .map(|w| w.join().unwrap_or_default())
+            .collect()
+    });
+    for (i, image) in results.into_iter().flatten() {
+        out[i].1 = image;
+    }
+    out
+}
+
+/// Decodes one resource's encoded original into straight RGBA.
+///
+/// The `.xar` wrappings are chosen from what the importer recorded: a
+/// JPEG that arrived with a reconstruction palette is tag 71
+/// (JPEG8BPP), a `Bmp` may be a headerless DIB (tag 65), and `Unknown` is
+/// the importer's name for the zlib-wrapped DIB (tag 69). The decoded
+/// dimensions are used, not `res.info`, which the importer leaves zeroed.
+fn decode_resource(res: &xarast_doc::BitmapResource) -> Option<ImageRef> {
+    use xarast_doc::resources::ImageFormat as F;
+    use xarast_image::xar::decode_xar_bitmap;
+    let original = res.original.as_ref()?;
+    let bytes: &[u8] = &original.bytes;
+    let limits = xarast_image::DecodeLimits::default();
+    let decoded = match original.format {
+        F::Jpeg if !res.pixels.palette.is_empty() => {
+            let palette: Vec<[u8; 3]> =
+                res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect();
+            decode_xar_bitmap(71, bytes, &palette, &limits)
+        }
+        F::Png | F::Jpeg | F::Gif => xarast_image::decode(bytes, &limits),
+        F::Bmp => decode_xar_bitmap(65, bytes, &[], &limits),
+        F::Unknown => decode_xar_bitmap(69, bytes, &[], &limits),
+    }
+    .ok()?;
+    let d = decoded.data;
+    (d.width > 0 && d.height > 0).then(|| ImageRef::new(d.width, d.height, d.to_straight_rgba8()))
 }
 
 /// Wraps one emission in its transparency scope, and only when the

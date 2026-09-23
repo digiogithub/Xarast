@@ -134,11 +134,19 @@ fn mesh_repeat(t: Tiling) -> Repeat {
     }
 }
 
-/// The mapping of a bitmap fill, taken at face value.
-fn repeat_of(t: Tiling) -> Repeat {
+/// The mapping of a bitmap fill.
+///
+/// In the original a bitmap fill's tiling *is* the fill-mapping attribute
+/// in force, taken at face value, and the factory default is "repeat"
+/// (`docs/research/01-xar-format.md` §8.3), so a bitmap fill with no
+/// mapping record tiles. The `.xar` importer leaves the fill's own
+/// `tiling` unset; a `.xarast` fill may carry one, and when it does it
+/// wins over the attribute.
+fn bitmap_repeat(own: Tiling, attr: Tiling) -> Repeat {
+    let t = if own == Tiling::None { attr } else { own };
     match t {
-        Tiling::None | Tiling::Simple => Repeat::Simple,
-        Tiling::Repeat | Tiling::RepeatExtra => Repeat::Repeat,
+        Tiling::Simple => Repeat::Simple,
+        Tiling::None | Tiling::Repeat | Tiling::RepeatExtra => Repeat::Repeat,
         Tiling::RepeatInverted => Repeat::Mirror,
     }
 }
@@ -375,7 +383,7 @@ pub(crate) fn colour_paint(
             Paint::Image {
                 image: id,
                 mapping,
-                repeat: repeat_of(*own_tiling),
+                repeat: bitmap_repeat(*own_tiling, tiling),
                 filter: ctx.filter,
                 contone: contone
                     .as_ref()
@@ -553,7 +561,7 @@ pub(crate) fn transparency(
                     source: TranspSource::Image {
                         image: *id,
                         mapping,
-                        repeat: repeat_of(*own),
+                        repeat: bitmap_repeat(*own, tiling),
                     },
                 }
             }
@@ -637,4 +645,35 @@ fn intern_transparency_ramp(
         ctx.resolver.transparency_ramps[slot] = build_transparency_ramp(stops, profile, len);
     }
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_bitmap_fill_takes_the_mapping_attribute_and_tiles_by_default() {
+        // No mapping anywhere: the original's factory default, repeat.
+        assert_eq!(bitmap_repeat(Tiling::None, Tiling::None), Repeat::Repeat);
+        // The attribute in force, at face value.
+        assert_eq!(bitmap_repeat(Tiling::None, Tiling::Simple), Repeat::Simple);
+        assert_eq!(bitmap_repeat(Tiling::None, Tiling::Repeat), Repeat::Repeat);
+        assert_eq!(
+            bitmap_repeat(Tiling::None, Tiling::RepeatInverted),
+            Repeat::Mirror
+        );
+        assert_eq!(
+            bitmap_repeat(Tiling::None, Tiling::RepeatExtra),
+            Repeat::Repeat
+        );
+        // A fill's own tiling wins over the attribute.
+        assert_eq!(
+            bitmap_repeat(Tiling::Simple, Tiling::Repeat),
+            Repeat::Simple
+        );
+        assert_eq!(
+            bitmap_repeat(Tiling::RepeatInverted, Tiling::Simple),
+            Repeat::Mirror
+        );
+    }
 }

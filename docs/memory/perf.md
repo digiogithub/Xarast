@@ -125,12 +125,37 @@ the decoders uses `rayon`.
   ≈ 3 ms on 7.5 MB) is done only in `decode`.
 - The whole 59-file `.xar` corpus decodes in ≈ 120 ms (test profile); 99 ms
   of that is the eight JPEG8BPP records, mostly the palette snap (358 ms
-  before its exact-key cache).
+  before its exact-key cache). The walker spreads a frame's decodes over
+  the cores, so a file costs about its largest bitmap.
 - **Size**: a stripped release binary that decodes through the façade is
   **1.26 MiB larger** than one that does not (1.58 MiB vs 0.32 MiB, thin
-  LTO). The shipped binary does not link `xarast-image` yet; `arboard`
-  already brings `image` + `png` + `tiff`, so the real increment in the
-  AppImage will be smaller (JPEG, WebP, GIF, BMP, PNM codecs).
+  LTO). Measured on the shipped binary once the walker linked it
+  (XARA-T-0129, 2026-09-23): stripped `xarast` **21 443 032 → 21 978 840
+  bytes (+523 KiB, +2.5 %)**, because `arboard` already brought `image` +
+  `png` + `tiff`. Still no libwayland/GL/Vulkan in `ldd`.
+
+#### Bitmaps in the walker (XARA-T-0129, 2026-09-23)
+
+Release `xarast-cli smoke-open` over the corpus, first walk (which now
+decodes), before → after. Only files with bitmaps change:
+
+| File | Walk before | Walk after | What decodes |
+|---|---|---|---|
+| `leafgirl` | 0.6 ms | 37.9 ms | JPEG8BPP 649×430 + palette snap, PNG |
+| `scope3 simple` | 6.2 ms | 27.2 ms | two JPEG8BPP, three PNG |
+| `Spitfire` | 3.4 ms | 10.0 ms | two JPEG |
+| `Groucho2` | 0.9 ms | 5.6 ms | JPEG8BPP, PNG |
+| `TextJust`, `Rotated` | 0.0 ms | 5–7 ms | 652×1243 RGBA PNG |
+| every other bitmap file | ≤ 3 ms | ≤ 3 ms | |
+
+The import of the 22 alpha PNGs now also decodes and re-encodes them
+(`normalise_xar_png`): `Rotated` opens in 6.7 ms instead of 0.4 ms, every
+other file < 5 ms; `the_corpus_imports_within_its_time_budget` still
+passes. Real window (`xarast --screenshot`, GPU tiles, three runs each,
+`cold_start_ms`): leafgirl 326–508 → 344–370 ms, Spitfire 344–420 →
+326–355 ms, scope3 329–341 → 344–369 ms — within noise of the ≈ 330 ms
+the shell costs with no document work at all. ProbeX16 (no bitmaps) is
+unchanged at 1.2–1.5 s (XARA-T-0009).
 
 ### Document model
 

@@ -75,7 +75,7 @@ exist yet.
 | 11 spread, layer and ink node present | 59 | **59** spreads and layers; ink where there is ink, see below |
 | 12 `OneLine.xar` oracle | exact | **exact**: 88 records, depth 5, `MoveTo(112101,178899) → LineTo(283101,321399)`, record 31 CMYK "Black", line width 500 mp |
 | 13 facts-only snapshots | committed + leak grep | **done** (`tests/snapshots/`, three files) |
-| 14 bitmap bytes verbatim, magic matches | all | **all** |
+| 14 bitmap bytes verbatim, magic matches | all | **all** (tag-68 PNGs with alpha: the normalised rewrite, see "Bitmap bytes") |
 | 15 text decodes | 14/14 `TextDesigns` | **14/14**; `SimpleText.xar` yields the 19-character line |
 | 16 record framing round trip | lossless | **lossless** |
 | 19 bounded allocation per length field | < 1 MiB | **done**, 9 fields |
@@ -182,9 +182,26 @@ Every one is deliberate, and every one is a phase that owns it:
   `Cur::point(origin)` and `Cur::vector()` are separate calls with
   different signatures so the two cannot be confused. Regular-shape axes
   use `vector()`; the matrix translation uses `point`-style translation.
-- **Bitmap bytes are never copied or re-encoded.** `BitmapDefinition.image`
-  is a `Range<usize>` into the record payload, so an embedded JPEG stays
-  bit-identical and costs nothing to "decode".
+- **Bitmap bytes are never copied or re-encoded — with one exception.**
+  `BitmapDefinition.image` is a `Range<usize>` into the record payload, so
+  an embedded JPEG stays bit-identical and costs nothing to "decode". The
+  exception (2026-09-23, XARA-T-0129): a **tag-68 PNG with an alpha
+  channel** (colour type 4 or 6) stores *transparency* there, 0 = opaque
+  (`research/01 §4.5`). `Mapper::bitmap_bytes` rewrites it losslessly as a
+  standard PNG through `xarast_image::xar::normalise_xar_png` (same depth
+  and colour type, every ancillary chunk kept), under
+  `ImportOptions::bitmap_limits`; a file it cannot decode stays verbatim
+  with `DiagCode::BitmapNotNormalised`. The `.xar` convention stops at the
+  importer: the document, the walker, a `.xarast` package and a browser
+  all read standard alpha. A future `.xar` exporter must invert it back.
+  All 22 corpus PNGs with alpha are affected (every `TextDesigns` file,
+  `scope3 simple`, `JagSS100 simple`); read as standard alpha they are
+  black boxes.
+- **A tag-71 (JPEG8BPP) palette is kept** in `BitmapData::palette` as
+  opaque `Rgba8`, with `pixels` empty and `original` the JPEG (T10.2.6).
+  The walker hands it to `decode_xar_bitmap(71, …)`. It takes part in the
+  resource's SHA-256 dedup key. `.xarast` does not persist it yet
+  (XARA-T-0154).
 - **Text is structural only.** Strings, lines, kerns, stories and the
   2900–2920 attributes are decoded; nothing is shaped, measured or
   positioned.

@@ -115,6 +115,10 @@ pub enum DiagCode {
     /// A field held a value the specification does not define. The detail is
     /// the value.
     UnknownEnumValue,
+    /// A `TAG_DEFINEBITMAP_PNG` with an alpha channel could not be decoded to
+    /// rewrite that channel (which holds transparency) as standard alpha, so
+    /// its bytes were kept verbatim. The detail is the image's byte length.
+    BitmapNotNormalised,
 }
 
 impl DiagCode {
@@ -142,6 +146,7 @@ impl DiagCode {
             DiagCode::DepthLimit => "DepthLimit",
             DiagCode::BadRelativePathSize => "BadRelativePathSize",
             DiagCode::UnknownEnumValue => "UnknownEnumValue",
+            DiagCode::BitmapNotNormalised => "BitmapNotNormalised",
         }
     }
 
@@ -189,7 +194,8 @@ impl DiagCode {
             DiagCode::CrcMismatch | DiagCode::BlockLengthMismatch => D::ChecksumMismatch,
             DiagCode::UnknownCompressionType
             | DiagCode::UnexpectedCompressionRecord
-            | DiagCode::UnknownEnumValue => D::UnsupportedFeature,
+            | DiagCode::UnknownEnumValue
+            | DiagCode::BitmapNotNormalised => D::UnsupportedFeature,
         }
     }
 }

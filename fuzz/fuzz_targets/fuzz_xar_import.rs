@@ -29,6 +29,7 @@ fuzz_target!(|data: &[u8]| {
         strict: false,
         skip_text: false,
         skip_bitmaps: false,
+        bitmap_limits: xarast_image::DecodeLimits::tight(),
     };
     let Ok((doc, report)) = import(data, &opts) else {
         return;

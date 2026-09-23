@@ -341,6 +341,7 @@ pub fn pending_summary(w: &WalkStats) -> String {
         ("text", w.text_pending),
         ("shapes", w.shapes_pending),
         ("images", w.images_pending),
+        ("images-failed", w.images_failed),
         ("live", w.live_pending),
         ("clips-unsupported", w.clips_unsupported),
     ]
