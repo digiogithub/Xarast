@@ -110,7 +110,11 @@ impl AppMenu {
                     .color(tokens.text_muted),
                 );
                 ui.add_space(8.0);
-                ui.label(egui::RichText::new("Third-party licences").strong());
+                ui.label(
+                    egui::RichText::new("Third-party licences")
+                        .color(tokens.text)
+                        .size(15.0),
+                );
                 ui.label(
                     egui::RichText::new(
                         "The licences of the libraries Xarast is built from will be \
@@ -222,7 +226,11 @@ pub fn empty_state(
             return;
         }
         ui.add_space(20.0);
-        ui.label(egui::RichText::new("Recent files").strong());
+        ui.label(
+            egui::RichText::new("Recent files")
+                .color(tokens.text)
+                .size(15.0),
+        );
         ui.add_space(4.0);
         for path in &model.recent {
             let response = ui
