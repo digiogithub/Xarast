@@ -283,19 +283,31 @@ pub fn map(
     let defaults_differing = m.defaults_differing;
     let diagnostics = m.diags.items().to_vec();
 
-    let (doc, build_diagnostics) = m.builder.finish()?;
+    // The builder validated the document as its last step; reuse that
+    // report rather than walk half a million nodes a second time.
+    let (doc, build_diagnostics, validation) = m.builder.finish_with_report()?;
 
     let mut node_counts = [0u32; NODE_KIND_COUNT];
     let mut nodes_built = 0usize;
-    for id in doc.tree.preorder(doc.tree.root()) {
+    let mut count = |k: &NodeKind| {
         nodes_built = nodes_built.saturating_add(1);
-        if let Some(k) = doc.tree.kind(id)
-            && let Some(slot) = node_counts.get_mut(usize::from(k.discriminant()))
-        {
+        if let Some(slot) = node_counts.get_mut(usize::from(k.discriminant())) {
             *slot = slot.saturating_add(1);
         }
+    };
+    if validation.reachable == doc.tree.node_count() {
+        // Every node alive is reachable, so the arena, in memory order, is
+        // the same set as a walk from the root and much cheaper to visit.
+        for (_, data) in doc.tree.iter() {
+            count(&data.kind);
+        }
+    } else {
+        for id in doc.tree.preorder(doc.tree.root()) {
+            if let Some(k) = doc.tree.kind(id) {
+                count(k);
+            }
+        }
     }
-    let validation = doc.validate();
 
     Ok((
         doc,
@@ -458,7 +470,7 @@ impl<'o> Mapper<'o> {
     fn visit(&mut self, node: &RecordNode) -> Result<(), XarError> {
         let rec = &node.record;
         let at = (rec.number, rec.tag);
-        let decoded = match decode(rec.tag, &rec.data, self.origin, &mut self.diags, at) {
+        let mut decoded = match decode(rec.tag, &rec.data, self.origin, &mut self.diags, at) {
             Ok(d) => d,
             Err(_) => {
                 self.diags.push(
@@ -473,7 +485,7 @@ impl<'o> Mapper<'o> {
         if self.opts.strict && self.diags.count(Severity::Error) > 0 {
             return Err(XarError::Limit("strict: an error diagnostic was raised"));
         }
-        match self.emit(&decoded, node)? {
+        match self.emit(&mut decoded, node)? {
             After::Drop => Ok(()),
             After::Same => self.visit_children(&node.children),
             After::Child => {
@@ -529,7 +541,7 @@ impl<'o> Mapper<'o> {
 
     // ── One record ──────────────────────────────────────────────────────────
 
-    fn emit(&mut self, d: &Decoded, node: &RecordNode) -> Result<After, XarError> {
+    fn emit(&mut self, d: &mut Decoded, node: &RecordNode) -> Result<After, XarError> {
         let rec = &node.record;
         let at = (rec.number, rec.tag);
 
@@ -605,7 +617,9 @@ impl<'o> Mapper<'o> {
 
             Decoded::Path { path, style } => {
                 self.mapped = self.mapped.saturating_add(1);
-                let mut path = path.clone();
+                // The decoded record is dropped after this; take its path
+                // rather than copy three vectors per path record.
+                let mut path = std::mem::take(path);
                 if let Some(flags) = path_flags_of(&node.children) {
                     apply_path_flags(&mut path, flags, &mut self.diags, at);
                 }
