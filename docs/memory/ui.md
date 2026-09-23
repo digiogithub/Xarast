@@ -83,13 +83,13 @@ display. Until then, no claim is made about them in either direction.
 ### Current state
 
 `xarast-ui` builds, tests and benchmarks with no window, no GPU and no
-compositor. `cargo test -p xarast-ui` runs 115 tests in about a tenth of
-a second.
+compositor. `cargo test -p xarast-ui` runs 121 tests (114 unit, 7
+integration) in about a tenth of a second.
 
 | Module | State |
 |---|---|
 | `workspace` | `Workspace::ui()` — the whole interface in one call: dock, canvas, status bar, theming. This is the shell's entry point |
-| `canvas` | Region reservation and reporting in whole device pixels, transparent so the shell's canvas pass shows through, wheel/Ctrl-wheel/pinch/middle-drag/keyboard navigation, guide creation and dragging, page edge, grid and guides |
+| `canvas` | Region reservation and reporting in whole device pixels, transparent so the shell's canvas pass shows through, wheel/Ctrl-wheel/pinch/middle-drag/keyboard navigation, guide creation and dragging, page edge, grid and guides; `CanvasNavigation::External` hands navigation to the host |
 | `overlay` | Handles (bounds, rotate, node, fill, centre), lines, rectangles, dashes, hit-testing; device-pixel snapped |
 | `rulers` | `Ruler::draw` plus the pure `ticks()`/`major_step()` used by the tests; 1-2-5 steps, imperial and pica subdivisions |
 | `grid`, `guides` | Rectangular grid with subdivision dropout and snapping arithmetic; guides created by dragging from a ruler, moved, deleted by dropping back |
@@ -129,6 +129,20 @@ invent them.
 - **The view transform is read-only here.** Pan and zoom are commands.
   There is exactly one owner of the transform and it is not the
   interface.
+- **The host chooses who navigates the canvas** (`CanvasNavigation`).
+  `Internal` (the default, used by this crate's tests and the density
+  probe) lets the widget turn wheel, pinch, middle/space drag and view
+  keys into `Pan`/`ZoomAbout`. `External` (what the shell uses) emits
+  none of that: the widget still hosts guides, reports the pointer and
+  its focus, and hands tool input on, but a middle or space drag is
+  neither a command nor tool input. Two navigators reading one wheel is
+  how a notch zooms twice (XARA-US-0002).
+- **`ViewTransform` carries the viewport's orientation (`y_up`)**, it
+  does not decide it. `doc_to_view_y`/`view_to_doc_y` honour it, the
+  vertical ruler negates its tick values under it, and "top" in
+  `DocumentView::page` and `visible_doc_rect` means the edge at the top of
+  the screen — the larger `y` when `y_up`. Grid lines need no change: a
+  lattice through the origin is orientation-free (XARA-T-0026).
 - **Handles are drawn with a light-on-dark outline pair, not XOR.** XOR is
   unavailable on a composited surface and looks wrong over antialiased
   content; the outline pair buys the same "visible on any background"
@@ -161,6 +175,11 @@ invent them.
   scale change.
 - Tick and grid-line generation is bounded (2,048 and 4,096 per axis) so
   that an absurd zoom cannot become an unbounded allocation.
+- Every ruler tick sits where the view puts its value:
+  `view.doc_to_view_*(tick.value) == tick.position`, on both sides of the
+  origin and under both orientations (pinned by two tests in `rulers`).
+- A text field that appears in answer to a gesture (the layer rename)
+  takes the keyboard in the same frame, or there is nowhere to type.
 
 ### Dead ends (do not retry)
 
@@ -178,6 +197,15 @@ invent them.
 - **An opaque `CentralPanel` frame under the canvas.** The shell draws
   the document *beneath* the interface; an opaque panel fill hid it and
   the first composed window came up blank.
+- **The canvas widget as the owner of wheel navigation in the shell.**
+  egui smooths a wheel: one `Line` notch reaches `smooth_scroll_delta`
+  spread over about eleven frames (12.7, 8.7, 5.9, … points), so a zoom
+  or pan driven from it lands late and in pieces. The shell's adapter
+  applies a notch whole, at once.
+- **Minor ruler tick values from `index / subdivisions` plus
+  `index.rem_euclid(subdivisions)`.** Truncating division and a Euclidean
+  remainder disagree for negative indices: the minor tick one step left of
+  zero read four steps right. Use `div_euclid` with `rem_euclid`.
 
 ### Open TODOs
 
@@ -186,11 +214,10 @@ invent them.
 - `egui_kittest` **image** snapshots (phase criterion 17) need the `wgpu`
   feature and an adapter. The AccessKit-tree tests stand in for them
   here; add the image baselines when CI has `lavapipe`.
-- **For the shell:** `accesskit_winit` must be the release built against
-  the same AccessKit major as egui 0.33, which is **0.21** — the pinned
-  workspace version. `accesskit_winit 0.34` pairs with AccessKit 0.25 and
-  would put two incompatible `TreeUpdate` types at the shell↔UI boundary.
-  Either pick the matching adapter or upgrade egui and both together.
+- [x] **For the shell:** `accesskit_winit` must be the release built
+  against the same AccessKit major as egui 0.33 — done: `0.29.2` on
+  `accesskit 0.21.1` (XARA-US-0003). Upgrading egui means upgrading the
+  adapter in the same change.
 - Bump to egui 0.36 when the workspace moves to rustc 1.95, and drop
   `egui_tiles` 0.14 for 0.17 at the same time.
 - Wire the menus and the command palette when `xarast-app`'s shortcut
@@ -202,14 +229,11 @@ invent them.
   and should converge on the `xarast-app` spelling. The translation now
   exists, in the composition root (`xarast_shell::viewer::Viewer::ui_intent`
   and `document_view`); converging the types would delete most of it.
-- **`ViewTransform` has no Y flip.** It is scale + offset with `y`
-  down, while document `y` is up. The composition root therefore hands
-  the interface **y-negated** document coordinates (page, and the offset
-  derived from `Viewport`), which lands the page edge on the rendered
-  page to the pixel (`the_interface_page_edge_lands_on_the_rendered_page`)
-  but makes the vertical ruler read negative numbers. Fix it here: give
-  `ViewTransform` the viewport's orientation (or take the `Viewport`
-  itself) so the rulers label document `y` correctly.
+- [x] **`ViewTransform` has no Y flip** — fixed by `y_up`, copied from
+  the viewport by the composition root, which no longer negates `y`
+  (XARA-T-0026).
+- Vertical ruler labels (`1450pt`) are clipped by the 18 pt strip; draw
+  them rotated or drop the suffix (XARA-T-0032).
 
 ---
 
@@ -354,9 +378,14 @@ instrumentation), which was extended rather than replaced.
 | `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest`, `ShellWaker`, `--screenshot` read-back | Done; **runs on real hardware** (NVIDIA RTX 4000 SFF Ada, Vulkan, COSMIC/Wayland) |
 | `intents` | `IntentAdapter`, `semantic_modifiers`, `semantic_button`, `CanvasRegion` — physical `ShellEvent` → semantic `xarast_app::Intent` | Done (XARA-T-0001) |
 | `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame` | Done (XARA-T-0003) |
-| `viewer` | `Viewer`, the composition root: `ShellApp` over `AppState` + `Workspace` + `RenderThread` | Done (XARA-T-0003); panels receive no input yet (XARA-US-0002) |
+| `viewer` | `Viewer`, the composition root: `ShellApp` over `AppState` + `Workspace` + `RenderThread` | Done (XARA-T-0003); panels respond (XARA-US-0002) |
+| `egui_input` | `EguiInput`: `ShellEvent` → `egui::RawInput`; `cursor_shape` | Done (XARA-US-0002) |
+| `gpu_errors` | `GpuErrorSink` (the uncaptured-error and device-lost handler), `GpuRecovery` (the escalation policy) | Done (XARA-T-0027) |
+| `window` (AccessKit) | `A11y`: `accesskit_winit` adapter, handlers → `ShellEvent::Accessibility*` | Done (XARA-US-0003), behind the default `accessibility` feature |
 
-127 unit tests (shell), all passing with no compositor and no GPU.
+149 unit tests (shell), all passing with no compositor; the one that needs
+a GPU (`a_validation_error_on_a_real_device_is_counted_not_fatal`) skips
+without an adapter.
 
 ### The running application (XARA-US-0001)
 
@@ -483,7 +512,53 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     on compositors without `wlr-screencopy` (COSMIC has none; `grim`
     fails there). It captures once the rendered frame matches the canvas
     size and nothing is pending.
-
+21. **A `wgpu` error is a diagnosis, never a panic** (XARA-T-0027).
+    `GpuErrorSink` is installed with `Device::on_uncaptured_error` (and
+    the device-lost callback, ignoring `Destroyed` at exit) before the
+    device is used. It logs, counts and keeps the innermost cause line.
+    After each frame the loop asks `GpuRecovery`: the first three failing
+    frames reconfigure the surface, then presentation backs off
+    exponentially from 16 ms to a 2 s cap, while events and application
+    state keep flowing. One clean frame resets it. It never exits. The
+    application hears `ShellEvent::GpuError` and the viewer shows it in the
+    status bar. `XARAST_INJECT_GPU_ERRORS=N` raises a real validation error
+    in each of the first N frames, to watch the path in a real window.
+22. **Every `ShellEvent` goes to egui; canvas navigation has one owner,
+    the `IntentAdapter`** (XARA-US-0002). The canvas widget runs with
+    `CanvasNavigation::External`. Two gates keep the adapter out of
+    egui's way. First, a press or a wheel at a point where
+    `egui::Context::layer_id_at` finds a layer above `Order::Background`
+    (a popup or window) is not the canvas's; motion and releases always
+    pass, so a drag in progress is never cut. Second, view keys are
+    ignored while a text field has the keyboard. Arrows pan only when the
+    canvas or nothing has egui focus. The shim is built on `ShellEvent`,
+    not `winit`, so phase 14 inherits it.
+23. **"A text field has the keyboard" is `platform_output.ime.is_some()`**,
+    not `Context::wants_keyboard_input()`, which in egui 0.33 is true for
+    *any* focused widget (a Tab-focused button included).
+24. **egui's platform output is the shell's to carry**: `CopyText` to the
+    clipboard, IME allowed exactly while a text field is focused (with the
+    caret area in device pixels, sent only when it moves), and the pointer
+    shape through `ShellCtx::set_cursor(CursorShape)`, a toolkit-neutral
+    enum mapped to `winit` in `window.rs` and from egui in `egui_input`.
+    Ctrl+C/X/V become egui `Copy`/`Cut`/`Paste(text)`.
+25. **AccessKit through `accesskit_winit 0.29.2` with direct handlers**
+    (XARA-US-0003). The window is created invisible, the adapter is
+    attached, then the window is shown (the adapter panics on a visible
+    window). The handlers run on AccessKit's thread: they only record
+    activation, deactivation and actions in a mutex-guarded inbox and
+    wake the loop. The loop drains the inbox into `ShellEvent`s. The
+    viewer calls `egui::Context::enable_accesskit` on activation and
+    publishes each frame's tree through `ShellCtx::update_accessibility`,
+    after naming the root after the window title and setting the toolkit
+    to egui. Actions reach egui as `Event::AccessKitActionRequest`.
+26. **The colour-scheme watcher is a thread of its own**
+    (`xarast-settings`, XARA-US-0004), because the services thread blocks
+    inside an `rfd` dialog. It awaits `receive_color_scheme_changed()`
+    under `pollster` and is detached: it ends at the first change after
+    the service is dropped. Both service threads call a waker after each
+    answer, because a loop parked in `Wait` otherwise sees a portal answer
+    only at the next input event.
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
@@ -516,6 +591,15 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
    two interface frames between presents merge their deltas.
 10. **Pass order is fixed: canvas, then interface**, in one render pass
     with one encoder. The interface is premultiplied over the canvas.
+11. **No GPU error reaches `wgpu`'s default panic handler.** The sink is
+    installed right after `request_device`, before any resource exists.
+12. **Exactly one party navigates the canvas.** The shell's canvas widget
+    is `External`. `one_ctrl_wheel_notch_over_the_canvas_zooms_exactly_one_step`
+    and `a_plain_wheel_notch_pans_exactly_once` pin it. With the widget
+    back on `Internal`, one notch zoomed 1.466× instead of √2.
+13. **The AccessKit adapter exists before the window is first shown**,
+    and its handlers never touch interface state: they only queue and
+    wake.
 
 ### Dead ends (do not retry)
 
@@ -542,6 +626,17 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
 - **`grim` for screenshots on COSMIC.** No `wlr-screencopy`; the desktop
   portal screenshot captures the whole desktop, other windows included.
   Use `xarast --screenshot`.
+- **Finding the window on AT-SPI by its title.** AccessKit does not know
+  the `winit` title; before the root was named, the frame was anonymous.
+  Match the application by process id (`Atspi.Accessible.get_process_id`).
+- **Expecting AccessKit to appear with AT-SPI off.** `accesskit_unix` only
+  registers when `org.a11y.Status.IsEnabled` (or `ScreenReaderEnabled`)
+  is true. On this COSMIC session both are false unless a screen reader
+  runs. The check script sets `IsEnabled` for the run and restores it.
+- **Flipping the live desktop theme to test the colour-scheme signal.**
+  Unnecessary and intrusive. Run the app under `dbus-run-session` with a
+  small fake `org.freedesktop.portal.Settings` (python `Gio`: `ReadOne`,
+  `Read`, `ReadAll`, `version = 2`, `SettingChanged`).
 
 ### Open TODOs
 
@@ -557,24 +652,27 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
   frame pacing beyond `Wait`/`WaitUntil` are still the walking skeleton's:
   one adapter request. The canvas is CPU-rendered and uploaded; the GPU
   backend is not wired.
-- **`wgpu` validation errors are fatal** (the default error handler
-  panics). Install `Device::on_uncaptured_error` to log and degrade
-  instead, so a driver quirk cannot take the document down with it.
-- **The panels are drawn but inert** until the egui input shim
-  (XARA-US-0002). When it lands, the canvas widget's own navigation
-  (`UiCommand::Pan`/`ZoomAbout`) and the `intents` adapter both see the
-  same wheel: route canvas-region input to exactly one of them.
-- **Live** colour-scheme change notification: the settings portal is read
-  once at start-up. `ashpd` exposes a signal stream; wiring it needs a bus
-  to test against.
-- AccessKit transport (S10/U4.2) is **not wired**. When it is, use
-  `accesskit_winit 0.29.2` (pairs with `accesskit 0.21.1`, which is what
-  `egui 0.33` resolves) and fix the unused `accesskit = "0.25"` line in
-  `[workspace.dependencies]` at the same time. `xarast-shell` has no
-  AccessKit dependency today, so this is an addition, not a migration.
-- The `egui`→`winit` shim (S9/U4.1) is **not written**. It is `xarast-ui`'s
-  boundary as much as the shell's, and it should be built directly on
-  `ShellEvent` rather than on `winit`, so that phase 14 gets it for free.
+- [x] **`wgpu` validation errors are fatal** — no longer: decision 21
+  (XARA-T-0027). Still open: a *lost device* is logged and backed off
+  from, not recreated. Rebuilding `Gpu` (device, surface, painter
+  textures) after `DeviceLost` is the next step if a driver ever does it.
+- [x] **The panels are drawn but inert** — they respond; decision 22
+  (XARA-US-0002). Real mouse and keyboard were not injected on the
+  maintainer's desktop (`ydotool` exists but would type into whatever
+  has focus). The end-to-end tests drive real egui frames headlessly.
+- [x] **Live** colour-scheme change — decision 26 (XARA-US-0004),
+  verified against a fake portal on a private bus. The real COSMIC portal
+  was not flipped.
+- [x] AccessKit transport (S10/U4.2) — decision 25 (XARA-US-0003),
+  verified with a real AT-SPI client (`gi.Atspi`): 39 nodes, 29 labelled,
+  and an AT-SPI `click` on "Hide layer Main layer" came back as "Show
+  layer Main layer". **The audible Orca pass is still to do by hand**
+  (Orca is installed, but running it speaks on the desktop and writes
+  its settings).
+- [x] The `egui` shim (S9/U4.1) — `egui_input`, on `ShellEvent`.
+- Cursor shapes and the IME caret area are wired but unmeasured on
+  COSMIC; the first text tool (phase 9) should check the candidate window
+  position at 1.25×.
 - [x] **Bridge `ShellEvent` to `xarast_app::Intent`** — `intents.rs`,
   decision 18 (XARA-T-0001).
 - X11 pressure via `octotablet` remains deferred; X11 is a documented
