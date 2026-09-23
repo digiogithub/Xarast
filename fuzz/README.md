@@ -1,10 +1,11 @@
 # Fuzzing
 
-Eleven `cargo-fuzz` targets, in their own workspace so that the main one
+Thirteen `cargo-fuzz` targets, in their own workspace so that the main one
 stays on stable. Six cover the `.xar` importer — a legacy binary format
 parser is attack surface, so fuzzing is part of Phase 3 rather than a
-follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — and five cover
-the geometry, render and document-model layers the importer feeds.
+follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — five cover
+the geometry, render and document-model layers the importer feeds, and two
+cover the native `.xarast` container (Phase 6).
 
 | Target | Crate | What it drives |
 |---|---|---|
@@ -19,6 +20,8 @@ the geometry, render and document-model layers the importer feeds.
 | `fuzz_display_list` | `xarast-render` | scenes through `DisplayList::build` and the CPU backend |
 | `fuzz_ramp` | `xarast-render` | ramp tables, profiles, gradient evaluation |
 | `fuzz_doc_builder` | `xarast-doc` | arbitrary build scripts: "valid or nothing" |
+| `fuzz_xarast_open` | `xarast-format` | `XarastReader::open`, every read path, and a re-save of whatever opens |
+| `fuzz_xarast_manifest` | `xarast-format` | the manifest parser and its write–parse fixed point |
 
 The five structured targets take their input through `arbitrary`; the
 helpers they share are in `fuzz_targets/common.rs`.
@@ -30,7 +33,17 @@ cargo +nightly fuzz run -O fuzz_svg_path_parse -- -max_total_time=600 \
     -dict=dicts/svg_path_parse.dict
 ```
 
-Any other target runs the same way. A local run should pass a scratch
+Any other target runs the same way. The `.xarast` targets have no
+committed seeds (everything under `corpus/` must be a seed that
+`crates/xarast-xar/tests/fuzz_seeds.rs` generates, and that test fails on
+anything else). Write them to a scratch directory first; CI writes them to
+`corpus/` because it runs no tests afterwards:
+
+```sh
+cargo run -p xarast-format --example fuzz_seeds -- /tmp/xarast-seeds
+cargo +nightly fuzz run -O fuzz_xarast_open /tmp/grown /tmp/xarast-seeds/fuzz_xarast_open \
+    -- -dict=dicts/xarast_open.dict
+``` A local run should pass a scratch
 directory as the *first* corpus argument, so that what the fuzzer
 discovers never lands in `corpus/`:
 

@@ -45,6 +45,8 @@ jobs:
           - fuzz_display_list
           - fuzz_ramp
           - fuzz_doc_builder
+          - fuzz_xarast_open
+          - fuzz_xarast_manifest
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +73,14 @@ jobs:
           path: fuzz/grown/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
           restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # The `.xarast` seeds are generated, not committed: every file under
+      # fuzz/corpus/ must be one `crates/xarast-xar/tests/fuzz_seeds.rs`
+      # generates. The example writes packages and manifests built from
+      # scratch by the crate's own writer.
+      - name: Generate the .xarast seeds
+        if: startsWith(matrix.target, 'fuzz_xarast_')
+        run: cargo run --release -p xarast-format --example fuzz_seeds -- fuzz/corpus
 
       - name: Build
         working-directory: fuzz
