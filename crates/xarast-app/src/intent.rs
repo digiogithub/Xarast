@@ -169,6 +169,37 @@ pub enum Intent {
     SetQuality(xarast_render::RenderQuality),
     /// Throw away every cached pixel and rebuild the scene.
     InvalidateAll,
+
+    // ── the application ───────────────────────────────────────────────
+    //
+    // These act on the set of open documents or on the platform rather
+    // than on the active document, so `AppState::apply` handles them and a
+    // `Session` ignores them. The platform ones (`ShowOpenDialog`, `Quit`)
+    // are queued as `PlatformRequest`s for the shell to carry out: the core
+    // never shows a dialog or ends the process itself.
+    /// Ask the platform for a file to open (File › Open…). The answer, if
+    /// the user picks something, comes back as [`Intent::OpenFile`].
+    ShowOpenDialog,
+    /// Open a file, replacing the current document. A file that fails to
+    /// open leaves the current document where it was.
+    OpenFile(std::path::PathBuf),
+    /// Close the active document.
+    CloseDocument,
+    /// Forget the recently opened files.
+    ClearRecent,
+    /// End the application.
+    Quit,
+}
+
+/// Something only the platform layer can do, queued by
+/// [`crate::AppState::apply`] and carried out by the shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlatformRequest {
+    /// Show a file chooser for opening a document.
+    ShowOpenDialog,
+    /// End the application.
+    Quit,
 }
 
 bitflags::bitflags! {
@@ -193,6 +224,9 @@ bitflags::bitflags! {
         const UI = 1 << 3;
         /// Every cached pixel is stale.
         const CACHE = 1 << 4;
+        /// A different document (or none) has the canvas: the caller
+        /// re-titles the window, re-sizes the new view and frames it.
+        const ACTIVE = 1 << 5;
     }
 }
 

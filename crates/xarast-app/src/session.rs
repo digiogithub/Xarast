@@ -629,6 +629,13 @@ impl Session {
                 self.walker.reset();
                 changed |= Changed::CACHE | Changed::DOCUMENT;
             }
+            // Application-level: `AppState::apply` handles these before a
+            // session ever sees them.
+            Intent::ShowOpenDialog
+            | Intent::OpenFile(_)
+            | Intent::CloseDocument
+            | Intent::ClearRecent
+            | Intent::Quit => {}
         }
         if changed.needs_scene() {
             self.dirty.invalidate(self.viewport.size());

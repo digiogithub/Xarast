@@ -15,6 +15,8 @@
 //! | [`viewport`] | [`Viewport`]: the document↔screen transform, pan, zoom, fits, scroll bounds |
 //! | [`walker`] | [`SceneWalker`]: the arena→[`Scene`](xarast_render::Scene) walk, which is the seam the architecture puts here so that the renderer never sees a node |
 //! | [`session`] | [`Session`]: a document, its edit state, its view, its history and its dirty tracking |
+//! | [`command`] | [`AppCommand`]: the command table the menus draw and the shell binds keys from |
+//! | [`recent`] | [`RecentFiles`]: the recently opened files and their store |
 //! | [`render_thread`] | [`RenderThread`]: the one channel to the render thread — [`RenderRequest`], generations, supersession and cancellation |
 //!
 //! # The contract the shell and the UI build against
@@ -61,6 +63,7 @@
 #![doc(html_no_source)]
 
 pub mod app;
+pub mod command;
 pub mod commands;
 pub mod edit;
 pub mod geometry;
@@ -68,6 +71,7 @@ pub mod headless;
 pub mod intent;
 mod paint;
 pub mod prefs;
+pub mod recent;
 pub mod render_thread;
 mod reuse;
 pub mod schedule;
@@ -76,11 +80,13 @@ pub mod viewport;
 pub mod walker;
 
 pub use app::{AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, Severity};
+pub use command::{AppCommand, ChordKey, KeyChord};
 pub use edit::{ControlPoints, EditState, Modifiers, SelectMode, ToolId, ToolState};
 pub use geometry::{DevicePoint, DeviceSize, DocPoint, DocPointF, DocRect};
 pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult, render_to_png};
-pub use intent::{Changed, Intent, PointerButton, PointerSample};
+pub use intent::{Changed, Intent, PlatformRequest, PointerButton, PointerSample};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
+pub use recent::RecentFiles;
 pub use render_thread::{
     FINAL_COLUMNS, FrameJob, FrameRenderer, FrameReuse, MIN_COLUMN_WIDTH, RenderRequest,
     RenderStats, RenderThread, RenderedFrame,

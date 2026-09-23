@@ -5,10 +5,11 @@
 //! thread and is never shared: the render thread gets an immutable
 //! display list, never this (architecture §5).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::intent::{Changed, Intent};
+use crate::intent::{Changed, Intent, PlatformRequest};
 use crate::prefs::Preferences;
+use crate::recent::RecentFiles;
 use crate::session::{DocumentId, Session, SessionError};
 
 /// How serious a diagnostic is.
@@ -161,7 +162,12 @@ pub struct AppState {
     /// The non-modal problem list.
     pub diagnostics: DiagnosticLog,
     /// Recently opened files, newest first.
-    pub recent: Vec<std::path::PathBuf>,
+    pub recent: RecentFiles,
+    /// Where [`AppState::recent`] is persisted; `None` keeps it in memory
+    /// (tests, probes, a system with no home directory).
+    recent_store: Option<PathBuf>,
+    /// What the platform layer has been asked to do and has not done yet.
+    requests: Vec<PlatformRequest>,
 }
 
 impl AppState {
@@ -173,8 +179,28 @@ impl AppState {
             active: None,
             prefs: Preferences::default(),
             diagnostics: DiagnosticLog::with_limit(1000),
-            recent: Vec::new(),
+            recent: RecentFiles::new(),
+            recent_store: None,
+            requests: Vec::new(),
         }
+    }
+
+    /// Keeps the recent-files list in `file`, loading what is there now
+    /// and dropping entries whose files have gone. A missing or corrupt
+    /// file is an empty list.
+    #[must_use]
+    pub fn with_recent_store(mut self, file: PathBuf) -> AppState {
+        self.recent = RecentFiles::load(&file);
+        self.recent_store = Some(file);
+        if self.recent.prune_missing() > 0 {
+            self.save_recent();
+        }
+        self
+    }
+
+    /// Takes the requests the platform layer owes, oldest first.
+    pub fn take_requests(&mut self) -> Vec<PlatformRequest> {
+        std::mem::take(&mut self.requests)
     }
 
     /// The document with the canvas.
@@ -258,15 +284,88 @@ impl AppState {
     ///
     /// Whatever the session returns.
     pub fn apply(&mut self, intent: Intent) -> Result<Changed, SessionError> {
-        match self.active_mut() {
-            Some(s) => s.apply(intent),
-            None => Ok(Changed::empty()),
+        match intent {
+            Intent::ShowOpenDialog => {
+                self.requests.push(PlatformRequest::ShowOpenDialog);
+                Ok(Changed::empty())
+            }
+            Intent::Quit => {
+                self.requests.push(PlatformRequest::Quit);
+                Ok(Changed::empty())
+            }
+            Intent::OpenFile(path) => self.open_replacing(&path),
+            Intent::CloseDocument => {
+                let closed = self.active.is_some_and(|id| self.close(id));
+                Ok(if closed {
+                    Changed::ACTIVE | Changed::UI
+                } else {
+                    Changed::empty()
+                })
+            }
+            Intent::ClearRecent => {
+                self.recent.clear();
+                self.save_recent();
+                Ok(Changed::UI)
+            }
+            intent => match self.active_mut() {
+                Some(s) => s.apply(intent),
+                None => Ok(Changed::empty()),
+            },
+        }
+    }
+
+    /// Opens `path` as the only document (the single-document model of
+    /// the first usable viewer). The documents open before are closed
+    /// only once the new one has opened, so a file that fails to open
+    /// leaves the current one on screen; the failure is in the problem
+    /// list and in the returned error. A path that fails is also dropped
+    /// from the recent files, since picking it again cannot work.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Session::open`] returns.
+    pub fn open_replacing(&mut self, path: &Path) -> Result<Changed, SessionError> {
+        match self.open(path) {
+            Ok(id) => {
+                let others: Vec<DocumentId> = self
+                    .docs
+                    .iter()
+                    .map(|s| s.id)
+                    .filter(|d| *d != id)
+                    .collect();
+                for d in others {
+                    self.docs.close(d);
+                }
+                self.active = Some(id);
+                Ok(Changed::ACTIVE | Changed::DOCUMENT | Changed::UI | Changed::CACHE)
+            }
+            Err(e) => {
+                if self.recent.forget(path) {
+                    self.save_recent();
+                }
+                Err(e)
+            }
         }
     }
 
     fn remember_recent(&mut self, path: &Path) {
-        self.recent.retain(|p| p != path);
-        self.recent.insert(0, path.to_path_buf());
-        self.recent.truncate(16);
+        self.recent.remember(path);
+        self.save_recent();
+    }
+
+    fn save_recent(&mut self) {
+        let Some(file) = self.recent_store.as_deref() else {
+            return;
+        };
+        if let Err(e) = self.recent.save(file) {
+            self.diagnostics.push(DiagnosticEntry {
+                severity: Severity::Info,
+                message: format!(
+                    "Could not save the recent files list to {}: {e}",
+                    file.display()
+                ),
+                document: None,
+            });
+        }
     }
 }
