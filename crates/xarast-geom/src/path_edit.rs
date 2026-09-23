@@ -291,6 +291,15 @@ fn round(p: kurbo::Point) -> Point {
 }
 
 impl EditPath {
+    /// A node view made of `subpaths`, as a drawing tool builds one.
+    #[must_use]
+    pub fn from_subpaths(subpaths: Vec<EditSubpath>) -> EditPath {
+        EditPath {
+            subpaths,
+            keep_flags: false,
+        }
+    }
+
     /// The node view of a path.
     #[must_use]
     pub fn from_path(path: &Path) -> EditPath {
@@ -391,9 +400,25 @@ impl EditPath {
                 flags.push(f);
             }
         });
-        let any = flags.iter().any(|f| !f.is_empty());
-        if !(any || self.keep_flags) {
-            flags.clear();
+        // A path that came with flags keeps them as they are. One that
+        // came without gets an array only once an edit gives a point a
+        // flag that means something (smooth, auto-placed); every on-curve
+        // point is then marked an endpoint, as the format expects. A new
+        // corner's endpoint mark alone does not create an array, so adding
+        // and deleting a point on a flagless path gives the path back.
+        if !self.keep_flags {
+            let meaningful = flags
+                .iter()
+                .any(|f| !(*f - PointFlags::END_POINT).is_empty());
+            if meaningful {
+                for (f, r) in flags.iter_mut().zip(self.layout()) {
+                    if matches!(r, PointRole::Node(_)) {
+                        *f |= PointFlags::END_POINT;
+                    }
+                }
+            } else {
+                flags.clear();
+            }
         }
         let path = Path::from_parts(verbs, points, flags);
         debug_assert!(path.is_ok(), "{path:?}");
