@@ -693,6 +693,7 @@ impl ToolCtx<'_> {
             self.doc,
             &self.edit.snap,
             self.viewport,
+            self.picker,
             &exclude,
         );
         let (q, hit) = r.snap(p);
@@ -710,6 +711,7 @@ impl ToolCtx<'_> {
             self.doc,
             &self.edit.snap,
             self.viewport,
+            self.picker,
             moving,
         );
         let (d, hit) = r.snap_move(bounds, delta);

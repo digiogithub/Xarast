@@ -278,6 +278,34 @@ fn guides_and_grid_are_undoable_and_survive_a_xarast_round_trip() {
 }
 
 #[test]
+fn object_snap_takes_a_corner_first_and_an_outline_otherwise() {
+    let mut s = Session::new_empty(DocumentId(1));
+    s.dispatch(&Square(0, 0, 60_000)).unwrap();
+    s.dispatch(&Square(200_000, 0, 60_000)).unwrap();
+    let objs: Vec<NodeId> = xarast_app::edit::selectable_objects(&s.doc).collect();
+    let (_, b) = (objs[0], objs[1]);
+    s.apply(Intent::Guides(GuideOp::DeleteAll)).unwrap();
+    s.apply(Intent::ToggleSnap(SnapKind::Object)).unwrap();
+    // Drag B left so its left edge is 2 pt right of A's right edge, 10 pt
+    // up: no corner of A is in reach, A's right edge is.
+    let from = s.viewport.doc_to_device(Point::raw(230_000, 30_000));
+    let at = s.viewport.doc_to_device(Point::raw(92_000, 40_000));
+    down(&mut s, from);
+    to(&mut s, at);
+    up(&mut s, at);
+    let o = origin_of(&s, b);
+    assert_eq!(o.x, Mp::new(60_000), "on A's outline: {o:?}");
+    // Now near A's top-right corner: the corner wins over the edge.
+    let from = s.viewport.doc_to_device(Point::raw(90_000, 40_000));
+    let at = s.viewport.doc_to_device(Point::raw(91_500, 81_000));
+    down(&mut s, from);
+    to(&mut s, at);
+    up(&mut s, at);
+    let o = origin_of(&s, b);
+    assert_eq!(o, Point::raw(60_000, 60_000), "B's corner on A's corner");
+}
+
+#[test]
 fn show_grid_and_guides_toggle_and_hidden_guides_do_not_snap() {
     let mut s = Session::new_empty(DocumentId(1));
     let before = xarast_app::snap::grid_of(&s.doc).visible;

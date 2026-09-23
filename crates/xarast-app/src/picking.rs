@@ -742,6 +742,81 @@ impl Picker {
         })
     }
 
+    /// Where an object snap near `p` lands (`phase-07 §W8`, XARA-T-0153):
+    /// the nearest, within `radius`, of the bounding-box corners, edge
+    /// middles and centres of the leaves near `p`; failing those, the
+    /// nearest point of their painted outlines. Objects whose top-level object is in `exclude` (the ones
+    /// being dragged) are ignored. Goes through the index, so it costs
+    /// the objects near the pointer, not the document.
+    #[must_use]
+    pub fn object_snap(
+        &self,
+        doc: &Document,
+        p: DocPoint,
+        radius: Mp,
+        exclude: &[NodeId],
+    ) -> Option<DocPoint> {
+        self.with(doc, |b| {
+            let skip = |node: NodeId| {
+                b.leaves
+                    .get(&node)
+                    .is_none_or(|l| exclude.contains(&l.top) || exclude.contains(&node))
+            };
+            let r = radius.to_f64().abs();
+            let dist =
+                |q: DocPoint| (q.x.to_f64() - p.x.to_f64()).hypot(q.y.to_f64() - p.y.to_f64());
+            let mid =
+                |a: Mp, c: Mp| Mp::new(((i64::from(a.raw()) + i64::from(c.raw())) / 2) as i32);
+            let mut best: Option<(f64, DocPoint)> = None;
+            for (node, _) in b.index.candidates_at(p, radius) {
+                if skip(node) {
+                    continue;
+                }
+                // The geometry's own box, not the indexed one, which is
+                // widened by the stroke's reach.
+                let bounds = match b.leaves.get(&node).map(|l| &l.geometry) {
+                    Some(Geometry::Path(path)) => path.bounds(),
+                    _ => match b.index.get(node) {
+                        Some((r, _)) => r,
+                        None => continue,
+                    },
+                };
+                for x in [bounds.lo.x, mid(bounds.lo.x, bounds.hi.x), bounds.hi.x] {
+                    for y in [bounds.lo.y, mid(bounds.lo.y, bounds.hi.y), bounds.hi.y] {
+                        let q = DocPoint::new(x, y);
+                        let d = dist(q);
+                        if d <= r && best.is_none_or(|(bd, _)| d < bd) {
+                            best = Some((d, q));
+                        }
+                    }
+                }
+            }
+            // A point beats a line, as magnetic snapping does: the outline
+            // is only a candidate when no corner or centre is in reach
+            // (otherwise the outline, which passes through the corner,
+            // would always be at least as near).
+            if let Some((_, q)) = best {
+                return Some(q);
+            }
+            xarast_geom::nearest_in_index(&b.index, p, radius, |node| {
+                if skip(node) {
+                    return None;
+                }
+                match &b.leaves.get(&node)?.geometry {
+                    Geometry::Path(path) => xarast_geom::nearest_point_transformed(
+                        path,
+                        Matrix::IDENTITY,
+                        p,
+                        radius,
+                        0.5,
+                    ),
+                    Geometry::Bounds => None,
+                }
+            })
+            .map(|(_, n)| n.point)
+        })
+    }
+
     /// The objects a marquee over `rect` selects: every top-level object
     /// whose bounds lie inside it, in paint order.
     #[must_use]

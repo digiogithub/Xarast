@@ -345,6 +345,7 @@ impl<'a> SnapResolver<'a> {
         doc: &'a Document,
         settings: &SnapSettings,
         vp: &Viewport,
+        picker: &'a crate::picking::Picker,
         exclude: &'a [NodeId],
     ) -> SnapResolver<'a> {
         let mut sources: Vec<Box<dyn SnapSource + 'a>> = Vec::new();
@@ -360,7 +361,7 @@ impl<'a> SnapResolver<'a> {
             sources.push(Box::new(g));
         }
         if settings.objects {
-            sources.push(Box::new(ObjectSource::new(doc, exclude)));
+            sources.push(Box::new(ObjectSource::new(doc, picker, exclude)));
         }
         let s = vp.scale();
         let per_px = if s > 0.0 && s.is_finite() {
@@ -520,52 +521,49 @@ fn mid(a: Mp, b: Mp) -> Mp {
     Mp::new(((i64::from(a.raw()) + i64::from(b.raw())).div_euclid(2)) as i32)
 }
 
-/// Snapping to other objects: their bounding-box corners and centres
-/// (`phase-07` reserves the full magnetic snap to outlines, XARA-T-0153).
-#[derive(Debug, Clone, Default)]
-pub struct ObjectSource {
-    points: Vec<DocPoint>,
+/// Snapping to other objects (`research/04` "magnetic snap", XARA-T-0153):
+/// their bounding-box corners, edge middles and centres, or failing those
+/// the nearest point of their painted outlines — found through the pick
+/// index, so a query costs the objects near the pointer.
+#[derive(Debug)]
+pub struct ObjectSource<'a> {
+    doc: &'a Document,
+    picker: &'a crate::picking::Picker,
+    exclude: &'a [NodeId],
 }
 
-impl ObjectSource {
-    /// The snap points of every selectable object except `exclude` (the
-    /// objects being dragged).
+impl<'a> ObjectSource<'a> {
+    /// Every selectable object except `exclude` (the objects being
+    /// dragged).
     #[must_use]
-    pub fn new(doc: &Document, exclude: &[NodeId]) -> ObjectSource {
-        let mut points = Vec::new();
-        for n in crate::edit::selectable_objects(doc) {
-            if exclude.contains(&n) {
-                continue;
-            }
-            let b = crate::viewport::nodes_rect(doc, [n]);
-            if b.is_empty() {
-                continue;
-            }
-            for x in [b.lo.x, mid(b.lo.x, b.hi.x), b.hi.x] {
-                for y in [b.lo.y, mid(b.lo.y, b.hi.y), b.hi.y] {
-                    points.push(DocPoint::new(x, y));
-                }
-            }
+    pub fn new(
+        doc: &'a Document,
+        picker: &'a crate::picking::Picker,
+        exclude: &'a [NodeId],
+    ) -> ObjectSource<'a> {
+        ObjectSource {
+            doc,
+            picker,
+            exclude,
         }
-        ObjectSource { points }
     }
 }
 
-impl SnapSource for ObjectSource {
+impl SnapSource for ObjectSource<'_> {
     fn kind(&self) -> SnapKind {
         SnapKind::Object
     }
 
     fn candidates(&self, near: DocPoint, radius: Mp, out: &mut Vec<SnapCandidate>) {
-        let r = radius.to_f64();
-        for p in &self.points {
-            if (p.x.to_f64() - near.x.to_f64()).hypot(p.y.to_f64() - near.y.to_f64()) <= r {
-                out.push(SnapCandidate {
-                    at: *p,
-                    axis: SnapAxis::Both,
-                    kind: SnapKind::Object,
-                });
-            }
+        if let Some(at) = self
+            .picker
+            .object_snap(self.doc, near, radius, self.exclude)
+        {
+            out.push(SnapCandidate {
+                at,
+                axis: SnapAxis::Both,
+                kind: SnapKind::Object,
+            });
         }
     }
 }
