@@ -128,6 +128,8 @@ scale factor and calls `Intent::SetDpi`.
 | `shapes` | the rectangle and ellipse tools and quick-shape helpers |
 | `tools` | `builtin()`, push, zoom and pending tools |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
+| `structure` | `StructureCommand`/`StructureOp` (group, ungroup, z-order, move-each, duplicate, cut), `ZOrder`, `AlignSpec`, `align_moves`, clipboard fragments (`copy_fragment`, `PasteFragment`, `fragment_svg`, `fragment_from_svg`) |
+| `snap` | `SnapSource`, `SnapResolver`, `SnapSettings`, grid/guide/object sources, `GuideCommand` |
 
 Tests: 13 viewport, 11 session/selection/command, 8 corpus (the 59 real
 `.xar` files, through `XARAST_XAR_CORPUS`, never copied into the
@@ -413,6 +415,14 @@ reason the walker *reports*, which is its own test.
     and `ChooseTool`/`MomentaryTool` switch its tool. A tool may ask for a
     tool change (`ToolRequests::tool`); a `CreateShape` selects what it
     created. `Session` holds a `Picker` invalidated in `after_mutation`.
+13. **New intents (phase 7 round 3):** `Group`, `Ungroup`,
+    `Arrange(ZOrder)`, `Align(AlignSpec)`, `Duplicate`, `Copy`, `Cut`,
+    `Paste { in_place }`, `PasteText { text, in_place }` (the shell's
+    answer), `ToggleSnap`, `ToggleGrid`, `ToggleGuides`, `Guides(GuideOp)`,
+    `ShowDialog(Dialog)`. Copy/Cut/Paste/PasteText/ShowDialog are
+    `AppState`-level; new `PlatformRequest`s `SetClipboardText`,
+    `ReadClipboard`, `ShowDialog`. The session drains
+    `doc.tree.drain_changes()` into its `Picker` in `after_mutation`.
 10. **No two commands share a key chord** (`no_two_commands_share_a_key`),
     and the core never performs a platform action: it queues a
     `PlatformRequest`.

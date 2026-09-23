@@ -28,6 +28,13 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Current attributes | `edit.rs` `CurrentAttributes`, `Intent::SetCurrentAttribute` | done (no UI to set them yet) |
 | Keys | `AppCommand` + shell | as before, plus `3` = Zoom to selection; momentary Space / Alt+S (selector), Alt+Z (zoom), Alt+X (push) |
 | `--probe drag|scale|rotate|rect|ellipse|nodes|pen|freehand` | `xarast-shell` | done |
+| Incremental pick index (journal → re-walk the touched top-level objects) | `picking.rs`, `xarast-doc` `Tree::drain_changes` | done (XARA-T-0168) |
+| Group/ungroup (localise + factor-out), z-order ×6, align/distribute, duplicate, cut | `structure.rs` `StructureCommand` | done (XARA-US-0035) |
+| Clipboard: fragment document + SVG flavour, internal/system paste, paste in place | `structure.rs`, `app.rs` `InternalClipboard`, shell | done |
+| Alignment panel, Arrange menu, Edit/View items | `xarast-ui/src/menus.rs` | done |
+| Snapping: `SnapSource`, resolver, grid, guides, objects (corners, then outlines), NumPad toggles, marker | `snap.rs`, `ToolCtx::snap_point`/`snap_move` | done (XARA-US-0036, T-0153) |
+| Guides/grid as undoable document edits; ruler guides and grid settings wired | `snap.rs` `GuideCommand`, shell `ui_intent` | done |
+| `--probe snap|arrange|paste` | `xarast-shell` | done |
 
 Tests: `crates/xarast-app/tests/transforms.rs` (18: dual state, scale
 corner/aspect/centre, live Ctrl mid-scale, line widths, rotate with
@@ -63,6 +70,17 @@ stroke); geometry proptests in `xarast-geom/tests/path_edit.rs`.
 Live window (GardenPlan.xar, 2056×1286, GPU tiles, 100 frames, input →
 presented p50/p99): nodes 2.9/14.7 ms, pen 3.4/8.9 ms, freehand
 3.2/9.8 ms.
+
+Round 3 (2026-09-23): `bench pick` "undo + first pick after it" 2.26 ms
+per undo+pick+redo+pick (≈1.1 ms per edit and pick; was 62 ms);
+`bench structure`: group 5 000 + undo 10 ms, align+distribute 5 000 +
+undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
+`--probe snap` (grid + guide + object snapping) p50 1.99 / p99 4.22 ms;
+`--probe arrange` p50 2.32 / p99 4.32 ms; `--probe paste` (isolated GNOME
+46 session, 939×708) p50 2.45 / p99 3.25 ms. Tests: `tests/structure.rs`
+(10), `tests/structure_corpus.rs` (41 files), `tests/snapping.rs` (6),
+`tests/picking.rs` (+1), `snap.rs` unit (4), `xarast-geom/tests/nearest.rs`
+(3), `xarast-doc` journal and move-cost tests.
 
 ## Decisions taken (and why)
 
@@ -221,6 +239,91 @@ presented p50/p99): nodes 2.9/14.7 ms, pen 3.4/8.9 ms, freehand
     a drag starts, so the fitter sees every sample (other tools ignore
     the extra updates). The preview fits in chunks of 96 samples (frozen
     prefix + bounded tail); the release refits the whole stroke.
+37. **Incremental pick index** (XARA-T-0168). `Action::apply` journals
+    `(node, parent-at-the-time)` into the tree; the session drains it into
+    the picker after every mutation (undo/redo included) and the next pick
+    removes and re-walks only the touched *top-level objects* (layer
+    children). Z is per top: `key + leaf ordinal`, tops `2^24` apart, new
+    keys halve the gap to the nearest indexed neighbour. Rebuilds instead
+    on: journal overflow (2^16 entries, a fresh tree, a resource change),
+    any layer/spread change (visibility and lock included), a loose
+    layer-level attribute change, > ¼ of the tops touched, no key left, or
+    a layer with no indexed object yet. Undo + first pick at 100k objects
+    1.1 ms the pair (was a 62 ms rebuild).
+38. **Structure operations move through one primitive** (`structure.rs`):
+    inherited-before → move → inherited-after → an attribute child per
+    differing slot (`localise`); grouping then `factor_out`s leading
+    attributes every member sets identically. No normalisation after other
+    edits (`research/02 §10.6`). Multi attributes are not materialised.
+    Group goes right above the topmost member; ungroup puts members where
+    the group was, so group∘ungroup of a contiguous run restores z-order
+    (41 corpus files pixel-identical, `tests/structure_corpus.rs`).
+39. **Send to back goes after the parent's leading attributes**; forward/
+    backward skip attribute siblings; layer up/down go to the top of the
+    next *editable* layer of the same spread. An operation with nothing to
+    do returns `structure::NOTHING_TO_DO`, rolled back: no empty undo step.
+40. **A move is not charged as a deletion** (`Tx::move_node`): the detach
+    used to charge the whole subtree to the 128 MiB budget, so grouping a
+    large drawing evicted its own undo step (dead end found on
+    `ProbeX16.xar`).
+41. **Clipboard.** Copy = `copy_fragment`: a new `Document` (source
+    defaults and resources cloned) holding self-contained copies, kept in
+    `AppState` as `InternalClipboard { fragment, svg }`; the shell puts the
+    `.xarast` SVG profile on the system clipboard **as text** — `arboard`
+    has no custom MIME types, so `image/svg+xml` is not offered (task
+    filed). Paste asks the shell (`PlatformRequest::ReadClipboard`); the
+    answer `Intent::PasteText` pastes our fragment when the text is our SVG
+    or there is no clipboard (`None`), else reads the text as SVG; other
+    text → a diagnostic. Plain paste centres in the view, paste in place
+    keeps coordinates; pasted objects go on the active layer, selected.
+    Across documents palette references are resolved to direct colours
+    unless the target palette has the identical entry; bitmaps are
+    imported (dedup by content, outside undo — unreferenced ones are swept).
+    Measured in an isolated GNOME session: `read=Ok(12046) ours=true`; the
+    text does not outlive the process there (no clipboard manager).
+42. **Duplicate** copies each object right above itself (so it inherits
+    what the original does) and offsets by `DUPLICATE_OFFSET` (10 pt
+    right, 10 pt down, provisional).
+43. **Snapping belongs to the gesture**: tools call
+    `ToolCtx::snap_point(p)` (creation corners, scale blob, rotation
+    centre) or `snap_move(nodes, bounds, delta)` (a move: nine anchors,
+    smallest correction per axis; not while Constrain holds). Per axis
+    nearest wins, ties by priority guide > object > grid; object
+    candidates are points, a point candidate wins over an axis pair at
+    least as far. Radius 8 device px (provisional). Grid lines every
+    `spacing / subdivisions`, integer-exact. Object snap = the picker's
+    `object_snap`: corners/edge middles/centres of leaves near the pointer,
+    failing those the nearest outline point (XARA-T-0153); it goes through
+    the index (a first version walked every object per frame).
+44. **Switches are session state** (`EditState::snap`, default: guides on,
+    grid and objects off). `Intent::ToggleSnap` re-delivers the last
+    pointer as a modifiers change, so a mid-drag toggle re-evaluates at
+    once. Guides and the grid are **document** state: `GuideCommand`
+    (Add/Move/Delete/DeleteAll/SetGrid) is undoable and survives `.xarast`
+    save/reopen; Show guides = the guide layer's visibility (hidden guides
+    do not snap). The snap marker is `HandleShape::Snap` while dragging.
+
+### Shortcuts added (`research/04 §4.2–4.4`)
+
+| Keys | Command | Note |
+|---|---|---|
+| Ctrl+X / Ctrl+C / Ctrl+V | Cut / Copy / Paste | Backspace, Shift+Del, Ctrl+Ins, Ins, Shift+Ins not bound |
+| Ctrl+Shift+V | Paste in place | |
+| Ctrl+D | Duplicate | Ctrl+K (clone) not implemented |
+| Ctrl+G / Ctrl+U | Group / Ungroup | |
+| Ctrl+F / Ctrl+B | Bring to front / Send to back | |
+| Ctrl+Shift+F / Ctrl+Shift+B | Forward / Backward one | |
+| Ctrl+Shift+U / Ctrl+Shift+D | Layer up / down | |
+| Ctrl+Shift+L | Alignment panel | |
+| NumPad . / NumPad 2 / NumPad * | Snap to grid / guides / objects | work mid-drag (`works_in_drag`) |
+| `#` | Show grid | |
+| NumPad 1 | Show guides | keypad only (`ChordKey::NumPad`), so `1` stays 100 % |
+
+Clashes: none with the path tools' plain L/C/S/Z/B/J/Enter, Backspace and
+Ctrl+Shift+S (XARA-US-0034), checked by `no_two_commands_share_a_key`.
+Known ones stay: Ctrl+Shift+Z is Redo (original: zoom
+to selection, here `3`); `<`/`>` for undo/redo not bound. Ctrl+D is
+duplicate while plain `D` is fit drawing — different chords.
 
 ## Provisional values (observe in the VM before trusting)
 
@@ -267,9 +370,14 @@ presented p50/p99): nodes 2.9/14.7 ms, pen 3.4/8.9 ms, freehand
 
 ## Open TODOs
 
-- [ ] **Incremental pick index** (`set_bounds`/`insert`/`remove` per
-      committed transaction) to remove the 62 ms rebuild on the first
-      click after an edit at 100k objects. Image alpha picking.
+- [x] **Incremental pick index** (decision 37). Image alpha picking
+      is still open.
+- [ ] `image/svg+xml` and PNG flavours on the clipboard (needs a
+      data-control / X11 selection writer beside `arboard`), pasting
+      images; Inkscape paste checked manually per release.
+- [ ] Guide properties dialog; Delete all guides has no menu item yet;
+      snapping of the shape editor's nodes (W6) and of guide drags.
+- [ ] Clone (Ctrl+K), duplicate-offset preference, Paste attributes.
 - [ ] Phantom-node preview (a filled shape while drawing) needs walker
       support (`Preview::phantom`).
 - [ ] Constrain+Adjust while drawing is "square from the centre" here; the

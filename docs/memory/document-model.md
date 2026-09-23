@@ -401,6 +401,20 @@ Two things Phase 3 was asked to check against the corpus, **now answered**
   one of those records occurs in any of the 59 files. Leave it open until a
   file that uses them turns up; nothing renders them yet.
 
+## Round 3 additions (phase 7, 2026-09-23)
+
+- **Change journal.** `Tree` keeps `ChangeLog { changes: Vec<TreeChange
+  { node, parent }>, overflowed }`, appended by every `Action::apply`
+  (forward, undo, redo, rollback), never by the builder. A new tree starts
+  overflowed; > 2^16 entries or a resource change overflow it.
+  `drain_changes()` is not an edit (digest unchanged).
+- **`resolve_inherited(tree, id, defaults)`**: the attribute state just
+  before `id` (without its own children), returned as an open `AttrStack`.
+- **`FillGeometry::for_each_value_mut` / `bitmap_mut`** for remapping
+  colours and bitmaps between documents.
+- **`Tx::move_node` charges `size_of::<Action>()`**, not the subtree: a
+  move retains nothing.
+
 ## Invariants that must not be broken
 
 The twelve from `research/02 §10.16`, each with a matching `Invariant` variant

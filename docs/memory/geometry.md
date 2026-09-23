@@ -466,6 +466,13 @@ rejections and widen the search lazily.
   - deleted leaves → `remove`;
   - z-order edits → `set_z`.
 
+  **As built (XARA-T-0168):** the app keys z per *top-level object*
+  (`key + leaf ordinal`, tops `2^24` apart) rather than `rank << 16` per
+  leaf, and re-inserts a touched object's leaves rather than calling
+  `set_z`/`set_bounds` leaf by leaf; the tree's change journal
+  (`Tree::drain_changes`) says what was touched. See `tools.md` decision
+  37.
+
   Group and ungroup change no leaf's bounds or z. A live drag preview
   changes nothing in the index; the selection is already known while
   dragging.
@@ -720,9 +727,13 @@ flattener should go.
   test reduces it modulo the period because `kurbo` walks the offset one
   element at a time; the renderer's path does not, so a hostile offset of
   2^30 with a 1 mp pattern is slow there. Same fix, one line.
-- **Nearest point on a path for snapping** (phase 7 W8): `nearest_point`
-  exists and is exact per segment, but snapping needs it through
-  `HitIndex` candidates with a transform. Filed as XARA-T-0153.
+- ~~Nearest point on a path for snapping through `HitIndex` with a
+  transform (XARA-T-0153).~~ **Done 2026-09-23:**
+  `nearest_point_transformed(path, m, p, radius, accuracy)` transforms
+  the control points in `f64` first and skips segments whose transformed
+  control box is out of reach; `nearest_in_index(index, p, radius,
+  measure)` takes the closest over `candidates_at`. `xarast-app`'s object
+  snap uses both (`tests/nearest.rs`).
 - **Precise marquee touch** (geometry, not bounds, meeting the rectangle)
   is not provided; the marquee is on bounds, as the phase document
   specifies. A `rect_touches` built on the disc test's band machinery
