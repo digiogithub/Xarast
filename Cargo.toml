@@ -45,7 +45,11 @@ imbl = "7.0"
 # `xarast-format/tests/container.rs::deterministic_bytes_are_pinned`.
 # Other crates (`png`, `usvg`) may still ask for `rust_backend`; that only
 # compiles `miniz_oxide`, it does not select it.
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+# `runtime_detection` is not optional: without it zlib-rs runs its scalar
+# paths, and inflating `.xar` blocks was ~50 % slower than on miniz_oxide
+# (ProbeX16 parse 176 ms vs 112 ms). With it the import is at parity, and
+# the pinned bytes are the same as the scalar build's.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 
 # SHA-256: corpus lock verification in tests, `Document::canonical_digest()`
 # and content-hash deduplication of bitmap resources. RustCrypto,
