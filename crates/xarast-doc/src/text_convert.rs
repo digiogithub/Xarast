@@ -20,6 +20,9 @@
 //!   rule is even-odd gets an explicit non-zero one;
 //! * the story's own attributes that have no slot (an object name, say)
 //!   move to the group;
+//! * a story on a path keeps the path it followed, as the group's first
+//!   child (under the text), with the attributes it painted with: the
+//!   curve stays editable and, when it had a colour, visible;
 //! * the story is deleted, retained by the undo step.
 //!
 //! Text attributes (typeface, size, tracking, …) mean nothing to a path
@@ -29,8 +32,8 @@ use std::sync::Arc;
 
 use xarast_geom::{FillRule, Path};
 
-use crate::attr::resolve_inherited;
 use crate::attr::{ALL_ATTR_SLOTS, AttrNode, AttrSlot, AttrValue, ResolvedAttrs};
+use crate::attr::{resolve_inherited, resolve_uncached};
 use crate::history::{EditError, Tx};
 use crate::kind::{GroupNode, NodeKind, PathNode};
 use crate::tree::{Attach, NodeId};
@@ -113,6 +116,32 @@ pub fn convert_story_to_shapes(
         })
         .collect();
 
+    // The path a story on a path follows: its first path child, painted
+    // with the story's attributes before it and its own.
+    let on_path = matches!(
+        doc.tree.kind(story),
+        Some(NodeKind::TextStory(s)) if matches!(s.layout, crate::TextLayout::OnPath { .. })
+    );
+    let followed: Option<(PathNode, Vec<AttrValue>)> = if on_path {
+        doc.tree
+            .children(story)
+            .find_map(|c| match doc.tree.kind(c) {
+                Some(NodeKind::Path(p)) => {
+                    let own = resolve_uncached(&doc.tree, c, &doc.defaults);
+                    let attrs = ALL_ATTR_SLOTS
+                        .iter()
+                        .filter(|s| !is_text_slot(**s))
+                        .filter(|&&s| own.get(s) != inherited.get(s))
+                        .map(|&s| own.get(s).clone())
+                        .collect();
+                    Some(((**p).clone(), attrs))
+                }
+                _ => None,
+            })
+    } else {
+        None
+    };
+
     let group = tx.create(NodeKind::Group(Box::new(GroupNode {
         source_text: Some(Arc::from(source)),
         ..GroupNode::default()
@@ -121,6 +150,14 @@ pub fn convert_story_to_shapes(
     for v in slotless {
         let a = tx.create(NodeKind::Attr(Box::new(AttrNode::new(v))))?;
         tx.attach(a, group, Attach::LastChild)?;
+    }
+    if let Some((node, attrs)) = followed {
+        let path = tx.create(NodeKind::Path(Box::new(node)))?;
+        tx.attach(path, group, Attach::LastChild)?;
+        for v in attrs {
+            let a = tx.create(NodeKind::Attr(Box::new(AttrNode::new(v))))?;
+            tx.attach(a, path, Attach::LastChild)?;
+        }
     }
     for (run, attrs) in runs.iter().zip(per_run) {
         let path = tx.create(NodeKind::Path(Box::new(PathNode {
