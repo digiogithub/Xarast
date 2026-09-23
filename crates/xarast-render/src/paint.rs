@@ -108,6 +108,62 @@ pub enum MappingKind {
 /// Both mapping kinds, for the coverage matrix.
 pub const ALL_MAPPINGS: [MappingKind; 2] = [MappingKind::Affine, MappingKind::Perspective];
 
+/// A mapping's inverse, computed once: [`GradMapping::to_frame`] without
+/// the per-point matrix inversion. The arithmetic per point is the same,
+/// so the results are bit-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameMap {
+    m: Mat3,
+    /// The bottom row is `(0, 0, w)`: the projective divisor is the same
+    /// constant at every finite point.
+    affine: bool,
+    /// ...and that constant is exactly one, so dividing by it is the
+    /// identity.
+    unit: bool,
+}
+
+impl FrameMap {
+    fn new(m: Mat3) -> FrameMap {
+        let affine = m.0[6] == 0.0 && m.0[7] == 0.0;
+        FrameMap {
+            m,
+            affine,
+            unit: affine && m.0[8] == 1.0,
+        }
+    }
+
+    /// Maps a device point into the `(u, v)` frame, or `None` behind the
+    /// horizon of a projective mapping.
+    #[must_use]
+    pub fn apply(&self, p: Point64) -> Option<(f64, f64)> {
+        self.m.apply(p)
+    }
+
+    /// A scalar gradient's parameter at a device point, as [`grad_param`].
+    ///
+    /// A linear gradient only needs `u`, and an affine frame's divisor is a
+    /// constant (`0·x + 0·y + w` is exactly `w` at a finite point), so that
+    /// case skips the second coordinate and, when `w` is one, the division
+    /// as well: it runs per pixel. The expression for `u` is unchanged, so
+    /// the value is too.
+    #[must_use]
+    pub fn param(&self, shape: GradShape, p: Point64) -> Option<f64> {
+        if shape == GradShape::Linear && self.affine && p.x.is_finite() && p.y.is_finite() {
+            let m = &self.m.0;
+            let u = m[0] * p.x + m[1] * p.y + m[2];
+            if self.unit {
+                return Some(u);
+            }
+            let w = m[8];
+            if !w.is_finite() || w.abs() < 1e-12 {
+                return None;
+            }
+            return Some(u / w);
+        }
+        shape_param(shape, self.apply(p)?)
+    }
+}
+
 /// A 3×3 projective matrix, only ever used for perspective mappings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Mat3([f64; 9]);
@@ -230,6 +286,13 @@ impl GradMapping {
         }
     }
 
+    /// The device-to-frame map, inverted once, for evaluating many points.
+    /// `None` when the mapping is degenerate.
+    #[must_use]
+    pub fn frame_map(self) -> Option<FrameMap> {
+        self.inverse().map(FrameMap::new)
+    }
+
     /// Maps a device point into the `(u, v)` frame, or `None` if the
     /// mapping is degenerate or the point is behind the horizon of a
     /// projective one.
@@ -288,12 +351,55 @@ pub fn apply_repeat(s: f64, repeat: Repeat) -> f64 {
     }
     match repeat {
         Repeat::Simple => s.clamp(0.0, 1.0),
-        Repeat::Repeat | Repeat::RepeatHq => s.rem_euclid(1.0),
+        Repeat::Repeat | Repeat::RepeatHq => rem_euclid_pow2(s, 1.0),
         Repeat::Mirror => {
-            let m = s.rem_euclid(2.0);
+            let m = rem_euclid_pow2(s, 2.0);
             if m > 1.0 { 2.0 - m } else { m }
         }
     }
+}
+
+/// `s.rem_euclid(d)` for a finite `s` and `d` of 1 or 2, without the libm
+/// `fmod` call the standard library makes: this runs once per pixel of
+/// every repeating gradient. Both steps are exact — dividing by a power of
+/// two, and subtracting a number's whole part from it below 2^53 — so the
+/// result is the same bits, the sign of a zero included.
+#[inline(always)]
+fn rem_euclid_pow2(s: f64, d: f64) -> f64 {
+    const EXACT: f64 = 9_007_199_254_740_992.0; // 2^53
+    let r = if s.abs() < EXACT {
+        let q = s / d;
+        // `as` truncates toward zero, as `fmod`'s quotient does.
+        let r = s - (q as i64) as f64 * d;
+        if r == 0.0 { 0.0f64.copysign(s) } else { r }
+    } else {
+        // Every double from 2^53 up is a multiple of two.
+        0.0f64.copysign(s)
+    };
+    if r < 0.0 { r + d } else { r }
+}
+
+/// `(v * (len - 1)).round().clamp(0, len - 1) as usize`: the ramp index for
+/// a parameter, without the libm `round` call the baseline x86-64 target
+/// makes (it has no SSE4.1). Same result for every input, NaN included.
+#[inline]
+#[must_use]
+pub fn ramp_index(v: f64, len: usize) -> usize {
+    let max = len.saturating_sub(1);
+    let x = v * max as f64;
+    if x.is_nan() || x <= 0.0 {
+        return 0;
+    }
+    if x >= max as f64 {
+        return max;
+    }
+    // 0 < x < max < 2^52: truncation and the fraction are exact, and
+    // rounding half away from zero is "up when the fraction is a half".
+    // `i64`, not `u64`: x86-64 converts a double to a signed integer in
+    // one instruction and to an unsigned one in a branchy sequence.
+    let t = x as i64;
+    let up = x - t as f64 >= 0.5;
+    (t as usize + usize::from(up)).min(max)
 }
 
 /// Evaluates a scalar gradient shape at a device point, before the repeat
@@ -302,7 +408,11 @@ pub fn apply_repeat(s: f64, repeat: Repeat) -> f64 {
 /// Returns `None` for a mesh shape or a degenerate mapping.
 #[must_use]
 pub fn grad_param(shape: GradShape, mapping: GradMapping, p: Point64) -> Option<f64> {
-    let (u, v) = mapping.to_frame(p)?;
+    shape_param(shape, mapping.to_frame(p)?)
+}
+
+/// A gradient shape's parameter at a point of its `(u, v)` frame.
+fn shape_param(shape: GradShape, (u, v): (f64, f64)) -> Option<f64> {
     Some(match shape {
         GradShape::Linear => u,
         GradShape::Radial => (u * u + v * v).sqrt(),
@@ -657,92 +767,141 @@ fn lerp_rgba(a: Rgba8, b: Rgba8, t: f64) -> Rgba8 {
 /// must not take the renderer down.
 #[must_use]
 pub fn eval_paint(paint: &Paint, ramps: &RampCache, images: &ImageRegistry, p: Point64) -> Rgba8 {
-    match paint {
-        Paint::Solid(c) => *c,
-        Paint::Gradient {
-            shape,
-            mapping,
-            repeat,
-            ramp,
-        } => match ramp {
-            GradRamp::Table(id) => {
-                let Some(table) = ramps.try_get(*id) else {
-                    return Rgba8::TRANSPARENT;
-                };
-                let Some(s) = grad_param(*shape, *mapping, p) else {
-                    return Rgba8::TRANSPARENT;
-                };
-                let s = apply_repeat(s, *repeat);
-                let idx = (s * (table.len() - 1) as f64).round();
-                let idx = (idx.clamp(0.0, (table.len() - 1) as f64)) as usize;
-                table[idx]
-            }
-            GradRamp::Mesh3(c) => {
-                let Some((u, v)) = mapping.to_frame(p) else {
-                    return Rgba8::TRANSPARENT;
-                };
-                let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-                let w0 = (1.0 - u - v).max(0.0);
-                let sum = w0 + u + v;
-                if sum <= 0.0 {
-                    return c[0];
-                }
-                let ch = |f: fn(&Rgba8) -> u8| -> u8 {
-                    ((w0 * f64::from(f(&c[0])) + u * f64::from(f(&c[1])) + v * f64::from(f(&c[2])))
-                        / sum)
-                        .round()
-                        .clamp(0.0, 255.0) as u8
-                };
-                Rgba8 {
-                    r: ch(|c| c.r),
-                    g: ch(|c| c.g),
-                    b: ch(|c| c.b),
-                    a: ch(|c| c.a),
-                }
-            }
-            GradRamp::Mesh4(c) => {
-                let Some((u, v)) = mapping.to_frame(p) else {
-                    return Rgba8::TRANSPARENT;
-                };
-                let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-                let top = lerp_rgba(c[0], c[1], u);
-                let bottom = lerp_rgba(c[2], c[3], u);
-                lerp_rgba(top, bottom, v)
-            }
-        },
-        Paint::Image {
+    PaintSampler::new(paint, ramps, images).sample(p)
+}
+
+/// A paint readied for evaluation at many points: the mapping inverted, the
+/// ramp table and the image looked up, once per primitive instead of once
+/// per pixel. [`eval_paint`] is this with one point, so the two cannot
+/// drift apart.
+#[derive(Debug, Clone, Copy)]
+pub struct PaintSampler<'a> {
+    paint: &'a Paint,
+    /// The frame map, `None` for a degenerate mapping or a mapless paint.
+    frame: Option<FrameMap>,
+    /// The ramp table of a table gradient.
+    table: Option<&'a [Rgba8]>,
+    /// The image of an image fill.
+    image: Option<&'a ImageRef>,
+}
+
+impl<'a> PaintSampler<'a> {
+    /// Readies a paint.
+    #[must_use]
+    pub fn new(
+        paint: &'a Paint,
+        ramps: &'a RampCache,
+        images: &'a ImageRegistry,
+    ) -> PaintSampler<'a> {
+        let (frame, table, image) = match paint {
+            Paint::Solid(_) | Paint::Fractal(_) => (None, None, None),
+            Paint::Gradient { mapping, ramp, .. } => (
+                mapping.frame_map(),
+                match ramp {
+                    GradRamp::Table(id) => ramps.try_get(*id),
+                    _ => None,
+                },
+                None,
+            ),
+            Paint::Image { image, mapping, .. } => (mapping.frame_map(), None, images.get(*image)),
+        };
+        PaintSampler {
+            paint,
+            frame,
+            table,
             image,
-            mapping,
-            repeat,
-            filter,
-            contone,
-            adjust,
-        } => {
-            let Some(img) = images.get(*image) else {
-                return Rgba8::TRANSPARENT;
-            };
-            let Some((u, v)) = mapping.to_frame(p) else {
-                return Rgba8::TRANSPARENT;
-            };
-            let (fw, fh) = (f64::from(img.width()), f64::from(img.height()));
-            let (x, y) = (u * fw - 0.5, v * fh - 0.5);
-            let sample = match filter {
-                Filter::Nearest => img.texel(x.round() as i64, y.round() as i64, *repeat),
-                Filter::Bilinear | Filter::HighQuality => {
-                    let (x0, y0) = (x.floor(), y.floor());
-                    let (fx, fy) = (x - x0, y - y0);
-                    let (x0, y0) = (x0 as i64, y0 as i64);
-                    let t00 = img.texel(x0, y0, *repeat);
-                    let t10 = img.texel(x0 + 1, y0, *repeat);
-                    let t01 = img.texel(x0, y0 + 1, *repeat);
-                    let t11 = img.texel(x0 + 1, y0 + 1, *repeat);
-                    lerp_rgba(lerp_rgba(t00, t10, fx), lerp_rgba(t01, t11, fx), fy)
-                }
-            };
-            let sample = apply_contone(sample, *contone);
-            apply_adjust(sample, *adjust)
         }
-        Paint::Fractal(_) => Rgba8::TRANSPARENT,
+    }
+
+    /// The paint's colour at a device point.
+    #[must_use]
+    #[inline]
+    pub fn sample(&self, p: Point64) -> Rgba8 {
+        match self.paint {
+            Paint::Solid(c) => *c,
+            Paint::Gradient {
+                shape,
+                repeat,
+                ramp,
+                ..
+            } => match ramp {
+                GradRamp::Table(_) => {
+                    let Some(table) = self.table else {
+                        return Rgba8::TRANSPARENT;
+                    };
+                    let Some(s) = self.frame.and_then(|f| f.param(*shape, p)) else {
+                        return Rgba8::TRANSPARENT;
+                    };
+                    table[ramp_index(apply_repeat(s, *repeat), table.len())]
+                }
+                GradRamp::Mesh3(c) => {
+                    let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                        return Rgba8::TRANSPARENT;
+                    };
+                    let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+                    let w0 = (1.0 - u - v).max(0.0);
+                    let sum = w0 + u + v;
+                    if sum <= 0.0 {
+                        return c[0];
+                    }
+                    let ch = |f: fn(&Rgba8) -> u8| -> u8 {
+                        ((w0 * f64::from(f(&c[0]))
+                            + u * f64::from(f(&c[1]))
+                            + v * f64::from(f(&c[2])))
+                            / sum)
+                            .round()
+                            .clamp(0.0, 255.0) as u8
+                    };
+                    Rgba8 {
+                        r: ch(|c| c.r),
+                        g: ch(|c| c.g),
+                        b: ch(|c| c.b),
+                        a: ch(|c| c.a),
+                    }
+                }
+                GradRamp::Mesh4(c) => {
+                    let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                        return Rgba8::TRANSPARENT;
+                    };
+                    let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+                    let top = lerp_rgba(c[0], c[1], u);
+                    let bottom = lerp_rgba(c[2], c[3], u);
+                    lerp_rgba(top, bottom, v)
+                }
+            },
+            Paint::Image {
+                repeat,
+                filter,
+                contone,
+                adjust,
+                ..
+            } => {
+                let Some(img) = self.image else {
+                    return Rgba8::TRANSPARENT;
+                };
+                let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                    return Rgba8::TRANSPARENT;
+                };
+                let (fw, fh) = (f64::from(img.width()), f64::from(img.height()));
+                let (x, y) = (u * fw - 0.5, v * fh - 0.5);
+                let sample = match filter {
+                    Filter::Nearest => img.texel(x.round() as i64, y.round() as i64, *repeat),
+                    Filter::Bilinear | Filter::HighQuality => {
+                        let (x0, y0) = (x.floor(), y.floor());
+                        let (fx, fy) = (x - x0, y - y0);
+                        let (x0, y0) = (x0 as i64, y0 as i64);
+                        let t00 = img.texel(x0, y0, *repeat);
+                        let t10 = img.texel(x0.saturating_add(1), y0, *repeat);
+                        let t01 = img.texel(x0, y0.saturating_add(1), *repeat);
+                        let t11 = img.texel(x0.saturating_add(1), y0.saturating_add(1), *repeat);
+                        lerp_rgba(lerp_rgba(t00, t10, fx), lerp_rgba(t01, t11, fx), fy)
+                    }
+                };
+                let sample = apply_contone(sample, *contone);
+                apply_adjust(sample, *adjust)
+            }
+            Paint::Fractal(_) => Rgba8::TRANSPARENT,
+        }
     }
 }
 
@@ -803,6 +962,98 @@ fn apply_adjust(c: Rgba8, adj: BitmapAdjust) -> Rgba8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_map_gives_grad_param_bit_for_bit() {
+        let mappings = [
+            GradMapping::unit(),
+            GradMapping::Affine {
+                a: Point64::new(13.74, 88.52),
+                b: Point64::new(13.74, -55.48),
+                c: Point64::new(157.74, 88.52),
+            },
+            GradMapping::Affine {
+                a: Point64::new(-3.0, 7.0),
+                b: Point64::new(40.0, 9.0),
+                c: Point64::new(1.0, -30.0),
+            },
+            GradMapping::Perspective {
+                a: Point64::new(48.0, 48.0),
+                b: Point64::new(36.0, 92.0),
+                c: Point64::new(90.0, 40.0),
+                d: Point64::new(95.0, 99.0),
+            },
+        ];
+        for m in mappings {
+            let f = m.frame_map().expect("valid");
+            for shape in ALL_SHAPES {
+                for i in 0..400 {
+                    let p =
+                        Point64::new(f64::from(i % 37) * 3.1 + 0.5, f64::from(i / 37) * 9.7 + 0.5);
+                    let a = grad_param(shape, m, p).map(f64::to_bits);
+                    let b = f.param(shape, p).map(f64::to_bits);
+                    assert_eq!(a, b, "{shape:?} {m:?} at {p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_fast_repeat_and_index_match_the_standard_library() {
+        let mut vals = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            1.5,
+            -1.5,
+            2.0,
+            -2.0,
+            2.5,
+            -3.0,
+            0.499_999_999_999_999_94,
+            1.0 - f64::EPSILON,
+            -1e-300,
+            1e-300,
+            4_503_599_627_370_495.5,
+            4_503_599_627_370_496.0,
+            -4_503_599_627_370_497.0,
+            9.3e18,
+            -9.3e18,
+            1e300,
+            -1e300,
+            f64::MAX,
+            f64::MIN,
+        ];
+        let mut st: u64 = 0x2545_f491;
+        for _ in 0..200_000 {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            let v = f64::from_bits(st);
+            if v.is_finite() {
+                vals.push(v);
+            }
+            vals.push((st >> 11) as f64 / (1u64 << 53) as f64 * 40.0 - 20.0);
+            vals.push(((st >> 20) % 4096) as f64 / 2047.0);
+        }
+        for v in vals {
+            for d in [1.0, 2.0] {
+                assert_eq!(
+                    rem_euclid_pow2(v, d).to_bits(),
+                    v.rem_euclid(d).to_bits(),
+                    "{v:e} % {d}"
+                );
+            }
+            for len in [256usize, 2048, 1, 2] {
+                let slow = ((v * (len - 1) as f64).round().clamp(0.0, (len - 1) as f64)) as usize;
+                assert_eq!(ramp_index(v, len), slow, "{v:e} over {len}");
+            }
+        }
+        assert_eq!(ramp_index(f64::NAN, 256), 0);
+    }
     use crate::ramp::{EffectSpace, RampLength, Stop};
 
     fn rgb(r: u8, g: u8, b: u8) -> Rgba8 {

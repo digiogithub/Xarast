@@ -9,7 +9,39 @@
 //! therefore be `Rgba8Unorm` and never `Rgba8UnormSrgb`, or the hardware
 //! linearises behind our back.
 
+#[cfg(test)]
 use crate::precision::round_device;
+
+/// `round_device(v.floor())` for a finite `v`, without the two libm calls.
+///
+/// The default x86-64 target has no SSE4.1, so `f64::floor` is a function
+/// call; bounding a path twice per command made rounding a measurable part
+/// of `DisplayList::build`. A saturating truncation plus one compare gives
+/// the same integer: the floor is already whole, so rounding it again is
+/// the identity, and both saturate to the `i32` range.
+#[inline]
+fn floor_to_i32(v: f64) -> i32 {
+    // `as` saturates, so a huge or tiny value lands on the `i64` limits.
+    let t = v as i64;
+    let t = if (t as f64) > v {
+        t.saturating_sub(1)
+    } else {
+        t
+    };
+    t.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
+
+/// `round_device(v.ceil())` for a finite `v`; see [`floor_to_i32`].
+#[inline]
+fn ceil_to_i32(v: f64) -> i32 {
+    let t = v as i64;
+    let t = if (t as f64) < v {
+        t.saturating_add(1)
+    } else {
+        t
+    };
+    t.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+}
 
 /// A rectangle in whole device pixels, half-open: `x0..x1`, `y0..y1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -62,10 +94,10 @@ impl DeviceRect {
             return DeviceRect::EMPTY;
         }
         DeviceRect::new(
-            round_device(r.x0.floor()),
-            round_device(r.y0.floor()),
-            round_device(r.x1.ceil()),
-            round_device(r.y1.ceil()),
+            floor_to_i32(r.x0),
+            floor_to_i32(r.y0),
+            ceil_to_i32(r.x1),
+            ceil_to_i32(r.y1),
         )
     }
 
@@ -370,6 +402,50 @@ pub fn scroll_surface(s: &mut Surface, dx: i32, dy: i32) -> [DirtyRect; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_floor_and_ceil_match_the_rounding_rule() {
+        let mut vals = vec![
+            0.0,
+            -0.0,
+            0.5,
+            -0.5,
+            1.0,
+            -1.0,
+            1.0 - f64::EPSILON,
+            -1.0 + f64::EPSILON,
+            2_147_483_647.0,
+            2_147_483_647.5,
+            2_147_483_648.0,
+            -2_147_483_648.0,
+            -2_147_483_648.5,
+            -2_147_483_649.0,
+            4_503_599_627_370_495.5,
+            9.3e18,
+            -9.3e18,
+            1e300,
+            -1e300,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+        ];
+        let mut s: u64 = 0x1234_5678;
+        for _ in 0..100_000 {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            let bits = s;
+            let v = f64::from_bits(bits);
+            if v.is_finite() {
+                vals.push(v);
+            }
+            vals.push((bits >> 11) as f64 / (1u64 << 53) as f64 * 1e5 - 5e4);
+        }
+        for v in vals {
+            assert_eq!(floor_to_i32(v), round_device(v.floor()), "floor {v:e}");
+            assert_eq!(ceil_to_i32(v), round_device(v.ceil()), "ceil {v:e}");
+        }
+    }
 
     #[test]
     fn rect_algebra() {

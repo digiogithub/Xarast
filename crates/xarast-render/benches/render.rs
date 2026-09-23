@@ -147,6 +147,33 @@ fn display_list(c: &mut Criterion) {
     g.finish();
 }
 
+/// The strip a pan exposes: one band tall and the width of the screen,
+/// over the 100 000-object scene. Tracks XARA-T-0033 (build) and
+/// XARA-T-0034 (rasterising it on more than one core).
+fn strip(c: &mut Criterion) {
+    let mut g = c.benchmark_group("strip");
+    g.sample_size(20);
+    let (w, h) = (1920u32, 1080u32);
+    let scene = bulk(w, h, 100_000);
+    let view = view(w, h);
+    let dirty = DirtyRect::of(DeviceRect::new(0, 500, 1920, 540));
+    g.bench_function("build_1920x40_100000", |b| {
+        b.iter(|| black_box(DisplayList::build(&scene, &view, &dirty)));
+    });
+    let dl = DisplayList::build(&scene, &view, &dirty);
+    let res = Resolver::new();
+    let mut target = Surface::new(w, h);
+    let mut backend = CpuBackend::new(CpuConfig::interactive());
+    g.bench_function("render_1920x40_100000", |b| {
+        b.iter(|| {
+            backend
+                .render(black_box(&dl), &res, &mut target)
+                .expect("renders")
+        });
+    });
+    g.finish();
+}
+
 fn paints(c: &mut Criterion) {
     let mut g = c.benchmark_group("paints");
     let stops: Vec<Stop> = (0..8)
@@ -243,6 +270,7 @@ criterion_group!(
     full_frame,
     incremental,
     display_list,
+    strip,
     paints,
     cache_threshold
 );

@@ -91,6 +91,18 @@ pub fn plan_tiles(dl: &DisplayList, area: DeviceRect, tile_size: u32) -> TilePla
     TilePlan { tiles, area }
 }
 
+/// The height of every band but the last, from the working-memory budget.
+///
+/// This is all the CPU backend needs of a plan: it walks every command in
+/// every band and rejects on precomputed bounds, which is cheaper than
+/// binning 100 000 commands into per-band lists first.
+#[must_use]
+pub fn band_height(area: DeviceRect, budget_bytes: usize) -> u32 {
+    let scanline_bytes = (area.width() as usize).max(1) * 4;
+    let lines = (budget_bytes / scanline_bytes.max(1)).max(MIN_BAND_SCANLINES as usize);
+    u32::try_from(lines.min(u32::MAX as usize)).unwrap_or(MIN_BAND_SCANLINES)
+}
+
 /// Splits a display list into horizontal bands.
 ///
 /// `budget_bytes` is the working memory a band may use; the band height
@@ -102,9 +114,7 @@ pub fn plan_bands(dl: &DisplayList, area: DeviceRect, budget_bytes: usize) -> Ti
     if area.is_empty() {
         return TilePlan { tiles, area };
     }
-    let scanline_bytes = (area.width() as usize).max(1) * 4;
-    let lines = (budget_bytes / scanline_bytes.max(1)).max(MIN_BAND_SCANLINES as usize);
-    let lines = u32::try_from(lines.min(u32::MAX as usize)).unwrap_or(MIN_BAND_SCANLINES);
+    let lines = band_height(area, budget_bytes);
     let mut y = area.y0;
     while y < area.y1 {
         let y1 = (y + lines as i32).min(area.y1);

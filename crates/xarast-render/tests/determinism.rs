@@ -76,3 +76,80 @@ fn the_interactive_configuration_is_not_claimed_to_be_deterministic() {
             .deterministic
     );
 }
+
+#[test]
+fn a_thin_strip_renders_the_same_in_column_tiles() {
+    // A strip one band tall is split into column tiles so that it does not
+    // rasterise on one core (XARA-T-0034). A tile edge must not show:
+    // serial rendering never tiles, so the two must agree byte for byte.
+    use xarast_color::Rgba8;
+    use xarast_geom::{FillRule, Mp, Path, Point, Rect, StrokeStyle};
+    use xarast_render::{
+        BlendFamily, CpuBackend, DirtyRect, DisplayList, LayerKind, Paint, PathRef, RenderQuality,
+        Resolver, Scene, SceneBuilder, SceneNodeId, Surface, Transform2D, Transparency, ViewParams,
+    };
+    let (w, h) = (1024u32, 48u32);
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+    let pt = |x: f64, y: f64| Point::new(Mp::from_pt(x), Mp::from_pt(y));
+    let mut clip = Path::builder();
+    clip.rect(Rect::new(pt(10.0, 4.0), pt(1000.0, 44.0)));
+    b.push_clip(&PathRef::new(clip.build()), FillRule::NonZero);
+    b.push_layer(
+        LayerKind::Isolated,
+        Transparency::flat(BlendFamily::Mix, 40),
+    );
+    let mut s: u64 = 0x5eed;
+    let mut next = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 11) as f64 / (1u64 << 53) as f64
+    };
+    for i in 0..400u64 {
+        let (cx, cy, r) = (next() * 1024.0, next() * 48.0, 3.0 + next() * 40.0);
+        let mut p = Path::builder();
+        p.move_to(pt(cx - r, cy));
+        p.line_to(pt(cx + r * 0.3, cy - r * 0.7));
+        p.line_to(pt(cx + r, cy + r * 0.2));
+        p.close();
+        let path = PathRef::new(p.build());
+        let colour = Rgba8 {
+            r: (i * 37 % 256) as u8,
+            g: (i * 91 % 256) as u8,
+            b: 200,
+            a: if i % 3 == 0 { 160 } else { 255 },
+        };
+        if i % 5 == 0 {
+            let style = StrokeStyle {
+                width: Mp::from_pt(1.5),
+                ..StrokeStyle::default()
+            };
+            b.stroke(SceneNodeId(i), &path, style, Paint::Solid(colour));
+        } else {
+            b.fill(
+                SceneNodeId(i),
+                &path,
+                FillRule::NonZero,
+                Paint::Solid(colour),
+            );
+        }
+    }
+    b.pop_layer();
+    b.pop_clip();
+    b.finish().expect("balanced");
+    let view = ViewParams::new(w, h, Transform2D::scale(1.0 / 1000.0), RenderQuality::Final);
+    let dl = DisplayList::build(&scene, &view, &DirtyRect::NONE);
+    let render = |threads: usize| {
+        let mut target = Surface::new(w, h);
+        let cfg = CpuConfig {
+            threads,
+            ..CpuConfig::interactive()
+        };
+        CpuBackend::new(cfg)
+            .render(&dl, &Resolver::new(), &mut target)
+            .expect("renders");
+        digest(&target)
+    };
+    assert_eq!(render(0), render(1), "a column-tile edge changed the strip");
+}

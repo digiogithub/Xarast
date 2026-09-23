@@ -70,6 +70,7 @@ pub mod path;
 pub mod precision;
 pub mod ramp;
 pub mod scene;
+pub mod stroke_cull;
 pub mod surface;
 pub mod tiling;
 

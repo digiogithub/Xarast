@@ -19,6 +19,7 @@
 //! visually different and the file format distinguishes them.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 use xarast_geom::{FillRule, StrokeStyle};
@@ -188,9 +189,60 @@ pub struct NodeInfo {
 /// consumes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scene {
-    pub(crate) ops: Vec<SceneOp>,
+    /// Shared with every display list built from it, which is what lets a
+    /// build reference paths, paints and styles instead of copying them.
+    pub(crate) ops: Arc<Vec<SceneOp>>,
+    /// One entry per op: what a culled build needs to reject it without
+    /// reading the op itself. See [`Cull`].
+    pub(crate) cull: Vec<Cull>,
     nodes: HashMap<SceneNodeId, NodeInfo>,
     quality: RenderQuality,
+}
+
+/// A culling entry, kept apart from its op.
+///
+/// A culled build (a pan strip, a dirty rectangle) rejects almost every
+/// primitive. Reading the rejection data out of 320-byte ops streamed the
+/// whole scene through the cache; these entries are 40 bytes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Cull {
+    /// Structural, or bounded by something other than a path: read the op.
+    Visit,
+    /// A fill whose path has these document-space control bounds.
+    Fill(kurbo::Rect),
+    /// A stroke: its path's control bounds, already grown by the stroke's
+    /// pad in document units.
+    Stroke(kurbo::Rect),
+    /// A fill or stroke whose path bounds are inverted: it draws nothing.
+    Never,
+}
+
+impl Cull {
+    /// The entry for a path, padded by `pad` document units, exactly as
+    /// `display_list::device_bounds_of` pads it.
+    fn of(path: &PathRef, pad: f64, stroke: bool) -> Cull {
+        let r = path.bounds();
+        if r.x1 < r.x0 || r.y1 < r.y0 {
+            return Cull::Never;
+        }
+        let r = kurbo::Rect::new(r.x0 - pad, r.y0 - pad, r.x1 + pad, r.y1 + pad);
+        if stroke {
+            Cull::Stroke(r)
+        } else {
+            Cull::Fill(r)
+        }
+    }
+}
+
+/// How far a stroke spreads beyond its path, in document units: half its
+/// width times the mitre allowance, or nothing for a hairline, whose one
+/// pixel the build adds in device space.
+pub(crate) fn stroke_pad(style: &StrokeStyle) -> f64 {
+    if style.width == xarast_geom::Mp::ZERO {
+        0.0
+    } else {
+        style.width.to_f64() * 0.5 * style.mitre_limit.max(1.0)
+    }
 }
 
 impl Scene {
@@ -202,7 +254,13 @@ impl Scene {
 
     /// Drops everything recorded, keeping the allocation.
     pub fn clear(&mut self) {
-        self.ops.clear();
+        // A display list still in flight keeps the old ops alive; only then
+        // is a fresh vector needed.
+        match Arc::get_mut(&mut self.ops) {
+            Some(ops) => ops.clear(),
+            None => self.ops = Arc::new(Vec::with_capacity(self.ops.len())),
+        }
+        self.cull.clear();
         self.nodes.clear();
     }
 
@@ -314,6 +372,20 @@ impl<'a> SceneBuilder<'a> {
         }
     }
 
+    /// The op list, unshared: `begin` cleared the scene, so a display list
+    /// built from the previous recording no longer holds this vector and
+    /// `make_mut` never copies.
+    fn ops(&mut self) -> &mut Vec<SceneOp> {
+        Arc::make_mut(&mut self.scene.ops)
+    }
+
+    /// Records an op with its culling entry; every op goes through here so
+    /// that the two lists stay the same length.
+    fn push(&mut self, op: SceneOp, cull: Cull) {
+        self.ops().push(op);
+        self.scene.cull.push(cull);
+    }
+
     fn current_transparency(&self) -> Transparency {
         self.transparency
             .last()
@@ -324,7 +396,7 @@ impl<'a> SceneBuilder<'a> {
     /// Opens a group with its own transform.
     pub fn push_group(&mut self, id: SceneNodeId, xf: Transform2D, hint: CacheHint) -> SceneNodeId {
         self.open.push((id, self.scene.ops.len()));
-        self.scene.ops.push(SceneOp::PushGroup { id, xf, hint });
+        self.push(SceneOp::PushGroup { id, xf, hint }, Cull::Visit);
         self.stack.push(Frame::Group);
         self.stats.groups += 1;
         self.scene.nodes.insert(
@@ -346,7 +418,7 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "group" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopGroup);
+        self.push(SceneOp::PopGroup, Cull::Visit);
         if let Some((id, _)) = self.open.pop()
             && let Some(info) = self.scene.nodes.get_mut(&id)
         {
@@ -356,10 +428,13 @@ impl<'a> SceneBuilder<'a> {
 
     /// Clips everything until the matching pop to a path.
     pub fn push_clip(&mut self, path: &PathRef, rule: FillRule) {
-        self.scene.ops.push(SceneOp::PushClip {
-            path: path.clone(),
-            rule,
-        });
+        self.push(
+            SceneOp::PushClip {
+                path: path.clone(),
+                rule,
+            },
+            Cull::Visit,
+        );
         self.stack.push(Frame::Clip);
         self.stats.clips += 1;
     }
@@ -371,13 +446,13 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "clip" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopClip);
+        self.push(SceneOp::PopClip, Cull::Visit);
     }
 
     /// Applies a transparency to everything emitted until the matching pop,
     /// per object, following the original's lexical attribute scoping.
     pub fn push_transparency(&mut self, t: Transparency) {
-        self.scene.ops.push(SceneOp::PushTransparency(t.clone()));
+        self.push(SceneOp::PushTransparency(t.clone()), Cull::Visit);
         self.transparency.push(t);
         self.stack.push(Frame::Transparency);
     }
@@ -391,7 +466,7 @@ impl<'a> SceneBuilder<'a> {
             return;
         }
         self.transparency.pop();
-        self.scene.ops.push(SceneOp::PopTransparency);
+        self.push(SceneOp::PopTransparency, Cull::Visit);
     }
 
     /// Opens an offscreen layer: everything until the matching pop is
@@ -399,9 +474,7 @@ impl<'a> SceneBuilder<'a> {
     /// capture, and it is what a transparent *group* means, as opposed to a
     /// transparency applied per object.
     pub fn push_layer(&mut self, kind: LayerKind, transparency: Transparency) {
-        self.scene
-            .ops
-            .push(SceneOp::PushLayer { kind, transparency });
+        self.push(SceneOp::PushLayer { kind, transparency }, Cull::Visit);
         self.stack.push(Frame::Layer);
         self.stats.layers += 1;
     }
@@ -413,19 +486,23 @@ impl<'a> SceneBuilder<'a> {
                 .get_or_insert(SceneError::Underflow { kind: "layer" });
             return;
         }
-        self.scene.ops.push(SceneOp::PopLayer);
+        self.push(SceneOp::PopLayer, Cull::Visit);
     }
 
     /// Emits a filled path.
     pub fn fill(&mut self, id: SceneNodeId, path: &PathRef, rule: FillRule, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Fill {
-            id,
-            path: path.clone(),
-            rule,
-            paint,
-            transparency,
-        });
+        let cull = Cull::of(path, 0.0, false);
+        self.push(
+            SceneOp::Fill {
+                id,
+                path: path.clone(),
+                rule,
+                paint,
+                transparency,
+            },
+            cull,
+        );
         self.stats.fills += 1;
     }
 
@@ -434,26 +511,33 @@ impl<'a> SceneBuilder<'a> {
     /// document-space outline.
     pub fn stroke(&mut self, id: SceneNodeId, path: &PathRef, style: StrokeStyle, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Stroke {
-            id,
-            path: path.clone(),
-            style,
-            paint,
-            transparency,
-        });
+        let cull = Cull::of(path, stroke_pad(&style), true);
+        self.push(
+            SceneOp::Stroke {
+                id,
+                path: path.clone(),
+                style,
+                paint,
+                transparency,
+            },
+            cull,
+        );
         self.stats.strokes += 1;
     }
 
     /// Emits an image.
     pub fn image(&mut self, id: SceneNodeId, image: ImageId, mapping: GradMapping, paint: Paint) {
         let transparency = self.current_transparency();
-        self.scene.ops.push(SceneOp::Image {
-            id,
-            image,
-            mapping,
-            paint,
-            transparency,
-        });
+        self.push(
+            SceneOp::Image {
+                id,
+                image,
+                mapping,
+                paint,
+                transparency,
+            },
+            Cull::Visit,
+        );
         self.stats.images += 1;
     }
 
