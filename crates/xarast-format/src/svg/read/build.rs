@@ -649,16 +649,25 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
         name: Option<Arc<str>>,
     ) -> Result<(), SvgReadError> {
         let (cctx, leftover) = self.child_ctx(e, ctx);
+        let is_source = |c: &Elem| c.is(NS_XARAST, "text-source");
+        let source_text = e.children.iter().find_map(|c| match c {
+            Child::Elem(k) => self
+                .elem(*k)
+                .filter(|x| is_source(x))
+                .map(|x| Arc::from(x.text())),
+            _ => None,
+        });
         let g = GroupNode {
             name: name.or_else(|| attr(e, NS_INKSCAPE, "label").map(Arc::from)),
             soft: is_true(xa(e, "soft")),
+            source_text,
         };
         let node = self.b.node(NodeKind::Group(Box::new(g)))?;
         let mut bag = self.common(
             node,
             e,
             &|ns, l| {
-                (ns == NS_XARAST && matches!(l, "kind" | "soft"))
+                (ns == NS_XARAST && matches!(l, "kind" | "soft" | "was-text"))
                     || (ns == NS_INKSCAPE && l == "label")
             },
             &leftover,
@@ -666,7 +675,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             false,
         );
         self.b.push_scope()?;
-        self.children(e, &cctx, &|_| false, 0, &mut bag)?;
+        self.children(e, &cctx, &is_source, 0, &mut bag)?;
         self.b.pop_scope();
         self.store(node, bag);
         Ok(())

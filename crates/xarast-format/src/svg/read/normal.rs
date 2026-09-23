@@ -446,7 +446,10 @@ impl Nf<'_> {
                 self.container(n, depth, head, true);
             }
             NodeKind::Group(g) => {
-                let head = format!("group name={:?} soft={}", g.name, b(g.soft));
+                let mut head = format!("group name={:?} soft={}", g.name, b(g.soft));
+                if let Some(t) = &g.source_text {
+                    head.push_str(&format!(" was-text={t:?}"));
+                }
                 self.container(n, depth, head, false);
             }
             NodeKind::Live(l) => {

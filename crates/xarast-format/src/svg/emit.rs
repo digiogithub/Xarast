@@ -699,8 +699,17 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 if g.soft {
                     el.a("xarast:soft", "true");
                 }
+                // Text converted to shapes keeps its source text
+                // (`research/06 §6.7`, "Text converted to curves").
+                let prelude = g.source_text.as_ref().map(|t| {
+                    el.a("xarast:was-text", "true");
+                    let mut s = String::from("<xarast:text-source>");
+                    push_text_escaped(&mut s, t);
+                    s.push_str("</xarast:text-source>");
+                    s
+                });
                 self.stats.groups += 1;
-                self.container(n, el, None);
+                self.container(n, el, prelude);
             }
             NodeKind::ClipView(cv) => self.clipview(n, cv.mode),
             NodeKind::Live(l) => self.live(n, l),

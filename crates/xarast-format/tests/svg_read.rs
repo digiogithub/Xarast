@@ -285,6 +285,9 @@ fn fixture() -> Document {
         .node(NodeKind::Group(Box::new(GroupNode {
             name: Some(Arc::from("The group")),
             soft: true,
+            // Converted text keeps its source (T9.6.4): markup and a
+            // paragraph break must survive.
+            source_text: Some(Arc::from("A <b> & \"c\"\nsecond")),
         })))
         .unwrap();
     b.push_scope().unwrap();
@@ -478,6 +481,7 @@ fn the_fixture_reads_back_to_the_same_normal_form_and_bytes() {
     assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);
     assert!(o.preservation.intact(), "{:?}", o.preservation);
     let (a, b) = (normal_form(&doc), normal_form(&o.document));
+    assert!(a.contains(r#"was-text="A <b> & \"c\"\nsecond""#), "{a}");
     for (x, y) in a.lines().zip(b.lines()) {
         assert_eq!(x, y);
     }
