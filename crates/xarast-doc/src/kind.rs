@@ -371,6 +371,10 @@ pub struct GroupNode {
     pub name: Option<Arc<str>>,
     /// A "soft group": members stay selectable individually.
     pub soft: bool,
+    /// The text this group was converted from ("Convert to shapes" on a
+    /// text story, phase 9 T9.6.4), kept for accessibility and search:
+    /// the story's logical text, paragraphs separated by `'\n'`.
+    pub source_text: Option<Arc<str>>,
 }
 
 /// How a [`ClipViewNode`] clips.

@@ -757,6 +757,12 @@ impl Canon for NodeKind {
                     }
                 }
                 h.bool(g.soft);
+                // Appended only when present, so the digest of every group
+                // that was never text is what it was before the field.
+                if let Some(t) = &g.source_text {
+                    h.u8(1);
+                    h.str(t);
+                }
             }
             NodeKind::Live(l) => h.add(&**l),
             NodeKind::ClipView(c) => h.u8(c.mode as u8),
