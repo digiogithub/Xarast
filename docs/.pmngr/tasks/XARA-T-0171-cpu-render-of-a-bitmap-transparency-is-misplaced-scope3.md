@@ -2,13 +2,15 @@
 id: XARA-T-0171
 type: task
 title: CPU render of a bitmap transparency is misplaced (scope3/JagSS100 shadows tiled or flipped vs the bitmap-fill convention)
-status: backlog
+status: done
 priority: medium
 parent: XARA-US-0051
 author: mcp
 labels: [render, bitmap, phase-10]
 created: 2026-09-23T18:24:03Z
-updated: 2026-09-23T18:24:03Z
+updated: 2026-09-23T19:03:36Z
+started: 2026-09-23T19:03:23Z
+closed: 2026-09-23T19:03:36Z
 ---
 
 ## Description
