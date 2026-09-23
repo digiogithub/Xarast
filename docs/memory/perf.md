@@ -83,9 +83,9 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Blend LUT set, 12 families | ≤ 15 ms | 0.28 ms | passes |
 | `.xar` full import, `ProbeX16.xar` (7.4 MB) | ≤ 350 ms | ~~644 ms~~ **329–343 ms** | passes, thin margin (XARA-T-0031) |
 | `.xar` full import, whole corpus (59 files, 12.3 MB) | ≤ 3 s | ~~0.87–0.89 s~~ 0.46–0.47 s | passes |
-| Pan, 100k objects, CPU, Draft through the scheduler, fit page | ≤ 16 ms | 5.3–6.6 ms | passes (strips mostly off the ink) |
-| Pan, 100k objects, CPU, Draft through the scheduler, zoomed 3× | ≤ 16 ms | **51–57 ms** | **fails, ~3.4×**; XARA-T-0033, XARA-T-0034 |
-| Zoom (wheel notch), 100k objects, CPU, Draft through the scheduler | ≤ 16 ms | 1.5–1.6 ms | passes; the zoom-out border is left to the Final |
+| Pan, 100k objects, CPU, Draft through the scheduler, fit page | ≤ 16 ms | ~~5.3–6.6 ms~~ 1.58 ms | passes (after the render-perf merge, 2026-09-23, load ~5) |
+| Pan, 100k objects, CPU, Draft through the scheduler, zoomed 3× | ≤ 16 ms | ~~51–57 ms~~ **11.1 ms** | passes after XARA-T-0033/T-0034 (linear display list, document-space culling, column tiles); re-measured 2026-09-23 at load ~5 |
+| Zoom (wheel notch), 100k objects, CPU, Draft through the scheduler | ≤ 16 ms | 1.4 ms | passes; the zoom-out border is left to the Final |
 | Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | not yet | XARA-T-0008; there is no GPU render thread yet |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
@@ -181,7 +181,7 @@ up to 60 % higher and is discarded.
 |---|---|---|---|
 | `pan_draft`: 9 px right, 5 px up | **5.3–6.6 ms** | **51–57 ms** | scroll + two strips. Zoomed: 35 ms of `DisplayList::build` (two scans of all 224k ops) + 15 ms raster |
 | `zoom_draft`: one notch in or out | **1.5–1.6 ms** | **1.5–1.6 ms** | nearest resample of the kept frame; backdrop in the uncovered border |
-| `final_after_idle`: the upgrade | 284–287 ms | 340–363 ms | four full-height columns: ~105 ms of list builds + 170–235 ms raster |
+| `final_after_idle`: the upgrade | 284–287 ms (now 104 ms) | 340–363 ms (now 102 ms) | four full-height columns: ~105 ms of list builds + 170–235 ms raster |
 | `full_draft`: no reuse, for reference | 231–235 ms | 262–270 ms | one full Draft frame |
 
 **Verdict against ≤ 16 ms.** Zoom passes everywhere. Pan passes at fit
