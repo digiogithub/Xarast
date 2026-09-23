@@ -118,36 +118,52 @@ pub fn nearest_point(path: &Path, p: Point, accuracy: f64) -> Option<Nearest> {
 /// Whether `p` lies inside the path's fill under `rule`.
 ///
 /// Exact: the winding number is computed against the curves themselves, not
-/// against a flattened approximation.
+/// against a flattened approximation. For picking with a tolerance, a
+/// transform or a stroke, use [`hit_fill`](crate::hit_fill) and
+/// [`hit_stroke`](crate::hit_stroke) instead.
 #[must_use]
-pub fn hit_fill(path: &Path, p: Point, rule: FillRule) -> bool {
+pub fn fill_contains(path: &Path, p: Point, rule: FillRule) -> bool {
     if path.is_empty() {
         return false;
     }
-    rule.covers(path.to_bez_path().winding(p.to_kurbo()))
+    rule.covers(closed_for_fill(&path.to_bez_path()).winding(p.to_kurbo()))
 }
 
-/// Whether `p` lies within `half_width` of the path's outline.
+/// The path with every open subpath explicitly closed.
 ///
-/// # The approximation
-///
-/// This measures distance to the centreline rather than building the stroke
-/// outline, because hit-testing runs on every pointer move and stroke
-/// expansion does not. Near caps and joins the two differ, by at most the
-/// half-width itself — a butt cap is tested as though it were round. That
-/// error is below the pick tolerance a user can perceive, and it errs towards
-/// making objects easier to hit, which is the direction a user prefers. It is
-/// documented rather than hidden because a caller that needs the exact
-/// outline can build one with [`stroke_to_path`](crate::stroke_to_path).
-#[must_use]
-pub fn hit_stroke(path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool {
+/// `kurbo`'s winding number sums the segments it is given and does not add
+/// the implicit closing line of an open subpath, so without this an open
+/// subpath would be tested as a curve that encloses nothing consistent —
+/// while every renderer fills it as though it were closed.
+pub(crate) fn closed_for_fill(p: &kurbo::BezPath) -> kurbo::BezPath {
+    let mut out = kurbo::BezPath::new();
+    let mut open = false;
+    for el in p.elements() {
+        match el {
+            kurbo::PathEl::MoveTo(_) => {
+                if open {
+                    out.close_path();
+                }
+                open = true;
+            }
+            kurbo::PathEl::ClosePath => open = false,
+            _ => {}
+        }
+        out.push(*el);
+    }
+    if open {
+        out.close_path();
+    }
+    out
+}
+
+/// Whether `p` lies within `half_width` of the path's centreline. The
+/// fallback [`PathHitIndex::hit_stroke`] uses outside its grid.
+fn centreline_within(path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool {
     if path.is_empty() {
         return false;
     }
     let limit = half_width.to_f64().abs();
-    // A quick rejection on the control hull first: it is conservative, so a
-    // miss here is a genuine miss, and it costs one rectangle test against
-    // the per-segment work below.
     if !path
         .bounds()
         .inflated(half_width.abs() + Mp::new(1))
@@ -159,7 +175,11 @@ pub fn hit_stroke(path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool
     nearest_point(path, p, acc).is_some_and(|n| n.distance <= limit)
 }
 
-/// A build-once, query-many acceleration structure for hit testing.
+/// A build-once, query-many acceleration structure for hit testing **one
+/// large path** — thousands of segments — many times.
+///
+/// Not to be confused with [`HitIndex`](crate::HitIndex), which indexes
+/// many objects' bounds; this one indexes one path's edges.
 ///
 /// Holds the path flattened at [`Tolerance::EXPORT`] — 1 mp, or 0.35 um — as
 /// edges, plus a uniform grid of row buckets over the bounding box. Ray
@@ -172,11 +192,11 @@ pub fn hit_stroke(path: &Path, p: Point, half_width: Mp, tol: Tolerance) -> bool
 /// is a static BVH built here rather than a new dependency.
 ///
 /// The 1 mp flattening means results can differ from the exact
-/// [`hit_fill`] within a millipoint of the outline. That is three orders of
+/// [`fill_contains`] within a millipoint of the outline. That is three orders of
 /// magnitude below any pick tolerance, and it buys a bounded, predictable
 /// query cost.
 #[derive(Clone, Debug)]
-pub struct HitIndex {
+pub struct PathHitIndex {
     /// Flattened edges as `(from, to)` pairs.
     edges: Vec<(Point, Point)>,
     /// For each row, the indices of the edges whose y-range meets it.
@@ -187,7 +207,7 @@ pub struct HitIndex {
     row_height: f64,
 }
 
-impl HitIndex {
+impl PathHitIndex {
     /// The number of grid rows, chosen so that a typical path has a handful
     /// of edges per row without the row vector dominating memory.
     fn row_count(edges: usize) -> usize {
@@ -196,7 +216,7 @@ impl HitIndex {
 
     /// Builds the index. Cost is linear in the flattened edge count.
     #[must_use]
-    pub fn build(path: &Path) -> HitIndex {
+    pub fn build(path: &Path) -> PathHitIndex {
         let polys = crate::flatten(path, Tolerance::EXPORT);
         let mut edges: Vec<(Point, Point)> = Vec::new();
         for poly in &polys {
@@ -214,7 +234,7 @@ impl HitIndex {
             }
         }
         let bounds = path.bounds();
-        let nrows = HitIndex::row_count(edges.len());
+        let nrows = PathHitIndex::row_count(edges.len());
         let h = (bounds.height().to_f64() / nrows as f64).max(1.0);
         let mut rows = vec![Vec::new(); nrows];
         if !bounds.is_empty() {
@@ -231,7 +251,7 @@ impl HitIndex {
                 }
             }
         }
-        HitIndex {
+        PathHitIndex {
             edges,
             rows,
             bounds,
@@ -261,7 +281,7 @@ impl HitIndex {
             return false;
         }
         let Some(row) = self.row_of(p.y.to_f64()) else {
-            return crate::hit_fill(path, p, rule);
+            return fill_contains(path, p, rule);
         };
         let (px, py) = p.to_f64();
         let mut winding = 0i32;
@@ -297,7 +317,7 @@ impl HitIndex {
             return false;
         }
         let Some(row) = self.row_of(p.y.to_f64()) else {
-            return crate::hit_stroke(path, p, half_width, tol);
+            return centreline_within(path, p, half_width, tol);
         };
         // The band of rows the disc of radius `limit` can reach.
         let span = ((limit / self.row_height).ceil() as usize).min(self.rows.len());

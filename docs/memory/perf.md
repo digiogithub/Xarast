@@ -105,7 +105,10 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Decode a 24 Mpx PNG (27.5 MB) | ≤ 600 ms | **227 ms** (209–239) | passes |
 | Decode a 4K PNG (10.3 MB) | — | **50 ms** | information |
 | BLAKE3 of 100 MB of decoded pixels | ≤ 200 ms | **29 ms** | passes |
-
+| Hit test, 100k objects: topmost **precise** pick (`HitIndex` + `HitShape::hit`) | ≤ 2 ms | 5.5–13.8 µs | passes (XARA-T-0150, 2026-09-23, load 10–40) |
+| Hit test, 100k objects, adversarial: 100k unfilled outlines all round the point | ≤ 2 ms | **17.7–21 ms** | **fails**; every candidate needs a precise rejection, no index can help (see "Picking") |
+| Marquee over 100k objects, whole page, touch or enclose | ≤ 20 ms | 0.78–1.38 ms | passes |
+| `HitIndex` insert + remove / move one object, 100k | — | 23–30 ns / 69–680 ns | the reason the grid beat a static BVH (8–23 ms rebuild) |
 ### Images (`xarast-image`, phase 10)
 
 `taskset -c 0-7 cargo bench -p xarast-image --bench decode`, 2026-09-23, at
@@ -409,6 +412,27 @@ dictionaries for Thai, Lao, Khmer and Myanmar). `xarast` declares
 `xarast-text` through `xarast-app` but calls nothing yet, so today it grows by
 1.2 KB (23 170 560 → 23 171 752 bytes, unstripped); the real cost lands
 with the first call to `Shaper`.
+
+### Picking (phase 7 W3, 2026-09-23)
+
+`crates/xarast-geom/benches/hit_index.rs`,
+`taskset -c 4-7 cargo bench -p xarast-geom --bench hit_index`. 100 000
+objects on an A3 page in four scenes: uniform, clustered, mixed sizes
+(1 % page-sized), and all stacked on one point. The load average from
+other agents was 10–40 throughout, so the ranges are across runs and
+scenes, ±30 %. The full grid-versus-BVH table and the reasoning are in
+`geometry.md`, "Picking". The phase document's budgets are 2 ms (pick)
+and 20 ms (marquee); US-0031 also asked for 1 ms and 5 ms, and every row
+that passes passes both.
+
+| Operation, 100k objects | Grid (shipped) | Static BVH (bench only) |
+|---|---|---|
+| Build | 5.5–12 ms | 8.6–23 ms |
+| Topmost pick, bounds only | 2.2–9.9 µs | 0.008–6.3 µs |
+| Precise pick, top-down to the first real hit | 5.5–13.8 µs | — |
+| Marquee, whole page | 0.78–1.38 ms | 5–37 µs |
+| Insert + remove one object | 23–30 ns | 8–23 ms (rebuild) |
+| Adversarial hollow stack, precise | 17.7–21 ms (was 120 ms before hull culling) | — |
 
 ## Phase 2 — document model (development container, historical)
 

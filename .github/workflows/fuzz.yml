@@ -42,6 +42,7 @@ jobs:
           - fuzz_xar_colour
           - fuzz_path_boolean
           - fuzz_svg_path_parse
+          - fuzz_hit_test
           - fuzz_display_list
           - fuzz_ramp
           - fuzz_doc_builder

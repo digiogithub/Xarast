@@ -287,7 +287,7 @@ fn subdivide_cubic(c: kurbo::CubicBez, tol: f64, depth: u32, out: &mut Vec<Point
 /// flat while the curve bulges far past its own endpoint. This is the
 /// classical bound on `|B(t) - L(t)|` for the two curves parameterised
 /// together, which accounts for both components.
-fn chord_bound(c: kurbo::CubicBez) -> f64 {
+pub(crate) fn chord_bound(c: kurbo::CubicBez) -> f64 {
     let ux = 3.0 * c.p1.x - 2.0 * c.p0.x - c.p3.x;
     let uy = 3.0 * c.p1.y - 2.0 * c.p0.y - c.p3.y;
     let vx = 3.0 * c.p2.x - c.p0.x - 2.0 * c.p3.x;

@@ -3,8 +3,8 @@
 Fourteen `cargo-fuzz` targets, in their own workspace so that the main one
 stays on stable. Six cover the `.xar` importer — a legacy binary format
 parser is attack surface, so fuzzing is part of Phase 3 rather than a
-follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — five cover
-the geometry, render and document-model layers the importer feeds, two
+follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — six cover
+the geometry, render and document-model layers the importer feeds, three
 cover the native `.xarast` container (Phase 6), and one covers image
 decoding (Phase 10).
 
@@ -18,6 +18,7 @@ decoding (Phase 10).
 | `fuzz_xar_colour` | `xarast-xar` | colour records, inherit sentinels, parents |
 | `fuzz_path_boolean` | `xarast-geom` | two paths through a `BoolOp` × `FillRule`, and `self_union` |
 | `fuzz_svg_path_parse` | `xarast-geom` | SVG path data as text, and the exact round trip |
+| `fuzz_hit_test` | `xarast-geom` | `hit_fill`/`hit_stroke` on arbitrary paths, transforms and styles; `HitIndex` edits against a brute-force list |
 | `fuzz_display_list` | `xarast-render` | scenes through `DisplayList::build` and the CPU backend |
 | `fuzz_ramp` | `xarast-render` | ramp tables, profiles, gradient evaluation |
 | `fuzz_doc_builder` | `xarast-doc` | arbitrary build scripts: "valid or nothing" |
@@ -26,7 +27,7 @@ decoding (Phase 10).
 | `fuzz_xarast_svg_read` | `xarast-format` | the SVG profile reader on arbitrary text, and the read–save–read fixed point of what it accepts |
 | `fuzz_image_decode` | `xarast-image` | `probe` + `decode` over every format with `DecodeLimits::tight()`, and the `.xar` bitmap wrappings |
 
-The five structured targets take their input through `arbitrary`; the
+The six structured targets take their input through `arbitrary`; the
 helpers they share are in `fuzz_targets/common.rs`.
 
 ```sh
@@ -127,7 +128,7 @@ every push rather than only nightly. `fuzz/artifacts/` is not committed:
 a raw artefact derived from a real-corpus seed could carry its bytes.
 `crates/xarast-xar/tests/fuzz_regressions.rs` holds the importer's.
 
-The first runs (2026-09-23) found eight bugs; each is a test now:
+The first runs (2026-09-23) found nine bugs; each is a test now:
 
 | Target | Finding | Test |
 |---|---|---|
@@ -138,6 +139,7 @@ The first runs (2026-09-23) found eight bugs; each is a test now:
 | `fuzz_doc_builder` | a sourceless controller at the depth limit did too | `a_sourceless_controller_at_the_depth_limit_is_dropped` |
 | `fuzz_ramp` | NaN stop offsets broke the sort's total order | `nan_offsets_do_not_break_the_sort` |
 | `fuzz_svg_path_parse` | an 8e77 arc radius asked `kurbo` for 1.8 GB of cubics | `svg_reader_refuses_numbers_beyond_the_extent_before_parsing` |
+| `fuzz_hit_test` | a singular 1000x transform over an extent-sized ellipse flattened every cubic crossing the probe band whole (37 s, out of memory) | `hit::tests::huge_curves_through_the_band_are_cheap` |
 
 ## Known limits of the targets
 
@@ -148,6 +150,10 @@ The first runs (2026-09-23) found eight bugs; each is a test now:
   exhausts memory; that is a render gap (`docs/memory/render.md` TODO 11,
   gintrack XARA-T-0022), not a fuzzing artefact, and the bounds stop it
   from masking everything else. Lift both when it is fixed.
+- `fuzz_hit_test` keeps the transform's linear part within ±1000 and
+  does not assert that a larger pick radius keeps every hit: on a
+  zero-area sliver two flattening tolerances legitimately disagree (its
+  first finding, with a determinant-0 matrix).
 - `fuzz_path_boolean` runs one `BoolOp` × `FillRule` pair per input, not
   all sixteen, because an extent-sized curve flattens to thousands of
   vertices and sixteen overlays of it per case exhaust the time budget.

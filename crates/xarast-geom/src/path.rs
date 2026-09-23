@@ -578,7 +578,9 @@ impl Path {
                 let probe = probe_point(&sps[i].segs);
                 let depth = (0..sps.len())
                     .filter(|&j| j != i && !outlines[j].is_empty())
-                    .filter(|&j| crate::hit_fill(&outlines[j], probe, crate::FillRule::EvenOdd))
+                    .filter(|&j| {
+                        crate::fill_contains(&outlines[j], probe, crate::FillRule::EvenOdd)
+                    })
                     .count();
                 let want_ccw = depth % 2 == 0;
                 let area: f64 = sps[i].segs.iter().map(|s| s.to_kurbo().signed_area()).sum();

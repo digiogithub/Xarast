@@ -1,6 +1,6 @@
 //! Stroke expansion, dashing and offsetting.
 
-use crate::{BoolOp, Mp, Path, Point, Segment, Tolerance};
+use crate::{Mp, Path, Point, Segment, Tolerance};
 
 /// How a stroke terminates at an open end. The discriminants match `.xar`.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
@@ -186,11 +186,12 @@ pub fn stroke_to_path(
         return Ok(Path::new());
     }
 
-    // `kurbo::Stroke` has one cap per end but no per-end join, which matches
-    // us. It does not distinguish a start cap from an end cap when they
-    // differ, so a mismatched pair is stroked twice — once with each cap —
-    // and unioned. That is rare enough in real documents to be worth the
-    // second pass rather than a hand-written stroker.
+    // `kurbo::Stroke` carries a start cap and an end cap of its own and
+    // applies each to its own end of every open subpath (and of every dash),
+    // which is exactly `.xar`'s `TAG_STARTCAP`/`TAG_ENDCAP` pair. One pass is
+    // therefore enough even when the two differ. (An earlier version stroked
+    // twice with the caps swapped and unioned the results, which gave *both*
+    // ends the union of the two caps.)
     let bez = path.to_bez_path();
     let opts = kurbo::StrokeOpts::default();
     let base = |start: Cap, end: Cap| {
@@ -214,18 +215,7 @@ pub fn stroke_to_path(
         &opts,
         tol.get(),
     );
-    let (mut p, _) = Path::from_bez_path(&out);
-    if style.cap_start != style.cap_end {
-        let alt = kurbo::stroke(
-            bez.iter(),
-            &base(style.cap_end, style.cap_start),
-            &opts,
-            tol.get(),
-        );
-        let (q, _) = Path::from_bez_path(&alt);
-        p = crate::boolean(&p, &q, BoolOp::Union, FillRule::NonZero, tol);
-    }
-    Ok(p)
+    Ok(Path::from_bez_path(&out).0)
 }
 
 /// Splits a path into its dashes, returning an open path per dash.
