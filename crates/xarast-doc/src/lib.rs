@@ -56,10 +56,12 @@ pub mod builder;
 pub mod digest;
 pub mod document;
 pub mod fill;
+pub mod fill_edit;
 pub mod foreign;
 pub mod history;
 pub mod kind;
 pub mod live;
+pub mod palette;
 pub mod resources;
 pub mod snapshot;
 pub mod structure;
@@ -87,6 +89,11 @@ pub use fill::{
     FillGeometry, Paint, Perspective, ProceduralParams, Ramp, RampMapping, RampStop, Tiling,
     TranspPaint,
 };
+pub use fill_edit::{
+    FillChannel, FillHandle, FillValue, InsertStop, MoveFillControl, MoveStop, PaintSlot,
+    RemoveStop, SetFillEffect, SetFillGeometry, SetFillProfile, SetRampMapping, SetStopValue,
+    SetTiling, SetTranspMode, StopTarget, StopValue,
+};
 pub use foreign::{ForeignAttr, ForeignBaggage, ForeignChild, ForeignChildKind, ForeignMarks};
 pub use history::{Action, CoalesceKey, Command, CommandBus, EditError, History, Transaction, Tx};
 pub use kind::{
@@ -97,6 +104,10 @@ pub use kind::{
 pub use live::{
     BevelParams, BevelType, BlendParams, BrushParams, ContourParams, EffectParams, LiveKind,
     LiveNode, LiveRole, MouldKind, MouldParams, RegenState, ShadowKind, ShadowParams,
+};
+pub use palette::{
+    ColourUses, CreateColour, DeleteColour, PaletteResolver, RedefineColour, RenameColour,
+    ReparentColour,
 };
 pub use resources::{
     ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, DashId, DocumentResources,

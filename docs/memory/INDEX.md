@@ -6,6 +6,7 @@ note first and update it afterwards.
 | Note | Subsystem | Covers |
 |---|---|---|
 | `geometry.md` | Geometry & colour | Millipoints, paths, booleans, colour models, palettes |
+| `colour.md` | Colour editing (`xarast-color`, `xarast-doc` palette/fill commands) | Conversions vs. the original, palette editing and its DAG, epochs, fill/transparency commands, the corpus oracle |
 | `xar-import.md` | `.xar` importer | Physical layer, tag coverage, format quirks, corpus acceptance numbers |
 | `document-model.md` | Document model | Node arena, attributes, invariants, undo |
 | `app-core.md` | Application core | `EditState`, `Viewport`, the arena→`Scene` walker, sessions, command dispatch, the shell/UI contract |

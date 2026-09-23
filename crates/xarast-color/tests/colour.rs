@@ -214,12 +214,13 @@ fn a_shade_moves_through_the_parents_hsv_space() {
     let parent = t.insert(ColourDef::normal(ColourValue::rgb(1.0, 0.0, 0.0)));
     let shade = t.insert(ColourDef {
         model: ColourModel::Hsvt,
-        kind: ColourKind::Shade { x: 1.0, y: 0.5 },
+        kind: ColourKind::Shade { x: 0.0, y: -0.5 },
         parent: Some(parent),
-        components: [Some(1.0), Some(0.5), Some(0.0), Some(0.0)],
+        components: [Some(0.0), Some(-0.5), Some(0.0), Some(0.0)],
         ..ColourDef::default()
     });
-    // Half the value of pure red is a dark red.
+    // y = -0.5 halves the value: pure red becomes a dark red. x = 0 leaves
+    // saturation alone (research/02 §5.10.1).
     let got = t.resolve_rgba8(shade);
     assert!(got.r > 100 && got.r < 160, "{got:?}");
     assert_eq!(got.g, 0);
@@ -430,11 +431,11 @@ fn greyscale_and_luminance() {
         panic!()
     };
     assert!((v - 1.0).abs() < 1e-5);
-    // Rec. 601 weights: green dominates.
+    // The colour model's own weights (research/02 §5.10.1): 0.305/0.586/0.109.
     let ColourValue::Greyt { v: gv, .. } = ColourValue::rgb(0.0, 1.0, 0.0).to_greyt() else {
         panic!()
     };
-    assert!((gv - 0.587).abs() < 1e-3, "{gv}");
+    assert!((gv - 0.586).abs() < 1e-6, "{gv}");
 }
 
 #[test]

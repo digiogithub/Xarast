@@ -44,6 +44,14 @@ pub enum EditError {
     /// The action does not apply to that node.
     #[error("action does not apply to {0:?}")]
     WrongKind(NodeId),
+    /// The palette refused the edit.
+    #[error(transparent)]
+    Palette(#[from] xarast_color::ColourEditError),
+    /// A fill edit that does not fit the fill it targets: a handle the
+    /// shape does not have, a stop index out of range, a profile on a fill
+    /// without one.
+    #[error("fill edit does not apply: {0}")]
+    FillEdit(&'static str),
 }
 
 /// An atomic, invertible change.
@@ -110,6 +118,13 @@ pub enum Action {
         node: NodeId,
         /// The new baggage.
         new: Option<Arc<ForeignBaggage>>,
+    },
+    /// Replace the whole colour table (phase 8 palette edits). The inverse
+    /// is the table as it was, so undo restores every entry — including a
+    /// removed one, under its old id — exactly.
+    SetPalette {
+        /// The new table.
+        new: Arc<xarast_color::ColourTable>,
     },
     /// Several actions that undo as one.
     Batch(Vec<Action>),
@@ -196,6 +211,20 @@ impl Action {
                     return Err(TreeError::NoSuchNode(*node).into());
                 }
                 doc.tree.set_foreign(*node, new.clone());
+            }
+            Action::SetPalette { new } => {
+                // The epoch moves forward even on undo: the restored table's
+                // own epoch may have named different content on the branch
+                // that was abandoned.
+                let past = doc.resources.colours.epoch();
+                let mut table = (**new).clone();
+                table.advance_epoch_past(past);
+                doc.resources.colours = table;
+                // Resolved colours changed, so the render scope moves on;
+                // no node's geometry or "is painted" did (a palette entry can
+                // never become "no colour"), so the change journal, whose
+                // consumer is the pick index, records nothing.
+                doc.tree.touch_resources();
             }
             Action::Batch(actions) => {
                 for a in actions {
@@ -288,6 +317,9 @@ impl Action {
                 node: *node,
                 new: doc.tree.foreign_arc(*node).cloned(),
             },
+            Action::SetPalette { .. } => Action::SetPalette {
+                new: Arc::new(doc.resources.colours.clone()),
+            },
             Action::Batch(actions) => {
                 let mut out = Vec::with_capacity(actions.len());
                 for a in actions.iter().rev() {
@@ -310,6 +342,7 @@ impl Action {
                 .as_ref()
                 .map_or(0, |p| p.pixels.len() + p.palette.len() * 4),
             Action::SetForeign { new, .. } => new.as_ref().map_or(0, |b| b.size_hint()),
+            Action::SetPalette { new } => new.len() * size_of::<xarast_color::ColourDef>(),
             Action::Batch(a) => a.iter().map(|x| x.size_hint(doc)).sum(),
             _ => 0,
         }
@@ -325,7 +358,8 @@ impl Action {
             | Action::Transform { .. }
             | Action::SetAttr { .. }
             | Action::SetResource { .. }
-            | Action::SetForeign { .. } => false,
+            | Action::SetForeign { .. }
+            | Action::SetPalette { .. } => false,
         }
     }
 
@@ -688,7 +722,8 @@ impl<'d> Tx<'d> {
             | Action::Transform { .. }
             | Action::SetAttr { .. }
             | Action::SetResource { .. }
-            | Action::SetForeign { .. } => {}
+            | Action::SetForeign { .. }
+            | Action::SetPalette { .. } => {}
         }
     }
 

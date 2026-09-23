@@ -274,11 +274,11 @@ which is what made this visible.
   A fidelity decision: matching Xara's appearance for two decades of
   documents beats being colourimetrically right, and the format carries no
   ICC profiles to be right *with*.
-- **RGB → CMYK is therefore its exact inverse** (`C = 1 − R`, `K = 0`), not
-  maximum-black extraction. Forced: with the reverse transform fixed for
-  fidelity, any other forward transform makes `RGB → CMYK → RGB` lose
-  colour, and users round-trip through the colour dialog constantly.
-  Under-colour removal and black generation belong with the ICC path.
+- **RGB → CMYK is the original's** (phase 8, `colour.md` decision 1):
+  black generated past a 50 % threshold, pure black on the K plate. It is
+  still exactly invertible under the naive reverse. *(Phase 1 used `C = 1 −
+  R, K = 0`, believing anything else lost colour; that was wrong.)*
+  Real under-colour removal belongs with the ICC path.
 - `Fixed24::INHERIT` (`0xF800_0000`, reading as −8.0) means "inherit from the
   parent". `to_f32` returns `Option<f32>` and `ColourDef::components` is
   `[Option<f32>; 4]`, so forgetting the check is a compile error rather than

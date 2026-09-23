@@ -240,6 +240,10 @@ impl Document {
             h.bytes(d);
         }
 
+        // The palette (phase 8): palette edits are undoable, so undo must be
+        // provable on it too.
+        crate::palette::digest_palette(&self.resources.colours, &mut h);
+
         // Metadata.
         h.opt(&self.meta.title.as_deref());
         h.opt(&self.meta.comment.as_deref());

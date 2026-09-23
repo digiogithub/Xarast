@@ -65,6 +65,43 @@ impl ColourKind {
             _ => ColourKind::Normal,
         }
     }
+
+    /// Reads the `.xar` `colour_type` byte from the **raw** `FIXED24`
+    /// components, which is what a reader should use.
+    ///
+    /// A shade's two coordinates are signed, in `[-1, 1]`, and the format
+    /// writes them unclamped (`research/02 §5.10.1`), so they must not go
+    /// through [`Fixed24::to_f32`](crate::Fixed24::to_f32), which clamps to
+    /// `0..=1` and would turn every darkening shade into "no change".
+    #[must_use]
+    pub fn from_raw(v: u8, raw: [crate::Fixed24; 4]) -> ColourKind {
+        let signed = |f: crate::Fixed24| {
+            if f.is_inherit() {
+                0.0
+            } else {
+                let v = f.to_f32_raw();
+                if v.is_nan() { 0.0 } else { v.clamp(-1.0, 1.0) }
+            }
+        };
+        match v {
+            4 => ColourKind::Shade {
+                x: signed(raw[0]),
+                y: signed(raw[1]),
+            },
+            _ => ColourKind::from_byte(v, raw.map(crate::Fixed24::to_f32)),
+        }
+    }
+
+    /// Whether the colour is derived from its parent (tint, shade or link),
+    /// which is when the parent takes part in resolution at all.
+    #[inline]
+    #[must_use]
+    pub fn is_derived(&self) -> bool {
+        matches!(
+            self,
+            ColourKind::Tint { .. } | ColourKind::Linked | ColourKind::Shade { .. }
+        )
+    }
 }
 
 /// One entry in the document's colour table.
@@ -126,7 +163,7 @@ impl ColourDef {
                 Some(comps[2]),
                 Some(comps[3]),
             ],
-            cached_rgb: value.to_rgba8(),
+            cached_rgb: value.to_rgba8_packed(),
             entry_index: 0,
         }
     }
@@ -165,11 +202,37 @@ pub enum ColourError {
 }
 
 /// The document's colour table: the definitions plus a name index.
+///
+/// Editing (`redefine`, `rename`, `reparent`, `remove`, `refresh_from`) lives
+/// in the `edit` submodule; every mutation bumps [`ColourTable::epoch`].
 #[derive(Clone, Default, Debug)]
 pub struct ColourTable {
     defs: slotmap::SlotMap<ColourId, ColourDef>,
     by_name: HashMap<Arc<str>, ColourId>,
+    /// Bumped by every mutation.
+    epoch: PaletteEpoch,
+    /// Parents before children, computed on first use after a structural
+    /// change.
+    order: std::sync::OnceLock<Arc<[ColourId]>>,
 }
+
+/// A version number for the palette. Monotonic: every mutation of a
+/// [`ColourTable`] moves it forward, so it can key any cache that depends on
+/// resolved palette colours — one palette edit invalidates exactly those.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
+pub struct PaletteEpoch(pub u64);
+
+impl PaletteEpoch {
+    /// The next epoch.
+    #[inline]
+    #[must_use]
+    pub const fn next(self) -> PaletteEpoch {
+        PaletteEpoch(self.0.wrapping_add(1))
+    }
+}
+
+mod edit;
+pub use edit::{ColourEditError, ColourIds, OnDelete};
 
 impl ColourTable {
     /// How far [`ColourTable::resolve`] will walk a parent chain.
@@ -196,7 +259,14 @@ impl ColourTable {
         if let Some(n) = name {
             self.by_name.insert(n, id);
         }
+        self.structure_changed();
         id
+    }
+
+    /// Records a change to which entries exist or how they are linked.
+    fn structure_changed(&mut self) {
+        self.order = std::sync::OnceLock::new();
+        self.epoch = self.epoch.next();
     }
 
     /// Looks up a definition.
@@ -211,11 +281,14 @@ impl ColourTable {
     /// yet in a corrupt file, and because repointing a tint at a different
     /// base colour is an ordinary editing operation. Nothing stops this
     /// creating a cycle; [`ColourTable::resolve`] is cycle-safe precisely so
-    /// that it does not have to.
+    /// that it does not have to. It is for loaders; an editor uses
+    /// [`ColourTable::reparent`], which refuses cycles, and a loader calls
+    /// [`ColourTable::repair_cycles`] when it is done.
     pub fn set_parent(&mut self, id: ColourId, parent: Option<ColourId>) -> bool {
         match self.defs.get_mut(id) {
             Some(d) => {
                 d.parent = parent;
+                self.structure_changed();
                 true
             }
             None => false,
@@ -279,7 +352,11 @@ impl ColourTable {
         if depth >= ColourTable::MAX_PARENT_DEPTH {
             return Err(ColourError::ParentChain(id));
         }
+        // Only a derived colour reads its parent (`research/02 §5.10.1`): a
+        // normal or spot colour with a stale parent link is its own
+        // components, as in the original.
         let parent = match def.parent {
+            _ if !def.kind.is_derived() => None,
             Some(p) if p == id => return Err(ColourError::ParentChain(id)),
             Some(p) => Some(self.resolve_inner(p, depth + 1)?),
             None => None,
@@ -289,39 +366,18 @@ impl ColourTable {
             ColourKind::Normal | ColourKind::Spot | ColourKind::Linked => {
                 ColourValue::from_components(def.model, def.merged_components(parent))
             }
-            ColourKind::Tint { factor } => {
-                // A tint mixes the parent with white: factor 1.0 is the
-                // parent, 0.0 is white. That is the printing sense of the
-                // word — a 90% tint of black is a light-ish grey — and it is
-                // what the corpus's "90% Black" entry resolves to.
-                let base = parent.unwrap_or(ColourValue::BLACK).to_rgbt();
-                let ColourValue::Rgbt { r, g, b, t } = base else {
-                    unreachable!("to_rgbt always yields Rgbt")
-                };
-                let f = factor.clamp(0.0, 1.0);
-                ColourValue::rgbt(
-                    1.0 - (1.0 - r) * f,
-                    1.0 - (1.0 - g) * f,
-                    1.0 - (1.0 - b) * f,
-                    t,
-                )
+            // Tints and shades apply in the child's own model to the parent
+            // brought into it. The original skips the conversion because
+            // making a colour a tint gives it its parent's model; converting
+            // is the same thing then, and still sensible if the two drifted.
+            ColourKind::Tint { factor } => parent
+                .unwrap_or(ColourValue::BLACK)
                 .to_model(def.model)
-            }
-            ColourKind::Shade { x, y } => {
-                // A shade positions the colour in the parent's
-                // saturation/value plane: x scales saturation, y scales
-                // value. The original's shade space is not documented beyond
-                // this, and the cached RGB is what a reader is meant to fall
-                // back on for exactness; this reproduces the shape of the
-                // relationship so that editing a shade behaves sensibly.
-                let ColourValue::Hsvt { h, s, v, t } =
-                    parent.unwrap_or(ColourValue::BLACK).to_hsvt()
-                else {
-                    unreachable!("to_hsvt always yields Hsvt")
-                };
-                ColourValue::hsvt(h, s * x.clamp(0.0, 1.0), v * y.clamp(0.0, 1.0), t)
-                    .to_model(def.model)
-            }
+                .tinted(factor),
+            ColourKind::Shade { x, y } => parent
+                .unwrap_or(ColourValue::BLACK)
+                .to_model(def.model)
+                .shaded(x, y),
         })
     }
 
@@ -372,21 +428,11 @@ impl Colour {
             Colour::Direct(v) => *v,
             Colour::Indexed { id, tint } => {
                 let base = table.resolve(*id);
+                // A local tint is a tint of the entry in the entry's own
+                // model, the same rule a palette tint follows.
                 match tint {
                     None => base,
-                    Some(f) => {
-                        let ColourValue::Rgbt { r, g, b, t } = base.to_rgbt() else {
-                            unreachable!("to_rgbt always yields Rgbt")
-                        };
-                        let f = f.clamp(0.0, 1.0);
-                        ColourValue::rgbt(
-                            1.0 - (1.0 - r) * f,
-                            1.0 - (1.0 - g) * f,
-                            1.0 - (1.0 - b) * f,
-                            t,
-                        )
-                        .to_model(base.model())
-                    }
+                    Some(f) => base.tinted(*f),
                 }
             }
         }
