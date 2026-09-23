@@ -71,6 +71,18 @@ multiple-versions = "warn"
 [advisories]
 version = 2
 yanked = "deny"
+# Every entry here is an "unmaintained" notice, not a vulnerability, on a
+# crate we only reach transitively and cannot swap without replacing its
+# parent. Each has a tracking task; revisit on every egui/resvg upgrade.
+ignore = [
+    # ttf-parser: pulled in by egui 0.33 (epaint -> ab_glyph ->
+    # owned_ttf_parser) for UI glyphs, and by resvg's fontdb in xtask.
+    # Leaves when egui moves off ab_glyph. Tracked as XARA-T-0062.
+    { id = "RUSTSEC-2026-0192", reason = "transitive via egui/ab_glyph; no drop-in replacement; XARA-T-0062" },
+    # rustybuzz: only through resvg/usvg in xtask (golden-image tooling),
+    # never linked into a shipped binary. Tracked as XARA-T-0062.
+    { id = "RUSTSEC-2026-0206", reason = "xtask-only via resvg; not shipped; XARA-T-0062" },
+]
 
 [sources]
 unknown-registry = "deny"
