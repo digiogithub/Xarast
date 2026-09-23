@@ -5695,6 +5695,7 @@ dependencies = [
 name = "xarast-text"
 version = "0.0.1"
 dependencies = [
+ "criterion",
  "fontique",
  "icu_properties",
  "icu_segmenter",

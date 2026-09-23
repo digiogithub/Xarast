@@ -27,3 +27,10 @@ skrifa = { workspace = true }
 unicode-bidi = { workspace = true }
 icu_segmenter = { workspace = true }
 icu_properties = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "layout"
+harness = false
