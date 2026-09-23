@@ -549,6 +549,24 @@ until this was wired.
 
 ## Decisions taken (and why)
 
+**Export has its own entry and its own band geometry (2026-09-23,
+XARA-US-0057).** `export::render_export_strips` maps a document rectangle
+exactly onto a `w × h` grid and renders it in strips through
+`CpuBackend::render_rows`, which draws device rows `y0..y0+h` of a display
+list on the **absolute** band grid with a caller-given band height. The
+entry constructs `CpuConfig::deterministic()` itself and takes no backend
+parameter: the GPU cannot reach an export. Band height is
+`export_band_lines(w, h)` — about 64 bands, 16 rows minimum, 1 MiB maximum —
+and a strip is a whole number of bands starting on the grid, so the thread
+count and the strip budget never change a byte
+(`tests/export.rs`: runs, strip budgets, 1 vs 8 threads, over every
+synthetic case). This is deliberately *not* `band_budget_bytes`: the
+on-screen deterministic configuration keeps its 1 MiB bands so the goldens
+do not move, while export gets enough bands to use the machine
+(XARA-T-0038's parallelism half: the gradient files export in 0.36–0.9 s
+against 2.0–4.5 s through `render`). See `export.md`.
+
+
 **Display-list commands index into shared scene ops (2026-09-23,
 XARA-US-0016).** Copying path, paint, style and transparency into every
 command made the 100k list 38 MB. That was past glibc's mmap threshold, so

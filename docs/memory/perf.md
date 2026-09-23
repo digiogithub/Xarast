@@ -55,6 +55,12 @@ memory bandwidth with the busy cores.
 Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 
 ### Budget table
+| PNG export, A4 at 300 dpi (2480 × 3508), 10 000 objects (`xarast-io` bench `export_a4_300dpi_10k/png`) | ≤ 3 s | **127 ms** (109–141) | passes (2026-09-23, load ~10–15); section "Export" |
+| JPEG export, same, q90 | ≤ 2.5 s | **132 ms** | passes |
+| WebP lossless export, same | ≤ 4 s | **147 ms** | passes |
+| Export dialog: size/DPI recompute per keystroke (`sizing_edit_keystroke`) | ≤ 100 µs | **23 ns** | passes |
+| Peak RSS, A4 at 300 dpi PNG / JPEG (`Spitfire.xar`, whole process) | ≤ 300 MB | **197 MB / 124 MB** | passes |
+| Peak RSS, 20 000 × 13 694 px PNG (streamed) | ≤ 1.5 GB (20k²) | **372 MB**, 6.1–6.4 s | passes (PNG streams; JPEG/WebP hold the image) |
 
 | Budget | Target | Measured | Verdict |
 |---|---|---|---|
@@ -109,6 +115,37 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Hit test, 100k objects, adversarial: 100k unfilled outlines all round the point | ≤ 2 ms | **17.7–21 ms** | **fails**; every candidate needs a precise rejection, no index can help (see "Picking") |
 | Marquee over 100k objects, whole page, touch or enclose | ≤ 20 ms | 0.78–1.38 ms | passes |
 | `HitIndex` insert + remove / move one object, 100k | — | 23–30 ns / 69–680 ns | the reason the grid beat a static BVH (8–23 ms rebuild) |
+### Export (`xarast-io`, phase 11 round 1, 2026-09-23)
+
+Release build, reference machine, load 10–16 (other agents compiling).
+`xarast-cli export` over the 59-file corpus, one process per format, the
+drawing area, transparent background (JPEG flattens onto white):
+
+| Format | 96 dpi: wall / render / encode | 300 dpi: wall / render / encode | Bytes (96 / 300 dpi) | Peak RSS (96 / 300) |
+|---|---|---|---|---|
+| PNG | 3.7–3.8 s / 1.75 s / 0.58–0.69 s | 15.0–17.4 s / 11.7–12.1 s / 1.9–3.8 s | 9.5 MB / 52.6 MB | 511 / 749–766 MB |
+| JPEG q90 4:2:0 | 3.4–3.5 s / 1.6 s / 0.39–0.46 s | 15.1–15.9 s / 11.5–11.9 s / 1.8–3.1 s | 3.7 MB / 20.4 MB | 499 / 601 MB |
+| WebP lossless | 3.4–3.5 s / 1.7 s / 0.36–0.37 s | 15.4–15.6 s / 12.4–12.6 s / 1.6 s | 9.4 MB / 52.9 MB | 500 / 601–666 MB |
+
+Open is ≈ 0.69 s and the scene walk ≈ 0.49 s of every run. Zero errors, and
+**every file is byte-identical between the two runs** of each format at
+both resolutions. The corpus RSS is dominated by the importer and the
+largest files, not by the export (a single A4 at 300 dpi peaks at 197 MB).
+
+- **Bands.** `export_band_lines` gives ~64 bands (≥ 16 rows, ≤ 1 MiB) and
+  64 MiB strips. The `*GradFilledShapes*` files export at 96 dpi in
+  0.36–0.9 s against 2.0–4.5 s through `xarast-cli render`, whose
+  deterministic config still has three 1 MiB bands (XARA-T-0038).
+- **PNG DEFLATE was the bottleneck** before `deflate::ChunkedZlib`: on
+  `Spitfire` A4 at 300 dpi, level 1 encode took 254 ms, level 6 about
+  1 040 ms and level 9 8.5 s against a 120 ms render. Parallel 1 MiB pieces
+  plus parallel row filtering: A4 PNG 1.25 s → 0.35 s wall (encode
+  180 ms); 20 000 × 13 694 px 24 s → 6.1 s (encode 19.8 s → 2.6 s). The
+  pieces cost < 0.2 % in size (9 553 847 → 9 569 926 bytes).
+- **Memory.** PNG streams strip by strip: the 274 Mpx export peaks at
+  372 MB, most of it a 64 MiB strip, its converted and filtered copies, and
+  the 32 MiB DEFLATE batch. JPEG and WebP hold the whole RGBA image.
+
 ### Images (`xarast-image`, phase 10)
 
 `taskset -c 0-7 cargo bench -p xarast-image --bench decode`, 2026-09-23, at
@@ -777,8 +814,9 @@ that will recur:
 - [x] `DisplayList::build` at 100k: 20.8 ms against 3 ms — now 1.9 ms
       (XARA-US-0016, 2026-09-23). The CPU full frame at 100k passes too
       (19 ms against 25).
-- [ ] Gradient-heavy export: about 30 ns per composited pixel and three
-      bands on a 766 px image (XARA-T-0038).
+- [ ] Gradient-heavy rendering: about 30 ns per composited pixel
+      (XARA-T-0038). The three-band half is fixed for export (≈ 48 bands,
+      0.36–0.9 s per file) but not for the headless `render` path.
 - [ ] `Document::snapshot()`: 43–80 ms against 25 ms, still.
 - [ ] Wire the budgets into CI so that a regression fails the build, rather
       than being noticed later. CI runners are not the reference machine, so

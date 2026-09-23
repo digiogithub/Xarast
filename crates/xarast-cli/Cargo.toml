@@ -19,6 +19,12 @@ xarast-format = { path = "../xarast-format" }
 xarast-io = { path = "../xarast-io" }
 xarast-render = { path = "../xarast-render" }
 xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+
+[features]
+default = []
+# The PNG "optimise" pass (`--optimise`); builds libdeflate from C.
+oxipng = ["xarast-io/oxipng"]
 
 [[bin]]
 name = "xarast-cli"

@@ -129,6 +129,25 @@ image = { version = "0.25.10", default-features = false, features = [
     "pnm",
 ] }
 
+# ── Export encoders (`xarast-io`, phase 11) ─────────────────────────────────
+# JPEG export: quality, progressive, chroma subsampling, JFIF density and
+# APP1 EXIF (`docs/memory/export.md`). Its `simd` feature stays off: that
+# path picks AVX2 at run time, and an export must be byte-identical on every
+# machine. `(MIT OR Apache-2.0) AND IJG`: the forward DCT is derived from the
+# IJG library, whose only condition on a binary is the acknowledgement kept
+# in `docs/11-licensing-and-clean-room.md` §4.1 (justified in `deny.toml`).
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"] }
+# WebP export, lossless only: pure Rust, already in the graph through
+# `image`. There is no acceptable pure-Rust *lossy* WebP encoder
+# (`docs/memory/export.md`). `MIT OR Apache-2.0`.
+image-webp = "0.2.4"
+# The optional "optimise (slower)" PNG pass, behind `xarast-io`'s `oxipng`
+# feature, off by default. `MIT`; its `libdeflater` builds the C library
+# libdeflate (`Apache-2.0` crate, MIT upstream), which is why it is not a
+# default feature. `parallel` stays off so the trial order, and therefore
+# the output, is fixed; `zopfli` and the CLI (`binary`) are not wanted.
+oxipng = { version = "10.2", default-features = false }
+
 # ── Application core ─────────────────────────────────────────────────────────
 # Insertion-ordered set/map. The selection is an ordered set: "the first
 # object selected" and "the last" are both user-visible, and iteration order

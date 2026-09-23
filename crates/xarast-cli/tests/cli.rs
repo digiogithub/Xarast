@@ -247,6 +247,116 @@ fn smoke_open_reports_walk_stats_and_fails_on_a_bad_file() {
     assert_eq!(stderr(&o).matches("FAILED").count(), 2, "{}", stderr(&o));
 }
 
+#[test]
+fn export_writes_every_format_at_the_requested_resolution() {
+    let dir = scratch("export-formats");
+    let input = write(&dir, "square.xar", &square_xar());
+    let i = input.to_str().unwrap();
+    for ext in ["png", "jpg", "webp"] {
+        let out = dir.join(format!("sq.{ext}"));
+        let o = run(&[
+            "export",
+            i,
+            "-o",
+            out.to_str().unwrap(),
+            "--dpi",
+            "300",
+            "--area",
+            "72,72,144,144",
+        ]);
+        assert_eq!(o.status.code(), Some(0), "{ext}: {}", stderr(&o));
+        assert!(
+            stdout(&o).contains("300x300 px at 300.0 dpi"),
+            "{}",
+            stdout(&o)
+        );
+        let img = image_size(&out);
+        assert_eq!(img, (300, 300), "{ext}");
+    }
+    // JPEG over the default transparent background says it flattened.
+    let o = run(&["export", i, "-o", dir.join("n.jpg").to_str().unwrap()]);
+    assert!(
+        stdout(&o).contains("note: transparency flattened onto #ffffff"),
+        "{}",
+        stdout(&o)
+    );
+}
+
+fn image_size(path: &Path) -> (u32, u32) {
+    let bytes = std::fs::read(path).unwrap();
+    if bytes.starts_with(b"\x89PNG") {
+        return png_size(path);
+    }
+    if bytes.starts_with(b"RIFF") {
+        // VP8L: 14 bits each of width-1 and height-1 after the signature.
+        let b = &bytes[21..25];
+        let v = u32::from_le_bytes(b.try_into().unwrap());
+        return ((v & 0x3fff) + 1, ((v >> 14) & 0x3fff) + 1);
+    }
+    // JPEG: the first SOF0/SOF2 segment.
+    let sof = bytes
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0] || w == [0xFF, 0xC2])
+        .expect("SOF");
+    let h = u32::from(u16::from_be_bytes([bytes[sof + 5], bytes[sof + 6]]));
+    let w = u32::from(u16::from_be_bytes([bytes[sof + 7], bytes[sof + 8]]));
+    (w, h)
+}
+
+#[test]
+fn export_refuses_xar_with_the_architecture_reason() {
+    let dir = scratch("export-xar");
+    let input = write(&dir, "square.xar", &square_xar());
+    let out = dir.join("out.xar");
+    for args in [
+        vec![
+            "export",
+            "--format",
+            "xar",
+            input.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ],
+        vec![
+            "export",
+            input.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    ] {
+        let o = run(&args);
+        assert_ne!(o.status.code(), Some(0));
+        assert!(stderr(&o).contains("§3.5"), "{}", stderr(&o));
+    }
+    assert!(!out.exists());
+}
+
+#[test]
+fn export_is_byte_identical_across_processes() {
+    let dir = scratch("export-determinism");
+    let input = write(&dir, "square.xar", &square_xar());
+    for ext in ["png", "jpg", "webp"] {
+        let a = dir.join(format!("a.{ext}"));
+        let b = dir.join(format!("b.{ext}"));
+        for out in [&a, &b] {
+            let o = run(&[
+                "export",
+                input.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+                "--dpi",
+                "150",
+            ]);
+            assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+        }
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            std::fs::read(&b).unwrap(),
+            "{ext}"
+        );
+    }
+}
+
 // ── The corpus ──────────────────────────────────────────────────────────────
 
 fn corpus() -> Option<PathBuf> {
@@ -310,4 +420,31 @@ fn corpus_renders_small_with_no_failure() {
     let text = stdout(&o);
     assert!(text.contains("59 files: 59 rendered"), "{text}");
     println!("{text}");
+}
+
+#[test]
+fn corpus_exports_to_every_format_with_no_failure() {
+    let root = corpus_or_skip!();
+    for fmt in ["png", "jpeg", "webp"] {
+        let out = scratch(&format!("corpus-export-{fmt}"));
+        let mut args = vec![
+            "export".to_owned(),
+            "--out-dir".to_owned(),
+            out.to_string_lossy().into_owned(),
+            "--format".to_owned(),
+            fmt.to_owned(),
+            "--width=160".to_owned(),
+            "--quiet".to_owned(),
+        ];
+        args.extend(
+            CORPUS_DIRS
+                .iter()
+                .map(|d| root.join(d).to_string_lossy().into_owned()),
+        );
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let o = run(&args);
+        assert_eq!(o.status.code(), Some(0), "{fmt}: {}", stderr(&o));
+        let text = stdout(&o);
+        assert!(text.contains("59 files: 59 exported, 0 failed"), "{text}");
+    }
 }
