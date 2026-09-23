@@ -15,7 +15,7 @@ use xarast_geom::{BiasGain, Point};
 use super::Stats;
 use super::defs::Defs;
 use super::frame::Frame;
-use super::num::{f64s, mp};
+use super::num::{f32s, f64s, mp};
 use super::xml::attr;
 
 /// The largest per-channel error a baked ramp may have (`§6.4`): 2/255.
@@ -110,6 +110,15 @@ fn effect_name(e: FillEffect) -> &'static str {
     }
 }
 
+/// `xarast:fill-effect`, unless it is the default fade. Written on every
+/// twin and bitmap pattern: the model keeps the effect whatever the fill
+/// (a contone bitmap interpolates with it).
+fn effect_attr(out: &mut String, e: FillEffect) {
+    if e != FillEffect::Fade {
+        attr(out, "xarast:fill-effect", effect_name(e));
+    }
+}
+
 fn profile_attr(p: BiasGain) -> String {
     format!("{} {}", f64s(p.bias, 6), f64s(p.gain, 6))
 }
@@ -120,6 +129,31 @@ fn pt_pair(ctx: &PaintCtx<'_>, p: Point) -> String {
     format!("{} {}", mp(x), mp(y))
 }
 
+/// A key colour as a reader rebuilds it from what is written: a palette
+/// colour named by its `c-N` reference resolves exactly; anything else is
+/// read back from its 8-bit spelling. Everything derived from a key (baked
+/// stops, a flat approximation) is computed from this value, never from
+/// the model's own `f32` colour, so that a reload re-derives the same
+/// bytes (XARA-T-0110).
+fn key_colour(c: &Colour, ctx: &PaintCtx<'_>) -> (ColourValue, Option<String>) {
+    let v = c.resolve(ctx.colours);
+    match palette_ref(c, ctx) {
+        Some(r) => (v, Some(r)),
+        None => (ColourValue::from_rgba8(v.to_rgba8()), None),
+    }
+}
+
+/// `xarast:stop-refs` / `xarast:colour-refs`: one token per key colour,
+/// `#c-N` for a palette colour and `-` for a literal one; omitted when no
+/// key is a palette colour.
+fn refs_attr(out: &mut String, name: &str, refs: &[Option<String>]) {
+    if refs.iter().all(Option::is_none) {
+        return;
+    }
+    let v: Vec<&str> = refs.iter().map(|r| r.as_deref().unwrap_or("-")).collect();
+    attr(out, name, &v.join(" "));
+}
+
 /// A resolved colour ramp: key stops in the parameter space *after* the
 /// profile, plus what shapes it.
 struct KeyRamp {
@@ -127,6 +161,8 @@ struct KeyRamp {
     to: ColourValue,
     ramp: Ramp<ColourValue>,
     effect: FillEffect,
+    /// Palette references of the keys, in key order (from, stops, to).
+    refs: Vec<Option<String>>,
 }
 
 impl KeyRamp {
@@ -135,22 +171,26 @@ impl KeyRamp {
         to: &Colour,
         ramp: &Ramp<Colour>,
         effect: FillEffect,
-        t: &ColourTable,
+        ctx: &PaintCtx<'_>,
     ) -> KeyRamp {
         let mut r: Ramp<ColourValue> = Ramp::new();
         r.profile = ramp.profile;
         r.mapping = ramp.mapping;
+        let (from, from_ref) = key_colour(from, ctx);
+        let mut refs = vec![from_ref];
         for s in ramp.stops() {
-            r.insert(xarast_doc::RampStop {
-                pos: s.pos,
-                value: s.value.resolve(t),
-            });
+            let (value, rf) = key_colour(&s.value, ctx);
+            refs.push(rf);
+            r.insert(xarast_doc::RampStop { pos: s.pos, value });
         }
+        let (to, to_ref) = key_colour(to, ctx);
+        refs.push(to_ref);
         KeyRamp {
-            from: from.resolve(t),
-            to: to.resolve(t),
+            from,
+            to,
             ramp: r,
             effect,
+            refs,
         }
     }
 
@@ -238,7 +278,14 @@ fn push_stops(body: &mut String, stops: &[(f32, Rgba8)]) {
 /// The stops and twin attributes of a colour ramp.
 fn ramp_body(k: &KeyRamp, ext: &mut String, stats: &mut Stats) -> Vec<(f32, Rgba8)> {
     if k.is_linear() {
-        return k.keys();
+        let keys = k.keys();
+        if !offsets_exact(keys.iter().map(|(p, _)| *p)) {
+            // A key position `<stop offset>`'s four decimals do not pin:
+            // the twin keeps it (the stops stay the plain SVG).
+            attr(ext, "xarast:stops", &colour_keys(&keys));
+        }
+        refs_attr(ext, "xarast:stop-refs", &k.refs);
+        return keys;
     }
     stats.ramps_baked += 1;
     if k.ramp.profile != BiasGain::IDENTITY {
@@ -250,13 +297,27 @@ fn ramp_body(k: &KeyRamp, ext: &mut String, stats: &mut Stats) -> Vec<(f32, Rgba
     if k.effect != FillEffect::Fade {
         attr(ext, "xarast:fill-effect", effect_name(k.effect));
     }
-    let keys: Vec<String> = k
-        .keys()
-        .iter()
-        .map(|(p, c)| format!("{}:{}", f64s(f64::from(*p), 6), hex_alpha(*c)))
-        .collect();
-    attr(ext, "xarast:stops", &keys.join(" "));
+    attr(ext, "xarast:stops", &colour_keys(&k.keys()));
+    refs_attr(ext, "xarast:stop-refs", &k.refs);
     bake(&|t| k.sample(t))
+}
+
+/// `pos:#rrggbb[aa] …`: a colour ramp's keys.
+fn colour_keys(keys: &[(f32, Rgba8)]) -> String {
+    keys.iter()
+        .map(|(p, c)| format!("{}:{}", pos_s(*p), hex_alpha(*c)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether every key position survives `<stop offset>`'s four decimals
+/// (read back through an `f64`, as a reader does).
+fn offsets_exact(mut positions: impl Iterator<Item = f32>) -> bool {
+    positions.all(|p| {
+        f64s(f64::from(p), 4)
+            .parse::<f64>()
+            .is_ok_and(|v| v as f32 == p)
+    })
 }
 
 /// The graduated-fill repeat SVG can express: only the "extra" repeat tiles.
@@ -362,6 +423,45 @@ fn radial_geometry(
     g
 }
 
+/// The twins of a radial fill written as a circle (`cx cy r`): the minor
+/// axis when it differs, a lock that is off, and the major axis when a
+/// reader would not derive it — a quarter turn clockwise of the minor axis
+/// when that is a radius, else `(cx + r, cy)` — so the fill's own axes come
+/// back exactly.
+fn circle_twins(
+    ctx: &PaintCtx<'_>,
+    centre: Point,
+    major: Point,
+    minor: Point,
+    aspect_locked: bool,
+) -> String {
+    let mut out = String::new();
+    if minor != major {
+        attr(&mut out, "xarast:minor", &pt_pair(ctx, minor));
+    }
+    if !aspect_locked && minor == major {
+        attr(&mut out, "xarast:aspect-locked", "false");
+    }
+    let (cx, cy) = (i64::from(centre.x.raw()), i64::from(centre.y.raw()));
+    let (ux, uy) = (i64::from(major.x.raw()) - cx, i64::from(major.y.raw()) - cy);
+    let r = ((ux as f64).powi(2) + (uy as f64).powi(2)).sqrt().round() as i64;
+    let derived = if minor != major {
+        let (dx, dy) = (i64::from(minor.x.raw()) - cx, i64::from(minor.y.raw()) - cy);
+        let len = ((dx as f64).powi(2) + (dy as f64).powi(2)).sqrt();
+        if (len - r as f64).abs() <= 1.0 {
+            (cx + dy, cy - dx)
+        } else {
+            (cx + r, cy)
+        }
+    } else {
+        (cx + r, cy)
+    };
+    if derived != (i64::from(major.x.raw()), i64::from(major.y.raw())) {
+        attr(&mut out, "xarast:major", &pt_pair(ctx, major));
+    }
+    out
+}
+
 /// The colour paint of a fill or a stroke.
 pub(crate) fn colour_paint(
     ctx: &mut PaintCtx<'_>,
@@ -394,7 +494,7 @@ pub(crate) fn colour_paint(
             to,
             ramp,
         } => {
-            let k = KeyRamp::from_paint(from, to, ramp, effect, t);
+            let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
             let mut ext = String::new();
             let stops = ramp_body(&k, &mut ext, ctx.stats);
             let geo = linear_geometry(ctx, *start, *end);
@@ -413,7 +513,7 @@ pub(crate) fn colour_paint(
             to,
             ramp,
         } => {
-            let k = KeyRamp::from_paint(from, to, ramp, effect, t);
+            let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
             let mut ext = String::new();
             let stops = ramp_body(&k, &mut ext, ctx.stats);
             let circle = *aspect_locked || minor == major;
@@ -422,13 +522,11 @@ pub(crate) fn colour_paint(
             } else {
                 radial_geometry(ctx, *centre, *major, *minor, false)
             };
-            let mut extra = String::new();
-            if circle && minor != major {
-                attr(&mut extra, "xarast:minor", &pt_pair(ctx, *minor));
-            }
-            if !*aspect_locked && minor == major {
-                attr(&mut extra, "xarast:aspect-locked", "false");
-            }
+            let extra = if circle {
+                circle_twins(ctx, *centre, *major, *minor, *aspect_locked)
+            } else {
+                String::new()
+            };
             PaintOut {
                 value: gradient(
                     ctx,
@@ -455,7 +553,7 @@ pub(crate) fn colour_paint(
             // §6.3: a radial gradient through the diamond's frame is the
             // accepted approximation (round rather than straight corners).
             ctx.stats.fills_approximated += 1;
-            let k = KeyRamp::from_paint(from, to, ramp, effect, t);
+            let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
             let mut ext = String::new();
             let stops = ramp_body(&k, &mut ext, ctx.stats);
             let geo = radial_geometry(ctx, *centre, *corner1, *corner2, false);
@@ -483,7 +581,7 @@ pub(crate) fn colour_paint(
             ramp,
         } => {
             ctx.stats.fills_approximated += 1;
-            let k = KeyRamp::from_paint(from, to, ramp, effect, t);
+            let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
             let mid = k.sample(0.5);
             let mut side = String::from("<xarast:fill");
             attr(&mut side, "xarast:type", "conical");
@@ -516,9 +614,15 @@ pub(crate) fn colour_paint(
                 ),
             );
             attr(&mut side, "xarast:colours", &join_hex(&cs));
+            refs_attr(
+                &mut side,
+                "xarast:colour-refs",
+                &colour_refs(&[c0, c1, c2], ctx),
+            );
             if tiling != Tiling::None {
                 attr(&mut side, "xarast:repeat", repeat_name(tiling));
             }
+            effect_attr(&mut side, effect);
             side.push_str("/>");
             flat_approx(mean(&cs), side)
         }
@@ -548,9 +652,15 @@ pub(crate) fn colour_paint(
                 ),
             );
             attr(&mut side, "xarast:colours", &join_hex(&cs));
+            refs_attr(
+                &mut side,
+                "xarast:colour-refs",
+                &colour_refs(&[c0, c1, c2, c3], ctx),
+            );
             if tiling != Tiling::None {
                 attr(&mut side, "xarast:repeat", repeat_name(tiling));
             }
+            effect_attr(&mut side, effect);
             side.push_str("/>");
             flat_approx(mean(&cs), side)
         }
@@ -576,29 +686,16 @@ pub(crate) fn colour_paint(
             let mut side = String::from("<xarast:fill");
             attr(&mut side, "xarast:type", kind);
             attr(&mut side, "xarast:colours", &join_hex(&[a, b]));
-            attr(&mut side, "xarast:seed", &params.seed.to_string());
-            attr(
+            refs_attr(
                 &mut side,
-                "xarast:graininess",
-                &f64s(f64::from(params.graininess), 6),
+                "xarast:colour-refs",
+                &colour_refs(&[from, to], ctx),
             );
-            attr(
-                &mut side,
-                "xarast:gravity",
-                &f64s(f64::from(params.gravity), 6),
-            );
-            attr(
-                &mut side,
-                "xarast:squash",
-                &f64s(f64::from(params.squash), 6),
-            );
-            attr(&mut side, "xarast:dpi", &params.dpi.to_string());
-            if params.tileable {
-                attr(&mut side, "xarast:tileable", "true");
+            procedural_attrs(&mut side, params, *profile);
+            if tiling != Tiling::None {
+                attr(&mut side, "xarast:repeat", repeat_name(tiling));
             }
-            if *profile != BiasGain::IDENTITY {
-                attr(&mut side, "xarast:profile", &profile_attr(*profile));
-            }
+            effect_attr(&mut side, effect);
             side.push_str("/>");
             flat_approx(mean(&[a, b]), side)
         }
@@ -658,6 +755,7 @@ pub(crate) fn colour_paint(
                     "xarast:contone",
                     &join_hex(&[rgba(a, t), rgba(b, t)]),
                 );
+                refs_attr(&mut body, "xarast:contone-refs", &colour_refs(&[a, b], ctx));
             }
             if *profile != BiasGain::IDENTITY {
                 attr(&mut body, "xarast:profile", &profile_attr(*profile));
@@ -670,6 +768,12 @@ pub(crate) fn colour_paint(
                     &format!("{} {}", pt_pair(ctx, p.p2), pt_pair(ctx, p.p3)),
                 );
             }
+            // The fill mapping, apart from the bitmap's own tile mode
+            // (XARA-T-0109).
+            if tiling != Tiling::None {
+                attr(&mut body, "xarast:fill-repeat", repeat_name(tiling));
+            }
+            effect_attr(&mut body, effect);
             body.push_str("><image");
             attr(&mut body, "width", "1");
             attr(&mut body, "height", "1");
@@ -690,9 +794,10 @@ fn ramp_twin(side: &mut String, k: &KeyRamp, tiling: Tiling) {
     let keys: Vec<String> = k
         .keys()
         .iter()
-        .map(|(p, c)| format!("{}:{}", f64s(f64::from(*p), 6), hex_alpha(*c)))
+        .map(|(p, c)| format!("{}:{}", pos_s(*p), hex_alpha(*c)))
         .collect();
     attr(side, "xarast:stops", &keys.join(" "));
+    refs_attr(side, "xarast:stop-refs", &k.refs);
     if k.ramp.profile != BiasGain::IDENTITY {
         attr(side, "xarast:profile", &profile_attr(k.ramp.profile));
     }
@@ -705,6 +810,11 @@ fn ramp_twin(side: &mut String, k: &KeyRamp, tiling: Tiling) {
     if tiling != Tiling::None {
         attr(side, "xarast:repeat", repeat_name(tiling));
     }
+}
+
+/// The palette references of a twin's colours.
+fn colour_refs(cs: &[&Colour], ctx: &PaintCtx<'_>) -> Vec<Option<String>> {
+    cs.iter().map(|c| palette_ref(c, ctx)).collect()
 }
 
 fn join_hex(cs: &[Rgba8]) -> String {
@@ -821,7 +931,9 @@ pub(crate) fn transparency(
         } => {
             let circle = *aspect_locked || minor == major;
             let geo = if circle {
-                radial_geometry(ctx, *centre, *major, *major, true)
+                let mut g = radial_geometry(ctx, *centre, *major, *major, true);
+                g.push_str(&circle_twins(ctx, *centre, *major, *minor, *aspect_locked));
+                g
             } else {
                 radial_geometry(ctx, *centre, *major, *minor, false)
             };
@@ -852,7 +964,10 @@ pub(crate) fn transparency(
             ramp,
         } => {
             ctx.stats.fills_approximated += 1;
-            let geo = radial_geometry(ctx, *centre, *corner1, *corner2, false);
+            let mut geo = radial_geometry(ctx, *centre, *corner1, *corner2, false);
+            // As for a diamond fill: the radial gradient is the drawing,
+            // the marker says what it approximates.
+            attr(&mut geo, "xarast:fill", "diamond");
             let mask = transparency_mask(
                 ctx,
                 &geo,
@@ -879,7 +994,7 @@ pub(crate) fn transparency(
                 alpha: opt_alpha(level),
                 mode: from.mode,
                 mask: None,
-                sidecar: Some(transparency_twin(ctx, t)),
+                sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
         FillGeometry::ThreeColour { c0, c1, c2, .. } => {
@@ -890,7 +1005,7 @@ pub(crate) fn transparency(
                 alpha: opt_alpha(level),
                 mode: c0.mode,
                 mask: None,
-                sidecar: Some(transparency_twin(ctx, t)),
+                sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
         FillGeometry::FourColour { c0, c1, c2, c3, .. } => {
@@ -903,21 +1018,24 @@ pub(crate) fn transparency(
                 alpha: opt_alpha((sum / 4) as u8),
                 mode: c0.mode,
                 mask: None,
-                sidecar: Some(transparency_twin(ctx, t)),
+                sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
         FillGeometry::Bitmap { .. } => {
             ctx.stats.fills_approximated += 1;
             TranspOut {
-                sidecar: Some(transparency_twin(ctx, t)),
+                sidecar: Some(transparency_twin(ctx, t, tiling)),
                 ..TranspOut::default()
             }
         }
     }
 }
 
-/// The twin of a transparency SVG cannot draw: its kind and control points.
-fn transparency_twin(ctx: &PaintCtx<'_>, t: &TranspPaint) -> String {
+/// The twin of a transparency SVG cannot draw: its kind, control points
+/// and everything else the model holds (XARA-T-0111): key levels, ramp
+/// profile, procedural parameters, the bitmap and the fill mapping. The
+/// keys' blend mode is the element's (`xarast:blend`).
+fn transparency_twin(ctx: &mut PaintCtx<'_>, t: &TranspPaint, tiling: Tiling) -> String {
     let kind = match t {
         FillGeometry::Conical { .. } => "conical",
         FillGeometry::ThreeColour { .. } => "three-point",
@@ -937,8 +1055,112 @@ fn transparency_twin(ctx: &PaintCtx<'_>, t: &TranspPaint) -> String {
     if !pts.is_empty() {
         attr(&mut s, "xarast:points", &pts.join(" "));
     }
+    let values = |v: &[&Transparency]| {
+        v.iter()
+            .map(|t| t.level.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    match t {
+        FillGeometry::Conical { from, to, ramp, .. } => {
+            attr(&mut s, "xarast:levels", &level_keys(from, to, ramp));
+            if ramp.profile != BiasGain::IDENTITY {
+                attr(&mut s, "xarast:profile", &profile_attr(ramp.profile));
+            }
+            if ramp.mapping == RampMapping::Sin {
+                attr(&mut s, "xarast:ramp-mapping", "sin");
+            }
+        }
+        FillGeometry::ThreeColour { c0, c1, c2, .. } => {
+            attr(&mut s, "xarast:values", &values(&[c0, c1, c2]));
+        }
+        FillGeometry::FourColour { c0, c1, c2, c3, .. } => {
+            attr(&mut s, "xarast:values", &values(&[c0, c1, c2, c3]));
+        }
+        FillGeometry::Fractal {
+            params,
+            from,
+            to,
+            profile,
+        }
+        | FillGeometry::Noise {
+            params,
+            from,
+            to,
+            profile,
+        } => {
+            attr(&mut s, "xarast:values", &values(&[from, to]));
+            procedural_attrs(&mut s, params, *profile);
+        }
+        FillGeometry::Bitmap {
+            image,
+            tiling: own,
+            dpi,
+            contone,
+            profile,
+            ..
+        } => {
+            if let Some(bm) = (ctx.bitmap_href)(*image) {
+                attr(&mut s, "href", &bm.href);
+                attr(&mut s, "xlink:href", &bm.href);
+            }
+            if *own != Tiling::None {
+                attr(&mut s, "xarast:tile-mode", repeat_name(*own));
+            }
+            if *dpi != 0 {
+                attr(&mut s, "xarast:dpi", &dpi.to_string());
+            }
+            if let Some((a, b)) = contone {
+                attr(&mut s, "xarast:contone", &values(&[a, b]));
+            }
+            if *profile != BiasGain::IDENTITY {
+                attr(&mut s, "xarast:profile", &profile_attr(*profile));
+            }
+        }
+        _ => {}
+    }
+    if tiling != Tiling::None {
+        attr(&mut s, "xarast:repeat", repeat_name(tiling));
+    }
     s.push_str("/>");
     s
+}
+
+/// `0:level pos:level … 1:level`: a transparency ramp's keys.
+fn level_keys(from: &Transparency, to: &Transparency, ramp: &Ramp<Transparency>) -> String {
+    let mut keys = vec![format!("0:{}", from.level)];
+    keys.extend(
+        ramp.stops()
+            .iter()
+            .map(|s| format!("{}:{}", pos_s(s.pos), s.value.level)),
+    );
+    keys.push(format!("1:{}", to.level));
+    keys.join(" ")
+}
+
+/// The parameters of a fractal or noise fill, as twin attributes.
+fn procedural_attrs(
+    s: &mut String,
+    params: &xarast_doc::fill::ProceduralParams,
+    profile: BiasGain,
+) {
+    attr(s, "xarast:seed", &params.seed.to_string());
+    attr(s, "xarast:graininess", &f32s(params.graininess));
+    attr(s, "xarast:gravity", &f32s(params.gravity));
+    attr(s, "xarast:squash", &f32s(params.squash));
+    attr(s, "xarast:dpi", &params.dpi.to_string());
+    if params.tileable {
+        attr(s, "xarast:tileable", "true");
+    }
+    if profile != BiasGain::IDENTITY {
+        attr(s, "xarast:profile", &profile_attr(profile));
+    }
+}
+
+/// A key position in a twin: the shortest spelling that reads back as the
+/// same `f32`.
+fn pos_s(p: f32) -> String {
+    f32s(p)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -969,6 +1191,9 @@ fn transparency_mask(
         let mut v = vec![(0.0, grey(from.level))];
         v.extend(ramp.stops().iter().map(|s| (s.pos, grey(s.value.level))));
         v.push((1.0, grey(to.level)));
+        if !offsets_exact(v.iter().map(|(p, _)| *p)) {
+            attr(&mut ext, "xarast:levels", &level_keys(&from, &to, ramp));
+        }
         v
     } else {
         ctx.stats.ramps_baked += 1;
@@ -978,14 +1203,7 @@ fn transparency_mask(
         if ramp.mapping == RampMapping::Sin {
             attr(&mut ext, "xarast:ramp-mapping", "sin");
         }
-        let mut keys = vec![format!("0:{}", from.level)];
-        keys.extend(
-            ramp.stops()
-                .iter()
-                .map(|s| format!("{}:{}", f64s(f64::from(s.pos), 6), s.value.level)),
-        );
-        keys.push(format!("1:{}", to.level));
-        attr(&mut ext, "xarast:levels", &keys.join(" "));
+        attr(&mut ext, "xarast:levels", &level_keys(&from, &to, ramp));
         bake(&|t| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level))
     };
     attr(&mut ext, "color-interpolation", "sRGB");

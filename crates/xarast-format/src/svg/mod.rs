@@ -124,6 +124,9 @@ pub struct Stats {
     /// `d`, so they draw nothing.
     pub quickshapes_without_outline: usize,
     pub images: usize,
+    /// Distinct bitmaps written into the package, what `meta.xml` counts:
+    /// a bitmap no element references is not written (XARA-T-0110).
+    pub bitmaps: usize,
     /// Bitmaps that could not be written at all (no bytes).
     pub images_missing: usize,
     /// Bitmaps written in a container browsers cannot decode (BMP, the
@@ -268,6 +271,7 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
     let svg = assemble(&e, doc, w, h, count, &digest);
     drop(e);
     stats.images_unrenderable = unrenderable;
+    stats.bitmaps = cache.values().filter(|r| r.is_some()).count();
     stats.bytes = svg.len();
     SvgDocument {
         svg,

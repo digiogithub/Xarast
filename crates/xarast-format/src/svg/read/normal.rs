@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use xarast_color::{ColourId, ColourKind, TranspMode};
+use xarast_color::{ColourId, ColourKind};
 use xarast_doc::fill::{Paint, Tiling};
 use xarast_doc::{
     AttrSlot, AttrStack, AttrValue, BitmapId, Document, ForeignBaggage, ForeignChildKind,
@@ -691,10 +691,17 @@ impl Nf<'_> {
             (a - p, b - p, c + p, d + p)
         });
         // Bitmaps are named by content.
-        for p in [&fill_paint, &stroke_paint].into_iter().flatten() {
-            if let Some(id) = p.bitmap() {
-                self.bitmap_ref(id);
-            }
+        let transp_bitmaps = [&fill_t, &stroke_t]
+            .into_iter()
+            .flatten()
+            .filter_map(|t| t.bitmap());
+        let paint_bitmaps = [&fill_paint, &stroke_paint]
+            .into_iter()
+            .flatten()
+            .filter_map(|p| p.bitmap());
+        let ids: Vec<BitmapId> = paint_bitmaps.chain(transp_bitmaps).collect();
+        for id in ids {
+            self.bitmap_ref(id);
         }
         let refs = self.bitmaps.clone();
         let mut lookup = |id: BitmapId| refs.get(&id).cloned().flatten();
@@ -807,14 +814,22 @@ impl Nf<'_> {
             if let Some(t) = &st.sidecar {
                 let _ = write!(s, " stroke-transparency-twin={t}");
             }
+            if let Some(m) = &st.mask {
+                let m = self.canon(&format!("url(#{m})"));
+                let _ = write!(s, " stroke-mask={m}");
+            }
         }
-        let mode = if ft.mode != TranspMode::None && ft.mode != TranspMode::Mix {
-            ft.mode
-        } else {
-            st.mode
-        };
-        if let Some((_, name)) = blend_of(mode) {
+        // Each drawn side's own blend mode (the profile carries both:
+        // `xarast:blend` and `xarast:stroke-blend`).
+        if (fill.value != "none" || image)
+            && let Some((_, name)) = blend_of(ft.mode)
+        {
             let _ = write!(s, " blend={name}");
+        }
+        if stroke.value != "none"
+            && let Some((_, name)) = blend_of(st.mode)
+        {
+            let _ = write!(s, " stroke-blend={name}");
         }
         self.extras(&mut s, stroke.value != "none");
         s

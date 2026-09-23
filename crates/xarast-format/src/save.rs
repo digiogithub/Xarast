@@ -166,11 +166,7 @@ pub fn meta_xml(doc: &Document, stats: &Stats, generator: &str) -> String {
     attr(&mut s, "xarast:pages", &pages.to_string());
     attr(&mut s, "xarast:layers", &stats.layers.to_string());
     attr(&mut s, "xarast:objects", &stats.elements.to_string());
-    attr(
-        &mut s,
-        "xarast:bitmaps",
-        &doc.resources.bitmaps().count().to_string(),
-    );
+    attr(&mut s, "xarast:bitmaps", &stats.bitmaps.to_string());
     attr(
         &mut s,
         "xarast:colours",

@@ -12,10 +12,15 @@
 //!   colour's own alpha is known when the paint says it (a palette colour,
 //!   a twin); a literal colour is taken as opaque and the whole opacity
 //!   becomes the transparency.
-//! - `xarast:blend` goes to the fill's transparency when there is a fill,
-//!   to the stroke's otherwise (the writer's own precedence).
-//! - With two `<xarast:transparency>` twins the first is the fill's; with
-//!   one, it is the fill's when there is a fill.
+//! - `xarast:stroke-blend` is the stroke's blend mode and `xarast:blend`
+//!   then the fill's alone. Without it (older files), `xarast:blend` goes
+//!   to the fill's transparency when there is a fill, to the stroke's
+//!   otherwise (the writer's own precedence).
+//! - `<xarast:stroke-transparency>` and `xarast:stroke-mask` are the
+//!   stroke's. Older files: with two `<xarast:transparency>` twins the
+//!   first is the fill's; with one, it is the fill's when there is a fill.
+//! - Key colours take the palette colour their `xarast:*-refs` token
+//!   names when it resolves to the written value (`research/06 §6.14`).
 
 use super::*;
 
@@ -85,7 +90,7 @@ fn keys(v: &str) -> Option<Vec<(f32, Rgba8)>> {
     let mut out = Vec::new();
     for item in v.split_ascii_whitespace() {
         let (p, c) = item.split_once(':')?;
-        out.push((parse::float(p)? as f32, parse::colour(c)?));
+        out.push((parse::f32_exact(p)?, parse::colour(c)?));
     }
     (out.len() >= 2).then_some(out)
 }
@@ -95,7 +100,7 @@ fn level_keys(v: &str) -> Option<Vec<(f32, u8)>> {
     let mut out = Vec::new();
     for item in v.split_ascii_whitespace() {
         let (p, l) = item.split_once(':')?;
-        out.push((parse::float(p)? as f32, l.parse().ok()?));
+        out.push((parse::f32_exact(p)?, l.parse().ok()?));
     }
     (out.len() >= 2).then_some(out)
 }
@@ -192,6 +197,7 @@ impl<'d> Reader<'d, '_, '_> {
         let cs = &cctx.style;
         let mut out: Vec<AttrValue> = Vec::new();
         let mut twins_t: Vec<&'d Elem> = Vec::new();
+        let mut stroke_twin_t: Option<&'d Elem> = None;
         let mut fill_twin = None;
         let mut stroke_twin = None;
         for c in &e.children {
@@ -204,6 +210,7 @@ impl<'d> Reader<'d, '_, '_> {
                 "fill" => fill_twin = Some(x),
                 "stroke-fill" => stroke_twin = Some(x),
                 "transparency" => twins_t.push(x),
+                "stroke-transparency" => stroke_twin_t = Some(x),
                 _ => {}
             }
         }
@@ -240,14 +247,24 @@ impl<'d> Reader<'d, '_, '_> {
         };
         let stroke_visible = stroke.as_ref().is_some_and(|s| s.visible);
         // Which transparency twin is whose.
+        // `<xarast:stroke-transparency>` is the stroke's; before it had its
+        // own name, two twins were fill then stroke and a lone one the
+        // fill's when there is a fill.
         let (fill_tt, stroke_tt) = match (twins_t.as_slice(), fill_visible, stroke_visible) {
+            (_, _, _) if stroke_twin_t.is_some() => (twins_t.first().copied(), stroke_twin_t),
             ([a, b, ..], _, _) => (Some(*a), Some(*b)),
             ([a], true, _) => (Some(*a), None),
             ([a], false, true) => (None, Some(*a)),
             _ => (None, None),
         };
-        let fill_blend = if fill_visible { blend } else { None };
-        let stroke_blend = if fill_visible { None } else { blend };
+        // `xarast:stroke-blend` is the stroke's own mode when the fill is
+        // drawn; `xarast:blend` is then the fill's alone (the CSS mode may
+        // be the stroke's, as the nearest SVG can draw).
+        let (fill_blend, stroke_blend) = match xa(e, "stroke-blend").and_then(mode_of) {
+            Some(sb) if fill_visible => (xa(e, "blend").and_then(mode_of), Some(sb)),
+            _ if fill_visible => (blend, None),
+            _ => (None, blend),
+        };
 
         let mut mask_pad: Option<i64> = None;
         if let Some(mut f) = fill {
@@ -277,7 +294,6 @@ impl<'d> Reader<'d, '_, '_> {
             } else {
                 let alpha = o / (f64::from(f.alpha.max(1)) / 255.0);
                 self.flat_or_twin(fill_tt, alpha, fill_blend, cctx)
-                    .map(|t| (t, None))
             };
             if let Some(p) = f.paint {
                 push(&mut out, AttrValue::Fill(p));
@@ -303,9 +319,7 @@ impl<'d> Reader<'d, '_, '_> {
                 Some(m) => self
                     .mask_transparency(m, cctx, info, blend)
                     .map(|(t, tiling, _)| (t, tiling)),
-                None => self
-                    .flat_or_twin(fill_tt, opacity, blend, cctx)
-                    .map(|t| (t, None)),
+                None => self.flat_or_twin(fill_tt, opacity, blend, cctx),
             };
             if let Some((t, tiling)) = t {
                 push(&mut out, AttrValue::TranspFill(t));
@@ -323,7 +337,16 @@ impl<'d> Reader<'d, '_, '_> {
                     .unwrap_or(1.0)
                     * opacity;
                 let alpha = o / (f64::from(s.alpha.max(1)) / 255.0);
-                if let Some(t) = self.flat_or_twin(stroke_tt, alpha, stroke_blend, cctx) {
+                let mask = xa(e, "stroke-mask").and_then(|m| self.by_ref(m));
+                let t = match mask {
+                    Some(m) => self
+                        .mask_transparency(m, cctx, info, stroke_blend)
+                        .map(|(t, _, _)| t),
+                    None => self
+                        .flat_or_twin(stroke_tt, alpha, stroke_blend, cctx)
+                        .map(|(t, _)| t),
+                };
+                if let Some(t) = t {
                     push(&mut out, AttrValue::StrokeTransp(t));
                 }
                 // An effect may be carried by the stroke's ramp alone.
@@ -429,6 +452,31 @@ impl<'d> Reader<'d, '_, '_> {
         }
     }
 
+    /// `xarast:stop-refs` / `xarast:colour-refs` / `xarast:contone-refs`:
+    /// per key colour, the palette colour it names (`#c-N`), or `None`
+    /// (`-`, an unknown id, or no list).
+    fn key_refs(&self, v: Option<&str>) -> Vec<Option<ColourId>> {
+        v.unwrap_or("")
+            .split_ascii_whitespace()
+            .map(|t| {
+                t.strip_prefix('#')
+                    .and_then(|p| self.palette.get(p).copied())
+            })
+            .collect()
+    }
+
+    /// A key colour: the palette colour its reference names when that
+    /// resolves to the colour written (an editor that changed the colour
+    /// without the reference gets its new colour), a literal otherwise.
+    fn keyed(&self, c: Rgba8, r: Option<ColourId>) -> Colour {
+        if let Some(id) = r
+            && self.b.document().resources.colours.resolve_rgba8(id) == c
+        {
+            return Colour::Indexed { id, tint: None };
+        }
+        direct_alpha(c)
+    }
+
     /// A flat colour, as a palette reference when the element names one
     /// that resolves to it.
     fn flat(&mut self, cctx: &Ctx, c: Rgba8, ref_attr: &str) -> Side {
@@ -469,7 +517,7 @@ impl<'d> Reader<'d, '_, '_> {
         alpha: f64,
         mode: Option<TranspMode>,
         cctx: &Ctx,
-    ) -> Option<TranspPaint> {
+    ) -> Option<(TranspPaint, Option<Tiling>)> {
         let level = if alpha < 0.9995 { level_of(alpha) } else { 0 };
         let t = Transparency {
             level,
@@ -479,9 +527,9 @@ impl<'d> Reader<'d, '_, '_> {
             && let Some(p) = self.twin_transparency(tw, t, cctx)
         {
             self.stats.parametric = self.stats.parametric.saturating_add(1);
-            return Some(p);
+            return Some((p, xa(tw, "repeat").and_then(tiling_of)));
         }
-        (level != 0 || mode.is_some()).then_some(TranspPaint::Flat { value: t })
+        (level != 0 || mode.is_some()).then_some((TranspPaint::Flat { value: t }, None))
     }
 
     /// `<xarast:fill>` / `<xarast:stroke-fill>`: fills SVG cannot draw.
@@ -500,11 +548,13 @@ impl<'d> Reader<'d, '_, '_> {
                 *pts.get(i.checked_mul(2)?.checked_add(1)?)?,
             ))
         };
+        let refs = self.key_refs(g("colour-refs"));
         let colours: Vec<Colour> = g("colours")
             .unwrap_or("")
             .split_ascii_whitespace()
             .filter_map(parse::colour)
-            .map(direct_alpha)
+            .enumerate()
+            .map(|(i, c)| self.keyed(c, refs.get(i).copied().flatten()))
             .collect();
         let c = |i: usize| colours.get(i).cloned();
         let paint = match g("type")? {
@@ -515,9 +565,11 @@ impl<'d> Reader<'d, '_, '_> {
                 } else {
                     RampMapping::Linear
                 };
+                let refs = self.key_refs(g("stop-refs"));
                 let k: Vec<(f32, Colour)> = keys(g("stops")?)?
                     .into_iter()
-                    .map(|(p, c)| (p, direct_alpha(c)))
+                    .enumerate()
+                    .map(|(i, (p, c))| (p, self.keyed(c, refs.get(i).copied().flatten())))
                     .collect();
                 let (from, to, ramp) = ramp_of(k, profile, mapping)?;
                 FillGeometry::Conical {
@@ -595,61 +647,118 @@ impl<'d> Reader<'d, '_, '_> {
                 *pts.get(i.checked_mul(2)?.checked_add(1)?)?,
             ))
         };
+        // The keys: what the twin records (older files have none: every
+        // key is the level of the base representation), in the element's
+        // blend mode.
         let v = level;
+        let key = |l: u8| Transparency {
+            level: l,
+            mode: v.mode,
+        };
+        let values: Vec<Transparency> = xa(t, "values")
+            .unwrap_or("")
+            .split_ascii_whitespace()
+            .filter_map(|x| x.parse::<u8>().ok())
+            .map(key)
+            .collect();
+        let val = |i: usize| values.get(i).copied().unwrap_or(v);
+        let profile = profile_of(xa(t, "profile")).unwrap_or(BiasGain::IDENTITY);
+        let procedural = || {
+            let d = ProceduralParams::default();
+            let g = |n: &str| xa(t, n);
+            Box::new(ProceduralParams {
+                seed: g("seed").and_then(|x| x.parse().ok()).unwrap_or(d.seed),
+                graininess: f32_of(g("graininess")).unwrap_or(d.graininess),
+                gravity: f32_of(g("gravity")).unwrap_or(d.gravity),
+                squash: f32_of(g("squash")).unwrap_or(d.squash),
+                dpi: g("dpi").and_then(|x| x.parse().ok()).unwrap_or(d.dpi),
+                tileable: is_true(g("tileable")),
+            })
+        };
         Some(match xa(t, "type")? {
-            "conical" => FillGeometry::Conical {
-                centre: pt(self, 0)?,
-                zero_dir: pt(self, 1)?,
-                from: v,
-                to: v,
-                ramp: Ramp::new(),
-            },
+            "conical" => {
+                let mapping = if xa(t, "ramp-mapping") == Some("sin") {
+                    RampMapping::Sin
+                } else {
+                    RampMapping::Linear
+                };
+                let keys: Vec<(f32, Transparency)> = xa(t, "levels")
+                    .and_then(level_keys)
+                    .map(|k| k.into_iter().map(|(p, l)| (p, key(l))).collect())
+                    .unwrap_or_else(|| vec![(0.0, v), (1.0, v)]);
+                let (from, to, ramp) = ramp_of(keys, profile, mapping)?;
+                FillGeometry::Conical {
+                    centre: pt(self, 0)?,
+                    zero_dir: pt(self, 1)?,
+                    from,
+                    to,
+                    ramp,
+                }
+            }
             "three-point" => FillGeometry::ThreeColour {
                 origin: pt(self, 0)?,
                 axis1: pt(self, 1)?,
                 axis2: pt(self, 2)?,
-                c0: v,
-                c1: v,
-                c2: v,
+                c0: val(0),
+                c1: val(1),
+                c2: val(2),
             },
             "four-point" => FillGeometry::FourColour {
                 origin: pt(self, 0)?,
                 axis1: pt(self, 1)?,
                 axis2: pt(self, 2)?,
                 axis3: pt(self, 3)?,
-                c0: v,
-                c1: v,
-                c2: v,
-                c3: v,
+                c0: val(0),
+                c1: val(1),
+                c2: val(2),
+                c3: val(3),
             },
             "bitmap" => {
                 let persp = match (pt(self, 3), pt(self, 4)) {
                     (Some(p2), Some(p3)) => Some(Perspective { p2, p3 }),
                     _ => None,
                 };
+                let href = attr(t, "", "href").or_else(|| attr(t, NS_XLINK, "href"));
+                let image = if href.is_some() {
+                    self.bitmap_for(href, None, t.start)
+                } else {
+                    // Written before the twin named its image.
+                    self.placeholder_bitmap()
+                };
+                let contone: Vec<Transparency> = xa(t, "contone")
+                    .unwrap_or("")
+                    .split_ascii_whitespace()
+                    .filter_map(|x| x.parse::<u8>().ok())
+                    .map(key)
+                    .collect();
                 FillGeometry::Bitmap {
-                    image: self.placeholder_bitmap(),
+                    image,
                     origin: pt(self, 0)?,
                     axis_x: pt(self, 1)?,
                     axis_y: pt(self, 2)?,
                     persp,
-                    tiling: Tiling::None,
-                    dpi: 0,
-                    contone: None,
-                    profile: BiasGain::IDENTITY,
+                    tiling: xa(t, "tile-mode")
+                        .and_then(tiling_of)
+                        .unwrap_or(Tiling::None),
+                    dpi: xa(t, "dpi").and_then(|x| x.parse().ok()).unwrap_or(0),
+                    contone: match contone.as_slice() {
+                        [a, b] => Some((*a, *b)),
+                        _ => None,
+                    },
+                    profile,
                 }
             }
             "fractal-clouds" => FillGeometry::Fractal {
-                params: Box::default(),
-                from: v,
-                to: v,
-                profile: BiasGain::IDENTITY,
+                params: procedural(),
+                from: val(0),
+                to: val(1),
+                profile,
             },
             "noise" => FillGeometry::Noise {
-                params: Box::default(),
-                from: v,
-                to: v,
-                profile: BiasGain::IDENTITY,
+                params: procedural(),
+                from: val(0),
+                to: val(1),
+                profile,
             },
             _ => return None,
         })
@@ -762,7 +871,8 @@ impl<'d> Reader<'d, '_, '_> {
         if el.is(NS_SVG, "pattern") {
             // The fill mapping, when a writer records it (XARA-T-0109).
             let tiling = xa(el, "fill-repeat").and_then(tiling_of);
-            return self.pattern(el, ctx).map(|p| (p, tiling, None));
+            let effect = effect_of(xa(el, "fill-effect"));
+            return self.pattern(el, ctx).map(|p| (p, tiling, effect));
         }
         let g = self.gradient_chain(k)?;
         let bbox = g.get("", "gradientUnits") != Some("userSpaceOnUse");
@@ -805,14 +915,15 @@ impl<'d> Reader<'d, '_, '_> {
                 }),
                 _ => None,
             });
-        let key_list: Vec<(f32, Colour)> = match g.get(NS_XARAST, "stops").and_then(keys) {
-            Some(k) => k.into_iter().map(|(p, c)| (p, direct_alpha(c))).collect(),
-            None => g
-                .stops
-                .iter()
-                .map(|(p, c)| (*p, direct_alpha(*c)))
-                .collect(),
-        };
+        let refs = self.key_refs(g.get(NS_XARAST, "stop-refs"));
+        let key_list: Vec<(f32, Colour)> = g
+            .get(NS_XARAST, "stops")
+            .and_then(keys)
+            .unwrap_or_else(|| g.stops.clone())
+            .into_iter()
+            .enumerate()
+            .map(|(i, (p, c))| (p, self.keyed(c, refs.get(i).copied().flatten())))
+            .collect();
         let key_list = if key_list.len() == 1 {
             let only = key_list.first().cloned()?;
             vec![(0.0, only.1.clone()), (1.0, only.1)]
@@ -871,6 +982,13 @@ impl<'d> Reader<'d, '_, '_> {
                         );
                     }
                 }
+                // The writer names the major axis when neither rule gives it.
+                if let Some(m) = g
+                    .get(NS_XARAST, "major")
+                    .and_then(|v| self.pt_attr(ctx, Some(v)))
+                {
+                    major = m;
+                }
                 (
                     minor.unwrap_or(major),
                     g.get(NS_XARAST, "aspect-locked") != Some("false"),
@@ -925,13 +1043,15 @@ impl<'d> Reader<'d, '_, '_> {
         let axis_y = self.pt(ctx, round(ox + vx), round(oy + vy));
         let href = attr(image, "", "href").or_else(|| attr(image, NS_XLINK, "href"));
         let bitmap = self.bitmap_for(href, None, p.start);
+        let refs = self.key_refs(xa(p, "contone-refs"));
+        let r = |i: usize| refs.get(i).copied().flatten();
         let contone = xa(p, "contone").and_then(|v| {
             let c: Vec<Rgba8> = v
                 .split_ascii_whitespace()
                 .filter_map(parse::colour)
                 .collect();
             match c.as_slice() {
-                [a, b] => Some((direct_alpha(*a), direct_alpha(*b))),
+                [a, b] => Some((self.keyed(*a, r(0)), self.keyed(*b, r(1)))),
                 _ => None,
             }
         });

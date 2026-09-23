@@ -234,6 +234,23 @@ pub(crate) fn mp(s: &str) -> Option<i64> {
     sc.at_end().then_some(v)
 }
 
+/// A whole string as the nearest `f32`, correctly rounded from the
+/// decimal (not through an `f64`, which can round twice): what the writer's
+/// shortest round-trip spelling (`num::f32s`) needs to come back bit for
+/// bit. Anything but a plain decimal goes through [`float`].
+pub(crate) fn f32_exact(s: &str) -> Option<f32> {
+    let t = s.trim();
+    if !t.is_empty()
+        && t.bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'+' | b'e' | b'E'))
+        && let Ok(v) = t.parse::<f32>()
+        && v.is_finite()
+    {
+        return Some(v);
+    }
+    float(s).map(|x| x as f32)
+}
+
 /// A whole string as one float.
 pub(crate) fn float(s: &str) -> Option<f64> {
     let mut sc = Scan::new(s);

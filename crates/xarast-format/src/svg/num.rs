@@ -140,6 +140,29 @@ pub fn push_f64(out: &mut String, v: f64, decimals: u32) {
     push_fixed(out, clamped, decimals);
 }
 
+/// An `f32` in the shortest decimal that parses back to the same `f32`
+/// (no exponent; `0.5` as `.5`, as [`f64s`] spells it). Used where the
+/// model's value must survive a reload bit for bit: palette components
+/// (XARA-T-0110). Non-finite values become `0`.
+#[must_use]
+pub fn f32s(v: f32) -> String {
+    if !v.is_finite() {
+        return "0".into();
+    }
+    // `Display` for `f32` is the shortest round-trip form, never an
+    // exponent.
+    let s = format!("{v}");
+    if let Some(rest) = s.strip_prefix("0.") {
+        format!(".{rest}")
+    } else if let Some(rest) = s.strip_prefix("-0.") {
+        format!("-.{rest}")
+    } else if s == "-0" {
+        "0".into()
+    } else {
+        s
+    }
+}
+
 /// A unitless float, as a new string.
 #[must_use]
 pub fn f64s(v: f64, decimals: u32) -> String {
@@ -244,6 +267,28 @@ mod tests {
             (i64::MIN, 3, "-9223372036854775.808"),
         ] {
             assert_eq!(Num::fixed(v, d).as_str(), want, "{v}");
+        }
+    }
+
+    #[test]
+    fn f32s_reads_back_bit_for_bit() {
+        assert_eq!(f32s(0.5), ".5");
+        assert_eq!(f32s(-0.25), "-.25");
+        assert_eq!(f32s(1.0), "1");
+        assert_eq!(f32s(-0.0), "0");
+        assert_eq!(f32s(f32::NAN), "0");
+        // A walk over the unit interval, where palette components live,
+        // and a few magnitudes beyond it.
+        let mut bits = 0x3380_0000u32; // ~6e-8
+        while bits < 0x3f80_0000 {
+            let v = f32::from_bits(bits);
+            let s = f32s(v);
+            assert!(!s.contains('e'), "{s}");
+            assert_eq!(s.parse::<f32>().ok(), Some(v), "{s}");
+            bits += 9_973;
+        }
+        for v in [255.0f32, 1234.567, 0.466_783_6, 1e-7] {
+            assert_eq!(f32s(v).parse::<f32>().ok(), Some(v));
         }
     }
 }

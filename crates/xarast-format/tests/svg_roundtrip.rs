@@ -7,10 +7,9 @@
 //!    one (`svg::normal_form`, XARA-T-0105) — with the writer's passes 4–5
 //!    on (the default) and off (XARA-T-0107).
 //! 2. **Bytes**: re-saving the reloaded document through `save_opened`
-//!    with deterministic options reaches a fixed point: the second re-save
-//!    equals the first re-save for every file, and the first re-save equals
-//!    the original save for all but the files whose baked data is resampled
-//!    from 8-bit key stops (counted, and bounded here).
+//!    with deterministic options is byte-identical to the original save
+//!    (every entry, the container included): read then write is a fixed
+//!    point from the first re-save.
 //! 3. **No warnings**: nothing the writer produced reads back with a
 //!    warning.
 //!
@@ -24,7 +23,9 @@ use std::path::PathBuf;
 
 use xarast_doc::Severity;
 use xarast_format::svg::{SvgOptions, normal_form};
-use xarast_format::{OpenOptions, SaveOptions, WriteOptions, open_reader, save_opened_to, save_to};
+use xarast_format::{
+    OpenOptions, SaveOptions, WriteOptions, XarastReader, open_reader, save_opened_to, save_to,
+};
 
 const LOCK: &str = include_str!("../../../tests/corpus/corpus.lock");
 
@@ -60,27 +61,6 @@ fn opts(svg: SvgOptions) -> SaveOptions {
     }
 }
 
-/// A normal form with every line nested under an `opaque` node removed.
-fn without_opaque_subtrees(nf: &str) -> String {
-    let indent = |l: &str| l.len() - l.trim_start().len();
-    let mut out = String::new();
-    let mut skip_deeper: Option<usize> = None;
-    for l in nf.lines() {
-        if let Some(d) = skip_deeper {
-            if indent(l) > d {
-                continue;
-            }
-            skip_deeper = None;
-        }
-        if l.trim_start().split(' ').nth(1) == Some("opaque") {
-            skip_deeper = Some(indent(l));
-        }
-        out.push_str(l);
-        out.push('\n');
-    }
-    out
-}
-
 fn first_difference(a: &str, b: &str) -> String {
     for (i, (x, y)) in a.lines().zip(b.lines()).enumerate() {
         if x != y {
@@ -90,31 +70,34 @@ fn first_difference(a: &str, b: &str) -> String {
     format!("{} vs {} lines", a.lines().count(), b.lines().count())
 }
 
-/// Files whose `.xar` import keeps objects under an unknown record (an
-/// `Opaque` node with children) that the writer does not emit yet, so the
-/// reload has fewer objects (XARA-T-0108). Exactly these differ on the
-/// normal form; everything else in them round-trips. Fixing the writer
-/// empties this list, and the test then demands it.
-const KNOWN_OPAQUE_LOSS: &[&str] = &[
-    "testfiles/ProbeX16.xar",
-    "testfiles/testimp1.xar",
-    "Designs/BLUECAR.xar",
-    "Designs/TextCurve.xar",
-    "Designs/WATCH.xar",
-    "Designs/WATCH2.xar",
-    "Designs/Watch4.xar",
-    "Designs/leafgirl.xar",
-    "Designs/scope3 simple.xar",
-];
+/// The first package entry whose bytes differ, and where.
+fn first_entry_difference(a: &[u8], b: &[u8]) -> String {
+    let mut ra = XarastReader::open(Cursor::new(a)).unwrap();
+    let mut rb = XarastReader::open(Cursor::new(b)).unwrap();
+    let names: Vec<String> = ra.entries().iter().map(|e| e.name.clone()).collect();
+    let other: Vec<String> = rb.entries().iter().map(|e| e.name.clone()).collect();
+    if names != other {
+        return format!("entries {names:?} vs {other:?}");
+    }
+    // The manifest only repeats the other entries' digests: look at it last.
+    let mut names = names;
+    names.sort_by_key(|n| n == "META-INF/manifest.xml");
+    for n in names {
+        let (x, y) = (ra.entry(&n).unwrap(), rb.entry(&n).unwrap());
+        if x != y {
+            let (x, y) = (String::from_utf8_lossy(&x), String::from_utf8_lossy(&y));
+            return format!("{n}: {}", first_difference(&x, &y));
+        }
+    }
+    "the container differs".into()
+}
 
 #[test]
 fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_point() {
     let Some((root, files)) = corpus() else {
         return;
     };
-    let mut identical_first = 0usize;
-    let mut settled_second = Vec::new();
-    let mut nf_differs: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let (doc, _) = xarast_xar::import(&bytes, &xarast_xar::ImportOptions::default())
@@ -135,19 +118,10 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         assert!(opened.preservation.intact(), "{rel}");
         let got = normal_form(&opened.document);
         if nf != got {
-            assert!(
-                KNOWN_OPAQUE_LOSS.contains(&rel.as_str()),
+            failures.push(format!(
                 "{rel}: normal form differs at {}",
                 first_difference(&nf, &got)
-            );
-            // Everything but the lost subtrees round-trips.
-            let (a, b) = (without_opaque_subtrees(&nf), without_opaque_subtrees(&got));
-            assert!(
-                a == b,
-                "{rel}: differs beyond XARA-T-0108 at {}",
-                first_difference(&a, &b)
-            );
-            nf_differs.push(rel.clone());
+            ));
         }
 
         // Passes 4–5 off: the same model.
@@ -164,10 +138,9 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         .unwrap();
         let reread = open_reader(Cursor::new(plain.into_inner()), &OpenOptions::default())
             .unwrap_or_else(|e| panic!("{rel}: open (passes off): {e}"));
-        assert!(
-            normal_form(&reread.document) == got,
-            "{rel}: passes 4-5 change the model read back"
-        );
+        if normal_form(&reread.document) != got {
+            failures.push(format!("{rel}: passes 4-5 change the model read back"));
+        }
 
         let mut second = Cursor::new(Vec::new());
         save_opened_to(
@@ -178,35 +151,12 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         )
         .unwrap();
         let second = second.into_inner();
-        if second == first {
-            identical_first += 1;
-            continue;
+        if second != first {
+            failures.push(format!(
+                "{rel}: the first re-save is not byte-identical: {}",
+                first_entry_difference(&first, &second)
+            ));
         }
-        let mut again = open_reader(Cursor::new(second.clone()), &OpenOptions::default()).unwrap();
-        let mut third = Cursor::new(Vec::new());
-        save_opened_to(
-            &again.document,
-            &mut again.package,
-            &mut third,
-            &opts(SvgOptions::default()),
-        )
-        .unwrap();
-        assert!(
-            third.into_inner() == second,
-            "{rel}: not a fixed point on the second re-save"
-        );
-        settled_second.push(rel.clone());
     }
-    eprintln!(
-        "{identical_first}/59 identical on the first re-save; settled on the second: {settled_second:?}"
-    );
-    assert_eq!(
-        nf_differs, KNOWN_OPAQUE_LOSS,
-        "the files that lose Opaque subtrees changed: update KNOWN_OPAQUE_LOSS (XARA-T-0108)"
-    );
-    // Known today: four files whose profiled or approximated fills are
-    // re-sampled from 8-bit key stops (Fill Types simple, Spitfire, WATCH2,
-    // Watch4), and one whose meta.xml counts an unreferenced bitmap (scope3
-    // simple); see docs/memory/xarast-format.md. More is a regression.
-    assert!(identical_first >= 54, "{identical_first}");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

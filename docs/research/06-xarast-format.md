@@ -1742,6 +1742,65 @@ with `<color-profile name="coated" xlink:href="resources/profiles/b3-1122….icc
 | Strokes, dashes, caps, joins, arrows | Variable strokes and brushes (baked to a fill) | — |
 | Text with an embedded font, text on a path | Moulds (exactly baked, not live) | — |
 
+### 6.14 Exact twins: what the base cannot pin (normative for Xarast writers)
+
+A twin exists so that a reload rebuilds **the model's own values**, not an
+approximation of them. Rule: *whatever a reader would otherwise have to guess is
+written*; whatever is derived from written values (baked stops, a flat approximation)
+**MUST** be computed from the values *as written*, so that a reload re-derives the same
+bytes (the first re-save of a reloaded document is byte-identical to the save it came
+from).
+
+1. **Palette components** (`xarast:components`, a tint's `xarast:amount`, a shade's
+   `xarast:shade`) are written in the **shortest decimal that parses back to the same
+   `f32`** (no exponent, `.5` for `0.5`) and read with a correctly rounded decimal →
+   `f32` conversion. Six decimals do not pin an `f32`; a reader of older files keeps
+   the "nudge to `xarast:srgb`" fallback.
+2. **Key colours name their palette colour.** Gradient keys (`<stop>`s or
+   `xarast:stops`) carry `xarast:stop-refs`, three/four-colour, fractal and noise twins
+   `xarast:colour-refs`, a contone bitmap pattern `xarast:contone-refs`: one token per
+   key, `#c-N` for an untinted palette colour, `-` for a literal one; omitted when no
+   key is a palette colour. A reader takes the palette colour when it resolves to the
+   key's written 8-bit value (an editor that changed the colour and left the reference
+   gets its new colour), the literal otherwise. A literal key is read as its 8-bit
+   value, so the writer derives from that 8-bit value too.
+3. **Key positions** in `xarast:stops` / `xarast:levels` use the shortest `f32` form.
+   A plain ramp whose positions `<stop offset>`'s four decimals do not pin also gets
+   `xarast:stops` (colours) or `xarast:levels` (a transparency mask); `<stop>` elements
+   stay the drawing.
+4. **A circle's axes.** A radial fill written as `cx cy r` also writes `xarast:minor`
+   (when the axes differ), `xarast:aspect-locked="false"` (when unlocked) and
+   `xarast:major` whenever a reader would not derive the major axis itself (a quarter
+   turn clockwise of the minor axis when that is a radius, `(cx + r, cy)` otherwise).
+   The same twins go on a circular transparency's mask gradient; a diamond
+   transparency's mask gradient carries `xarast:fill="diamond"` like the fill.
+5. **Fill mapping and effect everywhere.** `xarast:fill-repeat` on a bitmap
+   `<pattern>` (apart from its own `xarast:tile-mode`), `xarast:repeat` on every
+   `<xarast:fill>` / `<xarast:stroke-fill>` / `<xarast:transparency>` twin whose
+   mapping is not `none`, and `xarast:fill-effect` on every twin and bitmap pattern
+   whose effect is not `fade`.
+6. **Transparency twins are complete.** `<xarast:transparency>` records, besides
+   `xarast:type` and `xarast:points`: conical — `xarast:levels="0:l … 1:l"`,
+   `xarast:profile`, `xarast:ramp-mapping`; three/four-point — `xarast:values="l0 l1
+   l2[ l3]"`; fractal/noise — `xarast:values="from to"` and the parameters of the fill
+   twin (`xarast:seed`, `graininess`, `gravity`, `squash`, `dpi`, `tileable`,
+   `profile`); bitmap — `href`/`xlink:href` to the image resource (one reference for
+   garbage collection; never fetched by a browser: the element is not SVG),
+   `xarast:tile-mode`, `xarast:dpi`, `xarast:contone="l0 l1"`, `xarast:profile`. The
+   keys' blend mode is the side's (below). Levels are 0 (opaque) … 255 (clear).
+7. **The stroke's own transparency.** Its twin is `<xarast:stroke-transparency>` (same
+   attributes); a graduated one is a `<mask>` in `<defs>` named by
+   `xarast:stroke-mask="url(#m…)"` (SVG has no per-stroke mask: a browser draws the
+   stroke without it). When the fill is drawn and the stroke's transparency has a blend
+   mode, `xarast:stroke-blend` names it and `xarast:blend` is the fill's alone (omitted
+   when the fill has none, even though the CSS `mix-blend-mode` — the nearest a browser
+   can draw — may then be the stroke's). Without `xarast:stroke-blend`, older rules
+   apply: `xarast:blend` is the fill's when there is a fill, the stroke's otherwise; two
+   `<xarast:transparency>` twins are fill then stroke; a lone one is the fill's when
+   there is a fill.
+8. **`meta.xml` statistics** count what was written: `xarast:bitmaps` is the number of
+   distinct bitmaps in the package (a bitmap no element uses is not written).
+
 ---
 
 ## 7. Document metadata
@@ -1960,6 +2019,33 @@ baggage* that retains:
 
 After editing the geometry in 0.1 and saving, the file **MUST** still contain
 `xarast:mesh-warp`, `acme:review-state` and `<xarast:neural-fill>`, intact.
+
+#### 8.2.1 Records an importer did not understand: `<xarast:opaque>`
+
+An importer (`.xar` today) keeps a record it does not model as an *opaque node*: the
+producer's tag, the record's bytes, and — because a record may open a subtree — the
+objects under it. The profile writes it as:
+
+```xml
+<xarast:opaque xarast:id="x2p" xarast:tag="4200" xarast:encoding="base64">AAFiaW5h…
+  <path id="x2q" d="…" fill="#c33"/>
+  <g id="x2r" xarast:kind="group">…</g>
+</xarast:opaque>
+```
+
+- The payload is the element's text content, base64, **first**; the subtree follows it
+  as ordinary profile elements (ids, paint, twins, foreign data), in document order.
+  An opaque node without such children is the same element with only the payload.
+- The writer **MUST NOT** drop the subtree (it is document content) and **MUST NOT**
+  move it out of `<xarast:opaque>`: neither Xarast's renderer nor a browser draws what
+  sits under an unknown record (an element in a foreign namespace is never rendered,
+  nor its descendants — verified in resvg, Chrome and Inkscape 1.2). The subtree is
+  therefore inert in every viewer; it carries no active content, and the reader
+  strips any as it does everywhere else.
+- Paint inheritance (§4.5.1 passes 4–5) does not cross `<xarast:opaque>`: nothing is
+  hoisted into or through it, so every element inside carries its complete paint.
+- The reader **MUST** read the element children back as the opaque node's children
+  (text between them is not payload unless it is base64: whitespace is skipped).
 
 ### 8.3 Preservation of ZIP entries
 
