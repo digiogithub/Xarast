@@ -76,6 +76,18 @@ const MAX_LENGTH: f64 = 2_147_483_648.0;
 /// input.
 const MAX_DEPTH: u32 = 16;
 
+/// How many edge visits one disc test may spend before giving up.
+///
+/// Only a disc that meets thousands of edges while none of their sides is
+/// covered — an unfilled region under [`FillRule::Positive`] or
+/// [`FillRule::Negative`], or piles of coincident edges that cancel — can
+/// get near it; the exact pass is quadratic in the edges inside the disc.
+/// Past the limit the answer is **hit**: the disc is then within the radius
+/// of the object's outline, which is what a user pointing at it sees, and
+/// erring towards a hit is the direction picking should err in. About
+/// 20 ms of work.
+const WORK_LIMIT: u64 = 20_000_000;
+
 /// More dashes than this along one path and the pattern is treated as
 /// solid: at that density it is solid on screen, and generating them would
 /// cost unbounded time on hostile input.
@@ -289,6 +301,17 @@ pub fn hit_stroke_transformed(
         return false;
     }
 
+    // Before allocating anything: is any segment's control hull within
+    // reach? The stroke, dashed or not, lies within `halo` of the path's
+    // own segments, so if none is, nothing is hit.
+    let near_any = path.segments().any(|seg| {
+        let d = Seg::from_segment(seg).transformed(aff);
+        rect_distance(pk, d.bbox()) <= reach && d.hull_distance(pk) <= reach
+    });
+    if !near_any {
+        return false;
+    }
+
     let local = path.to_bez_path();
     let centre = dashed(&local, style);
     let Some(subs) = subpaths(&centre) else {
@@ -310,9 +333,13 @@ pub fn hit_stroke_transformed(
         if doc.iter().any(|d| !d.is_finite()) {
             return false;
         }
+        // The box test first, then the distance to the control hull, a
+        // lower bound on the distance to the curve: a quarter-ellipse's
+        // control box contains the ellipse's centre and would otherwise send
+        // every hollow shape to the stroker.
         let near: Vec<bool> = doc
             .iter()
-            .map(|d| rect_distance(pk, d.bbox()) <= reach)
+            .map(|d| rect_distance(pk, d.bbox()) <= reach && d.hull_distance(pk) <= reach)
             .collect();
         if !near.contains(&true) {
             continue;
@@ -403,13 +430,13 @@ fn finite_affine(m: Matrix) -> Option<Affine> {
 
 /// The centreline actually drawn: the path cut into its dashes, or the path
 /// itself when there is no pattern or the pattern is too dense to matter.
-fn dashed(local: &BezPath, style: &StrokeStyle) -> BezPath {
+fn dashed<'a>(local: &'a BezPath, style: &StrokeStyle) -> std::borrow::Cow<'a, BezPath> {
     let Some(d) = &style.dash else {
-        return local.clone();
+        return std::borrow::Cow::Borrowed(local);
     };
     let elements = d.resolved(style.width);
     if elements.is_empty() {
-        return local.clone();
+        return std::borrow::Cow::Borrowed(local);
     }
     let sum: f64 = elements.iter().sum();
     // An odd-length pattern swaps on and off every cycle, so its true period
@@ -420,16 +447,16 @@ fn dashed(local: &BezPath, style: &StrokeStyle) -> BezPath {
         sum
     };
     if !period.is_finite() || period <= 0.0 {
-        return local.clone();
+        return std::borrow::Cow::Borrowed(local);
     }
     let length = control_polygon_length(local);
     if !length.is_finite() || length / period > MAX_DASHES {
-        return local.clone();
+        return std::borrow::Cow::Borrowed(local);
     }
     // The stroker walks the offset one element at a time; reducing it modulo
     // the period keeps a hostile offset from costing a billion steps.
     let offset = d.offset.to_f64().rem_euclid(period);
-    kurbo::dash(local.iter(), offset, &elements).collect()
+    std::borrow::Cow::Owned(kurbo::dash(local.iter(), offset, &elements).collect())
 }
 
 /// An upper bound on a path's arc length.
@@ -472,6 +499,18 @@ enum Seg {
 }
 
 impl Seg {
+    fn from_segment(s: crate::Segment) -> Seg {
+        match s {
+            crate::Segment::Line { p0, p1 } => Seg::Line(p0.to_kurbo(), p1.to_kurbo()),
+            crate::Segment::Cubic { p0, p1, p2, p3 } => Seg::Cubic(CubicBez::new(
+                p0.to_kurbo(),
+                p1.to_kurbo(),
+                p2.to_kurbo(),
+                p3.to_kurbo(),
+            )),
+        }
+    }
+
     fn start(&self) -> KPoint {
         match self {
             Seg::Line(a, _) => *a,
@@ -509,6 +548,40 @@ impl Seg {
         match self {
             Seg::Line(a, b) => a == b,
             Seg::Cubic(c) => c.p0 == c.p1 && c.p0 == c.p2 && c.p0 == c.p3,
+        }
+    }
+
+    /// Distance from `p` to the convex hull of the control points: zero
+    /// inside it, and never more than the distance to the curve, which lies
+    /// inside its hull.
+    fn hull_distance(&self, p: KPoint) -> f64 {
+        match self {
+            Seg::Line(a, b) => segment_distance_sq(p, *a, *b).sqrt(),
+            Seg::Cubic(c) => {
+                let q = [c.p0, c.p1, c.p2, c.p3];
+                // The hull of four points is the union of the four triangles
+                // they make.
+                let inside = |a: KPoint, b: KPoint, c: KPoint| {
+                    let d1 = (b - a).cross(p - a);
+                    let d2 = (c - b).cross(p - b);
+                    let d3 = (a - c).cross(p - c);
+                    (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
+                };
+                if inside(q[0], q[1], q[2])
+                    || inside(q[0], q[1], q[3])
+                    || inside(q[0], q[2], q[3])
+                    || inside(q[1], q[2], q[3])
+                {
+                    return 0.0;
+                }
+                let mut best = f64::INFINITY;
+                for i in 0..4 {
+                    for j in i + 1..4 {
+                        best = best.min(segment_distance_sq(p, q[i], q[j]));
+                    }
+                }
+                best.sqrt()
+            }
         }
     }
 
@@ -760,7 +833,9 @@ fn disc_touches_region(
         }
         s.flatten_into(flat_tol, &mut edges);
     }
+    let work = std::cell::Cell::new(0u64);
     let covers = |q: KPoint| {
+        work.set(work.get() + edges.len() as u64);
         let w = winding(&edges, q);
         rule.covers(if flip { w.wrapping_neg() } else { w })
     };
@@ -777,13 +852,36 @@ fn disc_touches_region(
             a != b && segment_distance_sq(p, a, b) <= r2
         })
         .collect();
+    let normal = |a: KPoint, b: KPoint| {
+        let d = b - a;
+        kurbo::Vec2::new(-d.y, d.x) / d.hypot() * PROBE
+    };
+    // A first, cheap pass: either side of each near edge's closest point.
+    // Under NonZero and EvenOdd every edge bounds the region on one side,
+    // so this almost always settles a hit at the first edge.
+    for &i in &near {
+        let (a, b) = edges[i];
+        let d = b - a;
+        let t = ((p - a).dot(d) / d.hypot2()).clamp(0.0, 1.0);
+        let m = a + d * t;
+        let n = normal(a, b);
+        if covers(m + n) || covers(m - n) {
+            return true;
+        }
+        if work.get() > WORK_LIMIT {
+            return true;
+        }
+    }
+    // The exact pass: split each edge where others cross it.
     let mut ts: Vec<f64> = Vec::new();
+    let mut split_work: u64 = 0;
     for &i in &near {
         let (a, b) = edges[i];
         let Some((t0, t1)) = clip_to_disc(a, b, p, r) else {
             continue;
         };
         ts.clear();
+        split_work += near.len() as u64;
         for &j in &near {
             if j != i {
                 let (c, e) = edges[j];
@@ -796,7 +894,7 @@ fn disc_touches_region(
         ts.sort_by(f64::total_cmp);
         ts.dedup();
         let d = b - a;
-        let n = kurbo::Vec2::new(-d.y, d.x) / d.hypot() * PROBE;
+        let n = normal(a, b);
         if ts.len() == 1 {
             // The disc only grazes the edge: one tangent point.
             ts.push(ts[0]);
@@ -806,6 +904,9 @@ fn disc_touches_region(
             if covers(m + n) || covers(m - n) {
                 return true;
             }
+        }
+        if work.get() + split_work > WORK_LIMIT {
+            return true;
         }
     }
     false
