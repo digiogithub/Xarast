@@ -11,5 +11,19 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["complex-scripts"]
+# Dictionary-based line breaking for Thai, Lao, Khmer and Myanmar, in both our
+# line breaker and parley's. Phase 9 requires it; it costs binary size (the
+# ICU4X dictionaries), measured in `docs/memory/perf.md`.
+complex-scripts = ["parley/complex-scripts"]
+
 [dependencies]
 xarast-geom = { path = "../xarast-geom" }
+kurbo = { workspace = true }
+parley = { workspace = true }
+fontique = { workspace = true }
+skrifa = { workspace = true }
+unicode-bidi = { workspace = true }
+icu_segmenter = { workspace = true }
+icu_properties = { workspace = true }
