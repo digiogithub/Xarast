@@ -309,8 +309,19 @@ New in Phase 2:
     canonical digest folds baggage in **only where present**, flagged by
     bit 16 of the per-node flags word (`NodeFlags` uses 16 bits), so every
     document without baggage digests exactly as before. Automatic marking
-    of edited nodes (F4.7) is not done here: that is W4's policy, applied
-    in commands, never in the arena.
+    of edited nodes (F4.7, W4, 2026-09-23) lives in the commands, never in
+    the arena: `Tx::transform` marks the moved subtree's baggage `DIRTY`;
+    `Tx::set_attr` and attaching an attribute node mark the owner's
+    subtree `DIRTY` (recolour); `Tx::set_kind` marks an ink node `STALE`
+    (its geometry changed), any other node `DIRTY`; regroup, change layer
+    and delete mark nothing (§8.5 rules 1 and 4). The marks are
+    `SetForeign` actions in the same transaction, so undo takes them back.
+33. **The builder restores what a reader read** (W4): `DocumentBuilder::tag`
+    claims a persistent tag (a node the builder numbered itself gives it up
+    and is re-tagged fresh: tags stay unique), `flags` sets `LOCKED` /
+    `MAGNETIC` only, `root` replaces the `DocumentNode`, `colour_parent`
+    points a palette entry at a later one, `current_scope` names the node
+    being appended to.
 
 ## The `.xar` attribute tag reconciliation
 
@@ -521,7 +532,8 @@ findings.
 
 - [x] **Per-node foreign-baggage container (XARA-T-0089, phase 6 risk K1).**
       Done 2026-09-23 (8b0834d): decision 32, invariant 20. Automatic
-      dirty/stale marking of edited nodes is W4's F4.7.
+      dirty/stale marking of edited nodes: done in W4 (decision 32);
+      deletion accounting for the save warning is XARA-T-0113.
 - [x] Benchmark arena vs `imbl` over a 100 000-node traversal. **Done; the
       arena wins; `10-architecture.md` §3.1 and §7 updated.**
 - [x] Settle the exact `AttrSlot` set against the `.xar` tags. **Done; 46,

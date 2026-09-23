@@ -9,14 +9,16 @@ Normative spec: `docs/research/06-xarast-format.md`. Plan:
 Phase 6, round 1 (2026-09-23): the byte layer. Round 2 (2026-09-23): the
 SVG profile writer (W3), the document-level save and `xarast-cli convert`.
 Round 3 (2026-09-23): passes 4–5, `zlib-rs` everywhere, the path-data
-separator fix; the reader (W4) is being written alongside.
+separator fix; the reader (W4): `svg::read_svg`, `normal_form`, `open`,
+`save_opened`, F4.7 marking in `xarast-doc`, `.xarast` in the app's open
+path.
 
 | Workstream | State | Where |
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
 | W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
 | W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `style`, `emit`), `save.rs` |
-| W4 SVG read + preservation | not started (the container half of F4.8 is done: unknown entries are raw-copied with their rows) | `writer.rs::carry_from` |
+| W4 SVG read + preservation | F4.1–F4.6, F4.8–F4.10 done; F4.7 marking done, deletion accounting open (XARA-T-0113); XARA-T-0105 (localise + normal form) and T-0107 (passes 4–5) done | `svg/read/` (`dom`, `parse`, `style`, `build/{ink,paint,root}`, `normal`), `open.rs` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4–F6.9 open | `durability/` |
 
@@ -24,9 +26,13 @@ Public entry points: `XarastReader::{open, open_with}`, `PackageWriter`,
 `ResourceIndex`, `Manifest`, `sniff`/`sniff_bytes`, `write_atomic[_with]`,
 `DocumentLock`, **`svg::write_svg`**, **`save`/`save_to`** (the spec's
 `save_atomic` for a first save: SVG + resources + `meta.xml` + container,
-atomically) and `meta_xml`. `xarast-cli convert <in.xar|DIR>… (-o F |
---out-dir D)` drives it; `cargo xtask svg-render <svg> <png> [width]` is
-the resvg check.
+atomically) and `meta_xml`; **`svg::read_svg`**, **`svg::normal_form`**,
+**`open`/`open_with`/`open_reader`** (→ `OpenedDocument`, which keeps the
+package reader) and **`save_opened`/`save_opened_to`** (re-save with raw
+copies). `xarast-cli convert <in.xar|DIR>… (-o F | --out-dir D)` drives
+the writer; `cargo xtask svg-render <svg> <png> [width]` is the resvg
+check; `cargo run --release -p xarast-format --example roundtrip --
+FILE.xar|DIR…` prints where save → open → save first differs.
 
 ### How the SVG layer plugs in (W3/W4)
 
@@ -214,6 +220,128 @@ SimpleText, amurdove): Inkscape 0.945–0.997, Chrome (navigating to the
 `.svg`) 0.945–0.996 — the three renderers agree; the 0.945 is leafgirl's
 fine bitmap-filled figure, resampled differently by each.
 
+## The SVG profile reader (W4) — how it works
+
+`read_svg(bytes, &ReadOptions, &mut fetch) -> SvgRead { document,
+diagnostics, stats, preservation }`; `open` wraps it with the container,
+`meta.xml` (authoritative over the SVG's copies of title/dates) and a
+`fetch` that reads `resources/…` from the package, digest-checked.
+
+- **XML (`dom.rs`)**: quick-xml, `check_end_names`, no trimming,
+  names validated as QNames, prefixes resolved by hand (as in the
+  manifest), UTF-8 only, BOM stripped before the reader sees it, DOCTYPE
+  and entities refused, depth/elements/bytes capped. The arena keeps each
+  element's **byte span** and own `xmlns` declarations: an unknown element
+  is stored as the exact text read, with the inherited declarations *it
+  uses* inserted — never the default SVG namespace (every Xarast document
+  has it; adding it changed the first read's text and the digest).
+- **Numbers (`parse.rs`)** are decimals → exact millipoints (i128 mantissa
+  and scale, half away from zero), never through a float: the writer's
+  three decimals round-trip exactly. Path data is integer arithmetic for
+  `M L H V C S Z`; `Q T A` become cubics (rounded). A malformed path keeps
+  what precedes the error, as SVG renders it, with a warning.
+- **Cascade (`style.rs`)**: inherited value < presentation attribute <
+  class rule < `style`; `inherit` honoured; unknown `style` declarations
+  are kept as a foreign `style` attribute. `xarast:fill-ref` /
+  `stroke-ref` are pseudo-properties, inherited, also from
+  `<xarast:paint-class>` twins (the pass 4–5 contract, XARA-T-0107). A
+  palette twin only takes effect when the palette colour resolves to the
+  element's actual colour: an editor that recolours without removing the
+  stale ref gets its new colour. A `class` is consumed only when every
+  class in it is one of the document's rules; otherwise it is foreign.
+- **Nodes (`build*.rs`)**: one element → one node, created in document
+  order; its id's tag claimed through `DocumentBuilder::tag` (a
+  non-canonical, foreign or duplicate id → new tag + Info, F4.9). Known
+  attributes per element kind; everything else, and every unknown child,
+  comment and PI with its position among the known children, is baggage.
+  Chapters come from `<xarast:document>`; a spread outside any chapter
+  sits at the root. A document with no spread (a plain SVG) reads into
+  one chapter/spread/page/layer sized by the viewBox. Transforms on
+  groups compose into a CTM baked into geometry; an `<image>`'s or
+  `<text>`'s own transform is its placement.
+- **Twins win (F4.2)**: `xarast:parallelogram` over `d`; quick-shape
+  parameters (the base `d` is kept as the outline cache when it differs
+  from `QuickShape::outline()` — it does for 32k corpus shapes, whose
+  import generated edge templates in shape space); conical, 3/4-colour,
+  fractal/noise twins over their flat approximation; `xarast:stops` /
+  `xarast:levels` keys over baked stops. Generated live-effect subtrees
+  under their controller are kept as `LiveRole::Generated` (nothing
+  regenerates before Phase 13); an orphan one becomes a plain group plus a
+  warning (F4.3).
+- **Paint (`build/paint.rs`)**, the inverse of the writer's `paint`,
+  localised (XARA-T-0105): one attribute child per slot whose value
+  differs from `default_for`. Rules for what SVG merges: `fill-opacity` =
+  colour alpha × transparency alpha — a literal colour is taken as
+  opaque (all of it becomes the transparency), a palette colour or a twin
+  says its own alpha; `xarast:blend` goes to the fill transparency when
+  there is a fill; two `<xarast:transparency>` twins are fill then
+  stroke, one is the fill's when there is a fill (XARA-T-0111). A mask's
+  box, padded by the writer with `width/2 + 1`, gives back the line width
+  of an unstroked element. A circular radial gradient's major axis is
+  the minor axis turned a quarter clockwise (the renderer takes both axes
+  as given; `cx cy r` alone would shear it).
+- **Palette**: rebuilt in order so `c-N` ids are stable. Six decimals do
+  not always pin an `f32` component: where a colour resolves one level
+  off the `xarast:srgb` the file records, the nearest `f32` that prints
+  the same six decimals and resolves right is chosen (components, then a
+  tint factor).
+- **Preservation digest (F4.6)**: recomputed by running `write_svg` on
+  the loaded document when it has baggage or the file declares any — the
+  writer's own emission order, no second implementation. Count lower than
+  declared → the §8.4 warning; same or higher but different → Info
+  (another editor rewrote or added foreign data; Inkscape always does).
+- **Security**: `<script>`, `<foreignObject>`, SMIL, `on*` and
+  `javascript:` values are stripped with a warning, and so is any foreign
+  fragment that contains them.
+
+### The normal form (XARA-T-0105)
+
+`normal_form(doc)` is text, one fact per line: metadata; the palette
+(model, kind, name, parent by position, 6-decimal components, resolved
+sRGB, entry index); every non-attribute node in document order with its
+id, kind and fields at the precision the profile carries (paths as the
+writer's path data in the spread frame, text matrices to 6 decimals,
+characters folded into styled runs); flags `LOCKED`/`MAGNETIC`; per ink
+node the **resolved** attribute stack projected through the writer's own
+paint code (`svg::paint::{colour_paint, transparency}`) with definitions
+inlined by content and **derived data dropped** (baked stops of a keyed
+ramp, the flat approximation of a twin); baggage with clamped positions;
+Opaque nodes with their children. Two documents are equivalent iff their
+normal forms are equal. It is independent of where attributes sit, of
+hoisting and classes, and of def ids.
+
+### Round trip numbers (2026-09-23, corpus of 59)
+
+- **Model**: normal form equal for 50 files; the other 9 lose exactly the
+  objects the importer keeps under an unknown record (an `Opaque` with
+  children), which the writer does not emit (XARA-T-0108): everything
+  else in them round-trips (`tests/svg_roundtrip.rs`, `KNOWN_OPAQUE_LOSS`).
+  Passes 4–5 on and off read the same model for all 59.
+- **Bytes**: 54/59 byte-identical on the first re-save through
+  `save_opened`; all 59 a fixed point on the second. The five: 8-bit key
+  stops resampled once (Fill Types simple, Spitfire, WATCH2, Watch4) and
+  `xarast:bitmaps` counting an unreferenced bitmap (scope3) — XARA-T-0110.
+- **Render** (`crates/xarast-app/tests/xarast_roundtrip.rs`, CPU, 480×360,
+  both framed on the original's drawing): 50/59 pixel-identical, 6 within
+  2 levels on ≤ 0.03 % of pixels; scope3 (2.3 %), Watch4 (0.5 %) and
+  Spitfire (14 px) differ for writer gaps XARA-T-0108/-0109.
+- **Open time** (`open_reader`, release): ProbeX16 (518k nodes, 50 MB SVG)
+  1.7–2.2 s; the 1,800-object files 3–15 ms (budget: 120 ms).
+
+### Inkscape (1.2.2), by hand on CatWoman graphs and a foreign-data fixture
+
+`inkscape --actions=…;export-type:svg;export-plain-svg:false` moved a
+path, recoloured a quick shape, renamed a layer. Inkscape rewrote every
+element (indentation, `d` absolute with commas, `#ff00ff`, a
+`style="fill:url(#…)"` duplicate), added `sodipodi:docname` on the root
+and `xmlns:svg`, dropped no `xarast:` attribute and kept `acme:state`,
+`xarast:foreign-dirty` and a comment in place. Reread: 289/289 paths,
+the move and the recolour taken (the stale `xarast:fill-ref` correctly
+ignored), the layer renamed, `sodipodi:docname` kept as root baggage, no
+warning; the digest reported "rewritten, nothing lost" (Inkscape's
+spelling changes the fragment text). What does not survive yet: its
+`namedview` view state and `<metadata>` additions (XARA-T-0112).
+
 ## Decisions taken (and why)
 
 - **`zip` 8.6** (current stable major; 9.0 is pre-release), `MIT`, **every
@@ -327,12 +455,26 @@ fine bitmap-filled figure, resampled differently by each.
   same CRC) — never recompressed.
 - No `unsafe` (`#![forbid(unsafe_code)]`); parser modules deny indexing,
   unwrap/expect, panic and unchecked arithmetic.
+- **Read then write is a fixed point** on what the writer produced: the
+  first re-save of a reloaded document equals the original save (54/59
+  corpus files, the rest listed in XARA-T-0110) and the second always
+  does (`tests/svg_roundtrip.rs`, `fuzz_xarast_svg_read`). A reader
+  change that breaks it is a bug, however small the difference.
+- **Opening writes nothing** (F4.10, `tests/svg_read.rs::opening_writes_nothing`):
+  no lock, no temporary, the file's bytes and mtime untouched.
+- A foreign fragment is stored as the text read (+ the declarations it
+  uses) and goes back **inside the element it was read in**, before the
+  known child it preceded. The writer re-emits it only if well-formed.
+- Ids: every element with a Xarast id claims its tag once; the root is
+  `x0` and is never claimed; a node the builder numbered itself gives its
+  tag up (`DocumentBuilder::tag`).
 
 ### Fuzzing
 
-Two targets, `fuzz_xarast_open` (reader + every read path + a full re-save
-of whatever opens, which must reopen) and `fuzz_xarast_manifest` (parser +
-the write–parse fixed point). Seeds are generated by
+Three targets, `fuzz_xarast_open` (reader + every read path + a full re-save
+of whatever opens, which must reopen), `fuzz_xarast_manifest` (parser +
+the write–parse fixed point) and `fuzz_xarast_svg_read` (W4, below).
+Seeds are generated by
 `cargo run -p xarast-format --example fuzz_seeds -- <dir>`, never committed
 (`crates/xarast-xar/tests/fuzz_seeds.rs` rejects any file under
 `fuzz/corpus/` it does not generate itself); CI generates them before the
@@ -342,6 +484,12 @@ run. Round 1, 2026-09-23, `Limits::FUZZ`, 1 MiB max input:
 |---|---|---|---|---|
 | `fuzz_xarast_open` | 3 × 10 min (last on the final build) | 5.17 M + 2.46 M + 2.16 M | 5 292 edges | none |
 | `fuzz_xarast_manifest` | 4 × 10 min (the first three stopped at a finding) | final clean run 6.69 M | 2 970 edges | 4, all fixed (below) |
+| `fuzz_xarast_svg_read` (W4) | 90 s + 10 min, `ReadOptions::fuzz()`, 3 seeds (writer output with and without passes 4–5, a hand-written third-party SVG) | 0.47 M + 0.84 M (~1 400/s: each input is read, saved, opened, saved) | 15 713 edges, 4 418 inputs, 666 MB peak | none |
+
+`fuzz_xarast_svg_read` asserts: no panic on any text; what reads saves as
+a package that opens, and the second save's `document.svg` equals the
+first (or settles one round later), with an equal normal form on a third
+read.
 
 ### Fuzz findings (round 1)
 
@@ -393,12 +541,33 @@ the file means", not crashes; each input is now a unit test in
   numbers in ProbeX16, 11 corpus files render closer to the reference
   since).
 - Comparing lock-file text to decide ownership on release.
+- Reading the SVG through a float path parser (`Path::from_svg_path_data`
+  via kurbo): relative commands accumulate in `f64`; the reader's own
+  integer parser is exact and needs no rounding.
+- Regenerating quick-shape outlines on every read ("parametric wins"
+  literally): 32k corpus shapes have outlines `QuickShape::outline()`
+  only approximates (edge templates); the stored `d` is kept as the cache.
+- Normal form = "the writer's SVG with def ids stripped": it cannot see
+  what the writer drops (the Opaque subtrees were only found once the
+  normal form listed the model's own tree) and breaks on every hoisting
+  change. The tree is model-level; only paint goes through the writer.
+- Rendering both documents with `HeadlessFrame::FitDrawing`: the drawing
+  bounds include line widths of unstroked objects, which the profile does
+  not carry, so the two fits differ by a few pixels. Frame both on the
+  original's drawing.
+- A separate ad-hoc digest walker on the reader side: the writer's
+  emission order (clip shapes before their ClipView, fragments after
+  sidecars) is subtle; running `write_svg` is exact and costs only for
+  documents with baggage.
 
 ## Open TODOs
 
-- W4: the reader, preservation context and the re-save path
-  (`from_package` + `carry_from` + raw copies) on top of `save`;
-  attribute localisation (XARA-T-0105); the preservation digest as above.
+- W4 leftovers: F4.7 deletion accounting (XARA-T-0113); header data
+  another editor adds — `namedview`, `<metadata>`, run-level attributes,
+  foreign ids (XARA-T-0112); writer twins the reader cannot tell apart
+  (XARA-T-0111). Writer gaps the round trip found: Opaque subtrees
+  (XARA-T-0108, data loss, 9 corpus files), fill mapping of bitmap and
+  procedural fills (XARA-T-0109), first re-save differences (XARA-T-0110).
 - W3 leftovers: baking/`BakeProvider`
   (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
