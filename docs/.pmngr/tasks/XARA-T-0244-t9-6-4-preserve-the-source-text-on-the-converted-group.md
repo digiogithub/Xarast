@@ -2,13 +2,14 @@
 id: XARA-T-0244
 type: task
 title: T9.6.4 — Preserve the source text on the converted group (xarast:was-text)
-status: in_review
+status: done
 parent: XARA-US-0049
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T22:35:23Z
-updated: 2026-09-23T22:41:21Z
+updated: 2026-09-23T23:20:36Z
 started: 2026-09-23T22:35:23Z
+closed: 2026-09-23T23:20:36Z
 ---
 
 ## Description

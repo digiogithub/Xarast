@@ -2,13 +2,14 @@
 id: XARA-T-0210
 type: task
 title: "T8.2.5 — MutateFill: change gradient type keeping colours, ramp and a mapped set of control points"
-status: in_review
+status: done
 parent: XARA-US-0038
 author: mcp
 labels: [phase-8, doc]
 created: 2026-09-23T19:53:36Z
-updated: 2026-09-23T21:25:22Z
+updated: 2026-09-23T23:20:36Z
 started: 2026-09-23T21:25:22Z
+closed: 2026-09-23T23:20:36Z
 ---
 
 ## Description

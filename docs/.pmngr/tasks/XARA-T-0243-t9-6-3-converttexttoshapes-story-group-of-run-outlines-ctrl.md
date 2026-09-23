@@ -2,13 +2,14 @@
 id: XARA-T-0243
 type: task
 title: "T9.6.3 — ConvertTextToShapes: story → group of run outlines (Ctrl+Shift+C)"
-status: in_review
+status: done
 parent: XARA-US-0049
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T22:35:23Z
-updated: 2026-09-23T22:41:21Z
+updated: 2026-09-23T23:20:36Z
 started: 2026-09-23T22:35:23Z
+closed: 2026-09-23T23:20:36Z
 ---
 
 ## Description
