@@ -41,7 +41,9 @@ use xarast_geom::{Cap, FillRule, Join, StrokeStyle};
 use crate::backend::{BackendError, FrameTimings, LayerId, Rasterizer, RasterizerCaps};
 use crate::blend::{BlendFamily, BlendLuts, LumaWeights, TranspSource, Transparency, composite};
 use crate::display_list::{DisplayList, DrawCmd, DrawItem, ListParts, SCENE_PAINT};
-use crate::paint::{GradMapping, ImageId, ImageRegistry, Paint, eval_paint};
+use crate::paint::{
+    FrameMap, GradMapping, ImageId, ImageRef, ImageRegistry, Paint, PaintSampler, eval_paint,
+};
 use crate::path::PathRef;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
@@ -87,11 +89,17 @@ impl Default for CpuConfig {
 impl CpuConfig {
     /// The configuration export and the golden tests use: bit-reproducible
     /// across machines of the same architecture.
+    ///
+    /// It uses every core. Bands are independent and merged by index, so
+    /// the thread count cannot change a byte
+    /// (`determinism::parallel_bands_produce_the_same_bytes_as_serial_ones`);
+    /// what reproducibility needs pinned is the SIMD level and the band
+    /// height, and both are.
     #[must_use]
     pub fn deterministic() -> CpuConfig {
         CpuConfig {
             pin_simd: true,
-            threads: 1,
+            threads: 0,
             band_budget_bytes: 1 << 20,
             weights: LumaWeights::BT601,
         }
@@ -877,6 +885,12 @@ fn composite_coverage(
         (Some(c), Some(0)) if c.a == 255 && transparency.family == BlendFamily::Mix => Some(c),
         _ => None,
     };
+    // Gradients and images are readied once per primitive, not per pixel.
+    let sampler = PaintSampler::new(paint, &res.ramps, &res.images);
+    let levels = LevelSampler::new(transparency, res);
+    // The same replacement for a paint whose colour varies: decided per
+    // pixel, on the sampled colour.
+    let replace_sampled = flat == Some(0) && transparency.family == BlendFamily::Mix;
     let mut touched = 0u64;
     let cw = coverage_rect.width() as usize;
     for y in rect.y0..rect.y1 {
@@ -903,11 +917,16 @@ fn composite_coverage(
             let p = Point64::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
             let src = match solid {
                 Some(c) => c,
-                None => eval_paint(paint, &res.ramps, &res.images, p),
+                None => sampler.sample(p),
             };
+            if cov == 255 && replace_sampled && src.a == 255 {
+                write_opaque(dst, band, width, x, y, src);
+                touched += 1;
+                continue;
+            }
             let t = match flat {
                 Some(t) => t,
-                None => level_at(transparency, res, p),
+                None => levels.sample(p),
             };
             blend_into(
                 dst,
@@ -936,45 +955,70 @@ fn mask_at(mask: &[u8], band: DeviceRect, width: u32, x: i32, y: i32) -> u8 {
 /// The transparency level at a point, from a flat value, a graduated ramp
 /// or a bitmap.
 fn level_at(t: &Transparency, res: &Resolver, p: Point64) -> u8 {
-    match &t.source {
-        TranspSource::Flat(v) => *v,
-        TranspSource::Gradient {
-            shape,
-            mapping,
-            repeat,
-            ramp,
-        } => {
-            let Some(table) = res.transparency_ramps.get(ramp.index() as usize) else {
-                return 0;
-            };
-            if table.is_empty() {
-                return 0;
+    LevelSampler::new(t, res).sample(p)
+}
+
+/// A transparency readied for many points, as [`PaintSampler`] is for a
+/// paint: the mapping inverted and the table or image looked up once.
+struct LevelSampler<'a> {
+    t: &'a Transparency,
+    frame: Option<FrameMap>,
+    table: Option<&'a [u8]>,
+    image: Option<&'a ImageRef>,
+}
+
+impl<'a> LevelSampler<'a> {
+    fn new(t: &'a Transparency, res: &'a Resolver) -> LevelSampler<'a> {
+        let (frame, table, image) = match &t.source {
+            TranspSource::Flat(_) => (None, None, None),
+            TranspSource::Gradient { mapping, ramp, .. } => (
+                mapping.frame_map(),
+                res.transparency_ramps
+                    .get(ramp.index() as usize)
+                    .map(Vec::as_slice),
+                None,
+            ),
+            TranspSource::Image { image, mapping, .. } => {
+                (mapping.frame_map(), None, res.images.get(*image))
             }
-            let Some(s) = crate::paint::grad_param(*shape, *mapping, p) else {
-                return 0;
-            };
-            let s = crate::paint::apply_repeat(s, *repeat);
-            let idx = (s * (table.len() - 1) as f64)
-                .round()
-                .clamp(0.0, (table.len() - 1) as f64);
-            table[idx as usize]
-        }
-        TranspSource::Image {
+        };
+        LevelSampler {
+            t,
+            frame,
+            table,
             image,
-            mapping,
-            repeat,
-        } => {
-            let Some(img) = res.images.get(*image) else {
-                return 0;
-            };
-            let Some((u, v)) = mapping.to_frame(p) else {
-                return 0;
-            };
-            let x = (u * f64::from(img.width()) - 0.5).round();
-            let y = (v * f64::from(img.height()) - 0.5).round();
-            // The original reads the transparency out of the luminance of
-            // the tile pattern.
-            LumaWeights::BT601.luma(img.texel(x as i64, y as i64, *repeat))
+        }
+    }
+
+    #[inline]
+    fn sample(&self, p: Point64) -> u8 {
+        match &self.t.source {
+            TranspSource::Flat(v) => *v,
+            TranspSource::Gradient { shape, repeat, .. } => {
+                let Some(table) = self.table else {
+                    return 0;
+                };
+                if table.is_empty() {
+                    return 0;
+                }
+                let Some(s) = self.frame.and_then(|f| f.param(*shape, p)) else {
+                    return 0;
+                };
+                table[crate::paint::ramp_index(crate::paint::apply_repeat(s, *repeat), table.len())]
+            }
+            TranspSource::Image { repeat, .. } => {
+                let Some(img) = self.image else {
+                    return 0;
+                };
+                let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                    return 0;
+                };
+                let x = (u * f64::from(img.width()) - 0.5).round();
+                let y = (v * f64::from(img.height()) - 0.5).round();
+                // The original reads the transparency out of the luminance
+                // of the tile pattern.
+                LumaWeights::BT601.luma(img.texel(x as i64, y as i64, *repeat))
+            }
         }
     }
 }
@@ -985,6 +1029,7 @@ fn level_at(t: &Transparency, res: &Resolver, p: Point64) -> u8 {
     clippy::too_many_arguments,
     reason = "the pixel address is four of these"
 )]
+#[inline]
 fn blend_into(
     dst: &mut [u8],
     band: DeviceRect,
