@@ -39,6 +39,27 @@ flate2 = "1.1"
 # `MIT OR Apache-2.0`.
 sha2 = "0.10"
 
+# ── Native `.xarast` format ──────────────────────────────────────────────────
+# The ZIP container. 8.x is the current stable major (9.0 is still a
+# pre-release). Every default feature is off: the container only ever writes
+# STORED and DEFLATE (`research/06 §4.2`), and AES, bzip2, lzma, xz, ppmd and
+# deflate64 would only widen the attack surface of the reader. DEFLATE goes
+# through `flate2` on the pure-Rust `zlib-rs` backend, pinned by name rather
+# than left to feature unification, so that a given lock file always
+# produces the same compressed bytes (determinism, O8). `zopfli` is left out
+# on purpose: it is far too slow for an interactive save. `MIT`; `zlib-rs`
+# is `Zlib`.
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+# The manifest (and, from W3/W4, the SVG profile). 0.41 because it is the
+# version already in the graph; `research/06 §13.2` explains why it and not
+# a tree parser. `MIT`.
+quick-xml = "0.41"
+# Content digests and resource identity (`research/06 §4.4`). The default
+# `std` feature only; SIMD is detected at run time. `CC0-1.0 OR Apache-2.0`.
+blake3 = "1.8"
+# Scratch directories in the durability tests. `MIT OR Apache-2.0`.
+tempfile = "3.27"
+
 # ── Render engine ────────────────────────────────────────────────────────────
 # `vello_cpu` is the coverage rasteriser the Phase 4 W0 spike selected; see
 # `docs/memory/render.md` for the measurements. We use it as a rasteriser

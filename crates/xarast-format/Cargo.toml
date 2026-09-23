@@ -11,5 +11,16 @@ authors.workspace = true
 [lints]
 workspace = true
 
+# The container, the manifest, the resource index and the durability layer
+# know nothing about the document model: they move bytes. The SVG profile
+# (W3/W4, next round) is the only part that will reach for `xarast-doc`, and
+# it plugs in through `PackageWriter::set_document` / `XarastReader::entry`.
 [dependencies]
 xarast-doc = { path = "../xarast-doc" }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+blake3 = { workspace = true }
+# The escape heuristic of `research/06 §4.3` deflates a 64 KiB sample.
+# Same crate and backend `zip` already uses.
+flate2 = { workspace = true }
+thiserror = { workspace = true }
