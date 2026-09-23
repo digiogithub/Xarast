@@ -482,3 +482,48 @@ fn inside_a_gesture_like_moves_merge_and_a_different_command_does_not() {
     }
     assert_eq!(s.doc.canonical_digest(), before);
 }
+
+/// Gives a node one unknown attribute, as a `.xarast` reader would.
+#[derive(Debug)]
+struct Baggage(NodeId);
+
+impl Command for Baggage {
+    fn label(&self) -> &'static str {
+        "Fixture"
+    }
+    fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+        tx.set_foreign(
+            self.0,
+            Some(xarast_doc::ForeignBaggage {
+                attrs: vec![xarast_doc::ForeignAttr {
+                    ns: "urn:example".into(),
+                    prefix: None,
+                    local: "note".into(),
+                    value: "x".into(),
+                }],
+                children: Vec::new(),
+                marks: xarast_doc::ForeignMarks::empty(),
+            }),
+        )
+    }
+}
+
+#[test]
+fn a_selector_move_marks_foreign_baggage_dirty_and_undo_clears_it() {
+    let (mut s, a, _) = fixture();
+    s.dispatch(&Baggage(a)).unwrap();
+    s.bus.history_mut().clear(&mut s.doc);
+    let marks = |s: &Session| s.doc.tree.foreign(a).map(|b| b.marks).unwrap();
+    assert!(marks(&s).is_empty());
+    let start = dev(&s, 125_000, 125_000);
+    move_to(&mut s, start);
+    down(&mut s, start, 0);
+    move_to(&mut s, offset(start, 40.0, 0.0));
+    up(&mut s, offset(start, 40.0, 0.0), 1);
+    assert!(marks(&s).contains(xarast_doc::ForeignMarks::DIRTY));
+    s.apply(Intent::Undo).unwrap();
+    assert!(
+        marks(&s).is_empty(),
+        "undo takes the mark back with the move"
+    );
+}
