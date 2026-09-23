@@ -78,6 +78,39 @@ spike's conclusion depends on the difference.
 partial axes (P3, P7, P9 and the presented halves of P2 and P4) need a
 display. Until then, no claim is made about them in either direction.
 
+## Editing and tools (phase 7)
+
+Full note: [`tools.md`](tools.md). What the interface side owns:
+
+- **Layout**: menu bar (File, **Edit**, View, Help) → **infobar row**
+  (`toolbar::InfobarRow`, 28 pt, tool name + the tool's described fields,
+  lengths in the document unit, typed units parsed, commit on focus loss /
+  Enter, Esc abandons) → **tool palette** docked left
+  (`toolbar::ToolPalette`, 40 pt strip, one 30 pt button per `ToolId::ALL`)
+  → canvas → dock on the right → status bar.
+- **Palette**: glyphs are painted strokes (original, no image assets);
+  selected = accent fill; later-phase tools (Fill, Transparency, Text)
+  disabled; implemented-later phase-7 tools enabled with a corner dot and
+  "coming soon (phase 7)" in the tooltip. Each button is published as an
+  AccessKit `Button` named after the tool with `toggled`, `disabled`,
+  `keyboard_shortcut` and a description (the tooltip). Clicking raises
+  `UiCommand::App(AppCommand::Tool(id))` — the same command as its key.
+- **Edit menu**: "Undo Move" / "Redo …" from `EditingView.undo/redo`
+  (greyed and plain "Undo" when empty), Delete and Select none greyed with
+  no selection. Items close the menu on click.
+- **Model**: `UiModel.editing: Option<EditingView>` (tool, undo, redo,
+  selected count, infobar); `UiCommand::InfobarEdit { field, value: Mp }`.
+- **Tests**: `crates/xarast-ui/tests/toolbar.rs` (palette order/placement/
+  state/keys, click → command, Edit labels, infobar typing `1in` → 72 pt);
+  viewer end-to-end tests in `xarast-shell/src/viewer.rs` (keys and palette
+  switch tools; select, drag, Edit › Undo Move, Ctrl+Shift+Z, Ctrl+Z,
+  Ctrl+Y; Esc mid-drag; Delete + undo).
+- **Real window**: `xarast --probe drag --screenshot out.png file.xar`
+  presses on the object nearest the canvas centre, drags it 100 frames and
+  releases (one Move), then captures. Needs no input on the desktop.
+- The colour panel has a "Fill" button of its own: query palette buttons
+  by role *and* position in tests.
+
 ## Panels and canvas
 
 ### Current state
