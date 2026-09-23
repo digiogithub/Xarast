@@ -276,8 +276,20 @@ pub fn fill_sets<K: FillKind>(doc: &Document, edit: &EditState) -> Vec<FillSet<K
     out
 }
 
+/// The handle a fill-like tool has selected: which channel, the objects of
+/// its set as they were when it was chosen, and the handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FillSelection {
+    /// Colour (the fill tool) or transparency (the transparency tool).
+    pub channel: FillChannel,
+    /// The objects sharing the handle set.
+    pub nodes: Vec<NodeId>,
+    /// The handle.
+    pub handle: FillHandle,
+}
+
 /// The handle under a document point, over every set, topmost set first.
-fn hit_sets<S: Stop>(
+pub(crate) fn hit_sets<S: Stop>(
     sets: &[FillSet<S>],
     vp: &Viewport,
     at: DocPoint,
@@ -771,6 +783,15 @@ fn ramp_ref<S: Stop>(g: &FillGeometry<S>) -> Option<&Ramp<S>> {
 impl<K: FillKind> Tool for FillLikeTool<K> {
     fn id(&self) -> ToolId {
         K::TOOL
+    }
+
+    fn fill_selection(&self) -> Option<FillSelection> {
+        let (nodes, handle) = self.selected.as_ref()?;
+        Some(FillSelection {
+            channel: K::CHANNEL,
+            nodes: nodes.clone(),
+            handle: *handle,
+        })
     }
 
     fn on_deactivate(&mut self, _cx: &mut ToolCtx<'_>) {

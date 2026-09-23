@@ -1019,6 +1019,12 @@ pub trait Tool: Send + std::fmt::Debug {
         None
     }
 
+    /// The fill handle a fill-like tool has selected: what a colour from
+    /// the colour bar or the colour editor then edits (phase 8, W8.7).
+    fn fill_selection(&self) -> Option<crate::fill_tool::FillSelection> {
+        None
+    }
+
     /// A typing key, while [`Tool::text_editing`] says text has the
     /// keyboard. Returns whether the tool took it.
     fn text_input(&mut self, input: &TextInput, cx: &mut ToolCtx<'_>) -> bool {
@@ -1466,6 +1472,12 @@ impl ToolMachine {
     #[must_use]
     pub fn text_editing(&self) -> Option<crate::text_tool::TextEditing> {
         self.tool(self.current).and_then(|t| t.text_editing())
+    }
+
+    /// The fill handle the tool in force has selected, if any.
+    #[must_use]
+    pub fn fill_selection(&self) -> Option<crate::fill_tool::FillSelection> {
+        self.tool(self.current).and_then(|t| t.fill_selection())
     }
 
     /// Sends an infobar edit to the tool in force.
