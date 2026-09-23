@@ -1213,6 +1213,10 @@ fn what_svg_cannot_draw_reads_back_exactly() {
     let first = package(&doc, SvgOptions::default());
     let mut o = open(&first);
     assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);
+    // A browser draws the contone fill through the writer's filter.
+    let svg = svg_of(&first);
+    assert_eq!(svg.matches("xarast:filter=\"contone\"").count(), 1, "{svg}");
+    assert!(svg.contains("<feFuncR type=\"table\""), "{svg}");
     for i in 0..7 {
         let (a, b) = (paint_slots(&doc, i), paint_slots(&o.document, i));
         for (x, y) in a.iter().zip(&b) {

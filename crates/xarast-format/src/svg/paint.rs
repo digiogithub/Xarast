@@ -765,7 +765,10 @@ pub(crate) fn colour_paint(
                 attr(&mut body, "xarast:fill-repeat", repeat_name(tiling));
             }
             effect_attr(&mut body, effect);
-            bitmap_pattern_tail(&mut body, &bm);
+            let filter = contone
+                .as_ref()
+                .map(|(a, b)| contone_filter(ctx, a, b, effect));
+            bitmap_pattern_tail(&mut body, &bm, filter.as_deref());
             let id = ctx.defs.add('p', "pattern", &body);
             PaintOut {
                 value: format!("url(#{id})"),
@@ -804,14 +807,65 @@ fn bitmap_pattern_head(ctx: &PaintCtx<'_>, origin: Point, axis_x: Point, axis_y:
     body
 }
 
-/// The image of a bitmap `<pattern>` and its end tag.
-fn bitmap_pattern_tail(body: &mut String, bm: &BitmapRef) {
+/// The image of a bitmap `<pattern>` (through `filter`, when given) and
+/// its end tag.
+fn bitmap_pattern_tail(body: &mut String, bm: &BitmapRef, filter: Option<&str>) {
     body.push_str("><image");
     attr(body, "width", "1");
     attr(body, "height", "1");
     attr(body, "preserveAspectRatio", "none");
     bm.attrs(body);
+    if let Some(f) = filter {
+        attr(body, "filter", &format!("url(#{f})"));
+    }
     body.push_str("/></pattern>");
+}
+
+/// BT.601 luma into every colour channel, alpha kept.
+const LUMA_MATRIX: &str = ".299 .587 .114 0 0 .299 .587 .114 0 0 .299 .587 .114 0 0 0 0 0 1 0";
+
+/// A contone (duotone) bitmap as a browser draws it: each texel's luma
+/// (BT.601) picks a colour on the ramp from `a` (black) to `b` (white),
+/// sampled into `feComponentTransfer` tables — two entries for a plain
+/// fade (exact), 17 for a rainbow effect. Derived from the key colours as
+/// written, so a reload re-derives the same bytes. The pattern's twin is
+/// the model; this filter carries no data of its own.
+fn contone_filter(ctx: &mut PaintCtx<'_>, a: &Colour, b: &Colour, effect: FillEffect) -> String {
+    let (a, _) = key_colour(a, ctx);
+    let (b, _) = key_colour(b, ctx);
+    let n: u16 = if effect == FillEffect::Fade { 2 } else { 17 };
+    let samples: Vec<Rgba8> = (0..n)
+        .map(|i| {
+            let t = f32::from(i) / f32::from(n - 1);
+            xarast_color::interpolate(a, b, t, effect).to_rgba8()
+        })
+        .collect();
+    let table = |ch: fn(&Rgba8) -> u8| {
+        samples
+            .iter()
+            .map(|c| f64s(f64::from(ch(c)) / 255.0, 4))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut body = String::new();
+    attr(&mut body, "xarast:filter", "contone");
+    attr(&mut body, "color-interpolation-filters", "sRGB");
+    body.push_str("><feColorMatrix");
+    attr(&mut body, "type", "matrix");
+    attr(&mut body, "values", LUMA_MATRIX);
+    body.push_str("/><feComponentTransfer>");
+    for (f, v) in [
+        ("feFuncR", table(|c| c.r)),
+        ("feFuncG", table(|c| c.g)),
+        ("feFuncB", table(|c| c.b)),
+    ] {
+        let _ = write!(body, "<{f}");
+        attr(&mut body, "type", "table");
+        attr(&mut body, "tableValues", &v);
+        body.push_str("/>");
+    }
+    body.push_str("</feComponentTransfer></filter>");
+    ctx.defs.add('f', "filter", &body)
 }
 
 /// A bitmap transparency as a luminance `<mask>` over the element's box:
@@ -829,7 +883,7 @@ fn bitmap_mask(
 ) -> String {
     let (x0, y0, x1, y1) = bounds;
     let mut pattern = bitmap_pattern_head(ctx, origin, axis_x, axis_y);
-    bitmap_pattern_tail(&mut pattern, bm);
+    bitmap_pattern_tail(&mut pattern, bm, None);
     let pattern = ctx.defs.add('p', "pattern", &pattern);
     let row = "-.299 -.587 -.114 0 1";
     let filter = ctx.defs.add(
