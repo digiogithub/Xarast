@@ -972,6 +972,37 @@ Tag → format mapping (`Kernel/bmpcomp.cpp:1320-1345`):
 Verified in `testfiles/TestBitmapFill.xar`: tag 68, size 2177,
 payload = `"Default\0"` in UTF-16 (16 bytes) followed by `89 50 4E 47 0D 0A 1A 0A …`.
 
+**Three tags do not embed a standard file** (phase 10, 2026-09-23):
+
+- **65 `BMP` is a headerless DIB.** The BMP import filter reads it with the
+  "read a `BITMAPFILEHEADER`" flag off (`wxOil/bmpfiltr.cpp:698-707` calling
+  `DIBUtil::ReadFromFile(…, FALSE, …)`; the flag's meaning is documented at
+  `wxOil/dibutil.cpp:1123-1124`). The image therefore starts at the
+  `BITMAPINFOHEADER` (`biSize` = 40), not at `BM`. A reader must synthesise
+  the 14-byte file header, computing the pixel offset from `biSize`, the
+  `BI_BITFIELDS` masks and the palette (`biClrUsed`, or `2^bpp` when it is 0
+  and `bpp ≤ 8`). `xarast-image` also sniffs first, so a `BM` file stored
+  under 65 by some other writer still decodes.
+- **69 `BMPZIP` is the same DIB behind the file's stream compression**:
+  `Compressed = TRUE` for tag 69 (`Kernel/bmpcomp.cpp:1335-1337`) makes the
+  BMP filter switch the file into compressed mode around the read
+  (`wxOil/bmpfiltr.cpp:698-713`, `Kernel/ccfile.cpp:200-221`). The exact
+  framing is unverified — the corpus has no tag-69 record — so the reader
+  accepts either a zlib stream or raw DEFLATE, bounded by the decode limits.
+- **71 `JPEG8BPP`** is a 24 bpp JPEG plus the palette of the 8 bpp original
+  (`Kernel/bmpcomp.cpp:1339-1342` sets `ReadPalette`). The reconstruction
+  happens only when the palette has 1–256 entries and the decoded JPEG is
+  24 bpp (`Kernel/bitmap.cpp:817-822`); it maps each pixel onto the palette
+  **without dithering** (`wxOil/dibutil.cpp:3741` requests
+  `XARADITHER_NONE`). The colour-matching metric itself runs inside the
+  closed rasteriser and is not observable; `xarast-image` uses nearest
+  squared RGB distance, lowest index on a tie.
+
+Corpus census, all 59 files, decoded through `xarast-image` (phase 10):
+58 × tag 61 (GIF previews), 4 × tag 67 (JPEG), 32 × tag 68 (PNG, 22 with
+alpha), 8 × tag 71 (JPEG8BPP); **no** tag 60, 62–66 or 69 occurs. Every one
+decodes.
+
 **`TAG_PREVIEWBITMAP_*` (60–64)** — the same but **without the name**: the payload is the
 image file directly. Verified: in `testfiles/*.xar` record 61 starts with
 `47 49 46 38 37 61` (`GIF87a`). The original importer simply *seeks* past it and

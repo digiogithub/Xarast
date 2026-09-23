@@ -14,6 +14,7 @@ note first and update it afterwards.
 | `ui.md` | User interface | Toolkit, panel layout, shortcuts, Wayland |
 | `packaging.md` | Packaging | AppImage, CI, glibc compatibility |
 | `text.md` | Text | Shaping, fonts, text on a path |
+| `image.md` | Images (`xarast-image`) | Decoding façade, decode limits and bomb fixtures, EXIF, `.xar` bitmap wrappings, the walker contract |
 | `perf.md` | Performance | Benchmarks, budgets, regressions |
 
 ## Status
