@@ -24,6 +24,10 @@ TASKS:
                 it with resvg, resolving relative hrefs next to the file.
                 The always-available browser-grade check of the .xarast
                 SVG profile (research/06 §5.6)
+    svg-check   [--interchange] <SVG|DIR>...: parse every SVG (a directory's
+                *.svg files) with usvg and render it with resvg at 256 px
+                wide; with --interchange, also fail on any `xarast`
+                vocabulary. Exported SVG's validation (phase 11 T11.3.7)
     help        Print this help
 ";
 
@@ -32,6 +36,7 @@ fn main() -> ExitCode {
     let result = match task.as_str() {
         "icons" => icons(),
         "svg-render" => svg_render(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "svg-check" => svg_check(&std::env::args().skip(2).collect::<Vec<_>>()),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;
@@ -135,5 +140,74 @@ fn svg_render(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         pixmap.width(),
         pixmap.height()
     );
+    Ok(())
+}
+
+fn svg_check(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let interchange = args.iter().any(|a| a == "--interchange");
+    let mut files = Vec::new();
+    for a in args.iter().filter(|a| *a != "--interchange") {
+        let p = PathBuf::from(a);
+        if p.is_dir() {
+            let mut v: Vec<PathBuf> = std::fs::read_dir(&p)?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|f| f.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")))
+                .collect();
+            v.sort();
+            files.extend(v);
+        } else {
+            files.push(p);
+        }
+    }
+    if files.is_empty() {
+        return Err("usage: cargo xtask svg-check [--interchange] <SVG|DIR>...".into());
+    }
+    let mut options = resvg::usvg::Options::default();
+    options.fontdb_mut().load_system_fonts();
+    let mut failed = 0usize;
+    for f in &files {
+        let result = (|| -> Result<(u32, u32), Box<dyn std::error::Error>> {
+            let svg = std::fs::read(f)?;
+            if interchange
+                && svg
+                    .windows(b"xarast:".len())
+                    .any(|w| w.eq_ignore_ascii_case(b"xarast:"))
+            {
+                return Err("carries `xarast:` vocabulary".into());
+            }
+            let opts = resvg::usvg::Options {
+                resources_dir: f.parent().map(Path::to_path_buf),
+                fontdb: options.fontdb.clone(),
+                ..Default::default()
+            };
+            let tree = resvg::usvg::Tree::from_data(&svg, &opts)?;
+            let size = tree.size();
+            let scale = 256.0 / size.width();
+            let height = (size.height() * scale).ceil().max(1.0) as u32;
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(256, height.min(16_384))
+                .ok_or("cannot allocate the pixmap")?;
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::from_scale(scale, scale),
+                &mut pixmap.as_mut(),
+            );
+            Ok((pixmap.width(), pixmap.height()))
+        })();
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                failed += 1;
+                eprintln!("FAILED: {}: {e}", f.display());
+            }
+        }
+    }
+    println!(
+        "{} SVG files: {} parsed and rendered, {failed} failed",
+        files.len(),
+        files.len() - failed
+    );
+    if failed > 0 {
+        return Err(format!("{failed} SVG files failed").into());
+    }
     Ok(())
 }
