@@ -1,5 +1,5 @@
-//! `xarast-cli export`: documents to PNG, JPEG or WebP through the export
-//! filters of `xarast-io` (phase 11 T11.1.7).
+//! `xarast-cli export`: documents to PNG, JPEG, WebP or PDF through the
+//! export filters of `xarast-io` (phase 11 T11.1.7, W11.4).
 //!
 //! The CLI builds an [`ExportRequest`] from flags and hands it, with a
 //! [`SessionSource`], to the same [`Registry`] the export dialog uses.
@@ -13,9 +13,9 @@ use xarast_app::{DocumentId, SceneWalker, Session};
 use xarast_color::Rgba8;
 use xarast_geom::{Mp, Point, Rect};
 use xarast_io::{
-    Background, Compromise, ExportArea, ExportError, ExportRequest, ExportSizing, ExportSource,
-    FormatId, FormatOptions, NoProgress, PngColour, PngCompression, PngDepth, Registry,
-    SourceScene, Subsampling, WebPMode, XAR_EXPORT_REFUSAL,
+    Background, BlendFidelity, Compromise, ExportArea, ExportError, ExportRequest, ExportSizing,
+    ExportSource, FormatId, FormatOptions, NoProgress, PDF_RASTERISE_DPI, PngColour,
+    PngCompression, PngDepth, Registry, SourceScene, Subsampling, WebPMode, XAR_EXPORT_REFUSAL,
 };
 use xarast_render::{RenderQuality, Scene};
 
@@ -25,14 +25,14 @@ use crate::inputs::{expand, ms};
 
 /// Usage for `export`.
 pub const USAGE: &str = "\
-xarast-cli export — export documents to PNG, JPEG or WebP
+xarast-cli export — export documents to PNG, JPEG, WebP or PDF
 
 USAGE:
-    xarast-cli export <IN.xar|IN.xarast> -o <OUT.png|.jpg|.webp> [OPTIONS]
+    xarast-cli export <IN.xar|IN.xarast> -o <OUT.png|.jpg|.webp|.pdf> [OPTIONS]
     xarast-cli export <IN|DIR>... --out-dir <DIR> --format <FMT> [OPTIONS]
 
 WHAT AND HOW BIG
-    --format FMT         png, jpeg or webp (default: from -o's extension)
+    --format FMT         png, jpeg, webp or pdf (default: from -o's extension)
     --area WHAT          drawing (default; the page when nothing is drawn),
                          page, spread, or x0,y0,x1,y1 in points
     --bleed PT           grow the area by PT points on every side
@@ -56,6 +56,13 @@ JPEG
 
 WebP
     lossless only; --quality is refused (no pure-Rust lossy encoder)
+
+PDF (one vector page the size of the area; --dpi and pixels do not apply)
+    --raster-dpi N       resolution of objects PDF cannot express (default 300)
+    --blend B            exact (default): rasterise every non-mix transparency
+                         with its backdrop; native: Stained Glass as Multiply,
+                         Bleach as Screen
+    --no-compress        leave the streams readable
 
 COMMON
     --no-dpi             do not write the resolution into the file
@@ -86,9 +93,10 @@ fn format_of(text: &str) -> Result<FormatId, String> {
         "png" => Ok(FormatId::Png),
         "jpg" | "jpeg" | "jpe" | "jfif" => Ok(FormatId::Jpeg),
         "webp" => Ok(FormatId::WebP),
+        "pdf" => Ok(FormatId::Pdf),
         "xar" | "web" => Err(XAR_EXPORT_REFUSAL.to_owned()),
         other => Err(format!(
-            "`{other}` is not an export format (png, jpeg, webp)"
+            "`{other}` is not an export format (png, jpeg, webp, pdf)"
         )),
     }
 }
@@ -161,6 +169,9 @@ struct FormatFlags {
     progressive: bool,
     subsampling: Option<Subsampling>,
     no_dpi: bool,
+    raster_dpi: Option<u32>,
+    blend: Option<BlendFidelity>,
+    no_compress: bool,
 }
 
 impl FormatFlags {
@@ -203,6 +214,18 @@ impl FormatFlags {
                     w.mode = WebPMode::Lossy { quality: q };
                 }
             }
+            FormatOptions::Pdf(p) => {
+                if png_only || jpeg_only || self.quality.is_some() {
+                    return Err("PDF takes no PNG or JPEG options".into());
+                }
+                p.rasterise_dpi = self.raster_dpi.unwrap_or(p.rasterise_dpi);
+                p.blend_fidelity = self.blend.unwrap_or(p.blend_fidelity);
+                p.compress = !self.no_compress;
+            }
+        }
+        let pdf_only = self.raster_dpi.is_some() || self.blend.is_some() || self.no_compress;
+        if pdf_only && id != FormatId::Pdf {
+            return Err("--raster-dpi, --blend and --no-compress are PDF options".into());
         }
         Ok(o)
     }
@@ -311,6 +334,24 @@ pub fn parse(argv: &[String]) -> Result<ExportArgs, String> {
                 });
             }
             "--no-dpi" => f.no_dpi = true,
+            "--raster-dpi" => {
+                let d: u32 = it.parsed(&arg)?;
+                if !(PDF_RASTERISE_DPI.0..=PDF_RASTERISE_DPI.1).contains(&d) {
+                    return Err(format!(
+                        "--raster-dpi takes {} to {}",
+                        PDF_RASTERISE_DPI.0, PDF_RASTERISE_DPI.1
+                    ));
+                }
+                f.raster_dpi = Some(d);
+            }
+            "--blend" => {
+                f.blend = Some(match it.value(&arg)?.as_str() {
+                    "exact" => BlendFidelity::Exact,
+                    "native" => BlendFidelity::PreferNative,
+                    other => return Err(format!("--blend: `{other}` is not exact or native")),
+                });
+            }
+            "--no-compress" => f.no_compress = true,
             "--quiet" | "-q" => quiet = true,
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown option {other}"));
@@ -515,14 +556,16 @@ pub fn run(a: &ExportArgs) -> Exit {
                 encode_ms += ms(r.encode_time);
                 bytes += r.bytes_written;
                 if !a.quiet {
+                    let size = if req.options.format() == FormatId::Pdf {
+                        format!("{}x{} pt page", r.pixels.0, r.pixels.1)
+                    } else {
+                        format!("{}x{} px at {:.1} dpi", r.pixels.0, r.pixels.1, r.dpi)
+                    };
                     println!(
-                        "{} -> {}: {}x{} px at {:.1} dpi, {} cmds, {} bytes, open {:.1} ms, \
+                        "{} -> {}: {size}, {} cmds, {} bytes, open {:.1} ms, \
                          scene {:.1} ms, render {:.1} ms, encode {:.1} ms",
                         input.display(),
                         req.destination.display(),
-                        r.pixels.0,
-                        r.pixels.1,
-                        r.dpi,
                         r.commands,
                         r.bytes_written,
                         t_open,
