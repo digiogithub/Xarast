@@ -22,10 +22,22 @@
 //!   first character is typed (T9.4.6), so leaving the tool never leaves an
 //!   empty story behind and a stray click costs no undo step.
 //!
-//! The tool never mutates the document (tools invariant 1). Typing,
-//! deletion and IME are T9.4.6–T9.4.7: until then Delete, Backspace and
-//! Enter are taken (and ignored) while editing, so they never delete the
-//! story object under the caret.
+//! The tool never mutates the document (tools invariant 1): typing and
+//! deleting emit [`EditCommand::TypeText`], [`EditCommand::DeleteText`]
+//! and, at a pending caret, [`EditCommand::CreateText`], which the session
+//! runs through the bus. Delete, Backspace and Enter belong to the text
+//! while a caret is up, so they never delete the story object under it.
+//!
+//! # Typing bursts (T9.4.6)
+//!
+//! Keys of one kind (typing, or deleting) less than [`TYPING_BURST_MS`]
+//! apart, each starting where the previous one left the caret, make one
+//! undo step: they share a burst number, which is their coalesce key.
+//! Anything else ends the burst — a caret move, a click, a selection,
+//! another command changing the document (the tool notes the document's
+//! epoch after its own edit), switching between typing and deleting. The
+//! first burst at a pending caret creates the story, so one undo removes
+//! the story with everything typed into it.
 //!
 //! # Layouts
 //!
@@ -34,21 +46,68 @@
 //! document's epoch: any committed edit (undo included) drops them all.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use kurbo::Affine;
-use xarast_doc::{AttrValue, Document, NodeId, NodeKind, StoryText, TextCursor};
-use xarast_geom::Mp;
+use xarast_doc::{
+    AttrValue, Document, NodeId, NodeKind, StoryText, TextCursor, TextLayout, TextStoryNode,
+};
+use xarast_geom::{Matrix, Mp, Vector};
 use xarast_text::StoryInput;
 
 use crate::edit::{SelectMode, ToolId};
 use crate::fonts::FontService;
 use crate::geometry::{DocPoint, DocRect};
+use crate::ops::EditCommand;
 use crate::text_edit::{Caret, CaretMap, CaretMotion};
 use crate::tool::{
-    CursorKind, GestureEvent, Infobar, InfobarItem, InteractionState, OverlayShape, TextKey,
-    TextNav, Tool, ToolAction, ToolCtx, ToolView,
+    CursorKind, GestureEvent, Infobar, InfobarItem, InteractionState, OverlayShape, TextInput,
+    TextInputKind, TextKey, TextNav, Tool, ToolAction, ToolCtx, ToolView,
 };
+
+/// Typing keys closer together than this, in milliseconds, make one undo
+/// step (`phase-09` W9.4).
+pub const TYPING_BURST_MS: u64 = 500;
+
+/// Burst numbers: process-wide, so no two bursts of any document share one.
+static NEXT_BURST: AtomicU64 = AtomicU64::new(1);
+
+fn next_burst() -> u64 {
+    NEXT_BURST.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum BurstKind {
+    Typing,
+    Deleting,
+}
+
+/// The typing burst in progress: what the next key must match to join it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct Burst {
+    id: u64,
+    kind: BurstKind,
+    /// The story it edits; `None` until the story it creates exists.
+    story: Option<NodeId>,
+    /// Where it left the caret.
+    caret: usize,
+    /// When its last key was pressed.
+    last_ms: u64,
+    /// The document's epoch right after its last edit applied; `None`
+    /// until then (and for good when the edit failed).
+    epoch: Option<u64>,
+}
+
+/// What typing inserts: `'\r'` (alone or before `'\n'`) becomes a
+/// paragraph break, other control characters except tab are dropped.
+fn typed(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
 
 /// A caret and selection in a story: the text between `anchor` and `head`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -233,6 +292,8 @@ pub struct TextTool {
     pub logical_arrows: bool,
     /// Counts caret changes, so the interface restarts the blink.
     moved: u64,
+    /// The typing burst the next key may join.
+    burst: Option<Burst>,
 }
 
 impl TextTool {
@@ -299,6 +360,9 @@ impl TextTool {
 
     fn set(&mut self, state: Option<TextEditing>, goal_x: Option<Mp>, cx: &mut ToolCtx<'_>) {
         let new = state.map(|state| Editing { state, goal_x });
+        // Anything that sets the caret ends a typing burst; typing starts
+        // its own again right after.
+        self.burst = None;
         if new != self.editing {
             self.moved = self.moved.wrapping_add(1);
         }
@@ -397,6 +461,143 @@ impl TextTool {
                 _ => None,
             })
             .unwrap_or(DEFAULT_SIZE)
+    }
+
+    /// A typing key: characters, Enter, Backspace, Delete.
+    fn input(&mut self, input: &TextInput, cx: &mut ToolCtx<'_>) -> bool {
+        let Some(editing) = self.editing else {
+            return false;
+        };
+        if let TextEditing::Pending { at, column } = editing.state {
+            if let TextInputKind::Insert(t) = &input.kind {
+                self.start_story(at, column, typed(t), input.time_ms, cx);
+            }
+            // Nothing to delete yet.
+            return true;
+        }
+        let Some((sel, v)) = self.current(cx.doc) else {
+            return true;
+        };
+        let map = &v.map;
+        let head = sel.head.byte;
+        let (kind, range, text) = match &input.kind {
+            TextInputKind::Insert(t) => (BurstKind::Typing, sel.range(), typed(t)),
+            _ if !sel.is_caret() => (BurstKind::Deleting, sel.range(), String::new()),
+            TextInputKind::Backspace { word } => {
+                let from = if *word {
+                    map.move_caret(sel.head, CaretMotion::Word, false, None)
+                        .byte
+                        .min(head)
+                } else {
+                    xarast_text::prev_grapheme(map.text(), head)
+                };
+                (BurstKind::Deleting, from..head, String::new())
+            }
+            TextInputKind::Delete { word } => {
+                let to = if *word {
+                    map.move_caret(sel.head, CaretMotion::Word, true, None)
+                        .byte
+                        .max(head)
+                } else {
+                    xarast_text::next_grapheme(map.text(), head)
+                };
+                (BurstKind::Deleting, head..to, String::new())
+            }
+        };
+        if range.is_empty() && text.is_empty() {
+            return true;
+        }
+        let joins = self.burst.is_some_and(|b| {
+            b.kind == kind
+                && b.story == Some(sel.story)
+                && sel.is_caret()
+                && b.caret == head
+                && b.epoch == Some(cx.doc.epoch.0)
+                && input.time_ms >= b.last_ms
+                && input.time_ms - b.last_ms < TYPING_BURST_MS
+        });
+        let id = match self.burst {
+            Some(b) if joins => b.id,
+            _ => next_burst(),
+        };
+        let caret = range.start + text.len();
+        cx.commands.emit(match kind {
+            BurstKind::Typing => EditCommand::TypeText {
+                story: sel.story,
+                replace: range,
+                text,
+                burst: id,
+            },
+            BurstKind::Deleting => EditCommand::DeleteText {
+                story: sel.story,
+                range,
+                burst: id,
+            },
+        });
+        self.set(
+            Some(TextEditing::Story(TextSelection {
+                story: sel.story,
+                anchor: Caret::at(caret),
+                head: Caret::at(caret),
+            })),
+            None,
+            cx,
+        );
+        self.burst = Some(Burst {
+            id,
+            kind,
+            story: Some(sel.story),
+            caret,
+            last_ms: input.time_ms,
+            epoch: None,
+        });
+        true
+    }
+
+    /// The first characters typed at a pending caret: a new story holding
+    /// them, on the active layer, with the current attributes.
+    fn start_story(
+        &mut self,
+        at: DocPoint,
+        column: Option<Mp>,
+        text: String,
+        time_ms: u64,
+        cx: &mut ToolCtx<'_>,
+    ) {
+        let Some(layer) = cx.edit.active_layer() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let layout = match column {
+            Some(width) => TextLayout::InColumn {
+                width,
+                word_wrap: true,
+            },
+            None => TextLayout::AtPoint,
+        };
+        let id = next_burst();
+        let caret = text.len();
+        cx.commands.emit(EditCommand::CreateText {
+            layer,
+            story: Box::new(TextStoryNode {
+                transform: Matrix::translate(Vector::new(at.x, at.y)),
+                layout,
+                ..TextStoryNode::default()
+            }),
+            attrs: cx.edit.current.values().to_vec(),
+            text,
+            burst: id,
+        });
+        self.burst = Some(Burst {
+            id,
+            kind: BurstKind::Typing,
+            story: None,
+            caret,
+            last_ms: time_ms,
+            epoch: None,
+        });
     }
 
     fn navigate(&mut self, nav: TextNav, cx: &mut ToolCtx<'_>) -> bool {
@@ -699,9 +900,18 @@ impl Tool for TextTool {
                 }
                 true
             }
-            // Typing and deleting are T9.4.6: while a caret is up these
-            // keys belong to the text, never to the objects.
-            ToolAction::Delete | ToolAction::Finish => true,
+            // While a caret is up these belong to the text, never to the
+            // objects: Edit › Delete deletes forwards, Enter breaks the
+            // paragraph. Neither joins a typing burst.
+            ToolAction::Delete | ToolAction::Finish => {
+                let kind = if action == ToolAction::Delete {
+                    TextInputKind::Delete { word: false }
+                } else {
+                    TextInputKind::Insert("\n".to_owned())
+                };
+                self.burst = None;
+                self.input(&TextInput { kind, time_ms: 0 }, cx)
+            }
             _ => false,
         }
     }
@@ -712,5 +922,33 @@ impl Tool for TextTool {
 
     fn text_editing(&self) -> Option<TextEditing> {
         self.editing()
+    }
+
+    fn text_input(&mut self, input: &TextInput, cx: &mut ToolCtx<'_>) -> bool {
+        self.input(input, cx)
+    }
+
+    fn after_commands(&mut self, doc: &Document, created: Option<NodeId>) {
+        let Some(b) = &mut self.burst else {
+            return;
+        };
+        b.epoch = Some(doc.epoch.0);
+        if b.story.is_none()
+            && let Some(story) =
+                created.filter(|&n| matches!(doc.tree.kind(n), Some(NodeKind::TextStory(_))))
+        {
+            // The story typing created: the caret goes on in it.
+            b.story = Some(story);
+            let caret = Caret::at(b.caret);
+            self.editing = Some(Editing {
+                state: TextEditing::Story(TextSelection {
+                    story,
+                    anchor: caret,
+                    head: caret,
+                }),
+                goal_x: None,
+            });
+            self.moved = self.moved.wrapping_add(1);
+        }
     }
 }

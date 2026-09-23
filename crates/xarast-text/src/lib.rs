@@ -30,7 +30,7 @@ pub use font::{
 };
 pub use layout::{DEFAULT_TAB_INTERVAL, GlyphRun, LaidCluster, LaidLine, Layout, PlacedGlyph};
 pub use metrics::{CharMetrics, FaceMetrics, FontMetrics, ScaledMetrics};
-pub use segment::{WordSegment, word_segments};
+pub use segment::{WordSegment, next_grapheme, prev_grapheme, word_segments};
 pub use shape::{NOMINAL_SIZE, Shaper};
 pub use style::{
     Direction, FontFeature, FontQuery, FontStyle, FontVariation, Justification, LineSpacing,

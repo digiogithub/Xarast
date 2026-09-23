@@ -933,6 +933,36 @@ pub struct TextNav {
     pub extend: bool,
 }
 
+/// What a key typed into the text being edited asks for (phase 9, T9.4.6).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TextInputKind {
+    /// Characters typed: a key's text, or `"\n"` for Enter.
+    Insert(String),
+    /// Backspace: the selection, or the grapheme cluster (the word, with
+    /// Ctrl) before the caret.
+    Backspace {
+        /// Ctrl: back to the start of the word.
+        word: bool,
+    },
+    /// Delete: the selection, or the grapheme cluster (the word, with Ctrl)
+    /// after the caret.
+    Delete {
+        /// Ctrl: on to the end of the word.
+        word: bool,
+    },
+}
+
+/// A typing key for the text being edited, with the time it was pressed:
+/// keys less than [`crate::text_tool::TYPING_BURST_MS`] apart make one undo
+/// step.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TextInput {
+    /// What it asks for.
+    pub kind: TextInputKind,
+    /// When, in milliseconds, on the clock pointer samples use.
+    pub time_ms: u64,
+}
+
 /// A tool: sees the document read-only, writes to a preview, emits commands.
 pub trait Tool: Send + std::fmt::Debug {
     /// Which tool this is.
@@ -987,6 +1017,20 @@ pub trait Tool: Send + std::fmt::Debug {
     /// navigation and typing keys then belong to the text.
     fn text_editing(&self) -> Option<crate::text_tool::TextEditing> {
         None
+    }
+
+    /// A typing key, while [`Tool::text_editing`] says text has the
+    /// keyboard. Returns whether the tool took it.
+    fn text_input(&mut self, input: &TextInput, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (input, cx);
+        false
+    }
+
+    /// The commands this tool just emitted have been applied: `doc` is the
+    /// document after them, `created` the object a creation command made.
+    /// Not called when a command failed.
+    fn after_commands(&mut self, doc: &Document, created: Option<NodeId>) {
+        let _ = (doc, created);
     }
 }
 
@@ -1398,6 +1442,24 @@ impl ToolMachine {
         }
         let id = self.current;
         self.tool_mut(id).is_some_and(|t| t.text_nav(nav, cx))
+    }
+
+    /// Sends a typing key to the tool in force, unless a gesture is in
+    /// flight. Returns whether the tool took it.
+    pub fn text_input(&mut self, input: &TextInput, cx: &mut ToolCtx<'_>) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id).is_some_and(|t| t.text_input(input, cx))
+    }
+
+    /// Tells the tool in force its commands were applied.
+    pub fn after_commands(&mut self, doc: &Document, created: Option<NodeId>) {
+        let id = self.current;
+        if let Some(t) = self.tool_mut(id) {
+            t.after_commands(doc, created);
+        }
     }
 
     /// The text the tool in force is editing, if any.

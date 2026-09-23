@@ -11,8 +11,8 @@ use xarast_app::text_edit::Caret;
 use xarast_app::text_tool::{TextEditing, TextSelection};
 use xarast_app::tool::DRAG_THRESHOLD_PX;
 use xarast_app::{
-    DevicePoint, DocumentId, Intent, OverlayShape, PointerButton, PointerSample, Session, TextKey,
-    TextNav, ToolAction, ToolId,
+    DevicePoint, DocumentId, Intent, OverlayShape, PointerButton, PointerSample, Session,
+    TextInput, TextInputKind, TextKey, TextNav, ToolAction, ToolId,
 };
 use xarast_doc::builder::{BuildLimits, skeleton};
 use xarast_doc::{AttrValue, NodeId, NodeKind, TextItem, TextStoryNode, TypefaceRef};
@@ -229,9 +229,18 @@ fn esc_leaves_the_text_and_delete_never_deletes_the_story() {
     let before = s.doc.canonical_digest();
     text_tool(&mut s);
     click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    let at = selection(&s).head.byte;
+    // Edit › Delete deletes the character after the caret, Enter breaks
+    // the paragraph: text edits, never the story object.
     s.apply(Intent::DeleteSelection).unwrap();
     s.apply(Intent::ToolAction(ToolAction::Finish)).unwrap();
-    assert!(s.doc.tree.contains(story));
+    assert!(s.doc.tree.is_reachable(story));
+    let mut want = String::from("Hello world\nSecond line\n");
+    want.remove(at);
+    want.insert(at, '\n');
+    assert_eq!(story_text(&s, story), want);
+    s.apply(Intent::Undo).unwrap();
+    s.apply(Intent::Undo).unwrap();
     untouched(&s, &s.doc.canonical_digest(), &before);
     s.apply(Intent::SelectAll).unwrap();
     assert_eq!(selection(&s).range(), 0..23);
@@ -382,4 +391,259 @@ fn a_double_click_on_text_with_the_selector_opens_the_text_tool() {
     click(&mut s, X0 + 30_000, Y0 + 5_000, 100);
     assert_eq!(s.tools().current(), ToolId::Text);
     assert_eq!(selection(&s).story, story);
+}
+
+// ── typing, deleting, undo per burst (T9.4.6) ────────────────────────────
+
+fn story_text(s: &Session, story: NodeId) -> String {
+    xarast_doc::StoryText::collect_simple(&s.doc.tree, &s.doc.defaults, story)
+        .unwrap()
+        .text
+}
+
+fn input(s: &mut Session, kind: TextInputKind, time_ms: u64) {
+    s.apply(Intent::TextInput(TextInput { kind, time_ms }))
+        .unwrap();
+}
+
+fn type_str(s: &mut Session, text: &str, time_ms: u64) {
+    input(s, TextInputKind::Insert(text.to_owned()), time_ms);
+}
+
+fn backspace(s: &mut Session, time_ms: u64) {
+    input(s, TextInputKind::Backspace { word: false }, time_ms);
+}
+
+/// How many undo steps the history holds.
+fn steps(s: &Session) -> usize {
+    s.bus.history().len()
+}
+
+fn primary_caret(s: &Session) -> Point {
+    s.overlay()
+        .into_iter()
+        .find_map(|o| match o {
+            OverlayShape::Caret {
+                from,
+                primary: true,
+                ..
+            } => Some(from),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn typing_200_characters_is_one_undo_step() {
+    // phase-09 acceptance criterion 14.
+    let (mut s, story) = fixture();
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, X0 + 200, Y0 + 5_000, 0);
+    let typed: String = "The quick brown fox jumps over the lazy dog. "
+        .chars()
+        .cycle()
+        .take(200)
+        .collect();
+    for (i, c) in typed.chars().enumerate() {
+        type_str(&mut s, &c.to_string(), 1_000 + 120 * i as u64);
+    }
+    assert_eq!(
+        story_text(&s, story),
+        format!("{typed}Hello world\nSecond line\n")
+    );
+    assert_eq!(selection(&s).head.byte, 200, "the caret follows the typing");
+    assert_eq!(steps(&s), 1);
+    assert_eq!(s.undo_label(), Some("Typing"));
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(
+        s.doc.canonical_digest(),
+        before,
+        "one Ctrl+Z removes all 200"
+    );
+    assert!(s.undo_label().is_none());
+    // The caret stays valid on the shorter text.
+    nav(&mut s, TextKey::Right, false, false);
+    assert!(selection(&s).head.byte <= 23);
+}
+
+#[test]
+fn a_pause_a_caret_move_or_another_edit_ends_the_burst() {
+    let (mut s, story) = fixture();
+    text_tool(&mut s);
+    click(&mut s, X0 + 200, Y0 + 5_000, 0);
+    type_str(&mut s, "a", 1_000);
+    type_str(&mut s, "b", 1_499);
+    assert_eq!(steps(&s), 1);
+    // 500 ms apart: a new step.
+    type_str(&mut s, "c", 1_999);
+    assert_eq!(steps(&s), 2);
+    // A caret move ends the burst, even when it comes back.
+    nav(&mut s, TextKey::Left, false, false);
+    nav(&mut s, TextKey::Right, false, false);
+    type_str(&mut s, "d", 2_050);
+    assert_eq!(steps(&s), 3);
+    // Deleting is its own burst; so is typing again after it.
+    backspace(&mut s, 2_100);
+    backspace(&mut s, 2_200);
+    assert_eq!(steps(&s), 4);
+    assert_eq!(s.undo_label(), Some("Delete Text"));
+    type_str(&mut s, "e", 2_300);
+    assert_eq!(steps(&s), 5);
+    assert_eq!(story_text(&s, story), "abeHello world\nSecond line\n");
+    // Undo in the middle of a burst: typing on starts a new step rather
+    // than merging into whatever the undo left last.
+    type_str(&mut s, "f", 2_400);
+    s.apply(Intent::Undo).unwrap();
+    type_str(&mut s, "g", 2_450);
+    assert_eq!(steps(&s), 5);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(story_text(&s, story), "abHello world\nSecond line\n");
+}
+
+#[test]
+fn backspace_and_delete_remove_whole_grapheme_clusters() {
+    let (mut s, story) = fixture();
+    text_tool(&mut s);
+    click(&mut s, X0 + 200, Y0 + 5_000, 0);
+    // "e" + combining acute, then a family emoji (a ZWJ sequence).
+    type_str(&mut s, "e\u{301}", 1_000);
+    type_str(&mut s, "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}", 1_100);
+    let family = 3 * 4 + 2 * 3;
+    assert_eq!(selection(&s).head.byte, 3 + family);
+    backspace(&mut s, 1_200);
+    assert_eq!(selection(&s).head.byte, 3);
+    assert_eq!(story_text(&s, story), "e\u{301}Hello world\nSecond line\n");
+    backspace(&mut s, 1_300);
+    assert_eq!(selection(&s).head.byte, 0);
+    assert_eq!(story_text(&s, story), "Hello world\nSecond line\n");
+    // Backspace at the start does nothing, and records nothing.
+    let n = steps(&s);
+    backspace(&mut s, 1_400);
+    assert_eq!(steps(&s), n);
+    type_str(&mut s, "a\u{308}", 5_000);
+    nav(&mut s, TextKey::Home, false, false);
+    input(&mut s, TextInputKind::Delete { word: false }, 5_100);
+    assert_eq!(story_text(&s, story), "Hello world\nSecond line\n");
+    assert_eq!(selection(&s).head.byte, 0);
+    // Ctrl+Delete: on to the next word (the caret motion of Ctrl+Right);
+    // Ctrl+Backspace: back to the start of the word.
+    input(&mut s, TextInputKind::Delete { word: true }, 9_000);
+    assert_eq!(story_text(&s, story), "world\nSecond line\n");
+    nav(&mut s, TextKey::End, false, false);
+    input(&mut s, TextInputKind::Backspace { word: true }, 9_100);
+    assert_eq!(story_text(&s, story), "\nSecond line\n");
+    // Delete at the story's end never takes its final break.
+    nav(&mut s, TextKey::End, true, false);
+    let n = steps(&s);
+    input(&mut s, TextInputKind::Delete { word: false }, 9_200);
+    assert_eq!(steps(&s), n);
+}
+
+#[test]
+fn typing_replaces_the_selection_and_enter_splits_the_paragraph() {
+    let (mut s, story) = fixture();
+    text_tool(&mut s);
+    // "world" selected by a double click.
+    click(&mut s, X0 + 80_000, Y0 + 5_000, 0);
+    click(&mut s, X0 + 80_000, Y0 + 5_000, 100);
+    assert_eq!(selection(&s).range(), 6..11);
+    type_str(&mut s, "there", 1_000);
+    assert_eq!(story_text(&s, story), "Hello there\nSecond line\n");
+    assert!(selection(&s).is_caret());
+    // Enter after "Hello": a new paragraph; the caret starts it.
+    nav(&mut s, TextKey::Home, false, false);
+    for _ in 0..5 {
+        nav(&mut s, TextKey::Right, false, false);
+    }
+    type_str(&mut s, "\n", 2_000);
+    assert_eq!(story_text(&s, story), "Hello\n there\nSecond line\n");
+    assert_eq!(selection(&s).head.byte, 6);
+    // The caret is drawn on the new second line, below the first.
+    let y = primary_caret(&s).y.raw();
+    assert!(y < Y0 - 10_000, "{y}");
+    // Backspace joins the paragraphs again.
+    backspace(&mut s, 3_000);
+    assert_eq!(story_text(&s, story), "Hello there\nSecond line\n");
+    // A selection across the paragraph break, deleted.
+    nav(&mut s, TextKey::Down, false, true);
+    input(&mut s, TextInputKind::Delete { word: false }, 4_000);
+    let t = story_text(&s, story);
+    assert!(
+        t.starts_with("Hello") && t.matches('\n').count() == 1,
+        "{t:?}"
+    );
+    assert!(
+        xarast_doc::validate::validate_document(&s.doc)
+            .errors
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_first_character_at_a_pending_caret_creates_the_story() {
+    let (mut s, _) = fixture();
+    let before = s.doc.canonical_digest();
+    let stories = |s: &Session| {
+        s.doc
+            .tree
+            .preorder(s.doc.tree.root())
+            .filter(|&n| matches!(s.doc.tree.kind(n), Some(NodeKind::TextStory(_))))
+            .collect::<Vec<_>>()
+    };
+    text_tool(&mut s);
+    click(&mut s, 300_000, 200_000, 0);
+    // Nothing typed yet: Backspace and Delete create nothing.
+    backspace(&mut s, 500);
+    input(&mut s, TextInputKind::Delete { word: false }, 600);
+    untouched(&s, &s.doc.canonical_digest(), &before);
+    type_str(&mut s, "H", 1_000);
+    type_str(&mut s, "i", 1_100);
+    let all = stories(&s);
+    assert_eq!(all.len(), 2);
+    let new = all[1];
+    assert_eq!(story_text(&s, new), "Hi\n");
+    let sel = selection(&s);
+    assert_eq!((sel.story, sel.head.byte), (new, 2));
+    assert_eq!(s.edit.selection().collect::<Vec<_>>(), [new]);
+    // One step: the story and its text go together.
+    assert_eq!(steps(&s), 1);
+    assert_eq!(s.undo_label(), Some("New Text"));
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+    assert_eq!(stories(&s).len(), 1);
+    // Leaving a pending caret leaves nothing behind.
+    click(&mut s, 300_000, 150_000, 5_000);
+    s.apply(Intent::Cancel).unwrap();
+    s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
+    assert_eq!(stories(&s).len(), 1);
+}
+
+#[test]
+fn a_column_wraps_as_it_is_typed_and_the_caret_follows() {
+    let (mut s, _) = fixture();
+    text_tool(&mut s);
+    drag(&mut s, (300_000, 300_000), (400_000, 250_000));
+    let words = "one two three four five six seven eight nine ten";
+    for (i, c) in words.chars().enumerate() {
+        type_str(&mut s, &c.to_string(), 20_000 + 50 * i as u64);
+    }
+    let sel = selection(&s);
+    match s.doc.tree.kind(sel.story) {
+        Some(NodeKind::TextStory(t)) => assert!(matches!(
+            t.layout,
+            xarast_doc::TextLayout::InColumn {
+                word_wrap: true,
+                ..
+            }
+        )),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(sel.head.byte, words.len());
+    assert_eq!(steps(&s), 1);
+    let map = xarast_app::text_tool::caret_map(&s.doc, sel.story, &fonts()).unwrap();
+    assert!(map.layout().lines.len() > 1, "a 100 pt column wraps");
+    // The caret sits inside the column.
+    let x = primary_caret(&s).x.raw();
+    assert!((300_000..=400_000).contains(&x), "{x}");
 }

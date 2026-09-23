@@ -813,12 +813,17 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
       arrows, Home, End, Page Up/Down become `Intent::TextNav { key,
       word: Ctrl, extend: Shift }` (canvas focused or nothing focused,
       the same gate as arrow panning), so they neither pan nor fit the
-      page. Plain character keys (no Ctrl, no Alt) are swallowed —
-      they are typing, T9.4.6 — so `l c s z b j d 0 1 3 # + -` and Space
-      (momentary selector) do nothing on the canvas while a caret is up.
-      Named keys (Delete, Esc, Enter, F-keys) and Ctrl chords still run
-      their commands; the tool takes Delete/Enter (ignored for now) so
-      they never delete the story, and Esc leaves the text.
+      page. Then `Viewer::text_typing`: Backspace and Delete (Ctrl: by
+      word), Enter (no Ctrl/Alt), and any key whose `KeyEvent::text` holds
+      a printable character or a tab with neither Ctrl nor Alt held become
+      `Intent::TextInput { kind, time_ms }`, stamped with
+      `IntentAdapter::now_ms` (the pointer samples' clock) for the 500 ms
+      typing-burst window (`tools.md` decision 57). So `l c s z b j d 0 1
+      3 # + -`, Space (momentary selector) and Tab type rather than act
+      while a caret is up; plain character keys without text are still
+      swallowed. Esc, F-keys and Ctrl chords still run their commands; Esc
+      leaves the text. IME composition (no `text` while composing) is
+      T9.4.7.
     - **Caret.** `OverlayShape::Caret { from, to, primary, moved }` →
       `OverlayItem::Caret`: a black line with a white halo (1.5 hairline
       for the primary caret, 1 for the secondary half of a split caret)

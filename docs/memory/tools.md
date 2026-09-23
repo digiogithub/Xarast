@@ -401,8 +401,8 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     top (narrower than 8 px → point story); Esc mid-drag restores the
     caret as it was. Esc with no drag leaves the text, story still
     selected. Ctrl+A selects the story's text. Delete, Backspace and
-    Enter are taken and ignored while a caret is up, so they never delete
-    the story object (until T9.4.6 gives them meaning). Choosing the tool
+    Enter belong to the text while a caret is up (decision 57), so they
+    never delete the story object. Choosing the tool
     with one story selected enters it with the caret at the end; the
     selector's double click on a story does that (decision 27).
 54. **The tool lays stories out itself**, through the walker's bridge
@@ -423,6 +423,33 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     only while `Tool::text_editing()` is `Some`. Ctrl = by word
     (arrows), to the story's ends (Home/End); Shift = extend. Mapping and
     shell routing: `ui.md` decision 40.
+57. **Typing (T9.4.6, XARA-T-0223)** is `Intent::TextInput(TextInput {
+    kind: Insert(text) | Backspace { word } | Delete { word }, time_ms })`
+    → `Tool::text_input`; the tool emits `EditCommand::TypeText { story,
+    replace, text, burst }`, `DeleteText { story, range, burst }` or, at a
+    pending caret, `CreateText { layer, story, attrs, text, burst }`
+    (active layer, current attributes). **One undo step per burst**: the
+    burst number is the command's `CoalesceKey` (`gesture: burst`, kind
+    `"text-typing"` or `"text-delete"`), so the history's existing
+    merge-on-equal-key does it — no gesture is opened and nothing is
+    time-based inside the history (the phase doc's "one implementation, in
+    the history"). The tool decides the burst: the next key joins when it
+    is the same kind, in the same story, at the caret the last one left,
+    **less than 500 ms** (`TYPING_BURST_MS`) after it, with a collapsed
+    caret, and the document's epoch is still the one the tool saw right
+    after its own edit. The last check is what makes "any other command
+    ends the burst" (undo included) hold without the session telling
+    tools: **`Tool::after_commands(doc, created)`** is called by
+    `run_tool` after the tool's commands applied, with the object a
+    creation made. The text tool uses it to note the epoch and to adopt the
+    story `CreateText` made (the caret moves into it). Burst numbers come
+    from a process-wide counter, so two documents never share one. Setting
+    the caret any other way (`TextTool::set`) ends the burst. Labels:
+    "Typing", "Delete Text", "New Text" (a merged step keeps its first
+    label, so undoing a new story's first burst says "Undo New Text" and
+    removes the story too). `ToolAction::Delete` (Edit › Delete) deletes
+    forwards and `ToolAction::Finish` breaks the paragraph, never joining a
+    burst.
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
@@ -479,11 +506,17 @@ duplicate while plain `D` is fit drawing — different chords.
 10. A fill or transparency drag emits nothing before release; the release
     is one `EditCommand::Fill` step, and what the preview drew is what the
     commit renders (pixel-identical, `tests/fill_tool.rs`).
-11. The text tool never mutates the document: entering, selecting,
-    navigating and preparing a new story leave the canonical digest and
-    the undo history as they were (`tests/text_tool.rs`).
+11. The text tool never mutates the document except by typing:
+    entering, selecting, navigating and preparing a new story leave the
+    canonical digest and the undo history as they were
+    (`tests/text_tool.rs`); a click on empty canvas never creates an empty
+    story.
 12. While a text caret is up, Delete/Backspace/Enter never reach the
     object-level commands.
+13. A typing burst is one undo step and one `Ctrl+Z` restores the digest
+    from before it, story creation included
+    (`typing_200_characters_is_one_undo_step`,
+    `the_first_character_at_a_pending_caret_creates_the_story`).
 
 ## Dead ends (do not retry)
 

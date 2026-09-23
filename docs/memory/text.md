@@ -19,8 +19,8 @@ tool (W9.4) and text on a path (W9.5) are later rounds.
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
-| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4) and story invariants (T9.2.5) open | in review |
-| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. Typing, IME, clipboard, infobar, ruler (T9.4.6–T9.4.10) open | in review |
+| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
+| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
 
 Public API (`crates/xarast-text/src/lib.rs`):
@@ -206,9 +206,9 @@ decisions 53–56 and `ui.md` decision 40 for the tool and shell sides.
   to right (so mixed text gives several spans, in visual order), plus a
   block a third of the line's size wide at the line's logical end when the
   paragraph break after it is selected.
-- **No typing yet.** A click on empty canvas or a column drag makes a
-  *pending* caret, not a story; T9.4.6 creates the story at the first
-  character. Delete/Backspace/Enter are swallowed while a caret is up.
+- **Pending caret.** A click on empty canvas or a column drag makes a
+  *pending* caret, not a story; the first typed character creates it
+  (below).
 - **Text on a path** (`OnPath`): the caret follows the straight layout the
   walker draws until W9.5.
 
@@ -227,6 +227,66 @@ x, words, empty story, marks; plus the corpus walk over every line of
 `tests/text_tool.rs` (10, through `Session` intents: document untouched),
 `xarast-shell` `a_text_caret_takes_the_navigation_and_character_keys`,
 `xarast-ui` `the_caret_blinks_from_on_then_stops_blinking`.
+
+## Typing and deleting (T9.4.6, as built, XARA-T-0223)
+
+Code: `xarast-doc/src/text_edit.rs` (`InsertText`, `DeleteRange`,
+`insert_text`, `delete_range`, `new_story`), `xarast-app/src/ops.rs`
+(`EditCommand::{TypeText, DeleteText, CreateText}`), `text_tool.rs`
+(bursts), `xarast_text::{prev_grapheme, next_grapheme}`.
+
+- **Offsets, not `TextPos`.** The edit commands take byte offsets into
+  `StoryText::text` (the phase doc sketches `TextPos`): the tool, layout
+  and hit testing speak offsets, and an offset survives the line split an
+  edit makes where a `(line, item)` pair does not.
+- **What an insertion does to the tree.** One `TextItem` node per
+  character, right after the character before the offset, so new text
+  takes that character's style; that character's own attribute children
+  are copied onto each new item. After a paragraph break or at a line's
+  start the items go before the first item at the offset instead.
+  `'\r\n'`/`'\r'` → `'\n'`, `'\t'` → `Tab`, other controls dropped.
+- **`'\n'` splits the line**: a `LineBreak(true)` is inserted and
+  everything after it moves to a new `TextLine` right after, which starts
+  with copies of the attributes the line had in scope at the split (last
+  per slot) and the same ruler. No character changes style (asserted),
+  and every line still ends with its break.
+- **Deleting a paragraph break does not merge lines**: the line simply no
+  longer ends with a break, and `paragraph_first_lines` runs the paragraph
+  on into the next line (paragraph style from the first line). Merging
+  would need explicit attributes to keep the moved characters' style;
+  leaving the lines costs nothing (they are derived state; `format_story`,
+  T9.3.12, will re-line). A line left with no items is removed unless it
+  is the story's last. Kerns/soft breaks strictly inside a deleted range go
+  with it; one at the range's start stays.
+- **Undo record = the per-node actions**, proportional to the text typed
+  or deleted. The phase doc's "store the paragraph's item run before and
+  after" (and its 4 KiB diff threshold) is not needed while nothing
+  reflows into the arena: there is no wrap restructuring to undo. Revisit
+  with T9.3.12.
+- **New story** (`new_story`): `TextStory` (matrix = translate to the
+  pending caret, `AtPoint` or `InColumn { width, word_wrap: true }`) →
+  the current attributes as its own children → one `TextLine` holding only
+  `LineBreak(true)`, the final EOL every story ends with (so the caret's
+  last offset is before it, as for imported stories). Then the text is
+  inserted at 0.
+- **Grapheme-aware deletion**: Backspace/Delete remove one extended
+  grapheme cluster (ICU4X; a base with its marks, a ZWJ emoji sequence,
+  CRLF), not one code point; Ctrl deletes to the logical word motion's
+  target (Ctrl+Delete = up to the next word's start, as Ctrl+Right). A
+  selection is deleted whole; typing replaces it. The final EOL is outside
+  the laid-out text, so it can never be deleted from the tool.
+- **Typing bursts** (`tools.md` decision 57): one undo step per burst,
+  merged by `CoalesceKey { gesture: burst, kind: "text-typing" |
+  "text-delete" }` in the history.
+
+Tests: `xarast-doc` `text_edit::tests` (5: style inheritance, line split
+keeps every style, joining paragraphs, bad offsets refused, new story),
+`xarast-text` `graphemes_step_over_marks_and_emoji_sequences`,
+`xarast-app/tests/text_tool.rs` (6 new: 200 characters = one undo step,
+burst ends, graphemes, selection replace + Enter, pending → story in one
+step, column wrap), `xarast-shell`
+`a_text_caret_takes_the_navigation_and_character_keys` (typing via key
+events).
 
 ## Walker integration (as built, round 2)
 
@@ -585,6 +645,12 @@ first story of a process waits for enumeration when nothing prewarmed
   `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
   embedded-font overlay; W9.5 text on a path; golden images of
   `TextDesigns` with pinned fonts (W9.7).
+- Typing leftovers (T9.4.6): a story emptied by deleting all its text stays
+  (the original deletes an empty story when the caret leaves it; doing so
+  here would add an undo step — decide with the maintainer); typed text
+  does not pick up attributes chosen while the caret is up (needs
+  `SetTextAttr`, T9.2.4); Unicode line/paragraph separators (U+2028/9)
+  type as characters, not breaks.
 
 ## The `.xarast` text writer (XARA-T-0172, done)
 

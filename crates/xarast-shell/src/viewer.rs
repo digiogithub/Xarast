@@ -1100,6 +1100,12 @@ impl Viewer {
                 // Ctrl chords still run their commands.
                 if let Some(nav) = self.text_nav(k) {
                     redraw |= self.apply(vec![Intent::TextNav(nav)]).needs_redraw();
+                } else if let Some(kind) = self.text_typing(k) {
+                    let input = xarast_app::TextInput {
+                        kind,
+                        time_ms: self.adapter.now_ms(),
+                    };
+                    redraw |= self.apply(vec![Intent::TextInput(input)]).needs_redraw();
                 } else if !(matches!(k.key, Key::Character(_))
                     && !k.modifiers.ctrl
                     && !k.modifiers.alt)
@@ -1179,6 +1185,34 @@ impl Viewer {
             word: k.modifiers.ctrl,
             extend: k.modifiers.shift,
         })
+    }
+
+    /// What a key types into the text being edited, when the canvas has the
+    /// keyboard (or nothing does): Backspace and Delete (Ctrl: by word),
+    /// Enter, and any key producing printable text or a tab with neither
+    /// Ctrl nor Alt held (so Ctrl chords stay shortcuts).
+    fn text_typing(&self, k: &KeyEvent) -> Option<xarast_app::TextInputKind> {
+        use xarast_app::TextInputKind as T;
+        let nothing_focused = self.egui.memory(|m| m.focused().is_none());
+        if !(self.canvas_focused || nothing_focused) {
+            return None;
+        }
+        let word = k.modifiers.ctrl;
+        match k.key {
+            Key::Named(NamedKey::Backspace) => return Some(T::Backspace { word }),
+            Key::Named(NamedKey::Delete) => return Some(T::Delete { word }),
+            Key::Named(NamedKey::Enter) if !k.modifiers.ctrl && !k.modifiers.alt => {
+                return Some(T::Insert("\n".to_owned()));
+            }
+            _ => {}
+        }
+        if k.modifiers.ctrl || k.modifiers.alt {
+            return None;
+        }
+        let text = k.text.as_deref()?;
+        text.chars()
+            .any(|c| c == '\t' || !c.is_control())
+            .then(|| T::Insert(text.to_owned()))
     }
 
     /// Arrow keys pan the view when the canvas has the keyboard, or when
@@ -2861,6 +2895,44 @@ mod tests {
         press(&mut v, Key::Named(NamedKey::Home), Modifiers::NONE);
         assert_eq!(at(&v), view);
         assert_eq!(tool(&v), xarast_app::ToolId::Text);
+        // Keys with text type it (T9.4.6): the first creates the story;
+        // Enter breaks the paragraph, Backspace deletes, Tab is a tab;
+        // Delete never reaches the object under the caret.
+        xarast_app::fonts::set_shared(xarast_app::fonts::FontService::from_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"),
+        ));
+        let type_key = |v: &mut Viewer, key: Key, text: Option<&str>| {
+            use crate::input::keyboard::{KeyEvent, KeyLocation};
+            send(
+                v,
+                &[ShellEvent::Key(KeyEvent {
+                    key,
+                    location: KeyLocation::Standard,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                    text: text.map(str::to_owned),
+                    modifiers: Modifiers::NONE,
+                })],
+            );
+        };
+        type_key(&mut v, Key::char('H'), Some("H"));
+        type_key(&mut v, Key::char('i'), Some("i"));
+        type_key(&mut v, Key::char('x'), Some("x"));
+        type_key(&mut v, Key::Named(NamedKey::Backspace), Some("\u{8}"));
+        type_key(&mut v, Key::Named(NamedKey::Enter), Some("\r"));
+        type_key(&mut v, Key::Named(NamedKey::Tab), Some("\t"));
+        type_key(&mut v, Key::Named(NamedKey::Delete), Some("\u{7f}"));
+        let s = v.app.active().unwrap();
+        let story = s
+            .edit
+            .selection()
+            .next()
+            .expect("the new story is selected");
+        let text = xarast_doc::StoryText::collect_simple(&s.doc.tree, &s.doc.defaults, story)
+            .unwrap()
+            .text;
+        assert_eq!(text, "Hi\n\t\n");
+        assert_eq!(at(&v), view, "Tab and Space are text, not tools");
         // Esc leaves the text; then the arrows pan again.
         press(&mut v, Key::Named(NamedKey::Escape), Modifiers::NONE);
         assert!(!v.app.active().unwrap().text_editing());

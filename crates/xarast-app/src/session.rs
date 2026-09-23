@@ -902,21 +902,25 @@ impl Session {
             changed |= Changed::VIEW | Changed::UI;
         }
         let mut result = Ok(());
+        let mut applied = false;
+        let mut created = None;
         for cmd in commands {
             let created_on = match &cmd {
-                EditCommand::CreateShape { layer, .. } | EditCommand::CreatePath { layer, .. } => {
-                    Some(*layer)
-                }
+                EditCommand::CreateShape { layer, .. }
+                | EditCommand::CreatePath { layer, .. }
+                | EditCommand::CreateText { layer, .. } => Some(*layer),
                 _ => None,
             };
             match self.apply_edit(cmd) {
                 Ok(Some(_)) => {
+                    applied = true;
                     changed |= Changed::DOCUMENT | Changed::UI;
                     // A new object is selected, as the original does: the
                     // tool that drew it then edits it.
                     if let Some(layer) = created_on
                         && let Some(n) = self.doc.tree.children(layer).next_back()
                     {
+                        created = Some(n);
                         self.edit.select([n], SelectMode::Replace);
                         if let Some(points) = requests.created_points.take() {
                             self.edit.set_control_points(vec![(n, points)]);
@@ -930,6 +934,9 @@ impl Session {
                     break;
                 }
             }
+        }
+        if applied && result.is_ok() {
+            self.tools.after_commands(&self.doc, created);
         }
         if result.is_ok()
             && let Some(points) = requests.points
@@ -1089,6 +1096,9 @@ impl Session {
             }
             Intent::TextNav(nav) => {
                 changed |= self.run_tool(|m, cx| m.text_nav(nav, cx))?.0;
+            }
+            Intent::TextInput(input) => {
+                changed |= self.run_tool(|m, cx| m.text_input(&input, cx))?.0;
             }
             Intent::ConvertToShapes => {
                 changed |= self.cancel_gesture();
