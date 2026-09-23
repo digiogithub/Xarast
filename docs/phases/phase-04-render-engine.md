@@ -337,6 +337,13 @@ directly, instead of inferring correctness from rendered images.
 
 ### W5 — GPU backend
 
+> **Superseded in part on 2026-09-23 (XARA-US-0011).** Measured on the
+> reference machine, a `vello` raster misses the integrated-GPU budget by
+> 9–11× and `vello` pins a different `wgpu`, so R5.1–R5.4 are not built.
+> The GPU composites CPU-rasterised tiles instead (`GpuTileCache`), and the
+> WGSL pass waits on the trigger in XARA-T-0051. Decision and numbers:
+> `docs/memory/render.md`, "The GPU decision".
+
 | ID | Task | Crate | Size | Depends on |
 |---|---|---|---|---|
 | R5.1 | `GpuRasterizer` over `vello` + `wgpu` 30; device/queue supplied by the caller, never created here | `xarast-render` | L | W0, W1 |

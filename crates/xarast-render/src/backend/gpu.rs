@@ -2,31 +2,22 @@
 //!
 //! # Status, stated plainly
 //!
-//! This backend is **structural, not yet validated**. The W0 spike could
-//! not measure gate G2 at all: the container it ran in has no
-//! `/dev/dri`, no Vulkan ICD and no software rasteriser, so `wgpu`
-//! enumerates zero adapters. The phase's own decision rule for that case
-//! is to ship CPU-only for Phase 4 and put the GPU backend behind a
-//! feature flag, which is what this is.
+//! **This is not a GPU rasteriser, and by decision it will not become one
+//! yet** (XARA-US-0011, `docs/memory/render.md`, "The GPU decision"). On
+//! the reference machine a full `vello` frame costs 72–86 ms on the
+//! integrated GPU against 19 ms on the CPU, and `vello` would bring a
+//! second `wgpu`. What the GPU does instead is composite CPU-rasterised
+//! tiles: see [`super::gpu_tiles`], which is byte-identical to its CPU
+//! reference on every adapter tested.
 //!
-//! What is here and is real: the device and queue are **supplied by the
-//! caller** and never created here (Phase 5 owns adapter selection); the
-//! render target format is asserted to be `Rgba8Unorm`; and the twelve
-//! blend tables are uploaded as one `256 × 256` `R8Unorm` array, in the
-//! layout the compositing shader will sample.
-//!
-//! What is deferred, and why: the WGSL compositing pass that evaluates
-//! paints and dispatches the twelve families on the GPU (tasks R5.3 and
-//! R5.4) is not written here. Shipping a shader that has never executed
-//! would be worse than shipping none: it cannot be tested on this machine,
-//! and the parity test that would catch its mistakes is the one test that
-//! cannot run either. Until an adapter exists, this backend reads the
-//! coverage back and composites it with [`crate::blend`], the same code
-//! the CPU backend uses, so that the two agree by construction rather than
-//! by luck. `vello` is therefore **not** a dependency of this backend yet:
-//! it is the intended coverage rasteriser for task R5.1, and adding it
-//! before the shader that would use it exists would put three megabytes in
-//! the binary for nothing.
+//! What is here: the device and queue are **supplied by the caller** and
+//! never created here (the shell owns adapter selection); the render
+//! target format is asserted to be `Rgba8Unorm`; and the twelve blend
+//! tables are uploaded as one `256 × 256` `R8Unorm` array, in the layout a
+//! future compositing shader would sample. [`GpuBackend::render`] renders
+//! on the CPU compositor, so that it agrees with the CPU backend by
+//! construction. The WGSL paint/blend pass (R5.3, R5.4) is deferred behind
+//! the trigger recorded in XARA-T-0051.
 //!
 //! # The format is not a detail
 //!
@@ -243,13 +234,8 @@ pub fn adapter_available() -> bool {
 /// A minimal block-on, so that the crate does not take an async runtime as
 /// a dependency for one call at the edge of a test.
 fn pollster_block_on<F: std::future::Future>(fut: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
     let mut fut = Box::pin(fut);
     loop {
         match fut.as_mut().poll(&mut cx) {

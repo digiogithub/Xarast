@@ -47,7 +47,8 @@ What is **not** in it, and who owns it:
 
 | Missing | Owner |
 |---|---|
-| The WGSL compositing pass, ping-pong destination reads, GPU tile planner | Phase 4 follow-up / Phase 5 gate — see the GPU section below |
+| The WGSL compositing pass, ping-pong destination reads, GPU tile planner | **Deferred** by the GPU decision (XARA-US-0011); trigger in XARA-T-0051 |
+| Presenting the canvas through `GpuTileCache` | built here (`gpu` feature); wiring into the shell is XARA-T-0050 |
 | Blur, shadow, feather, bevel, contour, blend, mould | Phase 13; `push_layer`/`pop_layer` and the offscreen machinery they need exist here |
 | Fractal (plasma, clouds) generation | Phase 13; `Paint::Fractal` exists and refuses to rasterise until materialised |
 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | Deferred (`research/03 §3.9` M8) |
@@ -374,6 +375,109 @@ frame differs from `vello_cpu` by a mean of 1.77 (0.03 on the RTX).
 
 ---
 
+## The GPU decision (XARA-US-0011, 2026-09-23)
+
+**Question.** With the CPU path inside its budgets (100k full frame 19 ms,
+Draft pan zoomed 3× 11.1 ms through the scheduler, zoom 1.4 ms) and G1/G2
+failed, is a GPU *rasteriser* worth building now, and if not, what should
+the GPU do?
+
+**Answer: no GPU rasteriser now. Rasterise on the CPU, keep the pixels on
+the GPU as tiles, and let the GPU move them (option a).** The WGSL
+paint/blend pass (b) is deferred behind a stated trigger (XARA-T-0051), and
+`vello` (c) is rejected until it runs on our `wgpu` *and* fits the iGPU
+budget.
+
+### Evidence
+
+Reference machine (`perf.md`), both GPUs selected explicitly through
+Vulkan. GPU rows are wall-clock from the first `wgpu` call to `poll(wait)`,
+medians of 50–300 frames; a range spans 4 runs at load average 5–25 (other
+agents compiling). `cargo bench -p xarast-render --features gpu --bench
+tiles`; `WGPU_ADAPTER_NAME=intel|nvidia` selects one adapter.
+
+| | Intel Arrow Lake iGPU (Mesa 26.1.6) | RTX 4000 SFF Ada (580.173) |
+|---|---|---|
+| empty submit + wait (the floor) | 0.05–0.37 ms | 0.05–0.19 ms |
+| **today:** upload a whole 1080p CPU frame | 0.54–1.6 ms | 0.61–0.89 ms |
+| (a) pan, tiles resident, 40 × 256² placed | 0.47–1.4 ms | 0.08–0.21 ms |
+| (a) pan crossing a tile row: upload 8 tiles + composite | 0.71–2.2 ms | 0.27–0.51 ms |
+| (a) Draft zoom 1.3×, 28 tiles | 0.37–1.8 ms | 0.08–0.15 ms |
+| (a) Draft zoom-out 0.5×, 144 tiles (today: backdrop border) | 0.71–2.0 ms | 0.15–0.47 ms |
+| **today at 4K:** upload a whole 3840 × 2160 frame | **23–27 ms** | 2.6–3.5 ms |
+| (a) 4K pan, 144 tiles resident | 1.5–3.0 ms | 0.30–0.54 ms |
+| (b) floor: upload 64 MiB of A8 coverage | **27–33 ms** | 5.4–6.9 ms |
+| (c) `vello` 0.10 full frame, 100k `bulk` (W0 re-run) | **72–86 ms** | 7.8–8.0 ms |
+
+CPU side, same runs: `scroll_surface` 1080p 0.19–0.73 ms; `compose_cpu`
+(the software tier of the same operation) 1.3–3.1 ms at 1080p.
+
+| Criterion | (a) CPU raster + GPU tiles | (b) WGSL paint/blend over CPU coverage | (c) `vello` on `wgpu` 29 |
+|---|---|---|---|
+| What it speeds up | pan, Draft zoom, 4K presentation; pan latency (the shell can re-composite at input time) | gradient-heavy frames (30 ns/px on the CPU, 1.4 × 10⁸ px per corpus frame) | full re-rasters, on the RTX only |
+| iGPU cost | ≤ 3 ms at 4K | ≥ 60 ms of mask upload for the frames it targets | 72–86 ms per frame |
+| Parity | **byte-exact** with `compose_cpu`: 0 of 960 composites differ on the iGPU, the RTX and lavapipe | perceptual only (gate B), gradient drift risk K5 | Δ 0.019 mean vs `vello_cpu`, and no Xara paints or families: still needs (b) on top |
+| Determinism / goldens | untouched: nothing is re-rasterised on the GPU | export stays CPU; two code paths per paint | as (b) |
+| Capability ladder | any tier with a `wgpu` device (lavapipe exact); no device → `compose_cpu` or today's path | per-tier shader validation | tier 0 only (compute) |
+| Dependency cost | none: `wgpu` 30 is already in the shell | none | two `wgpu`s: **+4.08 MiB** stripped (probe: 4.27 → 8.35 MB), **+46 crates** (127 → 173 for `xarast-render`), 9 more duplicated crates (`wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types`, `naga`, `wgpu-naga-bridge`, `wgpu-core-deps-*`, `bit-set`, `foldhash`); two `wgpu`s cannot share a device. Downgrading the workspace instead means porting the shell back to 29; `vello` alone adds 0.68 MiB over `wgpu`. Licences clean either way |
+| Effort | S (done here) + the shell wiring (XARA-T-0050) | L + L + M (R5.2–R5.4) | L, plus (b) |
+
+Reading the table:
+
+1. **The budgets that fail today are presentation budgets, not raster
+   budgets.** At 1080p the CPU already meets every interactive row. What
+   breaks is a 4K canvas on the integrated GPU: uploading one frame costs
+   23–27 ms, over the 16 ms budget before anything is drawn, against 1.5–3
+   ms to composite resident tiles. At 1080p on the iGPU the per-frame gain
+   is small (composite ≈ upload ≈ 1 ms); the gains there are the CPU work
+   removed (scroll, rescale), zoom-out showing content instead of a
+   backdrop border, and a pan presented at input time.
+2. **(b) is bandwidth-bound on the machine that decides.** Its targets are
+   the gradient-heavy files, and feeding their coverage to the iGPU costs
+   more than a frame. It becomes interesting only with coverage on the GPU,
+   which is (c)'s problem, or after XARA-T-0038 has shown what row-wise SIMD
+   leaves on the CPU. Trigger in XARA-T-0051.
+3. **(c) loses on every axis that matters here**: slower than the CPU on
+   the iGPU, a second `wgpu`, and it would still need (b) for Xara's paints
+   and families. Re-open when a `vello` release targets the workspace's
+   `wgpu` **and** a full 100k frame fits 16 ms on the iGPU.
+
+### What was built (XARA-T-0040)
+
+- `compose` (always compiled): `TileKey`, `TileGrid` (`covering`,
+  `rect`, `tile_view`, `placement`), `TilePlacement` with a `TexelRect`
+  valid area, `source_texel` (the one texel rule) and `compose_cpu`.
+- `backend::gpu_tiles` (`gpu` feature): `GpuTileCache` — one `Rgba8Unorm`
+  2D-array atlas (default 128 × 256², 32 MiB), LRU, `upload(key, surface,
+  rect, at)` from any sub-rectangle of a CPU `Surface` to a texel offset,
+  `encode` (one instanced draw on the caller's encoder, replace, clear to a
+  backdrop) and `compose`; plus `create_target` and `read_back`.
+- `tests/parity_tiles.rs`: the 120-scene corpus cut into 32² tiles,
+  composited eight ways (identity, whole and fractional pan, zoom ×1.5,
+  ×3.7 and ×0.6, a missing tile, a partial tile at an offset beside a tile
+  uploaded in halves) on every adapter: **byte-identical** on the Intel
+  iGPU, the RTX 4000 Ada and lavapipe (960 composites each). The NVIDIA
+  GL adapter fails device creation ("Parent device is lost") and is
+  skipped.
+- `benches/tiles.rs`: the table above.
+
+**A tile-assembled frame is not a whole frame.** Rasterising the corpus
+tile by tile and assembling it gives 105 of 120 cases byte-identical to
+the whole-frame render; 12 mesh gradients and `aa_seam` move 1–17 pixels
+by 1/255, and two perspective repeating linear gradients move one pixel
+on the wrap edge by 230/255 (a sub-ulp difference picks the other side of
+the discontinuity). So tiles are for **moving** pixels. A `Final` frame at
+rest is still rasterised whole and cut into tiles on upload, which the
+texel offsets exist for; the test pins the drift at ≤ 0.2 % of pixels.
+
+**Per-tile rasterisation is the wrong grain for large scenes.** A culled
+`DisplayList::build` is linear in the scene's ops: 6.5–10 ms for a
+900 000-op scene, so a single 256² tile costs 5–10 ms and a 1920 × 256
+row 12–18 ms. Rasterise one dirty rectangle per frame (as the render
+thread already does) and upload its pieces; do not loop over tiles.
+
+---
+
 ## Recovered constants — and the ones that were not recovered
 
 **The luminance weights were not recovered.** Task R4.4 needs the original
@@ -584,6 +688,17 @@ determinism suite asserts it over four band heights.
 11. **A fast path must be pinned to the slow one by a test**, bit for bit:
     the opaque-replace write, the fast floor/ceil, `rem_euclid_pow2`,
     `ramp_index`, `FrameMap::param`, and culled against full builds.
+12. **The tile texel rule lives in two places and they must stay one
+    expression**: `compose::source_texel` and `fs_main` in
+    `backend/gpu_tiles.rs` compute `floor((p + 0.5 - origin) * inv_scale)`
+    in `f32`, subtraction then multiplication, and the shader reads with
+    `textureLoad`, never a sampler. That is what makes the GPU composite
+    byte-identical to `compose_cpu`; `tests/parity_tiles.rs` fails on any
+    device where it is not. Do not "simplify" it to `p * inv - origin *
+    inv` (an FMA candidate) or to filtered sampling.
+13. **Composition replaces and never blends.** A tile is an opaque piece of
+    the canvas, background included. Anything that needs blending belongs
+    in the rasteriser, where the families and the goldens are.
 
 ---
 
@@ -627,6 +742,15 @@ determinism suite asserts it over four band heights.
   `fmod`/`round` and skipping the `u` division moved the gradient files by
   under 5 %. The time is the scalar per-pixel pipeline as a whole (≈ 30 ns),
   not one call.
+- **A GPU rasteriser to meet the interactive budgets (XARA-US-0011).** The
+  CPU meets them at 1080p; what fails is presentation (a 4K upload on the
+  iGPU). `vello` is 72–86 ms on the iGPU and needs a second `wgpu`; a WGSL
+  pass over CPU coverage pays 27–33 ms per 64 MiB of masks on the iGPU.
+  Re-open only on the triggers in "The GPU decision".
+- **Rasterising tile by tile.** Each call pays a culled display-list build
+  linear in the scene (6.5–10 ms at 900k ops), and the assembled frame is
+  not byte-identical to a whole one. Rasterise one dirty rectangle and
+  upload its pieces.
 
 ---
 
@@ -635,7 +759,9 @@ determinism suite asserts it over four band heights.
 | # | Item | Owner |
 |---|---|---|
 | 1 | ~~Re-run the W0 spike on a real reference machine and settle G1 and G2~~. **Done 2026-09-23**: both fail, settled. See "Re-run on the reference machine" above | done (XARA-US-0010) |
-| 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4) | Phase 4 follow-up, on hardware |
+| 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4). **Deferred** by the GPU decision; re-open on its trigger | XARA-T-0051 |
+| 15 | Present the canvas through `GpuTileCache` (shell/app wiring, capability ladder) | XARA-T-0050 |
+| 16 | The iGPU `write_texture` cliff: 1080p 0.6 ms, 4K 24 ms | XARA-T-0052 |
 | 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
 | 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the comparison against the original is Phase 11 |
@@ -647,7 +773,7 @@ determinism suite asserts it over four band heights.
 | 11 | ~~Strokes dashed whole before clipping~~. **Done 2026-09-23** (`stroke_cull`, XARA-T-0022); `fuzz_display_list` now spans the whole extent with unlimited dash patterns | done |
 | 13 | Gradient-heavy export: ≈ 30 ns per composited pixel, and only three 1 MiB bands on a 766 px image. The three `*GradFilledShapes*` files take 2.2–4.5 s | XARA-T-0038 |
 | 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
-| 12 | Reconcile `wgpu` versions: `vello` 0.10 / `vello_hybrid` 0.2 pin `wgpu` 29, and the workspace is on 30 | R5.1 |
+| 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
 ### Fuzzing, first runs (2026-09-23)
 

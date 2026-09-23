@@ -13,10 +13,12 @@ workspace = true
 
 [features]
 default = []
-# The GPU backend. Off by default: CI has no adapter, and the CPU backend is
+# The GPU side. Off by default: CI has no adapter, and the CPU backend is
 # the deterministic reference that export and the golden tests go through.
-# `wgpu` only: `vello` joins when the WGSL compositing pass lands (R5.1),
-# which is also when it would first be executed. See `backend::gpu`.
+# `wgpu` only. Since XARA-US-0011 the GPU composites CPU-rasterised tiles
+# (`backend::gpu_tiles`) and rasterises nothing; `vello` stays out of the
+# product until it targets the workspace's `wgpu` (docs/memory/render.md,
+# "The GPU decision").
 gpu = ["dep:wgpu"]
 # The GPU half of the W0 rasteriser spike (`benches/spike.rs`): candidates B
 # (`vello`) and C (`vello_hybrid`) timed on every hardware adapter. Bench
@@ -50,3 +52,9 @@ harness = false
 [[bench]]
 name = "spike"
 harness = false
+
+# XARA-US-0011: pan and Draft zoom through the GPU tile cache, per adapter.
+[[bench]]
+name = "tiles"
+harness = false
+required-features = ["gpu"]

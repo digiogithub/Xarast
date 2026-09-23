@@ -54,7 +54,7 @@ validated, and how `.xar → .xarast → png` conversions are benchmarked.
 | `xarast-doc` | Node arena, attribute model, layers/pages/spreads, resource table, command/undo log | `xarast-geom`, `xarast-color` |
 | `xarast-text` | Font database, shaping, paragraph layout, text on a path | `parley`, `swash`/`skrifa`, `fontdb` |
 | `xarast-image` | Image decode/encode, resampling, colour management, bitmap resources | `image`, `zune-*`, `jpeg-decoder` |
-| `xarast-render` | Scene, display list, tiling, GPU and CPU backends, compositor, blend modes | `xarast-geom`, `vello`, `vello_cpu`, `wgpu` |
+| `xarast-render` | Scene, display list, tiling, CPU backend, compositor, blend modes, GPU tile compositing | `xarast-geom`, `vello_cpu`, `wgpu` (feature `gpu`) |
 | `xarast-xar` | `.xar` reader: record layer, decompression, tree builder, model mapping | `xarast-doc`, `flate2` |
 | `xarast-format` | `.xarast` container: ZIP, SVG profile read/write, resource dedup, round-trip preservation | `xarast-doc`, `zip`, `quick-xml` |
 | `xarast-io` | Import/export filters: SVG, PNG, JPEG, WebP, PDF | `xarast-doc`, `xarast-image` |
@@ -121,7 +121,7 @@ they cannot be exhaustively checked, they put `dyn` dispatch on the hottest
 path, and they make `Clone` and serialisation painful. When a new node type
 forces us to touch every `match`, that is the type system doing its job.
 
-### 3.3 Render: our engine, vello as the coverage rasteriser
+### 3.3 Render: our engine, `vello_cpu` as the coverage rasteriser
 
 No third-party library becomes "the engine". None of them has Xara's blend
 modes, its conical and diamond gradients, or its non-linear ramp profiles. What
@@ -129,13 +129,21 @@ modes, its conical and diamond gradients, or its non-linear ramp profiles. What
 coverage rasteriser. `vello`'s sparse-strip representation maps closely onto
 the same concept CDraw used, and leaves the compositor ours.
 
-- One scene/display-list frontend, two backends: `vello` on `wgpu` (GPU) and
-  `vello_cpu` (CPU).
+- One scene/display-list frontend. **Rasterisation is on the CPU**
+  (`vello_cpu` coverage, our paints and compositor); the GPU keeps the
+  rasterised pixels as tiles and composites them for pans, zooms and
+  presentation (`GpuTileCache`, byte-identical to its CPU reference).
+  *Decided 2026-09-23 (XARA-US-0011), superseding "`vello` on `wgpu` (GPU)
+  and `vello_cpu` (CPU)":* on the reference machine `vello` takes 72–86 ms
+  per 100k frame on the integrated GPU against 19 ms on the CPU, and it
+  pins a different `wgpu` from the shell's (+4 MiB, 46 crates). Evidence
+  and the re-open triggers are in `docs/memory/render.md`, "The GPU
+  decision".
 - The CPU backend is not a fallback afterthought. It is the **deterministic**
-  path: export and golden-image tests always go through it, and comparing the
-  two backends pixel by pixel is itself a test.
-- Xara's exotic blend modes are custom WGSL compositing passes on GPU, mirrored
-  by a CPU compositor.
+  path: export and golden-image tests always go through it.
+- Xara's exotic blend modes live in the CPU compositor. A WGSL paint/blend
+  pass mirroring it is deferred until the trigger in XARA-T-0051 fires; when
+  it exists, comparing it with the CPU pixel by pixel is itself a test.
 - `skia-safe` is rejected: 30–60 MB and a C++ toolchain would recreate the very
   `libCDraw.a` problem we are solving.
 - `tiny-skia` stays as a validation reference in tests, never a production
