@@ -43,6 +43,7 @@ pub mod boolean;
 pub mod fixed;
 pub mod flatten;
 pub mod hit;
+pub mod hit_index;
 pub mod matrix;
 pub mod measure;
 pub mod mp;
@@ -62,6 +63,7 @@ pub use hit::{
     HitShape, HitTolerance, ShapeHit, hit_fill, hit_fill_transformed, hit_stroke,
     hit_stroke_transformed,
 };
+pub use hit_index::{Candidates, HitIndex, HitIndexStats, RectMode};
 pub use matrix::Matrix;
 pub use measure::{Nearest, PathHitIndex, arclen, fill_contains, nearest_point, point_at_arclen};
 pub use mp::{Mp, ParseMpError};
