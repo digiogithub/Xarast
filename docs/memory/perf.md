@@ -86,8 +86,9 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Pan, 100k objects, CPU, Draft through the scheduler, fit page | ≤ 16 ms | ~~5.3–6.6 ms~~ 1.58 ms | passes (after the render-perf merge, 2026-09-23, load ~5) |
 | Pan, 100k objects, CPU, Draft through the scheduler, zoomed 3× | ≤ 16 ms | ~~51–57 ms~~ **11.1 ms** | passes after XARA-T-0033/T-0034 (linear display list, document-space culling, column tiles); re-measured 2026-09-23 at load ~5 |
 | Zoom (wheel notch), 100k objects, CPU, Draft through the scheduler | ≤ 16 ms | 1.4 ms | passes; the zoom-out border is left to the Final |
-| Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | GPU side: 0.5–2.2 ms at 1080p, 1.5–3.0 ms at 4K (tile composite, `benches/tiles.rs`) | the primitive passes; end to end waits on XARA-T-0050 (shell wiring) |
-| Present one CPU frame, 4K, integrated GPU (today's full `write_texture`) | — | **23–27 ms** (1080p: 0.54–1.6 ms) | over budget on its own; XARA-T-0050 removes it, XARA-T-0052 investigates the cliff |
+| Pan/zoom, 100k objects, integrated GPU, input → presented, live window | ≤ 16 ms | pan p99 **1.3 ms** (GPU idle p99 5.5 ms), zoom p99 **0.5 ms** (GPU idle 2.8 ms); canvas 1796 × 1338 | **passes** (XARA-T-0050/T-0008, 2026-09-23); table in "Pan and zoom end to end" |
+| Pan/zoom, 100k objects, integrated GPU, 4K canvas, offscreen | ≤ 16 ms | pan p99 **9.6 ms**, zoom p99 **5.8 ms** (to GPU idle) | passes; the CPU tier at 4K is 35–41 ms (T-0052's upload cliff) |
+| Present one CPU frame, 4K, integrated GPU (the pre-T-0050 full `write_texture`) | — | **23–27 ms** (1080p: 0.54–1.6 ms) | off the interactive path since XARA-T-0050; still paid by the CPU tier and by the Final at rest; XARA-T-0052 investigates the cliff |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
 
@@ -411,6 +412,64 @@ is in `render.md`, "The GPU decision".
 24 ms: four times the bytes, fifteen to fifty times the time. The RTX scales
 linearly. Unexplained; XARA-T-0052.
 
+### Pan and zoom end to end (XARA-T-0050, XARA-T-0008)
+
+Two probes, 2026-09-23, load average 1–3.5, 300 samples each after 10
+warm-up frames, one scripted step a frame: pan 23.4 × 7.7 px (fractional,
+reversing every 60 steps), zoom 1.05× about the centre (ten in, ten out).
+Documents: the synthetic 250 000-node document (~105 000 paths, filled and
+stroked; `--synthetic 250000`) and `testfiles/ProbeX16.xar`.
+
+**Live window** — `xarast --probe pan|zoom [--synthetic 250000 | file]`
+on the COSMIC session, no vsync, the window closing itself. The sample is
+from the intent being applied to `Queue::present` returning, and to the
+GPU going idle after it (`device.poll(wait)`), which includes the
+interface frame, the tile uploads of whatever the render thread delivered
+and the composite. COSMIC tiles the window, so the canvas is 1796 × 1338
+(2.4 MP, more than 1080p) whatever `--size` asks.
+
+| p50 / p99 ms, input → presented (→ GPU idle) | synthetic pan | synthetic zoom | ProbeX16 pan | ProbeX16 zoom |
+|---|---|---|---|---|
+| Intel iGPU, GPU tiles | 0.50 / 1.31 (2.24 / 5.52) | 0.37 / 0.54 (2.13 / 2.75) | 0.37 / 1.06 (1.56 / 4.68) | 0.33 / 0.53 (2.05 / 8.72) |
+| Intel iGPU, CPU tier | 3.50 / 4.15 (5.00 / 9.47) | 3.46 / 3.96 (5.13 / 10.66) | 3.36 / 4.27 (5.14 / 12.26) | 2.52 / 3.40 (3.58 / 10.07) |
+| RTX 4000 Ada, GPU tiles | 0.44 / 3.19 (0.79 / 3.38) | 0.32 / 2.48 (0.69 / 2.49) | 0.31 / 2.64 (0.76 / 2.79) | 0.30 / 2.52 (0.69 / 2.52) |
+| RTX 4000 Ada, CPU tier | 3.28 / 5.02 (3.74 / 5.30) | 2.37 / 3.86 (2.90 / 3.94) | 3.11 / 4.15 (3.63 / 4.76) | 2.36 / 3.20 (2.89 / 3.60) |
+
+Worst single sample of the iGPU GPU-tiles runs: 21.8 ms to GPU idle (one,
+synthetic pan); every p99 is inside 16 ms.
+
+**Offscreen at any size** — `cargo run --release -p xarast-shell
+--example canvas_probe -- --size WxH --tier gpu|cpu --kind pan|zoom`,
+input at 120 Hz. Same session, scheduler, render thread, planner and tile
+store, composited into a canvas-sized texture; no interface, no
+swapchain. The sample is intent → GPU idle.
+
+| p50 / p99 ms | 1080p pan | 1080p zoom | 4K pan | 4K zoom |
+|---|---|---|---|---|
+| Intel, GPU tiles, synthetic | 1.79 / 3.98 | 1.58 / 4.15 | 3.71 / 9.62 | 1.98 / 5.83 |
+| Intel, GPU tiles, ProbeX16 | 1.94 / 5.45 | 1.59 / 3.16 | 3.44 / 7.69 | 2.86 / 6.92 |
+| Intel, CPU tier, synthetic | 3.23 / 7.23 | 2.83 / 5.76 | **34.8 / 40.6** | **31.1 / 35.4** |
+| RTX, GPU tiles, synthetic | 0.49 / 1.48 | 0.43 / 0.63 | 0.79 / 4.57 | 0.56 / 0.94 |
+| RTX, CPU tier, synthetic | 2.90 / 4.38 | 2.66 / 3.19 | 12.7 / 17.8 | 8.79 / 11.3 |
+
+Reading them:
+
+- **The budget is met on the integrated GPU at 1080p and at 4K** through
+  the GPU tile tier; XARA-T-0008's GPU half is closed with this.
+- The CPU tier (`XARAST_RENDERER=cpu`, and the fallback) is fine at 1080p
+  and fails at 4K on the iGPU: its whole-canvas upload is the 33 MB cliff
+  of XARA-T-0052. That is the fallback's cost, not the default path's.
+- A pan uploads about 320 KB a step (95 MB over 300 steps at 1080p): the
+  exposed strips, plus the partial tiles at the trailing edge that cannot
+  grow their valid area into a rectangle and start afresh.
+- A zoom uploads nothing until the gesture ends: the render thread skips
+  Draft zooms (`FrameJob::cpu_rescale = false`) and the GPU resamples the
+  resident level. The Final that follows is a whole-frame upload, at rest
+  (at 4K on the iGPU that single frame pays the T-0052 cliff once).
+- Max outliers (15–25 ms offscreen at 4K, once per run) coincide with the
+  first frames after a direction change, when the render thread's strips
+  land in a burst; p99 stays inside budget.
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape
@@ -440,8 +499,10 @@ that will recur:
 - [x] Pan/zoom on the CPU through the scheduler: `cargo bench -p xarast-app
       -- viewport` (XARA-US-0006). Zoom passes, pan fails 3.4× when zoomed
       into the drawing; see the section above.
-- [ ] Pan/zoom on the integrated GPU (XARA-T-0008), open-to-first-paint
-      (XARA-T-0009) and cold start (XARA-T-0010).
+- [x] Pan/zoom on the integrated GPU (XARA-T-0008) — passes end to end
+      through the GPU tile tier, 1080p and 4K (XARA-T-0050, see "Pan and
+      zoom end to end").
+- [ ] Open-to-first-paint (XARA-T-0009) and cold start (XARA-T-0010).
 - [ ] `DisplayList::build` culled builds (XARA-T-0033) and single-core
       short strips (XARA-T-0034): the two things between pan and 16 ms.
 - [ ] `Tx::commit` walks the whole tree on every edit

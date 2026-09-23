@@ -44,9 +44,11 @@ use crate::egui_input::{EguiInput, cursor_shape};
 use crate::input::event::{ColorScheme, DragEvent, PointerPhase, ShellEvent};
 use crate::input::keyboard::{Key, KeyState, NamedKey};
 use crate::intents::{CanvasRegion, IntentAdapter};
-use crate::paint::{CanvasFrame, UiFrame};
+use crate::paint::UiFrame;
 use crate::portal::PortalEvent;
+use crate::probe::Probe;
 use crate::scale::{PhysicalPos, PhysicalSize, ScaleFactor};
+use crate::tiles::{CanvasView, TiledFrame};
 use crate::{CursorShape, FrameRequest, ShellApp, ShellCtx};
 
 /// The pasteboard, premultiplied sRGB: a neutral mid grey that reads as
@@ -98,6 +100,12 @@ pub struct Viewer {
     cursor: CursorShape,
     /// The window title, which also names the accessibility tree's root.
     title: String,
+    /// A scripted pan or zoom measuring input-to-present latency.
+    probe: Option<Probe>,
+    /// An exact frame of the document has been shown: the probe may start.
+    settled_once: bool,
+    /// A canvas view has been handed to the shell and not cleared.
+    view_shown: bool,
 }
 
 /// One interface frame, before it is handed to the shell.
@@ -149,6 +157,9 @@ impl Viewer {
             ime_area: None,
             cursor: CursorShape::Default,
             title: "Xarast".to_owned(),
+            probe: None,
+            settled_once: false,
+            view_shown: false,
         }
         .with_external_navigation()
     }
@@ -168,6 +179,29 @@ impl Viewer {
     #[must_use]
     pub fn with_screenshot(mut self, path: PathBuf) -> Viewer {
         self.screenshot = Some(path);
+        self
+    }
+
+    /// Runs a scripted latency probe once the document has settled, prints
+    /// its report and quits (`xarast --probe pan|zoom`).
+    #[must_use]
+    pub fn with_probe(mut self, probe: Probe) -> Viewer {
+        self.probe = Some(probe);
+        self
+    }
+
+    /// Opens a synthetic document of about `nodes` nodes (250 000 give
+    /// about 100 000 filled and stroked paths), for the probes.
+    #[must_use]
+    pub fn with_synthetic(mut self, nodes: usize) -> Viewer {
+        let doc = xarast_doc::synthetic_document(xarast_doc::SynthSpec {
+            nodes,
+            ..xarast_doc::SynthSpec::default()
+        });
+        self.app.adopt(doc);
+        self.fit_pending = true;
+        self.scene_stale = true;
+        self.render_stale = true;
         self
     }
 
@@ -422,7 +456,13 @@ impl Viewer {
                 page: PAGE,
             };
             match Canvas::spawn(Box::new(move || waker.wake()), backdrop) {
-                Ok(canvas) => self.render = Some(canvas),
+                Ok(mut canvas) => {
+                    // The shell composites retained tiles at input time
+                    // (`tiles.rs`), so a Draft zoom is already on screen;
+                    // resampling it again on the CPU would be thrown away.
+                    canvas.set_cpu_rescale(false);
+                    self.render = Some(canvas);
+                }
                 Err(e) => {
                     self.message = Some(format!("Could not start the render thread: {e}"));
                     return;
@@ -449,6 +489,67 @@ impl Viewer {
         }
         self.scene_stale = false;
         self.render_stale = false;
+    }
+}
+
+impl Viewer {
+    /// Tells the shell which view to composite this frame: the session's
+    /// current one, which during a gesture is ahead of the last rendered
+    /// frame. That is what puts a pan on screen at input time.
+    fn show_view(&mut self, ctx: &mut ShellCtx<'_>) {
+        let Some(session) = self.app.active() else {
+            if std::mem::take(&mut self.view_shown) {
+                ctx.clear_canvas();
+            }
+            return;
+        };
+        let c = self.adapter.canvas();
+        let vp = session.viewport.device_rect();
+        if !self.primed || c.width == 0 || c.height == 0 || vp.is_empty() {
+            return;
+        }
+        ctx.set_canvas_view(CanvasView {
+            origin: (c.x, c.y),
+            width: vp.width(),
+            height: vp.height(),
+            transform: session.viewport.transform(),
+            backdrop: PASTEBOARD,
+        });
+        self.view_shown = true;
+    }
+
+    /// One step of the latency probe: records the previous step's present
+    /// and applies the next scripted intent, as input would.
+    fn drive_probe(&mut self, ctx: &mut ShellCtx<'_>) {
+        if !self.settled_once || self.app.active().is_none() {
+            return;
+        }
+        let Some(probe) = self.probe.as_mut() else {
+            return;
+        };
+        probe.record(ctx.last_present());
+        if probe.done() {
+            let vp = self
+                .app
+                .active()
+                .map(|s| s.viewport.device_rect())
+                .unwrap_or_default();
+            println!(
+                "{}",
+                probe.report(&self.renderer_label, (vp.width(), vp.height()))
+            );
+            if let Some(canvas) = self.render.as_ref() {
+                println!("  render thread: {:?}", canvas.render_thread().stats());
+            }
+            self.probe = None;
+            if self.screenshot.is_none() {
+                ctx.exit();
+            }
+            return;
+        }
+        let c = self.adapter.canvas();
+        let intent = probe.next((f64::from(c.width) / 2.0, f64::from(c.height) / 2.0));
+        self.apply(vec![intent]);
     }
 }
 
@@ -683,6 +784,8 @@ impl ShellApp for Viewer {
             }
         }
 
+        self.drive_probe(ctx);
+
         let step = self.ui_step(ctx.scale(), ctx.surface_size());
         ctx.show_ui(step.frame);
         self.platform_output(step.output, ctx);
@@ -718,15 +821,38 @@ impl ShellApp for Viewer {
                     && frame.exact
                     && !self.render_stale
                     && canvas.is_settled();
-                ctx.show_canvas(CanvasFrame {
-                    origin: (c.x, c.y),
+                if let Some(p) = self.probe.as_mut() {
+                    p.frames_delivered += 1;
+                }
+                ctx.show_tiled_frame(TiledFrame {
                     surface: frame.surface,
+                    transform: frame.view.transform,
+                    content: (frame.doc.0, frame.scene_epoch),
+                    generation: frame.generation,
+                    base: frame.base,
+                    covered: frame.covered,
+                    fresh: frame.fresh,
                 });
-                if settled && let Some(path) = self.screenshot.take() {
-                    ctx.capture(path, true);
+                if settled {
+                    self.settled_once = true;
+                    // With a probe, the capture is of the view it leaves behind.
+                    if self.probe.is_none()
+                        && let Some(path) = self.screenshot.take()
+                    {
+                        ctx.capture(path, true);
+                    }
                 }
             }
         }
+        self.show_view(ctx);
+        if let Some(r) = ctx.renderer() {
+            let label = r.to_string();
+            if label != self.renderer_label {
+                tracing::info!(renderer = %label, reason = ?r.reason, "canvas renderer");
+                self.renderer_label = label;
+            }
+        }
+
         // Nothing to render (no document, or it failed to open): capture
         // what there is rather than wait forever.
         if self.app.active().is_none()
@@ -744,6 +870,9 @@ impl ShellApp for Viewer {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        if self.probe.is_some() && self.settled_once {
+            return FrameRequest::Redraw;
+        }
         match repaint {
             Some(d) if d.is_zero() => FrameRequest::Redraw,
             Some(d) if d < Duration::from_secs(3600) => FrameRequest::RedrawAfter(d),

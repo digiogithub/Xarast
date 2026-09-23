@@ -43,6 +43,10 @@ pub(crate) struct Kept {
     /// produce. Only such a frame may be reused by a `Final` job.
     pub final_exact: bool,
     pub surface: Surface,
+    /// The generation the frame was published as.
+    pub generation: u64,
+    /// The pixels of the picture; the rest is placeholder backdrop.
+    pub covered: DeviceRect,
 }
 
 /// How to produce a job's frame.
@@ -140,6 +144,17 @@ pub(crate) fn scroll(surface: &mut Surface, dx: i32, dy: i32) -> Vec<DeviceRect>
         .filter(|d| !d.is_empty())
         .map(xarast_render::DirtyRect::rect)
         .collect()
+}
+
+/// What a frame scrolled by `(dx, dy)` covers, given what the kept frame
+/// covered in a viewport `all`. A fully covered frame stays fully covered,
+/// because the exposed strips are rasterised; a partly covered one (a
+/// `Draft` zoom-out) keeps only its moved rectangle, conservatively.
+pub(crate) fn scrolled_cover(covered: DeviceRect, all: DeviceRect, dx: i32, dy: i32) -> DeviceRect {
+    if covered == all {
+        return all;
+    }
+    covered.translated(dx, dy).intersection(all)
 }
 
 /// Resamples `old`, drawn at `from`, to the view `to`, nearest-neighbour.
@@ -291,6 +306,8 @@ mod tests {
             view: v,
             final_exact,
             surface: Surface::new(100, 80),
+            generation: 1,
+            covered: v.viewport,
         }
     }
 
@@ -305,6 +322,7 @@ mod tests {
             background: [1, 2, 3, 255],
             page: Some((DeviceRect::EMPTY, [255; 4])),
             generation: 0,
+            cpu_rescale: true,
         }
     }
 

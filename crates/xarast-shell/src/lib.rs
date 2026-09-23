@@ -41,6 +41,7 @@
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
 //! | [`gpu_errors`] | `wgpu` errors logged and recovered from, never a panic |
+//! | [`tiles`] | The canvas kept as tiles and composited at input time; the GPU and CPU tiers |
 //!
 //! See `docs/phases/phase-05-shell-and-ui.md` and `docs/memory/ui.md`.
 
@@ -58,7 +59,9 @@ pub mod input;
 pub mod intents;
 mod paint;
 pub mod portal;
+pub mod probe;
 pub mod scale;
+pub mod tiles;
 pub mod viewer;
 #[cfg(all(
     unix,
@@ -92,7 +95,8 @@ pub use portal::{
     FileFilter, OpenFileRequest, PortalEvent, PortalHandle, PortalRequestId, SaveFileRequest,
 };
 pub use scale::{LogicalSize, PhysicalPos, PhysicalSize, ScaleFactor};
-pub use window::{CursorShape, ShellCtx, ShellWaker};
+pub use tiles::{CanvasTier, CanvasView, TiledFrame, UploadStats};
+pub use window::{CursorShape, RendererStatus, ShellCtx, ShellWaker};
 
 /// The Wayland and X11 application identifier.
 ///
@@ -151,12 +155,14 @@ pub enum BackendPreference {
 }
 
 impl BackendPreference {
+    /// The backends to try; `WGPU_BACKEND` overrides them when set.
     fn backends(self) -> wgpu::Backends {
         match self {
             Self::VulkanThenGl => wgpu::Backends::VULKAN | wgpu::Backends::GL,
             Self::GlOnly => wgpu::Backends::GL,
             Self::Auto => wgpu::Backends::all(),
         }
+        .with_env()
     }
 
     fn describe(self) -> &'static str {
@@ -166,6 +172,73 @@ impl BackendPreference {
             Self::Auto => "any",
         }
     }
+}
+
+/// Which canvas renderer to use: `XARAST_RENDERER`, the escape hatch of
+/// `research/05 §4.3`.
+///
+/// Rasterisation is always the CPU's (`render.md`, "The GPU decision");
+/// what this picks is who keeps and moves the pixels. `gpu` and `hybrid`
+/// both mean the GPU tile compositor today, because there is no GPU
+/// rasteriser to distinguish them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RendererPreference {
+    /// GPU tiles when the device can hold them, else CPU composition.
+    #[default]
+    Auto,
+    /// Insist on GPU tiles (still degrades rather than fail).
+    Gpu,
+    /// CPU rasterisation with GPU compositing: GPU tiles.
+    Hybrid,
+    /// CPU composition, uploaded whole each frame; the GPU only presents.
+    Cpu,
+}
+
+impl RendererPreference {
+    /// Parses a value of `XARAST_RENDERER`; `None` for anything unknown.
+    #[must_use]
+    pub fn parse(v: &str) -> Option<RendererPreference> {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Some(Self::Auto),
+            "gpu" => Some(Self::Gpu),
+            "hybrid" => Some(Self::Hybrid),
+            "cpu" | "software" => Some(Self::Cpu),
+            _ => None,
+        }
+    }
+
+    /// Reads `XARAST_RENDERER`, warning about (and ignoring) a value it
+    /// does not know.
+    #[must_use]
+    pub fn from_env() -> RendererPreference {
+        let Ok(v) = std::env::var("XARAST_RENDERER") else {
+            return Self::Auto;
+        };
+        Self::parse(&v).unwrap_or_else(|| {
+            tracing::warn!(value = %v, "unknown XARAST_RENDERER (auto|gpu|hybrid|cpu); using auto");
+            Self::Auto
+        })
+    }
+
+    /// Whether the GPU tile compositor should be tried.
+    #[must_use]
+    pub const fn wants_gpu_tiles(self) -> bool {
+        !matches!(self, Self::Cpu)
+    }
+}
+
+/// When the last frame was drawn and presented, for latency probes.
+#[derive(Debug, Clone, Copy)]
+pub struct PresentTiming {
+    /// The redraw began (before the application's `on_frame`).
+    pub started: Instant,
+    /// The frame was handed to the compositor (`Queue::present` returned).
+    pub presented: Instant,
+    /// The GPU had finished the frame's work. Only measured when
+    /// [`ShellConfig::probe`] is set: waiting for it costs a stall.
+    pub gpu_done: Option<Instant>,
+    /// The canvas tier that drew it.
+    pub tier: CanvasTier,
 }
 
 /// How the shell should start up.
@@ -180,6 +253,11 @@ pub struct ShellConfig {
     /// Exit after presenting this many frames. `None` runs until the window is
     /// closed; `Some(n)` is what makes the shell testable without a human.
     pub exit_after_frames: Option<u32>,
+    /// Which canvas renderer to use (`XARAST_RENDERER`).
+    pub renderer: RendererPreference,
+    /// Latency probing: present without vsync and wait for the GPU after
+    /// each frame, so that [`PresentTiming::gpu_done`] is measured.
+    pub probe: bool,
 }
 
 impl Default for ShellConfig {
@@ -189,6 +267,8 @@ impl Default for ShellConfig {
             title: "Xarast".to_owned(),
             backends: BackendPreference::default(),
             exit_after_frames: None,
+            renderer: RendererPreference::Auto,
+            probe: false,
         }
     }
 }
@@ -448,6 +528,29 @@ mod tests {
         let s = platform_summary();
         assert!(s.contains("fractional scaling"), "{s}");
         assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn renderer_preferences_parse_the_escape_hatch() {
+        assert_eq!(
+            RendererPreference::parse("CPU"),
+            Some(RendererPreference::Cpu)
+        );
+        assert_eq!(
+            RendererPreference::parse("hybrid"),
+            Some(RendererPreference::Hybrid)
+        );
+        assert_eq!(
+            RendererPreference::parse("gpu"),
+            Some(RendererPreference::Gpu)
+        );
+        assert_eq!(
+            RendererPreference::parse(""),
+            Some(RendererPreference::Auto)
+        );
+        assert_eq!(RendererPreference::parse("vello"), None);
+        assert!(!RendererPreference::Cpu.wants_gpu_tiles());
+        assert!(RendererPreference::Auto.wants_gpu_tiles());
     }
 
     #[test]

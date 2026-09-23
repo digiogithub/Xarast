@@ -48,7 +48,7 @@ What is **not** in it, and who owns it:
 | Missing | Owner |
 |---|---|
 | The WGSL compositing pass, ping-pong destination reads, GPU tile planner | **Deferred** by the GPU decision (XARA-US-0011); trigger in XARA-T-0051 |
-| Presenting the canvas through `GpuTileCache` | built here (`gpu` feature); wiring into the shell is XARA-T-0050 |
+| Presenting the canvas through `GpuTileCache` | built here (`gpu` feature); **wired** into the shell by XARA-T-0050 (`xarast-shell/src/tiles.rs`, see "The tiles in the viewer") |
 | Blur, shadow, feather, bevel, contour, blend, mould | Phase 13; `push_layer`/`pop_layer` and the offscreen machinery they need exist here |
 | Fractal (plasma, clouds) generation | Phase 13; `Paint::Fractal` exists and refuses to rasterise until materialised |
 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | Deferred (`research/03 §3.9` M8) |
@@ -470,6 +470,31 @@ the discontinuity). So tiles are for **moving** pixels. A `Final` frame at
 rest is still rasterised whole and cut into tiles on upload, which the
 texel offsets exist for; the test pins the drift at ≤ 0.2 % of pixels.
 
+### The tiles in the viewer (XARA-T-0050)
+
+The shell (`xarast-shell/src/tiles.rs`) owns the cache. What it needed
+from here was one addition, `GpuTileCache::valid(key)`, so that it can
+upload only the texels a tile lacks. Facts about the integration that
+matter to this crate:
+
+- A **level** is one zoom *and* one pixel grid: the first frame at a zoom
+  defines it, and a later frame joins it only if its translation differs
+  by whole pixels (1e-3 tolerance, as `reuse.rs`). A Final after a
+  fractional pan starts a level. Up to three levels are kept and drawn
+  oldest first, so a zoom-out shows older resident content under the
+  newest level.
+- A tile's valid area is a bounding box, so a piece that would not join
+  it into a rectangle restarts the tile (`invalidate` + upload). This
+  happens at the trailing edge of a pan, and is most of the per-step
+  upload beyond the strips.
+- `compose_cpu` is the CPU tier of the same planner, over `256²` tiles in
+  memory; a unit test in the shell holds the two tiers byte-identical on
+  every adapter it finds, and real-window screenshots of `ProbeX16.xar`
+  on the Intel iGPU and the RTX, each tier, have identical canvases.
+- The composite target is the painter's canvas texture (`Rgba8Unorm`,
+  now also a render attachment); the swapchain may be `Bgra8Unorm`, which
+  is why the tiles do not draw into it directly.
+
 **Per-tile rasterisation is the wrong grain for large scenes.** A culled
 `DisplayList::build` is linear in the scene's ops: 6.5–10 ms for a
 900 000-op scene, so a single 256² tile costs 5–10 ms and a 1920 × 256
@@ -760,7 +785,7 @@ determinism suite asserts it over four band heights.
 |---|---|---|
 | 1 | ~~Re-run the W0 spike on a real reference machine and settle G1 and G2~~. **Done 2026-09-23**: both fail, settled. See "Re-run on the reference machine" above | done (XARA-US-0010) |
 | 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4). **Deferred** by the GPU decision; re-open on its trigger | XARA-T-0051 |
-| 15 | Present the canvas through `GpuTileCache` (shell/app wiring, capability ladder) | XARA-T-0050 |
+| 15 | ~~Present the canvas through `GpuTileCache` (shell/app wiring, capability ladder)~~. **Done 2026-09-23**; see "The tiles in the viewer" | done (XARA-T-0050) |
 | 16 | The iGPU `write_texture` cliff: 1080p 0.6 ms, 4K 24 ms | XARA-T-0052 |
 | 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |

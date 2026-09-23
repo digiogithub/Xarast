@@ -304,6 +304,15 @@ impl GpuTileCache {
         self.slots.contains_key(key)
     }
 
+    /// The texels of a resident tile that hold pixels, or `None` when it
+    /// is not resident. A presenter uses it to upload only what a tile
+    /// lacks, and to start a tile afresh when a new piece would not join
+    /// its valid area into a rectangle (see [`GpuTileCache::upload`]).
+    #[must_use]
+    pub fn valid(&self, key: &TileKey) -> Option<TexelRect> {
+        self.slots.get(key).map(|s| s.valid)
+    }
+
     /// Tiles resident now.
     #[must_use]
     pub fn len(&self) -> usize {

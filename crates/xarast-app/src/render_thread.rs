@@ -112,6 +112,14 @@ pub struct FrameJob {
     /// Assigned by [`RenderThread::submit`]; whatever is here on the way in
     /// is overwritten.
     pub generation: u64,
+    /// Whether a `Draft` zoom resamples the kept frame on the CPU
+    /// ([`FrameReuse::Rescaled`]). A presenter that keeps pixels as tiles
+    /// and resamples them itself at input time (the shell's tile
+    /// compositor) sets this to `false`: the worker then skips a `Draft`
+    /// whose zoom differs from the kept frame and publishes nothing for
+    /// it ([`RenderStats::skipped`]), and the `Final` that follows the
+    /// gesture draws the new zoom whole.
+    pub cpu_rescale: bool,
 }
 
 /// A request to the render thread.
@@ -172,6 +180,25 @@ pub struct RenderedFrame {
     /// Set when the backend refused the frame; the surface then holds only
     /// the background.
     pub error: Option<BackendError>,
+    /// [`FrameJob::scene_epoch`] of the job: frames of equal epochs (and
+    /// equal backdrops) show the same picture wherever their views
+    /// overlap, which is what licenses a presenter to keep their pixels.
+    pub scene_epoch: u64,
+    /// The rectangle of the surface holding pixels of the picture, in
+    /// frame pixels. The whole viewport, except after a `Draft` zoom-out,
+    /// whose uncovered border is placeholder backdrop (and a pan of such a
+    /// frame, which moves the rectangle).
+    pub covered: DeviceRect,
+    /// The rectangles rasterised for this frame. The whole viewport for a
+    /// full frame, the exposed strips for a scroll, nothing for a rescale.
+    /// Every other pixel of `covered` was moved from the frame
+    /// [`RenderedFrame::base`].
+    pub fresh: Vec<DeviceRect>,
+    /// For a [`FrameReuse::Scrolled`] frame, the generation of the frame
+    /// whose pixels it moved. A presenter that holds that frame's pixels
+    /// only needs `fresh`; one that never saw it (it was dropped, or not
+    /// collected) needs all of `covered`.
+    pub base: Option<u64>,
 }
 
 /// Counters, for the status bar and for the tests.
@@ -193,6 +220,9 @@ pub struct RenderStats {
     pub scrolled: u64,
     /// Frames drawn by resampling the previous one.
     pub rescaled: u64,
+    /// `Draft` zooms skipped because the job asked for no CPU rescale
+    /// ([`FrameJob::cpu_rescale`]).
+    pub skipped: u64,
 }
 
 /// What rasterises a display list. The CPU backend in production; a
@@ -434,10 +464,16 @@ impl Drop for RenderThread {
     }
 }
 
-/// Why a frame was not finished: it was cancelled, superseded (a `Final`
-/// only) or the thread is shutting down.
+/// Why a frame was not finished.
 #[derive(Debug)]
-struct Abandoned;
+enum Abandoned {
+    /// Cancelled, superseded (a `Final` only) or the thread is shutting
+    /// down.
+    Stale,
+    /// A `Draft` zoom the presenter resamples itself
+    /// ([`FrameJob::cpu_rescale`] is `false`).
+    Skipped,
+}
 
 /// What [`Worker::produce`] made.
 struct Produced {
@@ -447,6 +483,9 @@ struct Produced {
     reuse: FrameReuse,
     exact: bool,
     error: Option<BackendError>,
+    covered: DeviceRect,
+    fresh: Vec<DeviceRect>,
+    base: Option<u64>,
 }
 
 /// The worker's side: the renderer, the kept frame and a way to ask
@@ -525,7 +564,7 @@ impl<R: FrameRenderer> Worker<'_, R> {
         let n = FINAL_COLUMNS.min(vp.width() / MIN_COLUMN_WIDTH).max(1);
         for piece in reuse::columns(vp, n) {
             if self.stale(job) {
-                return Err(Abandoned);
+                return Err(Abandoned::Stale);
             }
             if let Some(e) = self.draw_rect(job, &job.view, piece, &mut surface, timings) {
                 return Ok((surface, Some(e)));
@@ -545,10 +584,12 @@ impl<R: FrameRenderer> Worker<'_, R> {
                 };
                 let mut surface = kept.surface;
                 let mut error = None;
-                for strip in reuse::scroll(&mut surface, dx, dy) {
-                    let e = self.draw_rect(job, &view, strip, &mut surface, &mut timings);
+                let strips = reuse::scroll(&mut surface, dx, dy);
+                for strip in &strips {
+                    let e = self.draw_rect(job, &view, *strip, &mut surface, &mut timings);
                     error = error.or(e);
                 }
+                let covered = reuse::scrolled_cover(kept.covered, kept.view.viewport, dx, dy);
                 Ok(Produced {
                     surface,
                     view,
@@ -558,8 +599,12 @@ impl<R: FrameRenderer> Worker<'_, R> {
                         && job.view.quality == RenderQuality::Final
                         && error.is_none(),
                     error,
+                    covered,
+                    fresh: strips,
+                    base: Some(kept.generation),
                 })
             }
+            Plan::Rescale if !job.cpu_rescale => Err(Abandoned::Skipped),
             Plan::Rescale => {
                 let rescaled = self
                     .kept
@@ -583,6 +628,9 @@ impl<R: FrameRenderer> Worker<'_, R> {
                     reuse: FrameReuse::Rescaled,
                     exact: false,
                     error: None,
+                    covered,
+                    fresh: Vec::new(),
+                    base: None,
                 })
             }
             Plan::Full => self.produce_full(job, timings),
@@ -602,6 +650,9 @@ impl<R: FrameRenderer> Worker<'_, R> {
             reuse: FrameReuse::Full,
             exact: job.view.quality == RenderQuality::Final && error.is_none(),
             error,
+            covered: job.view.viewport,
+            fresh: vec![job.view.viewport],
+            base: None,
         })
     }
 }
@@ -651,13 +702,22 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
         let produced = w.produce(&job);
 
         let mut st = shared.lock();
-        st.stats.rendered += 1;
-        let Ok(p) = produced else {
-            st.stats.aborted += 1;
-            if st.is_cancelled(job.generation) {
-                st.stats.cancelled += 1;
+        if !matches!(produced, Err(Abandoned::Skipped)) {
+            st.stats.rendered += 1;
+        }
+        let p = match produced {
+            Ok(p) => p,
+            Err(Abandoned::Skipped) => {
+                st.stats.skipped += 1;
+                continue;
             }
-            continue;
+            Err(Abandoned::Stale) => {
+                st.stats.aborted += 1;
+                if st.is_cancelled(job.generation) {
+                    st.stats.cancelled += 1;
+                }
+                continue;
+            }
         };
         match p.reuse {
             FrameReuse::Scrolled { .. } => st.stats.scrolled += 1,
@@ -675,6 +735,8 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
             view: p.view,
             final_exact: p.exact,
             surface: p.surface,
+            generation: job.generation,
+            covered: p.covered,
         });
         if st.is_cancelled(job.generation) {
             st.stats.cancelled += 1;
@@ -696,6 +758,10 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
             reuse: p.reuse,
             exact: p.exact,
             error: p.error,
+            scene_epoch: job.scene_epoch,
+            covered: p.covered,
+            fresh: p.fresh,
+            base: p.base,
         });
         drop(st);
         waker();
@@ -729,6 +795,7 @@ mod tests {
             background: [10, 20, 30, 255],
             page: Some((DeviceRect::new(-5, 20, 4, 40), [200, 200, 200, 255])),
             generation: 0,
+            cpu_rescale: true,
         }
     }
 
@@ -1005,6 +1072,15 @@ mod tests {
         (rt, rx)
     }
 
+    /// Waits until the worker has taken `n` frames, published or not.
+    fn wait_for_rendered(rt: &RenderThread, n: u64) {
+        let deadline = std::time::Instant::now() + T;
+        while rt.stats().rendered + rt.stats().skipped < n {
+            assert!(std::time::Instant::now() < deadline, "the worker stalled");
+            std::thread::yield_now();
+        }
+    }
+
     fn next_frame(rt: &RenderThread, woken: &mpsc::Receiver<()>) -> RenderedFrame {
         woken.recv_timeout(T).expect("a frame");
         rt.take_latest().expect("published before the wake")
@@ -1061,6 +1137,16 @@ mod tests {
         let scrolled = next_frame(&rt, &woken);
         assert_eq!(scrolled.reuse, FrameReuse::Scrolled { dx: 17, dy: -11 });
         assert!(scrolled.exact, "Final strips over Final pixels stay exact");
+        // What a presenter needs to keep only the new pixels: the frame it
+        // moved, the strips and the whole viewport as covered.
+        assert_eq!(first.base, None);
+        assert_eq!(first.fresh, vec![first.view.viewport]);
+        assert_eq!(scrolled.base, Some(first.generation));
+        assert_eq!(scrolled.covered, scrolled.view.viewport);
+        let fresh_px: u64 = scrolled.fresh.iter().map(|r| r.area()).sum();
+        // The two strips share their corner.
+        assert_eq!(fresh_px, 17 * 180 + 11 * 240);
+        assert_eq!(scrolled.scene_epoch, first.scene_epoch);
         // Only the strips were rasterised.
         let strips = 17 * 180 + 11 * (240 - 17);
         assert!(scrolled.timings.rasterised_pixels <= strips);
@@ -1107,6 +1193,46 @@ mod tests {
         let (mut fresh, fresh_woken) = cpu_thread();
         fresh.submit(fin);
         assert_eq!(next_frame(&fresh, &fresh_woken).surface, f.surface);
+    }
+
+    #[test]
+    fn a_draft_zoom_is_skipped_when_the_presenter_resamples_itself() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        let first = next_frame(&rt, &woken);
+
+        s.apply(crate::Intent::Zoom {
+            factor: 1.25,
+            anchor: crate::DevicePoint::new(100.0, 70.0),
+        })
+        .unwrap();
+        let mut draft = s.frame_job(BG, PAGE);
+        draft.view.quality = RenderQuality::Draft;
+        draft.cpu_rescale = false;
+        rt.submit(draft);
+        wait_for_rendered(&rt, 2);
+        // A pan of the same Draft zoom is skipped too: the kept frame is
+        // still at the old zoom.
+        s.apply(crate::Intent::Pan { dx: 5.0, dy: 0.0 }).unwrap();
+        let mut pan = s.frame_job(BG, PAGE);
+        pan.view.quality = RenderQuality::Draft;
+        pan.cpu_rescale = false;
+        rt.submit(pan);
+        wait_for_rendered(&rt, 3);
+        assert!(
+            rt.take_latest().is_none(),
+            "a skipped frame publishes nothing"
+        );
+        let fin = s.frame_job(BG, PAGE);
+        rt.submit(fin);
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Full);
+        assert!(f.exact);
+        assert!(f.generation > first.generation);
+        let st = rt.stats();
+        assert_eq!(st.skipped, 2, "{st:?}");
+        assert_eq!(st.rescaled, 0, "{st:?}");
     }
 
     #[test]

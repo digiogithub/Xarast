@@ -20,9 +20,10 @@ use crate::input::translate::EventTranslator;
 use crate::paint::{CanvasFrame, Painter, UiFrame};
 use crate::portal::{PortalHandle, PortalService};
 use crate::scale::{PhysicalSize, ScaleFactor};
+use crate::tiles::{CanvasTier, CanvasView, Compositor, TiledFrame};
 use crate::{
-    APP_ID, AdapterReport, BackendPreference, FrameRequest, ShellApp, ShellConfig, ShellError,
-    record_first_frame,
+    APP_ID, AdapterReport, BackendPreference, FrameRequest, PresentTiming, RendererPreference,
+    ShellApp, ShellConfig, ShellError, record_first_frame,
 };
 
 /// What the application is handed on every callback.
@@ -41,6 +42,35 @@ pub struct ShellCtx<'a> {
     pub(crate) frame: &'a mut PendingFrame,
     pub(crate) waker: &'a ShellWaker,
     pub(crate) exit: bool,
+    pub(crate) renderer: Option<RendererStatus>,
+    pub(crate) last_present: Option<PresentTiming>,
+}
+
+/// What presents the canvas, for the status bar and bug reports.
+#[derive(Debug, Clone)]
+pub struct RendererStatus {
+    /// The canvas tier in force.
+    pub tier: CanvasTier,
+    /// The adapter presenting.
+    pub adapter: AdapterReport,
+    /// Why the tier is not GPU tiles, when it is not.
+    pub reason: Option<String>,
+}
+
+impl std::fmt::Display for RendererStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} · {} ({})",
+            self.tier.label(),
+            self.adapter.name,
+            self.adapter.backend
+        )?;
+        if self.adapter.is_software {
+            f.write_str(", software")?;
+        }
+        Ok(())
+    }
 }
 
 /// Wakes the event loop from another thread.
@@ -114,6 +144,7 @@ pub enum CursorShape {
 #[derive(Debug, Default)]
 pub(crate) struct PendingFrame {
     canvas: Option<CanvasOp>,
+    tiles: TileOps,
     ui: Option<UiFrame>,
     /// Read the next presented frame back into a PNG, then maybe exit.
     capture: Option<(std::path::PathBuf, bool)>,
@@ -126,6 +157,14 @@ enum CanvasOp {
     Show(CanvasFrame),
     Move((i32, i32)),
     Clear,
+}
+
+/// What the application handed the tile compositor since the last
+/// present. Frames are applied in order; only the last view matters.
+#[derive(Debug, Default)]
+struct TileOps {
+    frames: Vec<TiledFrame>,
+    view: Option<CanvasView>,
 }
 
 impl ShellCtx<'_> {
@@ -248,6 +287,36 @@ impl ShellCtx<'_> {
     /// Stops showing a canvas.
     pub fn clear_canvas(&mut self) {
         self.frame.canvas = Some(CanvasOp::Clear);
+        self.frame.tiles = TileOps::default();
+    }
+
+    /// Hands over a finished canvas frame to be kept as tiles (`tiles.rs`).
+    /// The shell uploads only what it does not already hold; what is shown
+    /// is decided by [`ShellCtx::set_canvas_view`].
+    pub fn show_tiled_frame(&mut self, frame: TiledFrame) {
+        // Frames queued between presents are all applied, in order, so a
+        // scroll's base is never skipped.
+        self.frame.tiles.frames.push(frame);
+    }
+
+    /// The view the canvas should show at the next present, composited
+    /// from the tiles held. Called every frame: a pan or zoom is on
+    /// screen as soon as its input is, before the render thread answers.
+    pub fn set_canvas_view(&mut self, view: CanvasView) {
+        self.frame.tiles.view = Some(view);
+    }
+
+    /// What presents the canvas: the tier, the adapter and why. `None`
+    /// before the GPU is up.
+    #[must_use]
+    pub const fn renderer(&self) -> Option<&RendererStatus> {
+        self.renderer.as_ref()
+    }
+
+    /// When the previous frame was presented, for latency probes.
+    #[must_use]
+    pub const fn last_present(&self) -> Option<PresentTiming> {
+        self.last_present
     }
 
     /// Hands over one frame of interface output. Its texture changes are
@@ -309,6 +378,8 @@ macro_rules! ctx_of {
             frame: &mut $this.pending,
             waker: &$this.waker,
             exit: false,
+            renderer: $this.gpu.as_ref().map(Gpu::status),
+            last_present: $this.gpu.as_ref().and_then(|g| g.last_present),
         }
     };
 }
@@ -437,37 +508,66 @@ pub(crate) struct Gpu {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     painter: Painter,
+    /// The canvas kept as tiles, on the GPU or in memory.
+    compositor: Compositor,
+    /// The GPU tier has a composite to encode in the next present.
+    tiles_pending: bool,
     /// Where `wgpu` reports the errors it would otherwise panic on.
     errors: GpuErrorSink,
     pub(crate) report: AdapterReport,
+    last_present: Option<PresentTiming>,
+    /// Wait for the GPU after each present (`ShellConfig::probe`).
+    probe: bool,
 }
 
 impl Gpu {
     pub(crate) fn new(
         window: Arc<Window>,
         preference: BackendPreference,
+        renderer: RendererPreference,
+        probe: bool,
     ) -> Result<Self, ShellError> {
+        // The window's display handle goes to the instance: the GL backend
+        // needs it to find an EGL display on Wayland, and without it
+        // `WGPU_BACKEND=gl` found no adapter at all.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: preference.backends(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
+            ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
         });
 
         let surface = instance
             .create_surface(window.clone())
             .map_err(|e| ShellError::Surface(e.to_string()))?;
 
-        // `force_fallback_adapter` stays false: we would rather have the real
-        // GPU. A software adapter is still acceptable if it is all there is,
-        // which is why the failure below is the only hard stop.
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-            ..Default::default()
-        }))
-        .map_err(|_| ShellError::NoAdapter {
-            tried: preference.describe().to_owned(),
-        })?;
+        // The adapter ladder: the one `WGPU_ADAPTER_NAME` names, the
+        // high-performance one, then the software fallback (lavapipe,
+        // llvmpipe, WARP). The first that yields a device wins; only when
+        // none does is it an error, and a diagnosis rather than a panic.
+        let mut chosen = None;
+        let mut failures = Vec::new();
+        for adapter in candidate_adapters(&instance, &surface) {
+            let name = adapter.get_info().name;
+            match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                label: Some("xarast device"),
+                ..Default::default()
+            })) {
+                Ok(dq) => {
+                    chosen = Some((adapter, dq));
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(adapter = %name, error = %e, "device creation failed; trying the next adapter");
+                    failures.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        let Some((adapter, (device, queue))) = chosen else {
+            let mut tried = preference.describe().to_owned();
+            if !failures.is_empty() {
+                tried = format!("{tried}; {}", failures.join("; "));
+            }
+            return Err(ShellError::NoAdapter { tried });
+        };
 
         let info = adapter.get_info();
         let report = AdapterReport {
@@ -491,11 +591,6 @@ impl Gpu {
         };
         tracing::info!(adapter = %report, "selected adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("xarast device"),
-            ..Default::default()
-        }))
-        .map_err(|e| ShellError::Surface(e.to_string()))?;
         // Before anything else touches the device: from here on a
         // validation error is logged and recovered from, never a panic
         // (`ui.md` shell invariant 6).
@@ -538,8 +633,17 @@ impl Gpu {
         if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
+        if probe {
+            // Latency is measured to the present, not to the next vblank.
+            config.present_mode = wgpu::PresentMode::AutoNoVsync;
+        }
         surface.configure(&device, &config);
         let painter = Painter::new(&device, config.format);
+        let compositor = Compositor::new(
+            Arc::new(device.clone()),
+            Arc::new(queue.clone()),
+            renderer.wants_gpu_tiles(),
+        );
 
         Ok(Self {
             surface,
@@ -547,9 +651,27 @@ impl Gpu {
             queue,
             config,
             painter,
+            compositor,
+            tiles_pending: false,
             errors,
             report,
+            last_present: None,
+            probe,
         })
+    }
+
+    /// The renderer in force, for the status bar.
+    pub(crate) fn status(&self) -> RendererStatus {
+        RendererStatus {
+            tier: self.compositor.tier(),
+            adapter: self.report.clone(),
+            reason: self.compositor.reason.clone(),
+        }
+    }
+
+    /// Falls back from GPU tiles to CPU composition, for good.
+    pub(crate) fn demote_canvas(&mut self, why: &str) {
+        self.compositor.demote(why);
     }
 
     pub(crate) fn size(&self) -> PhysicalSize {
@@ -568,10 +690,32 @@ impl Gpu {
     /// Takes over what the application handed in this frame.
     fn apply(&mut self, pending: &mut PendingFrame) {
         match pending.canvas.take() {
-            Some(CanvasOp::Show(f)) => self.painter.set_canvas(&self.device, &self.queue, &f),
-            Some(CanvasOp::Move(o)) => self.painter.move_canvas(o),
-            Some(CanvasOp::Clear) => self.painter.clear_canvas(),
+            Some(CanvasOp::Show(f)) => {
+                // A whole image replaces the compositor's until a view is
+                // set again.
+                self.compositor.deactivate();
+                self.painter.set_canvas(&self.device, &self.queue, &f);
+            }
+            Some(CanvasOp::Move(o)) => {
+                self.painter.move_canvas(o);
+                self.compositor.move_to(o);
+            }
+            Some(CanvasOp::Clear) => {
+                self.compositor.deactivate();
+                self.painter.clear_canvas();
+            }
             None => {}
+        }
+        let tiles = std::mem::take(&mut pending.tiles);
+        for f in tiles.frames {
+            let stats = self.compositor.accept(f);
+            tracing::trace!(?stats, "canvas frame kept as tiles");
+        }
+        if let Some(view) = tiles.view {
+            self.compositor.set_view(view);
+        }
+        if self.compositor.is_active() {
+            self.tiles_pending |= self.compositor.prepare(&mut self.painter);
         }
         if let Some(ui) = pending.ui.take() {
             self.painter.set_ui(&self.device, &self.queue, ui);
@@ -580,7 +724,11 @@ impl Gpu {
 
     /// Presents one frame: the canvas pass, then the interface pass, over
     /// a flat backdrop.
-    fn present(&mut self, capture: Option<&std::path::Path>) -> FrameOutcome {
+    fn present(
+        &mut self,
+        capture: Option<&std::path::Path>,
+        started: std::time::Instant,
+    ) -> FrameOutcome {
         use wgpu::CurrentSurfaceTexture as Cst;
 
         let (frame, suboptimal) = match self.surface.get_current_texture() {
@@ -603,6 +751,9 @@ impl Gpu {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        if std::mem::take(&mut self.tiles_pending) {
+            self.compositor.encode(&mut encoder, &self.painter);
+        }
         self.painter.draw(
             &self.device,
             &mut encoder,
@@ -624,6 +775,17 @@ impl Gpu {
             }
         }
         self.queue.present(frame);
+        let presented = std::time::Instant::now();
+        let gpu_done = self.probe.then(|| {
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            std::time::Instant::now()
+        });
+        self.last_present = Some(PresentTiming {
+            started,
+            presented,
+            gpu_done,
+            tier: self.compositor.tier(),
+        });
         if suboptimal {
             self.reconfigure();
         }
@@ -742,6 +904,45 @@ impl Gpu {
     }
 }
 
+/// The adapters to try, best first: the one `WGPU_ADAPTER_NAME` names (a
+/// case-insensitive substring, as `wgpu`'s own helper reads it, but a
+/// missing match is a warning here, not a panic), the high-performance
+/// default, then the software fallback.
+fn candidate_adapters(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+) -> Vec<wgpu::Adapter> {
+    let mut out = Vec::new();
+    if let Ok(want) = std::env::var("WGPU_ADAPTER_NAME") {
+        let want = want.to_lowercase();
+        let named = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+            .into_iter()
+            .find(|a| {
+                a.is_surface_supported(surface) && a.get_info().name.to_lowercase().contains(&want)
+            });
+        match named {
+            Some(a) => out.push(a),
+            None => {
+                tracing::warn!(wanted = %want, "WGPU_ADAPTER_NAME matches no adapter that can present here")
+            }
+        }
+    }
+    for fallback in [false, true] {
+        if let Ok(a) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(surface),
+            force_fallback_adapter: fallback,
+            ..Default::default()
+        })) {
+            let info = a.get_info();
+            if !out.iter().any(|o: &wgpu::Adapter| o.get_info() == info) {
+                out.push(a);
+            }
+        }
+    }
+    out
+}
+
 /// A frame copied out for `--screenshot`.
 #[derive(Debug)]
 struct Readback {
@@ -797,6 +998,8 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     /// While set, frames are neither drawn nor presented: the GPU is being
     /// left alone after a run of errors.
     backoff_until: Option<std::time::Instant>,
+    /// When the application asked to be redrawn (`FrameRequest::RedrawAfter`).
+    redraw_at: Option<std::time::Instant>,
     /// Frames still to raise a deliberate GPU error in
     /// (`XARAST_INJECT_GPU_ERRORS`); zero in normal use.
     inject_errors: u32,
@@ -838,6 +1041,7 @@ impl<A: ShellApp> ShellLoop<A> {
             drops: None,
             recovery: GpuRecovery::new(),
             backoff_until: None,
+            redraw_at: None,
             inject_errors: std::env::var("XARAST_INJECT_GPU_ERRORS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -909,6 +1113,10 @@ impl<A: ShellApp> ShellLoop<A> {
                 }
             }
             Recovery::Backoff(delay) => {
+                // Errors that survive reconfiguring: stop asking the GPU
+                // to do more than present (the capability ladder's last
+                // rung before giving up on frames altogether).
+                gpu.demote_canvas("repeated GPU errors");
                 tracing::warn!(
                     streak = self.recovery.streak(),
                     delay_ms = delay.as_millis(),
@@ -976,7 +1184,12 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 crate::wayland_dnd::WaylandDrops::new(h.as_raw(), self.waker.clone())
             });
         }
-        match Gpu::new(window.clone(), self.config.backends) {
+        match Gpu::new(
+            window.clone(),
+            self.config.backends,
+            self.config.renderer,
+            self.config.probe,
+        ) {
             Ok(gpu) => {
                 self.report = Some(gpu.report.clone());
                 self.gpu = Some(gpu);
@@ -1021,6 +1234,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 tracing::debug!(scale_factor, "scale factor changed");
             }
             WindowEvent::RedrawRequested => {
+                let started = std::time::Instant::now();
                 self.collect_portal_answers();
                 self.translator.drain_samples(&mut self.events);
                 self.dispatch(event_loop);
@@ -1045,7 +1259,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                     event_loop.exit();
                     return;
                 }
-                apply_frame_request(event_loop, self.window.as_ref(), request);
+                self.redraw_at = apply_frame_request(event_loop, self.window.as_ref(), request);
                 self.publish_accessibility();
 
                 let Some(gpu) = self.gpu.as_mut() else { return };
@@ -1057,7 +1271,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 // deltas must reach the GPU exactly once and in order.
                 gpu.apply(&mut self.pending);
                 let capture = self.pending.capture.take();
-                let outcome = gpu.present(capture.as_ref().map(|(p, _)| p.as_path()));
+                let outcome = gpu.present(capture.as_ref().map(|(p, _)| p.as_path()), started);
                 if outcome != FrameOutcome::Presented {
                     // Not presented, not captured: try again next frame.
                     self.pending.capture = capture;
@@ -1127,6 +1341,20 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
         {
             w.request_redraw();
         }
+        // A timed redraw (the owed Final frame): a `WaitUntil` only wakes
+        // the loop, it draws nothing. Before this, the Final after a
+        // gesture appeared only if something else asked for a frame.
+        if let Some(at) = self.redraw_at {
+            if std::time::Instant::now() >= at {
+                self.redraw_at = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            } else {
+                let until = self.backoff_until.map_or(at, |b| b.min(at));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(until));
+            }
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1144,23 +1372,33 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
 }
 
 /// Turns the application's answer into a control flow and a redraw request.
+///
+/// Returns when a [`FrameRequest::RedrawAfter`] is due: the loop only wakes
+/// at that instant, and `about_to_wait` is what turns the wake-up into a
+/// redraw.
 fn apply_frame_request(
     event_loop: &ActiveEventLoop,
     window: Option<&Arc<Window>>,
     request: FrameRequest,
-) {
+) -> Option<std::time::Instant> {
     match request {
         // Park. `Wait` is what makes an idle window cost nothing; polling
         // here is the difference between 0 % and a busy core.
-        FrameRequest::Idle => event_loop.set_control_flow(ControlFlow::Wait),
+        FrameRequest::Idle => {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        }
         FrameRequest::Redraw => {
             event_loop.set_control_flow(ControlFlow::Wait);
             if let Some(w) = window {
                 w.request_redraw();
             }
+            None
         }
         FrameRequest::RedrawAfter(delay) => {
-            event_loop.set_control_flow(ControlFlow::wait_duration(delay));
+            let at = std::time::Instant::now() + delay;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            Some(at)
         }
     }
 }
