@@ -458,7 +458,7 @@ duplicate while plain `D` is fit drawing — different chords.
       palette colour on a stop or the arm (W8.7); the Hue blend mode; the
       original's double-click-then-drag conical; linear `end2` (skew) handle;
       bitmap-fill handles (phase 10). Profile slider drags produce one undo
-      step per change outside a gesture.
+      step per change outside a gesture (XARA-T-0220).
 
 - [x] **Incremental pick index** (decision 37). Image alpha picking
       is still open.

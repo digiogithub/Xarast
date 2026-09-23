@@ -716,6 +716,28 @@ strips start at the viewport edge. Antialiasing influence is local to one
 pixel, so two rows make a banded render identical to an unbanded one; the
 determinism suite asserts it over four band heights.
 
+**Ramp construction contract (phase 8, XARA-US-0040).** `build_ramp` /
+`build_transparency_ramp` in `xarast-render/src/ramp.rs` are the only table
+builders, used by both backends through `RampCache`; the bias/gain curve
+itself is `xarast_geom::BiasGain::map`, the one implementation (the
+document's `Ramp::sample` calls it too). The identity short-circuit is in
+`build_ramp`; `the_identity_profile_is_exactly_linear_over_2048_entries`
+pins it exact. Lengths: 256 entries at `Draft`, 2048 at `Final` — and a
+node a gesture previews (`Preview::attrs`) always builds 256, because a new
+ramp is made every drag frame; the frame after the release walks it at the
+session's quality again. Pixel comparisons of a preview against its commit
+are exact only at `Draft`.
+
+**`RampCache` evicts least recently used.** The owner calls `begin_frame`
+before a scene build and `evict(budget)` after (the walker, through
+`Resolver::begin_frame` / `trim_ramps`, budget `RAMP_CACHE_BUDGET` = 16 MiB).
+Only tables not used in the current frame are dropped, so every `RampId` of
+the scene just built stays valid; freed slots are reused, and `trim_ramps`
+empties the `transparency_ramps` entry of each evicted id (that side table
+is indexed by ramp id and rebuilt when its length is wrong). The render
+thread's resolver is a snapshot clone, untouched by eviction. A cache that
+never calls `begin_frame` (export, corpus tools) never evicts.
+
 ---
 
 ## Invariants that must not be broken
@@ -849,6 +871,8 @@ determinism suite asserts it over four band heights.
 | 11 | ~~Strokes dashed whole before clipping~~. **Done 2026-09-23** (`stroke_cull`, XARA-T-0022); `fuzz_display_list` now spans the whole extent with unlimited dash patterns | done |
 | 13 | Gradient-heavy export: ≈ 30 ns per composited pixel, and only three 1 MiB bands on a 766 px image. The three `*GradFilledShapes*` files take 2.2–4.5 s | XARA-T-0038 |
 | 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
+| 17 | Dirty region for a fill edit (T8.5.4: old ∪ new fill extent ∩ object bounds). The session still invalidates the whole viewport on every mutation; the render thread's content-hash tile reuse keeps it cheap | XARA-T-0221 |
+| 18 | Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5) | XARA-T-0222 |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
 ### Fuzzing, first runs (2026-09-23)
