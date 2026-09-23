@@ -2,12 +2,13 @@
 id: XARA-US-0049
 type: story
 title: W9.6 — Convert text to shapes
-status: backlog
+status: in_progress
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T17:24:04Z
+started: 2026-09-23T17:24:04Z
 ---
 
 ## Tasks (full table: phase-09 §W9.6)

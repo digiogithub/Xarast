@@ -2,12 +2,13 @@
 id: XARA-US-0046
 type: story
 title: W9.3 — Shaping, line breaking and justification
-status: backlog
+status: in_review
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T17:24:47Z
+started: 2026-09-23T17:24:04Z
 ---
 
 ## Description
