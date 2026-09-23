@@ -2,13 +2,15 @@
 id: XARA-T-0026
 type: task
 title: Give ViewTransform the viewport's Y orientation (vertical ruler reads negative)
-status: backlog
+status: done
 priority: medium
 parent: XARA-US-0081
 author: mcp
 labels: [ui]
 created: 2026-09-23T10:31:45Z
-updated: 2026-09-23T10:36:14Z
+updated: 2026-09-23T10:59:29Z
+started: 2026-09-23T10:55:35Z
+closed: 2026-09-23T10:59:29Z
 ---
 
 ## Description

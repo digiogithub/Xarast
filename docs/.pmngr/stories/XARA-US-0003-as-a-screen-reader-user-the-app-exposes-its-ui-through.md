@@ -2,13 +2,14 @@
 id: XARA-US-0003
 type: story
 title: As a screen-reader user, the app exposes its UI through AccessKit
-status: backlog
+status: in_review
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, a11y]
 estimate: 3
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T09:43:36Z
+updated: 2026-09-23T11:06:05Z
+started: 2026-09-23T11:00:03Z
 ---
 
 ## Description
