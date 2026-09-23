@@ -92,6 +92,8 @@ pub struct Viewer {
     ime_allowed: bool,
     ime_area: Option<[i32; 4]>,
     cursor: CursorShape,
+    /// The window title, which also names the accessibility tree's root.
+    title: String,
 }
 
 /// One interface frame, before it is handed to the shell.
@@ -141,6 +143,7 @@ impl Viewer {
             ime_allowed: false,
             ime_area: None,
             cursor: CursorShape::Default,
+            title: "Xarast".to_owned(),
         }
         .with_external_navigation()
     }
@@ -303,9 +306,13 @@ impl Viewer {
         }
     }
 
-    /// Carries the interface's requests to the platform: the clipboard,
-    /// the input method and the pointer shape.
+    /// Carries the interface's requests to the platform: the accessibility
+    /// tree, the clipboard, the input method and the pointer shape.
     fn platform_output(&mut self, output: egui::PlatformOutput, ctx: &mut ShellCtx<'_>) {
+        if let Some(mut update) = output.accesskit_update {
+            name_the_tree(&mut update, &self.title);
+            ctx.update_accessibility(update);
+        }
         for command in output.commands {
             if let egui::OutputCommand::CopyText(text) = command
                 && let Err(e) = ctx.clipboard().set_text(&text)
@@ -459,6 +466,13 @@ impl Viewer {
                 self.to_open.extend(paths.iter().cloned());
                 redraw = true;
             }
+            ShellEvent::AccessibilityActivated => {
+                // egui builds the tree from the next frame on; the shell
+                // publishes it (`platform_output`).
+                self.egui.enable_accesskit();
+                redraw = true;
+            }
+            ShellEvent::AccessibilityDeactivated => self.egui.disable_accesskit(),
             ShellEvent::GpuError(report) => {
                 // Already logged and being recovered from by the shell;
                 // the status bar says so rather than the window vanishing.
@@ -548,6 +562,22 @@ impl Viewer {
     }
 }
 
+/// Names what egui leaves anonymous: the root node is the window, and a
+/// screen reader announces it by the window's title; the toolkit is
+/// reported as egui's so an assistive technology can apply its quirks.
+fn name_the_tree(update: &mut egui::accesskit::TreeUpdate, title: &str) {
+    let Some(tree) = update.tree.as_mut() else {
+        // An incremental update keeps the names already published.
+        return;
+    };
+    tree.toolkit_name = Some("egui".to_owned());
+    tree.toolkit_version = Some("0.33".to_owned());
+    let root = tree.root;
+    if let Some((_, node)) = update.nodes.iter_mut().find(|(id, _)| *id == root) {
+        node.set_label(title.to_owned());
+    }
+}
+
 fn points(p: PhysicalPos, ppp: f32) -> egui::Pos2 {
     egui::pos2(p.x as f32 / ppp, p.y as f32 / ppp)
 }
@@ -629,7 +659,8 @@ impl ShellApp for Viewer {
                     .and_then(|p| p.file_name())
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                ctx.set_title(&format!("{title} — Xarast"));
+                self.title = format!("{title} — Xarast");
+                ctx.set_title(&self.title);
                 // A new document has no size yet; give it the canvas's.
                 self.primed = false;
             }
@@ -1196,5 +1227,66 @@ mod tests {
             (zoom(&v) - before).abs() > 1e-9 || (before - 1.0).abs() < 1e-9,
             "'1' outside a text field zooms to 100 %"
         );
+    }
+
+    // ---- AccessKit (XARA-US-0003) ---------------------------------------
+
+    #[test]
+    fn an_assistive_technology_gets_a_tree_only_once_it_listens() {
+        let mut v = Viewer::new(Vec::new());
+        v.app.new_document();
+        assert!(
+            ui_frames(&mut v, 2).is_none(),
+            "no tree while nobody listens"
+        );
+        v.handle(&ShellEvent::AccessibilityActivated);
+        let tree = ui_frames(&mut v, 1).expect("a tree once activated");
+        assert!(tree.tree.is_some(), "the first update is a full tree");
+        let mut named = tree.clone();
+        name_the_tree(&mut named, "a.xar — Xarast");
+        let root = named.tree.as_ref().unwrap().root;
+        let root_label = named
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == root)
+            .and_then(|(_, n)| n.label());
+        assert_eq!(root_label, Some("a.xar — Xarast"));
+        let labels: Vec<_> = tree.nodes.iter().filter_map(|(_, n)| n.label()).collect();
+        assert!(
+            labels.iter().any(|l| l.starts_with("Hide layer")),
+            "{labels:?}"
+        );
+        v.handle(&ShellEvent::AccessibilityDeactivated);
+        assert!(ui_frames(&mut v, 2).is_none(), "and none after it leaves");
+    }
+
+    #[test]
+    fn a_screen_reader_click_operates_a_panel_control() {
+        let mut v = Viewer::new(Vec::new());
+        v.app.new_document();
+        v.handle(&ShellEvent::AccessibilityActivated);
+        let tree = ui_frames(&mut v, 2).expect("a tree once activated");
+        let target = tree
+            .nodes
+            .iter()
+            .find_map(|(id, n)| {
+                n.label()
+                    .filter(|l| l.starts_with("Hide layer"))
+                    .map(|_| *id)
+            })
+            .expect("the visibility toggle is published");
+        send(
+            &mut v,
+            &[ShellEvent::AccessibilityAction(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Click,
+                    target,
+                    data: None,
+                },
+            )],
+        );
+        ui_frames(&mut v, 2);
+        let layers = v.ui_model(1.0).document.unwrap().layers;
+        assert!(layers.iter().any(|l| !l.visible), "{layers:?}");
     }
 }

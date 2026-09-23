@@ -117,6 +117,8 @@ pub(crate) struct PendingFrame {
     ui: Option<UiFrame>,
     /// Read the next presented frame back into a PNG, then maybe exit.
     capture: Option<(std::path::PathBuf, bool)>,
+    /// The accessibility tree to publish after this frame.
+    a11y: Option<egui::accesskit::TreeUpdate>,
 }
 
 #[derive(Debug)]
@@ -272,6 +274,15 @@ impl ShellCtx<'_> {
         self.frame.capture = Some((path, exit_after));
     }
 
+    /// Publishes an accessibility tree update to the platform's assistive
+    /// technologies. Only the latest update of a frame is kept; after
+    /// [`ShellEvent::AccessibilityActivated`] it must be a full tree. A
+    /// no-op when nothing is listening or the `accessibility` feature is
+    /// off.
+    pub fn update_accessibility(&mut self, update: egui::accesskit::TreeUpdate) {
+        self.frame.a11y = Some(update);
+    }
+
     /// Asks the shell to quit after this callback.
     pub const fn exit(&mut self) {
         self.exit = true;
@@ -300,6 +311,122 @@ macro_rules! ctx_of {
             exit: false,
         }
     };
+}
+
+/// What the AccessKit handlers leave for the event loop. They run on the
+/// adapter's own thread; the loop drains this on the main thread.
+#[cfg(feature = "accessibility")]
+#[derive(Debug, Default)]
+struct A11yInbox {
+    activated: bool,
+    deactivated: bool,
+    actions: Vec<egui::accesskit::ActionRequest>,
+}
+
+/// The AccessKit adapter bound to the window: the interface's tree on
+/// AT-SPI (and, in phase 14, UIA and NSAccessibility).
+///
+/// The handlers never touch the interface: they record what was asked in
+/// an [`A11yInbox`] and wake the loop, which turns it into
+/// [`ShellEvent`]s. The application answers with
+/// [`ShellCtx::update_accessibility`], published after the frame.
+#[cfg(feature = "accessibility")]
+struct A11y {
+    adapter: accesskit_winit::Adapter,
+    inbox: Arc<std::sync::Mutex<A11yInbox>>,
+}
+
+#[cfg(feature = "accessibility")]
+impl std::fmt::Debug for A11y {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("A11y").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "accessibility")]
+mod a11y_handlers {
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use egui::accesskit::{
+        ActionHandler, ActionRequest, ActivationHandler, DeactivationHandler, TreeUpdate,
+    };
+
+    use super::{A11yInbox, ShellWaker};
+
+    pub(super) struct Handler {
+        pub(super) inbox: Arc<Mutex<A11yInbox>>,
+        pub(super) waker: ShellWaker,
+    }
+
+    impl Handler {
+        fn with(&self, f: impl FnOnce(&mut A11yInbox)) {
+            f(&mut self.inbox.lock().unwrap_or_else(PoisonError::into_inner));
+            self.waker.wake();
+        }
+    }
+
+    impl ActivationHandler for Handler {
+        fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+            // The tree comes from the next interface frame, which the wake
+            // below schedules; AccessKit shows a placeholder until then.
+            self.with(|i| {
+                i.activated = true;
+                i.deactivated = false;
+            });
+            None
+        }
+    }
+
+    impl ActionHandler for Handler {
+        fn do_action(&mut self, request: ActionRequest) {
+            self.with(|i| i.actions.push(request));
+        }
+    }
+
+    impl DeactivationHandler for Handler {
+        fn deactivate_accessibility(&mut self) {
+            self.with(|i| {
+                i.deactivated = true;
+                i.activated = false;
+            });
+        }
+    }
+}
+
+#[cfg(feature = "accessibility")]
+impl A11y {
+    /// Must run before the window is first shown: the adapter refuses a
+    /// visible window.
+    fn new(event_loop: &ActiveEventLoop, window: &Window, waker: &ShellWaker) -> A11y {
+        let inbox = Arc::new(std::sync::Mutex::new(A11yInbox::default()));
+        let handler = || a11y_handlers::Handler {
+            inbox: inbox.clone(),
+            waker: waker.clone(),
+        };
+        let adapter = accesskit_winit::Adapter::with_direct_handlers(
+            event_loop,
+            window,
+            handler(),
+            handler(),
+            handler(),
+        );
+        A11y { adapter, inbox }
+    }
+
+    fn drain(&self, out: &mut Vec<ShellEvent>) {
+        let mut inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::mem::take(&mut inbox.deactivated) {
+            out.push(ShellEvent::AccessibilityDeactivated);
+        }
+        if std::mem::take(&mut inbox.activated) {
+            tracing::info!("an assistive technology is listening; publishing the interface");
+            out.push(ShellEvent::AccessibilityActivated);
+        }
+        out.extend(inbox.actions.drain(..).map(ShellEvent::AccessibilityAction));
+    }
 }
 
 /// The GPU state bound to one window.
@@ -656,6 +783,8 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     events: Vec<ShellEvent>,
     frames: u32,
     consecutive_failures: u32,
+    #[cfg(feature = "accessibility")]
+    a11y: Option<A11y>,
     /// What to do about GPU errors, frame by frame.
     recovery: GpuRecovery,
     /// While set, frames are neither drawn nor presented: the GPU is being
@@ -688,6 +817,8 @@ impl<A: ShellApp> ShellLoop<A> {
             events: Vec::new(),
             frames: 0,
             consecutive_failures: 0,
+            #[cfg(feature = "accessibility")]
+            a11y: None,
             recovery: GpuRecovery::new(),
             backoff_until: None,
             inject_errors: std::env::var("XARAST_INJECT_GPU_ERRORS")
@@ -702,6 +833,9 @@ impl<A: ShellApp> ShellLoop<A> {
     fn window_attributes(&self) -> winit::window::WindowAttributes {
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
+            // Shown once the accessibility adapter is attached, which it
+            // must be before the first map (`A11y::new`).
+            .with_visible(false)
             .with_decorations(self.decorations.request_decorations)
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.size.0,
@@ -778,6 +912,22 @@ impl<A: ShellApp> ShellLoop<A> {
         self.portals.poll(&mut answers);
         self.events
             .extend(answers.into_iter().map(ShellEvent::Portal));
+        #[cfg(feature = "accessibility")]
+        if let Some(a11y) = &self.a11y {
+            a11y.drain(&mut self.events);
+        }
+    }
+
+    /// Hands the application's latest tree to the adapter, which forwards
+    /// it only while an assistive technology is listening.
+    fn publish_accessibility(&mut self) {
+        let update = self.pending.a11y.take();
+        #[cfg(feature = "accessibility")]
+        if let (Some(update), Some(a11y)) = (update, self.a11y.as_mut()) {
+            a11y.adapter.update_if_active(|| update);
+        }
+        #[cfg(not(feature = "accessibility"))]
+        drop(update);
     }
 }
 
@@ -794,6 +944,11 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 return;
             }
         };
+        #[cfg(feature = "accessibility")]
+        {
+            self.a11y = Some(A11y::new(event_loop, &window, &self.waker));
+        }
+        window.set_visible(true);
         match Gpu::new(window.clone(), self.config.backends) {
             Ok(gpu) => {
                 self.report = Some(gpu.report.clone());
@@ -816,6 +971,11 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // AccessKit sees every window event first (focus, above all).
+        #[cfg(feature = "accessibility")]
+        if let (Some(a11y), Some(window)) = (self.a11y.as_mut(), self.window.as_ref()) {
+            a11y.adapter.process_event(window, &event);
+        }
         // Translate first, so that the application sees the event before the
         // shell acts on it and there is exactly one interpretation of each.
         self.translator.translate(&event, &mut self.events);
@@ -859,6 +1019,7 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                     return;
                 }
                 apply_frame_request(event_loop, self.window.as_ref(), request);
+                self.publish_accessibility();
 
                 let Some(gpu) = self.gpu.as_mut() else { return };
                 if self.inject_errors > 0 {

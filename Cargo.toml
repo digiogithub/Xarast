@@ -131,6 +131,17 @@ winit = { version = "0.30", default-features = false, features = [
     "x11",
     "rwh_06",
 ] }
+# The AccessKit platform adapter: carries egui's accessibility tree to AT-SPI
+# on Linux (and UIA/NSAccessibility in phase 14). 0.29.x is the release line
+# built on `accesskit 0.21`, the version `egui 0.33` publishes; 0.34 pairs
+# with 0.25 and would put two incompatible `TreeUpdate` types at the
+# shell/UI boundary (`docs/memory/ui.md`). `async-io`, not `tokio`: no
+# runtime reaches the core. `MIT OR Apache-2.0`.
+accesskit_winit = { version = "0.29.2", default-features = false, features = [
+    "accesskit_unix",
+    "async-io",
+    "rwh_06",
+] }
 # Blocking adaptor for the handful of `wgpu` futures the shell awaits during
 # start-up. No async runtime reaches the core (`research/05 §10.1`).
 # `MIT OR Apache-2.0`.

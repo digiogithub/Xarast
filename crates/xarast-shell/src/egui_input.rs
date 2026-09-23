@@ -200,6 +200,11 @@ impl EguiInput {
                 }
             }
             ShellEvent::Key(k) => self.key(k, clipboard),
+            // A screen reader pressing a button or moving the focus is
+            // input like any other, and egui's own widgets act on it.
+            ShellEvent::AccessibilityAction(request) => self
+                .events
+                .push(egui::Event::AccessKitActionRequest(request.clone())),
             ShellEvent::Ime(ime) => self.events.push(egui::Event::Ime(match ime {
                 ImeEvent::Enabled => egui::ImeEvent::Enabled,
                 ImeEvent::Preedit { text, .. } => egui::ImeEvent::Preedit(text.clone()),
@@ -448,6 +453,19 @@ mod tests {
             egui::Event::Ime(egui::ImeEvent::Commit("漢".to_owned()))
         );
         assert!(!raw.focused);
+    }
+
+    #[test]
+    fn an_accessibility_action_is_egui_input() {
+        let mut input = EguiInput::new();
+        let request = egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Focus,
+            target: egui::accesskit::NodeId(7),
+            data: None,
+        };
+        input.push(&ShellEvent::AccessibilityAction(request.clone()), 1.0, None);
+        let raw = input.take(egui::Rect::ZERO);
+        assert_eq!(raw.events, [egui::Event::AccessKitActionRequest(request)]);
     }
 
     #[test]
