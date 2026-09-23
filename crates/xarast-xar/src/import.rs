@@ -455,7 +455,7 @@ impl<'o> Mapper<'o> {
             opaque: 0,
             current_attributes: 0,
             current_differing: 0,
-            attrs: AttrStack::with_defaults(&xarast_doc::DefaultAttrs::default()),
+            attrs: AttrStack::with_defaults(&xar_defaults()),
             text_restore: Vec::new(),
             pending_high: None,
         }
@@ -849,7 +849,18 @@ impl<'o> Mapper<'o> {
                     rec.tag,
                     &node.children,
                 ))))?;
-                After::Child
+                self.push_scope()?;
+                // The original draws a story that sets no size at its own
+                // factory default, 16 pt, not at the model's; say so
+                // explicitly where the file relies on it.
+                let size = self.attrs.get(AttrSlot::TxtFontSize).clone();
+                if size != xarast_doc::default_for(AttrSlot::TxtFontSize) {
+                    self.builder.attribute(size)?;
+                }
+                let r = self.visit_children(&node.children);
+                self.pop_scope();
+                r?;
+                After::Drop
             }
             Decoded::TextLine => {
                 self.mapped = self.mapped.saturating_add(1);
@@ -1859,6 +1870,16 @@ fn layer_from(children: &[RecordNode]) -> LayerNode {
     layer
 }
 
+/// The attribute values the original starts from where they differ from
+/// the model's defaults: text with no size attribute is 16 pt
+/// (`Kernel/txtattr.cpp:449-452`). The importer mirrors the file's state
+/// from these, and writes a value explicitly wherever a node relies on one.
+fn xar_defaults() -> xarast_doc::DefaultAttrs {
+    let mut d = xarast_doc::DefaultAttrs::default();
+    d.set(AttrValue::FontSize(Mp::new(16_000)));
+    d
+}
+
 fn text_story(s: &crate::decode::TextStory, tag: u32, children: &[RecordNode]) -> TextStoryNode {
     let transform = match s.placement {
         TextPlacement::Simple(p) => Matrix::translate(Vector::new(p.x, p.y)),
@@ -2107,7 +2128,7 @@ mod tests {
                 "size 20000",
                 "a",
                 "b",
-                "size 12000",
+                "size 16000",
                 "c",
                 "d",
                 "\u{1F600}",
@@ -2115,6 +2136,12 @@ mod tests {
                 "EOL"
             ]
         );
+        // The story, which sets no size, carries the original's 16 pt.
+        let story = doc.tree.links(line).parent.unwrap();
+        assert!(doc.tree.children(story).any(|c| matches!(
+            doc.tree.kind(c),
+            Some(NodeKind::Attr(a)) if a.value == AttrValue::FontSize(Mp::new(16_000))
+        )));
     }
 
     #[test]
