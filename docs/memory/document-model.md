@@ -461,3 +461,12 @@ are meant to be one change.
       scripts; a real fuzz target should exist before Phase 3 fuzzes the `.xar`
       parser, so that that work tests the parser rather than rediscovering
       builder bugs.
+- [ ] **`Tx::commit` is O(document size).** `keep_one_active_layer` runs
+      `preorder` over the whole tree on every commit to find the spreads. On
+      the reference machine that makes a single-node edit cost **1.04 ms** to
+      dispatch at 100 000 nodes, while the undo itself costs 0.28 µs. It was
+      found on 2026-09-23 when the `undo/single_node_edit` bench, which timed
+      dispatch and undo together, jumped from 0.27 µs to 1.13 ms. The bench is
+      now split (`dispatch/` and `undo/`). The fix is to keep a spread index,
+      or to check only the spreads whose layers the transaction touched.
+      `docs/memory/perf.md` has the numbers.

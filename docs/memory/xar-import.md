@@ -529,10 +529,14 @@ nodes with `NodeKind::Live`.
   is not in the format at all).
 - Live objects: 1 594 records currently round-trip as `NodeKind::Opaque`
   and should become `NodeKind::Live` in Phase 13.
-- A release-profile import benchmark and the per-file budgets, for
-  `docs/memory/perf.md`.
-- `criterion` benchmarks and the per-tag-family breakdown; append them to
-  `docs/memory/perf.md`, which does not exist yet.
+- ~~A release-profile import benchmark~~: done 2026-09-23 as
+  `cargo bench -p xarast-xar --bench import` (per-file table over the corpus,
+  release). On the reference machine the whole corpus imports in 0.87 s
+  (budget 3 s), but **`ProbeX16.xar` takes 644 ms against the ≤ 350 ms
+  full-import budget**. Parsing is only 129–141 ms of that. The rest is
+  mapping into the model, at about 1.2 µs per node, and that is the part to
+  profile. The numbers are in `docs/memory/perf.md` §`.xar` import.
+- The per-tag-family breakdown of import time.
 - Legacy regular shapes (1000–1217, 1900): zero occurrences in the corpus,
   layout rules in `research/01 §4.7.1`. They currently fall through to
   `UnknownTag`/`Info`, so the object goes missing rather than coming out
