@@ -298,6 +298,20 @@ raycasting, AABBs — `kurbo` already provides in `f64`. Taking it would add a
 second curve vocabulary and a precision boundary for nothing. Revisit only if
 tessellation lands here, which the architecture assigns to `xarast-render`.
 
+### Regular shapes: `regular::regular_shape_outline`
+
+Added 2026-09-23 for XARA-T-0013. It generates polygons, stars and ellipses
+from their parameters, following the facts in `research/01 §4.7.1`. The
+work is in `f64`, and each point is quantised once as it is emitted.
+Primary points are at `π/n + k·2π/n` in the frame
+`cos θ · major − sin θ · minor`. Corner rounding cuts along both edges,
+scaled down when two cuts would overlap, and joins them with one cubic
+whose controls sit at 0.552 of the way to the corner. A one-cubic edge
+template is fitted by a similarity. Anything else is a straight edge.
+NaN, infinite or negative parameters degrade rather than panic, and more
+than `MAX_REGULAR_SIDES` (4096) sides returns `None`, as a bound on
+memory.
+
 ## Invariants that must not be broken
 
 1. **The five `Path` invariants**, enforced by `PathBuilder` by construction

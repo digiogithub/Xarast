@@ -60,15 +60,15 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 |---|---|---|---|
 | Undo of a single-node edit | ≤ 1 ms | 0.28 µs | passes |
 | Redo of a single-node edit | ≤ 1 ms | 0.10 µs | passes |
-| Dispatch (commit) of that edit | — | **1.04 ms** | regression, see below |
+| Dispatch (commit) of that edit | — | ~~1.04 ms~~ **101 ns** | fixed (XARA-T-0030), see below |
 | `walk_render`, 100 000 nodes | ≤ 2.0 ms | 0.87–0.92 ms | passes |
 | `preorder`, 100 000 nodes | ≤ 1.5 ms | 1.07–1.08 ms | passes (2.09 ms on the container) |
 | Random `Tree::get` | ≤ 5 ns | 5.10–5.67 ns | at budget; the figure includes the bench's own index arithmetic |
 | `AttrStack::push` + `pop_scope` | ≤ 20 ns | 12.1–12.9 ns | passes |
 | `AttrResolver::resolve`, warm / cold | ≤ 30 ns / ≤ 2 µs | 18.9 ns / 0.87–0.92 µs | passes |
-| `DocumentBuilder`, 100 000 nodes | ≤ 150 ms | 40–46 ms | passes |
+| `DocumentBuilder`, 100 000 nodes | ≤ 150 ms | ~~40–46 ms~~ 17.9 ms | passes (candidates recorded at `node()`, O(n) validate) |
 | `Document::canonical_digest()` | ≤ 30 ms | 4.1–5.7 ms | passes |
-| `Document::snapshot()` | ≤ 25 ms | **43–80 ms** | **1.7–3.2× over** |
+| `Document::snapshot()` | ≤ 25 ms | ~~43–80 ms~~ **9.7 ms** | passes (dense map, not a HAMT) |
 | `compute_bounds`, 100 000 nodes, cold | ≤ 12 ms | 7.6–8.1 ms | passes |
 | W0 G1: `vello_cpu`, `bulk` 1080p, 1 thread | ≤ 120 ms | **159–164 ms** | **fails** |
 | W0 G1: `vello_cpu`, `bulk` 1080p, 8 P-cores | ≤ 25 ms | **53–58 ms** | **fails** |
@@ -79,8 +79,8 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | `DisplayList::build`, 100 000 commands | ≤ 3 ms | **20.8 ms** | **6.9× over** |
 | Ramp build, 2048 entries, 8 stops, with profile | ≤ 40 µs | 34.5 µs | passes (86.6 µs on the container) |
 | Blend LUT set, 12 families | ≤ 15 ms | 0.28 ms | passes |
-| `.xar` full import, `ProbeX16.xar` (7.4 MB) | ≤ 350 ms | **644 ms** | **1.8× over** |
-| `.xar` full import, whole corpus (59 files, 12.3 MB) | ≤ 3 s | 0.87–0.89 s | passes |
+| `.xar` full import, `ProbeX16.xar` (7.4 MB) | ≤ 350 ms | ~~644 ms~~ **329–343 ms** | passes, thin margin (XARA-T-0031) |
+| `.xar` full import, whole corpus (59 files, 12.3 MB) | ≤ 3 s | ~~0.87–0.89 s~~ 0.46–0.47 s | passes |
 | Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | not yet | XARA-T-0008, needs the viewer |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
@@ -97,8 +97,20 @@ figure went from 0.27 µs on the container to 1.13 ms here. The undo itself is
 which walks the **whole tree** with `preorder` on every commit to find the
 spreads. That makes every edit O(document size). The bench is now split into
 `dispatch/single_node_edit` and `undo/single_node_edit`, so this cannot hide
-again. Not fixed in this round. The fix is to track spreads, or to check only
-the spreads the transaction touched.
+again. **Fixed 2026-09-23 (XARA-T-0030):** the commit now checks only the
+spreads the transaction touched. `dispatch/single_node_edit` went from
+1.96 ms (load ~24) to **101 ns** (100.97–101.23 ns, load ~5). Undo is
+61 ns and redo 102 ns in the same run.
+
+Full `doc` bench after this round (2026-09-23, load 5): walk_render 0.86 ms, preorder 1.05 ms, get 5.1 ns, resolve warm/cold 20 ns / 0.87 µs, builder 17.9 ms, digest 3.4 ms, snapshot 9.0 ms, dispatch 107 ns, undo 61 ns, redo 103 ns, compute_bounds cold 8.2 ms.
+
+**`snapshot()` fixed the same day.** The HAMT of `Arc<NodeData>` cost a
+HAMT insert plus an allocation per node on top of the payload clone. A
+side-by-side scratch measurement at load 19–25 split the cost as follows:
+the payload clones alone 11–18 ms, into a `std` map 21–24 ms, into `imbl`
+28–42 ms, and the old `snapshot()` 26–67 ms. The dense `SecondaryMap`
+took 7–13 ms including the drop. `snapshot/100k` now measures
+**9.7 ms** (9.63–9.83 ms, load 31).
 
 ### Render
 
@@ -136,6 +148,13 @@ load 6 and 19, agree to 0.1 %.
 | `testfiles/20000GradFilledShapes50PCtransparent.xar` | 334 528 | 120 006 | 17.6–17.9 ms | 96–103 ms |
 | `testfiles/20000GradFilledShapes.xar` | 331 360 | 80 006 | 11.2–13.0 ms | 57–59 ms |
 | **All 59 files** | 12 252 824 | 830 533 | 180–200 ms | 870–890 ms |
+
+After XARA-T-0031 (2026-09-23, load 8, three runs): `ProbeX16.xar`
+**329–343 ms** (parse 120–147 ms), `20000GradFilledShapes50PCtransparent`
+53 ms, `20000GradFilledShapes` 35 ms, and **all 59 files 458–473 ms**
+(parse 168–201 ms). Where the time went, and what is left, is in
+`docs/memory/xar-import.md` finding 13. This includes the new
+quick-shape outline generation (~12 ms on ProbeX16's 34 672 shapes).
 
 Per file: median 0.10 ms, p90 4.5–5.1 ms. The parse is about 20 % of an
 import. The rest is mapping into the document model, at roughly 1.2 µs per
