@@ -780,12 +780,20 @@ impl Canon for NodeKind {
                         tangential,
                         left_indent,
                         right_indent,
+                        chars,
                     } => {
                         h.u8(2);
                         h.bool(*reversed);
                         h.bool(*tangential);
                         h.add(left_indent);
                         h.add(right_indent);
+                        // Folded in only when present, so a story that
+                        // never had one keeps the digest it always had.
+                        if !chars.is_identity() {
+                            h.bool(chars.reflected);
+                            h.i32(chars.rotation);
+                            h.i32(chars.shear);
+                        }
                     }
                 }
                 h.bool(t.auto_kern);

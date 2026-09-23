@@ -84,8 +84,10 @@ pub struct WalkStats {
     /// Text that could not be drawn: a story whose visible characters found
     /// no font at all, or a line or item outside any story.
     pub text_pending: usize,
-    /// Stories on a path, drawn along a straight baseline: fitting text to
-    /// its path is W9.5.
+    /// Stories on a path drawn along a straight baseline because their
+    /// path is missing, has no length or cannot be brought into story
+    /// space (a singular story matrix). Every other story on a path
+    /// follows it (W9.5).
     pub text_on_path_pending: usize,
     /// Live effects skipped: regeneration is Phase 13.
     pub live_pending: usize,
@@ -386,6 +388,7 @@ impl SceneWalker {
                         }
                     }
                     if story {
+                        self.paint_story_path(doc, edit, node, &mut attrs, quality, &mut b);
                         self.paint_story(doc, node, &mut attrs, quality, &mut b);
                         walk.control(xarast_doc::Descend::Skip);
                         if previewed && preview_xf.is_some() {
@@ -674,6 +677,55 @@ impl SceneWalker {
         b.finish_node(id, content_hash(doc, node, self.scope));
     }
 
+    /// Paints the path a story on a path follows, under its text, as the
+    /// original does: the story's first `Path` child, with the story's own
+    /// attributes before it and the path's own children in scope. Most
+    /// such paths have no line colour; a visible one is part of the
+    /// design (`Designs/TextCurve.xar`).
+    fn paint_story_path(
+        &mut self,
+        doc: &Document,
+        edit: &EditState,
+        node: NodeId,
+        attrs: &mut AttrStack,
+        quality: RenderQuality,
+        b: &mut SceneBuilder<'_>,
+    ) {
+        let Some(NodeKind::TextStory(story)) = doc.tree.kind(node) else {
+            return;
+        };
+        if !matches!(story.layout, xarast_doc::TextLayout::OnPath { .. }) {
+            return;
+        }
+        let saved = self.scope;
+        attrs.push_scope();
+        for child in doc.tree.children(node) {
+            match doc.tree.kind(child) {
+                Some(NodeKind::Attr(a)) => {
+                    attrs.push(self.attr_value(child, a));
+                    self.scope = mix64(self.scope, node_version(doc, child));
+                }
+                Some(NodeKind::Path(_)) => {
+                    attrs.push_scope();
+                    let inner = self.scope;
+                    for c in doc.tree.children(child) {
+                        if let Some(NodeKind::Attr(a)) = doc.tree.kind(c) {
+                            attrs.push(self.attr_value(c, a));
+                            self.scope = mix64(self.scope, node_version(doc, c));
+                        }
+                    }
+                    self.paint(doc, edit, child, attrs, quality, b);
+                    self.scope = inner;
+                    attrs.pop_scope();
+                    break;
+                }
+                _ => {}
+            }
+        }
+        attrs.pop_scope();
+        self.scope = saved;
+    }
+
     /// Lays a story out (or takes it from the cache) and paints each
     /// attribute run's glyphs with that run's fill, stroke and transparency.
     fn paint_story(
@@ -721,7 +773,7 @@ impl SceneWalker {
                 self.text_ink.union(geom.bounds)
             };
         }
-        if geom.on_path {
+        if geom.on_path_unfitted {
             self.stats.text_on_path_pending += 1;
         }
         let id = scene_id(doc, node);

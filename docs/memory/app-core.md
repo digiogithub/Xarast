@@ -661,8 +661,11 @@ be better run once at `Tx::commit` than after every call.
 - [x] **Text draws** (phase 9 round 2). A story is painted whole at its
       visit (`walker::paint_story`, `text.rs`, `fonts.rs`; contract in
       `text.md`, "Walker integration"). `text_pending` is 0 on the corpus;
-      `text_on_path_pending` is 1 (`Designs/TextCurve.xar`, drawn straight
-      until W9.5). `WalkStats::text_stories` counts drawn stories.
+      `text_on_path_pending` is 0 since W9.5: a story on a path is fitted
+      to its first path child (`text::path_fit`, `lay_story`) and that
+      path is painted under the text (`walker::paint_story_path`); only a
+      story with no usable path is still drawn straight and counted.
+      `WalkStats::text_stories` counts drawn stories.
       `SceneWalker::with_fonts` / `headless::render_with_fonts` pin fonts;
       `viewport::drawing_rect_with` and `Session::scene_ink` include text,
       which has no cached bounds. Font substitutions flow walker →

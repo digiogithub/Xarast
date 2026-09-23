@@ -354,3 +354,78 @@ fn a_placer_positions_every_character_and_changes_nothing_a_reader_sees() {
     .unwrap();
     assert_eq!(bytes, second.into_inner());
 }
+
+/// A story on a path, with a pre-fit character transform and the path it
+/// follows as a child: every parameter comes back, bit for bit (W9.5).
+#[test]
+fn a_story_on_a_path_keeps_its_parameters_and_its_path() {
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    let chars_xf = xarast_doc::CharsTransform {
+        reflected: true,
+        rotation: xarast_doc::CharsTransform::fixed(0.25),
+        shear: -131,
+    };
+    b.node(NodeKind::TextStory(Box::new(TextStoryNode {
+        // No zero in the linear part: `-0.0` and `0.0` print apart.
+        transform: Matrix {
+            a: 1.0,
+            b: 0.125,
+            c: 0.25,
+            d: 1.0,
+            e: Mp::new(1_000),
+            f: Mp::new(2_000),
+        },
+        layout: TextLayout::OnPath {
+            reversed: true,
+            tangential: true,
+            left_indent: Mp::new(3_000),
+            right_indent: Mp::new(4_000),
+            chars: chars_xf,
+        },
+        auto_kern: true,
+        print_as_shapes: false,
+    })))
+    .unwrap();
+    b.push_scope().unwrap();
+    let mut pb = xarast_geom::Path::builder();
+    pb.move_to(xarast_geom::Point::raw(0, 0)).cubic_to(
+        xarast_geom::Point::raw(50_000, 80_000),
+        xarast_geom::Point::raw(150_000, 80_000),
+        xarast_geom::Point::raw(200_000, 0),
+    );
+    let mut path = xarast_doc::PathNode::new(pb.build());
+    path.filled = false;
+    b.node(NodeKind::Path(Box::new(path))).unwrap();
+    b.node(NodeKind::TextLine(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    chars(&mut b, "Round");
+    b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+        .unwrap();
+    b.pop_scope();
+    b.pop_scope();
+    let doc = b.finish().unwrap().0;
+
+    let first = save(&doc, SvgOptions::default());
+    let o = open_reader(Cursor::new(first.clone()), &OpenOptions::default()).unwrap();
+    assert_eq!(layout_view(&doc), layout_view(&o.document));
+    assert_eq!(normal_form(&doc), normal_form(&o.document));
+    let n = story_of(&o.document);
+    let Some(NodeKind::TextStory(s)) = o.document.tree.kind(n) else {
+        panic!("no story");
+    };
+    let TextLayout::OnPath { chars, .. } = s.layout else {
+        panic!("not on a path: {:?}", s.layout);
+    };
+    assert_eq!(chars, chars_xf);
+    let path_child = o
+        .document
+        .tree
+        .children(n)
+        .any(|c| matches!(o.document.tree.kind(c), Some(NodeKind::Path(_))));
+    assert!(path_child, "the path the text follows is kept");
+    let svg = svg_text(&first);
+    assert!(
+        svg.contains("xarast:path-params=\"true true 3 4 true 16384 -131\""),
+        "{svg}"
+    );
+}

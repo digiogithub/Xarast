@@ -639,11 +639,17 @@ impl<'d> Reader<'d, '_, '_> {
                     .split_ascii_whitespace()
                     .collect();
                 let m = |i: usize| p.get(i).and_then(|v| parse::mp(v)).map_or(Mp::ZERO, mp_i32);
+                let fixed = |i: usize| p.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
                 TextLayout::OnPath {
                     reversed: p.first() == Some(&"true"),
                     tangential: p.get(1) == Some(&"true"),
                     left_indent: m(2),
                     right_indent: m(3),
+                    chars: xarast_doc::CharsTransform {
+                        reflected: p.get(4) == Some(&"true"),
+                        rotation: fixed(5),
+                        shear: fixed(6),
+                    },
                 }
             }
             _ => TextLayout::AtPoint,

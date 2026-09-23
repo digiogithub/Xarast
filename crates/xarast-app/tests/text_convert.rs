@@ -441,3 +441,65 @@ fn every_text_designs_story_converts_to_the_same_pixels_and_undoes_exactly() {
     assert!(total > 0);
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// XARA-T-0246: text on a path converts to outlines that follow the path
+/// (the walker's fitted geometry), and the path the text followed stays in
+/// the group, painted as before: `Designs/TextCurve.xar` draws the same
+/// pixels after converting every story, and one undo restores it exactly.
+#[test]
+fn text_on_a_path_converts_to_outlines_along_the_path() {
+    let Some(root) = corpus() else {
+        return;
+    };
+    let path = root.join("Designs/TextCurve.xar");
+    let fonts = fonts();
+    xarast_app::fonts::set_shared(Arc::clone(&fonts));
+    let bytes = std::fs::read(&path).unwrap();
+    let mut s = Session::open_bytes(DocumentId(1), &path, &bytes).unwrap();
+    let on_path = |d: &Document, n: NodeId| {
+        matches!(d.tree.kind(n), Some(NodeKind::TextStory(t))
+            if matches!(t.layout, xarast_doc::TextLayout::OnPath { .. }))
+    };
+    let stories: Vec<NodeId> = s
+        .doc
+        .tree
+        .preorder(s.doc.tree.root())
+        .filter(|n| on_path(&s.doc, *n))
+        .collect();
+    assert!(stories.len() >= 3, "{stories:?}");
+    let frame = xarast_app::viewport::drawing_or_page_rect_with(&s.doc, Some(&fonts));
+    let before = render(&s, &fonts, frame);
+    let digest = s.doc.canonical_digest();
+
+    s.convert_to_shapes(ConvertCommand::with_fonts(
+        stories.clone(),
+        Arc::clone(&fonts),
+    ))
+    .unwrap();
+    assert_eq!(s.bus.history().len(), 1);
+    let groups: Vec<NodeId> = s
+        .edit
+        .selection()
+        .filter(|g| matches!(s.doc.tree.kind(*g), Some(NodeKind::Group(_))))
+        .collect();
+    assert!(groups.len() >= 3, "{groups:?}");
+    for g in &groups {
+        // The followed path first, then one outline per run.
+        let first = s
+            .doc
+            .tree
+            .children(*g)
+            .find(|c| matches!(s.doc.tree.kind(*c), Some(NodeKind::Path(_))));
+        let Some(Some(NodeKind::Path(p))) = first.map(|c| s.doc.tree.kind(c)) else {
+            panic!("group {g:?} has no path");
+        };
+        assert!(!p.filled, "the followed path is a stroke, not an outline");
+    }
+    let after = render(&s, &fonts, frame);
+    let (n, max) = diff(&before, &after);
+    assert_eq!(n, 0, "{n} pixels differ, by up to {max}");
+
+    assert!(s.undo().is_some());
+    assert_eq!(s.doc.canonical_digest(), digest);
+    assert_eq!(diff(&before, &render(&s, &fonts, frame)).0, 0);
+}

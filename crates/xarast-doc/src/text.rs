@@ -31,7 +31,58 @@ pub enum TextLayout {
         left_indent: Mp,
         /// Indent from the end of the path.
         right_indent: Mp,
+        /// What was done to the characters before they were fitted.
+        chars: CharsTransform,
     },
+}
+
+/// The transform applied to the characters of a story on a path **before**
+/// they are fitted to it (the original's `CharsScale`, `CharsRotation` and
+/// `CharsShear`, `docs/research/02-document-model.md` §7.2). A story's own
+/// matrix keeps only what applies after the fit.
+///
+/// Angles are radians in 16.16 fixed point, the file's `ANGLE`, so that the
+/// value survives a round trip bit for bit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct CharsTransform {
+    /// A negative character scale: every character is reflected about its
+    /// baseline, so the text hangs on the other side of the path.
+    pub reflected: bool,
+    /// Rotation. Carried, not drawn: the fit places characters by the
+    /// path's tangent alone (as the original does).
+    pub rotation: i32,
+    /// Shear, the slant of every character.
+    pub shear: i32,
+}
+
+impl CharsTransform {
+    /// Converts a 16.16 angle to radians.
+    #[must_use]
+    pub fn radians(fixed: i32) -> f64 {
+        f64::from(fixed) / 65_536.0
+    }
+
+    /// Converts radians to the 16.16 angle, rounding to the nearest step
+    /// and saturating.
+    #[must_use]
+    pub fn fixed(radians: f64) -> i32 {
+        let v = (radians * 65_536.0).round();
+        if v.is_nan() {
+            0
+        } else {
+            // Saturating by construction: the clamp keeps it in range.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                v.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+            }
+        }
+    }
+
+    /// Whether this is the identity (nothing to write or apply).
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        *self == CharsTransform::default()
+    }
 }
 
 /// Paragraph alignment.
