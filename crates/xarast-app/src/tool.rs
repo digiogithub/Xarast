@@ -271,6 +271,27 @@ pub enum OverlayShape {
         /// Dashed: a construction line.
         dashed: bool,
     },
+    /// A text caret: a line from the bottom of the text line to its top,
+    /// in document space (a rotated story gives a slanted caret). The
+    /// interface blinks it.
+    Caret {
+        /// The bottom end.
+        from: DocPoint,
+        /// The top end.
+        to: DocPoint,
+        /// The strong caret; `false` for the weak half of a split caret at
+        /// a direction boundary.
+        primary: bool,
+        /// Changes whenever the caret moves, so the blink restarts from
+        /// "on" and the caret never vanishes while it is being moved.
+        moved: u64,
+    },
+    /// Selected text on one line: a filled quadrilateral (a rectangle in
+    /// story space, turned with the story).
+    Highlight {
+        /// The corners, in order around the shape.
+        corners: [DocPoint; 4],
+    },
 }
 
 /// The outline of a path as an overlay polyline, flattened to within a
@@ -537,6 +558,8 @@ pub enum CursorKind {
     ZoomIn,
     /// A tool that does nothing yet.
     NotAllowed,
+    /// The text tool: an I-beam.
+    Text,
 }
 
 /// A change of view a tool asks for (the push and zoom tools).
@@ -793,6 +816,38 @@ impl ToolAction {
     }
 }
 
+/// A navigation key given to the text being edited (phase 9, T9.4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextKey {
+    /// Left arrow.
+    Left,
+    /// Right arrow.
+    Right,
+    /// Up arrow.
+    Up,
+    /// Down arrow.
+    Down,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
+}
+
+/// A caret movement asked for from the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextNav {
+    /// Which key.
+    pub key: TextKey,
+    /// Ctrl: by word (arrows), to the story's ends (Home, End).
+    pub word: bool,
+    /// Shift: extend the selection instead of moving the caret.
+    pub extend: bool,
+}
+
 /// A tool: sees the document read-only, writes to a preview, emits commands.
 pub trait Tool: Send + std::fmt::Debug {
     /// Which tool this is.
@@ -834,6 +889,19 @@ pub trait Tool: Send + std::fmt::Debug {
     fn action(&mut self, action: ToolAction, cx: &mut ToolCtx<'_>) -> bool {
         let _ = (action, cx);
         false
+    }
+
+    /// A caret movement key, while [`Tool::text_editing`] says text has
+    /// the keyboard. Returns whether the tool took it.
+    fn text_nav(&mut self, nav: TextNav, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (nav, cx);
+        false
+    }
+
+    /// The text being edited, when a caret is up: the keyboard's
+    /// navigation and typing keys then belong to the text.
+    fn text_editing(&self) -> Option<crate::text_tool::TextEditing> {
+        None
     }
 }
 
@@ -1235,6 +1303,22 @@ impl ToolMachine {
         }
         let id = self.current;
         self.tool_mut(id).is_some_and(|t| t.action(action, cx))
+    }
+
+    /// Sends a caret movement to the tool in force, unless a gesture is in
+    /// flight. Returns whether the tool took it.
+    pub fn text_nav(&mut self, nav: TextNav, cx: &mut ToolCtx<'_>) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id).is_some_and(|t| t.text_nav(nav, cx))
+    }
+
+    /// The text the tool in force is editing, if any.
+    #[must_use]
+    pub fn text_editing(&self) -> Option<crate::text_tool::TextEditing> {
+        self.tool(self.current).and_then(|t| t.text_editing())
     }
 
     /// Sends an infobar edit to the tool in force.

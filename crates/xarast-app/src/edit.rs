@@ -207,7 +207,7 @@ impl ToolId {
     /// of later phases cannot; the palette greys them out.
     #[must_use]
     pub const fn is_available(self) -> bool {
-        !matches!(self, ToolId::Fill | ToolId::Transparency | ToolId::Text)
+        !matches!(self, ToolId::Fill | ToolId::Transparency)
     }
 
     /// Whether the tool does anything on the canvas yet. A tool that can be
@@ -224,6 +224,7 @@ impl ToolId {
                 | ToolId::ShapeEditor
                 | ToolId::Pen
                 | ToolId::Freehand
+                | ToolId::Text
         )
     }
 
@@ -238,9 +239,9 @@ impl ToolId {
             | ToolId::Ellipse
             | ToolId::ShapeEditor
             | ToolId::Pen
-            | ToolId::Freehand => None,
+            | ToolId::Freehand
+            | ToolId::Text => None,
             ToolId::Fill | ToolId::Transparency => Some(8),
-            ToolId::Text => Some(9),
         }
     }
 

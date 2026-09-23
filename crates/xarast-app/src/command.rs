@@ -232,7 +232,7 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 51] = [
+    pub const ALL: [AppCommand; 52] = [
         AppCommand::Open,
         AppCommand::Save,
         AppCommand::SaveAs,
@@ -276,6 +276,7 @@ impl AppCommand {
         AppCommand::Tool(ToolId::Freehand),
         AppCommand::Tool(ToolId::Zoom),
         AppCommand::Tool(ToolId::Pan),
+        AppCommand::Tool(ToolId::Text),
         AppCommand::Action(ToolAction::Finish),
         AppCommand::Action(ToolAction::MakeLine),
         AppCommand::Action(ToolAction::MakeCurve),
@@ -378,6 +379,7 @@ impl AppCommand {
         const PEN: &[KeyChord] = &[KeyChord::shift_f(5)];
         const ZOOM_TOOL: &[KeyChord] = &[KeyChord::shift_f(7)];
         const PUSH: &[KeyChord] = &[KeyChord::shift_f(8)];
+        const TEXT: &[KeyChord] = &[KeyChord::f(8)];
         // The shape editor's keys (`research/04 §4.11`).
         const FINISH: &[KeyChord] = &[KeyChord::plain(ChordKey::Enter)];
         const MAKE_LINE: &[KeyChord] = &[KeyChord::char('l')];
@@ -437,7 +439,8 @@ impl AppCommand {
                 ToolId::Pen => PEN,
                 ToolId::Zoom => ZOOM_TOOL,
                 ToolId::Pan => PUSH,
-                ToolId::Fill | ToolId::Transparency | ToolId::Text => NONE,
+                ToolId::Text => TEXT,
+                ToolId::Fill | ToolId::Transparency => NONE,
             },
             AppCommand::Action(a) => match a {
                 ToolAction::Finish => FINISH,
@@ -585,6 +588,7 @@ mod tests {
             (ToolId::Pen, "Shift+F5"),
             (ToolId::Zoom, "Shift+F7"),
             (ToolId::Pan, "Shift+F8"),
+            (ToolId::Text, "F8"),
         ] {
             assert_eq!(key(AppCommand::Tool(tool)), k, "{tool:?}");
             assert_eq!(
@@ -592,7 +596,6 @@ mod tests {
                 Intent::ChooseTool(tool)
             );
         }
-        assert!(AppCommand::Tool(ToolId::Text).shortcuts().is_empty());
     }
 
     #[test]
