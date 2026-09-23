@@ -897,6 +897,7 @@ mod tests {
                 zoom: 2.0,
                 origin_x: 0.0,
                 origin_y: 0.0,
+                y_up: false,
             },
             ..Default::default()
         };

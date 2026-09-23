@@ -103,6 +103,7 @@ pub fn ticks(axis: Axis, unit: Unit, view: &ViewTransform, length: f64) -> Vec<T
         Axis::Vertical => view.origin_y,
         Axis::Horizontal => view.origin_x,
     };
+    let flip = axis == Axis::Vertical && view.y_up;
     let first = ((0.0 - origin) / step_pts).ceil();
     let count = (((length - (origin + first * step_pts)) / step_pts).floor() as i64 + 1)
         .clamp(0, MAX_TICKS as i64);
@@ -110,10 +111,10 @@ pub fn ticks(axis: Axis, unit: Unit, view: &ViewTransform, length: f64) -> Vec<T
         let index = first as i64 + i;
         let position = origin + index as f64 * step_pts;
         let is_major = index.rem_euclid(subdivisions as i64) == 0;
-        let value = Mp::new(
+        let magnitude = Mp::new(
             major
                 .raw()
-                .saturating_mul((index / subdivisions as i64) as i32)
+                .saturating_mul(index.div_euclid(subdivisions as i64) as i32)
                 .saturating_add(if is_major {
                     0
                 } else {
@@ -123,6 +124,12 @@ pub fn ticks(axis: Axis, unit: Unit, view: &ViewTransform, length: f64) -> Vec<T
                         .saturating_mul(index.rem_euclid(subdivisions as i64) as i32)
                 }),
         );
+        // Down the screen is down the document when `y` points up.
+        let value = if flip {
+            Mp::new(magnitude.raw().saturating_neg())
+        } else {
+            magnitude
+        };
         out.push(Tick {
             position,
             value,
@@ -252,6 +259,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_y_up_vertical_ruler_counts_upwards_and_agrees_with_the_view() {
+        // Document origin 600 points down the canvas, y up: the ruler must
+        // read positive above the origin and each tick must sit exactly
+        // where the view puts its value.
+        let view = ViewTransform {
+            zoom: 3.3,
+            origin_x: 0.0,
+            origin_y: 600.0,
+            y_up: true,
+        };
+        let t = ticks(Axis::Vertical, Unit::Point, &view, 800.0);
+        assert!(t.iter().any(|k| !k.major), "minor ticks are exercised");
+        for tick in &t {
+            let at = view.doc_to_view_y(tick.value);
+            assert!(
+                (at - tick.position).abs() < 1e-6,
+                "{tick:?} is drawn at {at}"
+            );
+        }
+        let above: Vec<_> = t.iter().filter(|k| k.position < 600.0 && k.major).collect();
+        assert!(above.iter().all(|k| k.value.raw() > 0), "{above:?}");
+        assert!(
+            t.windows(2).all(|w| w[0].value > w[1].value),
+            "values fall as the ruler goes down the screen"
+        );
+        // The horizontal ruler is not affected by the vertical flip.
+        let h = ticks(Axis::Horizontal, Unit::Point, &view, 800.0);
+        assert!(h.windows(2).all(|w| w[0].value < w[1].value));
+    }
+
+    #[test]
+    fn minor_ticks_left_of_the_origin_carry_their_own_value() {
+        // Truncating division once gave the minor tick one step left of
+        // zero the value of four steps right of it.
+        let view = ViewTransform {
+            zoom: 3.3,
+            origin_x: 400.0,
+            ..Default::default()
+        };
+        let t = ticks(Axis::Horizontal, Unit::Point, &view, 800.0);
+        assert!(t.iter().any(|k| !k.major && k.value.raw() < 0));
+        for tick in &t {
+            let at = view.doc_to_view_x(tick.value);
+            assert!(
+                (at - tick.position).abs() < 1e-3,
+                "{tick:?} is drawn at {at}"
+            );
+        }
+    }
+
+    #[test]
     fn labels_are_round_numbers_in_the_chosen_unit() {
         for unit in Unit::ALL {
             for zoom in [0.1, 0.5, 1.0, 2.0, 7.3, 50.0] {
@@ -318,6 +376,7 @@ mod tests {
             zoom: 1.0,
             origin_x: 137.0,
             origin_y: 0.0,
+            y_up: false,
         };
         let t = ticks(Axis::Horizontal, Unit::Point, &view, 900.0);
         let zero = t
@@ -336,6 +395,7 @@ mod tests {
             zoom: 1.0,
             origin_x: 137.3,
             origin_y: 41.7,
+            y_up: false,
         };
         for s in [1.0, 1.25, 1.5, 2.0] {
             let scale = Scale::new(s);
@@ -371,6 +431,7 @@ mod tests {
             zoom: 0.0,
             origin_x: f64::NAN,
             origin_y: 0.0,
+            y_up: false,
         };
         assert!(ticks(Axis::Horizontal, Unit::Point, &bad, 500.0).is_empty());
         assert!(

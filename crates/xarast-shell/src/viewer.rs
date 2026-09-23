@@ -554,16 +554,12 @@ fn points(p: PhysicalPos, ppp: f32) -> egui::Pos2 {
 
 /// Projects a session for the interface.
 ///
-/// The interface's [`ViewTransform`] is a scale and an offset with `y`
-/// pointing down, and it has no flip. The document's `y` points up, and
-/// the flip belongs to the [`xarast_app::Viewport`] alone
-/// (`app-core.md` §4). So this projection hands the interface document
-/// coordinates with `y` **negated**, and derives the offset from the
-/// viewport's own transform: the page edge, rulers and grid then land on
-/// exactly the pixels the renderer used, and the viewport stays the only
-/// thing that knows which way up a document is. The ruler's vertical
-/// labels read downwards as a consequence — recorded in `ui.md` as a gap
-/// the `UiModel` convergence closes.
+/// The viewport stays the only thing that decides which way up a document
+/// is (`app-core.md` §4); the interface is told, not asked. The projection
+/// copies the viewport's scale, the device position of the document
+/// origin and its `y`-up orientation into [`ViewTransform`], so the page
+/// edge, the rulers, the grid and the pointer read-out land on exactly the
+/// pixels the renderer used and read document `y` the right way up.
 fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> DocumentView {
     use xarast_geom::Mp;
     let vp = &s.viewport;
@@ -573,6 +569,7 @@ fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> D
         zoom: vp.scale() * f64::from(Mp::PER_PT) / ppp,
         origin_x: origin.x / ppp,
         origin_y: origin.y / ppp,
+        y_up: true,
     };
     let page = xarast_app::viewport::page_rect(&s.doc);
     let doc = &s.doc;
@@ -602,7 +599,8 @@ fn document_view(s: &Session, ppp: f64, keys: &mut Vec<xarast_doc::NodeId>) -> D
     );
     DocumentView {
         title,
-        page: (page.lo.x, -page.hi.y, page.hi.x, -page.lo.y),
+        // Left, top, right, bottom: under a y-up view the top is `hi.y`.
+        page: (page.lo.x, page.hi.y, page.hi.x, page.lo.y),
         layers,
         active_layer: active,
         view,
@@ -742,6 +740,49 @@ mod tests {
             assert!((e - w).abs() <= 1.0, "edge {edge:?} vs rendered {want:?}");
         }
         assert!(edge[1] < edge[3], "top above bottom: {edge:?}");
+    }
+
+    #[test]
+    fn the_vertical_ruler_reads_document_y_over_the_page() {
+        // XARA-T-0026: the ruler used to read negative because the
+        // projection negated y. Every tick drawn over the rendered page must
+        // now carry a value inside the page's own y range, larger nearer
+        // the top, and the pointer read-out must agree with the renderer.
+        let s = session();
+        let ppp = 1.25;
+        let mut keys = Vec::new();
+        let dv = document_view(&s, ppp, &mut keys);
+        let page = xarast_app::viewport::page_rect(&s.doc);
+        let rendered = xarast_app::viewport::device_rect_of(&s.viewport, page);
+        let (top, bottom) = (f64::from(rendered.y0) / ppp, f64::from(rendered.y1) / ppp);
+        let ticks = xarast_ui::rulers::ticks(
+            xarast_ui::Axis::Vertical,
+            xarast_ui::Unit::Point,
+            &dv.view,
+            f64::from(s.viewport.size().height) / ppp,
+        );
+        let over_page: Vec<_> = ticks
+            .iter()
+            .filter(|t| t.position > top + 1.0 && t.position < bottom - 1.0)
+            .collect();
+        assert!(!over_page.is_empty());
+        for t in &over_page {
+            assert!(
+                t.value >= page.lo.y && t.value <= page.hi.y,
+                "tick {t:?} outside the page's y range {:?}..{:?}",
+                page.lo.y,
+                page.hi.y
+            );
+        }
+        assert!(over_page.windows(2).all(|w| w[0].value > w[1].value));
+        // The top edge of the rendered page reads as the page's top.
+        let read = dv.view.view_to_doc_y(top);
+        let tolerance = xarast_geom::Mp::from_pt(1.0 / dv.view.zoom).raw();
+        assert!(
+            (read.raw() - page.hi.y.raw()).abs() <= tolerance,
+            "{read:?} vs {:?}",
+            page.hi.y
+        );
     }
 
     #[test]

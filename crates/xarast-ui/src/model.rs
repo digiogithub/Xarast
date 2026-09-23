@@ -101,8 +101,12 @@ impl PaletteEntry {
 /// how the rule "exactly one owner of the view transform" is enforced by
 /// construction rather than by discipline.
 ///
-/// The mapping is a scale and a translation — the viewport never rotates —
-/// and is kept in `f64` throughout, as architecture §3.4 requires.
+/// The mapping is a scale, a translation and an orientation — the viewport
+/// never rotates — and is kept in `f64` throughout, as architecture §3.4
+/// requires. The orientation is the viewport's, copied, never decided here:
+/// a document's `y` points up and the screen's down, and
+/// [`ViewTransform::y_up`] is how the interface knows, so that the vertical
+/// ruler, the pointer read-out and hit-testing all agree with the renderer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewTransform {
     /// Logical points on screen per document point. `1.0` is 100 %.
@@ -112,6 +116,10 @@ pub struct ViewTransform {
     pub origin_x: f64,
     /// The vertical half of the same.
     pub origin_y: f64,
+    /// Document `y` grows upwards on screen. True for a real document —
+    /// the application's viewport flips `y` — and false for the plain
+    /// `y`-down mapping the widget tests use.
+    pub y_up: bool,
 }
 
 impl Default for ViewTransform {
@@ -120,6 +128,7 @@ impl Default for ViewTransform {
             zoom: 1.0,
             origin_x: 0.0,
             origin_y: 0.0,
+            y_up: false,
         }
     }
 }
@@ -132,7 +141,12 @@ impl ViewTransform {
 
     /// Maps a document y coordinate to a canvas-relative point coordinate.
     pub fn doc_to_view_y(&self, y: Mp) -> f64 {
-        y.to_pt() * self.zoom + self.origin_y
+        self.y_sign() * y.to_pt() * self.zoom + self.origin_y
+    }
+
+    /// `-1` when document `y` grows upwards on screen, else `1`.
+    pub fn y_sign(&self) -> f64 {
+        if self.y_up { -1.0 } else { 1.0 }
     }
 
     /// Maps a canvas-relative point coordinate back to document space.
@@ -146,7 +160,7 @@ impl ViewTransform {
 
     /// The vertical half of [`ViewTransform::view_to_doc_x`].
     pub fn view_to_doc_y(&self, y: f64) -> Mp {
-        Mp::from_pt((y - self.origin_y) / self.zoom)
+        Mp::from_pt(self.y_sign() * (y - self.origin_y) / self.zoom)
     }
 
     /// The zoom as the percentage the status bar shows.
@@ -155,7 +169,9 @@ impl ViewTransform {
     }
 
     /// The document rectangle visible in a canvas region of this size, in
-    /// logical points.
+    /// logical points, as left, top, right, bottom — "top" being the edge
+    /// at the top of the screen, which is the larger `y` when
+    /// [`ViewTransform::y_up`].
     pub fn visible_doc_rect(&self, width: f64, height: f64) -> (Mp, Mp, Mp, Mp) {
         (
             self.view_to_doc_x(0.0),
@@ -270,7 +286,8 @@ pub struct DocumentView {
     /// The window and tab title.
     pub title: String,
     /// The page rectangle, in document coordinates: left, top, right,
-    /// bottom.
+    /// bottom, where "top" is the edge drawn at the top of the screen —
+    /// the larger `y` under a [`ViewTransform::y_up`] view.
     pub page: (Mp, Mp, Mp, Mp),
     /// The layers, bottom-most first, as the panel lists them top-most
     /// first after reversing.
@@ -476,6 +493,7 @@ mod tests {
             zoom: 1.37,
             origin_x: 41.5,
             origin_y: -12.25,
+            y_up: false,
         };
         for raw in [-500_000, -1_000, 0, 1_000, 72_000, 500_000] {
             let p = Mp::new(raw);
@@ -490,6 +508,7 @@ mod tests {
             zoom: 1.0,
             origin_x: 10.0,
             origin_y: 20.0,
+            y_up: false,
         };
         let (ax, ay) = (300.0, 200.0);
         let before = (v.view_to_doc_x(ax), v.view_to_doc_y(ay));
@@ -518,6 +537,40 @@ mod tests {
         assert_eq!(v.zoom, 1.0);
         assert_eq!(v.origin_x, 30.0);
         assert_eq!(v.origin_y, -15.0);
+    }
+
+    #[test]
+    fn a_y_up_view_puts_larger_y_higher_and_round_trips() {
+        let v = ViewTransform {
+            zoom: 2.0,
+            origin_x: 10.0,
+            origin_y: 500.0,
+            y_up: true,
+        };
+        let high = v.doc_to_view_y(Mp::from_pt(100.0));
+        let low = v.doc_to_view_y(Mp::from_pt(10.0));
+        assert!(high < low, "larger y is nearer the top: {high} vs {low}");
+        assert!((v.doc_to_view_y(Mp::ZERO) - 500.0).abs() < 1e-9);
+        let back = v.view_to_doc_y(v.doc_to_view_y(Mp::from_pt(-42.5)));
+        assert!((back.to_pt() + 42.5).abs() < 1e-3, "{back:?}");
+        let (_, top, _, bottom) = v.visible_doc_rect(800.0, 600.0);
+        assert!(top > bottom);
+    }
+
+    #[test]
+    fn zooming_a_y_up_view_keeps_the_anchor_on_the_same_document_point() {
+        let v = ViewTransform {
+            zoom: 1.0,
+            origin_x: 0.0,
+            origin_y: 400.0,
+            y_up: true,
+        };
+        let before = v.view_to_doc_y(150.0);
+        let after = v.zoomed_about(3.0, 200.0, 150.0).view_to_doc_y(150.0);
+        assert!(
+            (after.raw() - before.raw()).abs() <= 1,
+            "{before:?} vs {after:?}"
+        );
     }
 
     #[test]
