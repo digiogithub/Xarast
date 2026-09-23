@@ -410,7 +410,7 @@ impl Shaper {
                 .or_else(|| runs.first());
             if let Some(s) = s {
                 let q = s.font.clone();
-                if let Some(m) = db.query(&q, None)
+                if let Some(m) = db.query(&q, s.panose)
                     && let Some(fm) = face_metrics(st, db, m.face, &Arc::from(Vec::new()))
                 {
                     let sm = fm.scaled(s.effective_size());

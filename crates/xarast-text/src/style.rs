@@ -167,6 +167,10 @@ pub struct StyleRange {
     pub variations: Arc<[FontVariation]>,
     /// Underline. Carried through to the output; drawing it is the renderer's.
     pub underline: bool,
+    /// The document's PANOSE classification of the face, when it has one:
+    /// the substitution ladder uses it to pick a generic family for a face
+    /// that is not installed.
+    pub panose: Option<[u8; 10]>,
 }
 
 impl StyleRange {
@@ -184,6 +188,7 @@ impl StyleRange {
             features: Arc::from(Vec::new()),
             variations: Arc::from(Vec::new()),
             underline: false,
+            panose: None,
         }
     }
 
@@ -193,15 +198,18 @@ impl StyleRange {
         self.script.effective_size(self.size)
     }
 
-    /// The em width: the effective size stretched by the aspect ratio. Tracking
-    /// and manual kerns are thousandths of this.
+    /// The em width: the effective size stretched by the aspect ratio.
+    /// Tracking and manual kerns are thousandths of this times the face's
+    /// `'M'` width over its em, which layout applies (`'M'` is the
+    /// original's em character, `wxOil/textfuns.h:114`).
     #[must_use]
     pub fn em_width(&self) -> Mp {
         self.effective_size()
             .scale(f64::from(sanitize_aspect(self.aspect)))
     }
 
-    /// Tracking converted to millipoints at this run's em width.
+    /// Tracking converted to millipoints at this run's em width, for a face
+    /// whose `'M'` is one em wide (layout scales by the real face's).
     #[must_use]
     pub fn tracking_mp(&self) -> Mp {
         self.em_width().mul_ratio(self.tracking, 1000)
