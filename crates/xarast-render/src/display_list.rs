@@ -24,7 +24,7 @@ use crate::cache::CacheKey;
 use crate::paint::{GradMapping, ImageId, Paint};
 use crate::path::PathRef;
 use crate::precision::Transform2D;
-use crate::scene::{LayerKind, RenderQuality, Scene, SceneNodeId, SceneOp};
+use crate::scene::{Cull, LayerKind, RenderQuality, Scene, SceneNodeId, SceneOp, stroke_pad};
 use crate::surface::{DeviceRect, DirtyRect};
 
 /// The chord error a `Final` render allows, in device pixels.
@@ -359,7 +359,15 @@ impl DisplayList {
             None => view.viewport,
         };
         let ops = Arc::clone(&scene.ops);
-        let mut cmds: Vec<DrawCmd> = Vec::with_capacity(ops.len());
+        // A full build keeps nearly every op; a culled one (a pan strip)
+        // keeps a few, and a list sized to the scene would be a fresh
+        // multi-megabyte allocation per strip.
+        let culled = clip_to != view.viewport;
+        let mut cmds: Vec<DrawCmd> = Vec::with_capacity(if culled {
+            ops.len().min(4096)
+        } else {
+            ops.len()
+        });
         let mut xforms: Vec<Transform2D> = vec![view.transform];
         let mut paints: Vec<Paint> = Vec::new();
         let mut transps: Vec<Transparency> = Vec::new();
@@ -374,14 +382,47 @@ impl DisplayList {
         let mut xf_i = 0u32;
         let mut xf = view.transform;
 
+        let mut doc_window = window_in_document(culled, clip_to, xf);
         for (i, op) in ops.iter().enumerate() {
             let op_i = idx(i);
+            // Reject a primitive on its culling entry before touching the
+            // op; the bounds come out bit-identical to `device_bounds_of`.
+            // A full build keeps nearly everything and reads every op
+            // anyway, so only a culled one consults the entries.
+            let pre = if culled {
+                let (r, stroke) = match scene.cull.get(i) {
+                    Some(Cull::Never) => continue,
+                    Some(Cull::Fill(r)) => (*r, false),
+                    Some(Cull::Stroke(r)) => (*r, true),
+                    Some(Cull::Visit) | None => (kurbo::Rect::ZERO, false),
+                };
+                if matches!(scene.cull.get(i), Some(Cull::Fill(_) | Cull::Stroke(_))) {
+                    // Four compares in document space reject most of a
+                    // strip's misses before any corner is transformed.
+                    if let Some(q) = doc_window
+                        && (r.x1 < q.x0 || r.x0 > q.x1 || r.y1 < q.y0 || r.y0 > q.y1)
+                    {
+                        continue;
+                    }
+                    let b = device_bounds_of_rect(r, xf);
+                    let b = if stroke { b.inflated(1) } else { b };
+                    if !b.intersects(clip_to) {
+                        continue;
+                    }
+                    Some(b)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             match op {
                 SceneOp::PushGroup { xf: g, .. } => {
                     xf_i = idx(xforms.len());
                     xf = g.then(xf);
                     xforms.push(xf);
                     xf_stack.push(xf_i);
+                    doc_window = window_in_document(culled, clip_to, xf);
                 }
                 SceneOp::PopGroup => {
                     if xf_stack.len() > 1 {
@@ -389,6 +430,7 @@ impl DisplayList {
                     }
                     xf_i = xf_stack.last().copied().unwrap_or(0);
                     xf = xforms.get(xf_i as usize).copied().unwrap_or(view.transform);
+                    doc_window = window_in_document(culled, clip_to, xf);
                 }
                 SceneOp::PushClip { .. } => cmds.push(DrawCmd::PushClip { op: op_i, xf: xf_i }),
                 SceneOp::PopClip => cmds.push(DrawCmd::PopClip),
@@ -422,7 +464,7 @@ impl DisplayList {
                     transparency,
                     ..
                 } => {
-                    let b = device_bounds_of(path, xf, 0.0);
+                    let b = pre.unwrap_or_else(|| device_bounds_of(path, xf, 0.0));
                     if !b.intersects(clip_to) {
                         continue;
                     }
@@ -447,12 +489,9 @@ impl DisplayList {
                 } => {
                     // A hairline is one device pixel; anything else spreads
                     // by half its width, plus the mitre allowance.
-                    let pad = if style.width == xarast_geom::Mp::ZERO {
-                        0.0
-                    } else {
-                        style.width.to_f64() * 0.5 * style.mitre_limit.max(1.0)
-                    };
-                    let b = device_bounds_of(path, xf, pad).inflated(1);
+                    let b = pre.unwrap_or_else(|| {
+                        device_bounds_of(path, xf, stroke_pad(style)).inflated(1)
+                    });
                     if !b.intersects(clip_to) {
                         continue;
                     }
@@ -797,6 +836,47 @@ pub fn device_bounds_of(path: &PathRef, xf: Transform2D, pad_doc: f64) -> Device
         r.x1 + pad_doc,
         r.y1 + pad_doc,
     );
+    device_bounds_of_rect(r, xf)
+}
+
+/// The dirty rectangle in document space, grown so that a rectangle
+/// outside it certainly has device bounds outside the dirty rectangle, or
+/// `None` when that cannot be had cheaply: a full build, or a transform
+/// that rotates or shears (the image of a box is then not a box).
+///
+/// The margin covers what `device_bounds_of` adds on top of the exact
+/// image: the outward rounding, its pixel of antialiasing slack and a
+/// stroke's extra pixel, with one to spare for the inverse's rounding.
+fn window_in_document(culled: bool, clip: DeviceRect, xf: Transform2D) -> Option<kurbo::Rect> {
+    const MARGIN_PX: f64 = 4.0;
+    if !culled || clip.is_empty() {
+        return None;
+    }
+    let [a, b, c, d, e, f] = xf.to_affine().as_coeffs();
+    if b != 0.0 || c != 0.0 || !(a.is_finite() && d.is_finite() && e.is_finite() && f.is_finite()) {
+        return None;
+    }
+    if a.abs() < 1e-12 || d.abs() < 1e-12 {
+        return None;
+    }
+    let (x0, x1) = (
+        (f64::from(clip.x0) - MARGIN_PX - e) / a,
+        (f64::from(clip.x1) + MARGIN_PX - e) / a,
+    );
+    let (y0, y1) = (
+        (f64::from(clip.y0) - MARGIN_PX - f) / d,
+        (f64::from(clip.y1) + MARGIN_PX - f) / d,
+    );
+    Some(kurbo::Rect::new(
+        x0.min(x1),
+        y0.min(y1),
+        x0.max(x1),
+        y0.max(y1),
+    ))
+}
+
+/// [`device_bounds_of`] for document bounds already padded.
+fn device_bounds_of_rect(r: kurbo::Rect, xf: Transform2D) -> DeviceRect {
     let a = xf.to_affine();
     let corners = [
         a * kurbo::Point::new(r.x0, r.y0),
@@ -1006,6 +1086,82 @@ mod tests {
                 ));
             }
             other => panic!("expected a PopLayer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_culled_build_keeps_exactly_what_the_full_build_has_in_the_rect() {
+        // The document-space pre-rejection must be conservative: a culled
+        // build is the full build's commands filtered by the dirty rect.
+        let mut s: u64 = 0x0dd_ba11;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for round in 0..40 {
+            let mut scene = Scene::new();
+            let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+            let flip = if round % 2 == 0 { 1.0 } else { -1.0 };
+            b.push_group(
+                SceneNodeId(0),
+                Transform2D::new([
+                    flip * (0.5 + next()),
+                    0.0,
+                    0.0,
+                    0.5 + next() * 2.0,
+                    next() * 100_000.0 * flip,
+                    next() * 50_000.0,
+                ]),
+                CacheHint::Auto,
+            );
+            for i in 0..300u64 {
+                let (x, y) = (next() * 220.0 - 20.0, next() * 220.0 - 20.0);
+                let (w, h) = (next() * 30.0, next() * 30.0);
+                let path = rect_path(x, y, x + w, y + h);
+                if i % 3 == 0 {
+                    let style = StrokeStyle {
+                        width: xarast_geom::Mp::from_pt(next() * 6.0),
+                        ..StrokeStyle::default()
+                    };
+                    b.stroke(SceneNodeId(i + 1), &path, style, Paint::Solid(Rgba8::BLACK));
+                } else {
+                    b.fill(
+                        SceneNodeId(i + 1),
+                        &path,
+                        FillRule::NonZero,
+                        Paint::Solid(Rgba8::BLACK),
+                    );
+                }
+            }
+            b.pop_group();
+            b.finish().unwrap();
+            let v = view();
+            let full = DisplayList::build(&scene, &v, &DirtyRect::NONE);
+            for _ in 0..8 {
+                let x0 = (next() * 200.0) as i32;
+                let y0 = (next() * 200.0) as i32;
+                let rect = DeviceRect::new(
+                    x0,
+                    y0,
+                    x0 + 1 + (next() * 60.0) as i32,
+                    y0 + 1 + (next() * 8.0) as i32,
+                );
+                let clip = rect.intersection(v.viewport);
+                let culled = DisplayList::build(&scene, &v, &DirtyRect::of(rect));
+                let want: Vec<DrawCmd> = full
+                    .commands()
+                    .iter()
+                    .filter(|c| c.bounds().is_some_and(|b| b.intersects(clip)))
+                    .copied()
+                    .collect();
+                assert_eq!(
+                    culled.commands(),
+                    want.as_slice(),
+                    "round {round}, rect {rect:?}"
+                );
+            }
         }
     }
 
