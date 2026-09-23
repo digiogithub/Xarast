@@ -150,6 +150,10 @@ pub enum AppCommand {
     FitDrawing,
     /// View › 100 %.
     Zoom100,
+    /// View › Zoom to selection. The original's key for it is Redo here
+    /// (`tools.md`), so it takes `3`, which is where other editors keep
+    /// it.
+    ZoomSelection,
     /// Edit › Undo.
     Undo,
     /// Edit › Redo.
@@ -170,7 +174,7 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 21] = [
+    pub const ALL: [AppCommand; 22] = [
         AppCommand::Open,
         AppCommand::Close,
         AppCommand::Quit,
@@ -184,6 +188,7 @@ impl AppCommand {
         AppCommand::FitPage,
         AppCommand::FitDrawing,
         AppCommand::Zoom100,
+        AppCommand::ZoomSelection,
         AppCommand::Tool(ToolId::Selector),
         AppCommand::Tool(ToolId::ShapeEditor),
         AppCommand::Tool(ToolId::Rectangle),
@@ -206,6 +211,7 @@ impl AppCommand {
             AppCommand::FitPage => "Fit page",
             AppCommand::FitDrawing => "Fit drawing",
             AppCommand::Zoom100 => "100 %",
+            AppCommand::ZoomSelection => "Zoom to selection",
             AppCommand::Undo => "Undo",
             AppCommand::Redo => "Redo",
             AppCommand::Delete => "Delete",
@@ -238,6 +244,7 @@ impl AppCommand {
         const FIT_PAGE: &[KeyChord] = &[KeyChord::char('0'), KeyChord::plain(ChordKey::Home)];
         const FIT_DRAWING: &[KeyChord] = &[KeyChord::char('d')];
         const ZOOM_100: &[KeyChord] = &[KeyChord::char('1')];
+        const ZOOM_SELECTION: &[KeyChord] = &[KeyChord::char('3')];
         const UNDO: &[KeyChord] = &[KeyChord::ctrl('z')];
         // Ctrl+Shift+Z first because every other Linux program shows it;
         // Ctrl+Y is the original's (`research/04 §4.1`).
@@ -264,6 +271,7 @@ impl AppCommand {
             AppCommand::FitPage => FIT_PAGE,
             AppCommand::FitDrawing => FIT_DRAWING,
             AppCommand::Zoom100 => ZOOM_100,
+            AppCommand::ZoomSelection => ZOOM_SELECTION,
             AppCommand::Undo => UNDO,
             AppCommand::Redo => REDO,
             AppCommand::Delete => DELETE,
@@ -316,6 +324,7 @@ impl AppCommand {
             AppCommand::FitPage => Intent::ZoomTo(ZoomTarget::Page),
             AppCommand::FitDrawing => Intent::ZoomTo(ZoomTarget::Drawing),
             AppCommand::Zoom100 => Intent::ZoomTo(ZoomTarget::Percent100),
+            AppCommand::ZoomSelection => Intent::ZoomTo(ZoomTarget::Selection),
             AppCommand::Undo => Intent::Undo,
             AppCommand::Redo => Intent::Redo,
             AppCommand::Delete => Intent::DeleteSelection,

@@ -69,6 +69,7 @@ impl AppMenu {
                 for c in [
                     AppCommand::FitPage,
                     AppCommand::FitDrawing,
+                    AppCommand::ZoomSelection,
                     AppCommand::Zoom100,
                 ] {
                     command_item(ui, model, c, out);
