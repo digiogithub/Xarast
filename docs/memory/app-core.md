@@ -311,10 +311,24 @@ be better run once at `Tx::commit` than after every call.
       and cancellation (`phase-05 §U5.5`) belong with the shell's thread
       topology and were left for whoever lands `U2.7`, so that the
       channel type is not invented twice.
-- [ ] **`xarast-cli` is not wired.** The headless API and
-      `examples/render_headless.rs` are here; the `render` and
-      `smoke-open` subcommands were deliberately left alone to avoid
-      colliding with concurrent work.
+- [x] **`xarast-cli` is wired** (XARA-T-0004). `xarast-cli render` and
+      `xarast-cli smoke-open` use only the public API: `Session::open`,
+      `Session::viewport`, `headless::render` and `Session::walk_stats`.
+      Three API gaps are worked around in `crates/xarast-cli/src/render.rs`
+      and tracked as XARA-T-0012:
+      1. `HeadlessResult` has no `WalkStats`, so the CLI walks a second time.
+      2. `HeadlessOptions` cannot express a fixed zoom or dpi, so the CLI
+         sets `session.viewport` itself and passes `fit_drawing: false`.
+      3. **`drawing_rect` includes the page nodes**, because
+         `compute_bounds_with` gives `Page` its rectangle. "The drawing" is
+         therefore pages ∪ ink, and `fit_drawing` frames the whole page
+         around a small drawing. The CLI uses its own `ink_rect`: the
+         children of the active spread's visible, non-guide layers.
+- [ ] **Quick shapes with a cached path have zero-area bounds**
+      (XARA-T-0013). `RedStar`, `Test00` and `TestBitmapFill` walk to one
+      primitive, but the display list culls it, so they paint nothing.
+      That is why the corpus has 38 files with scene primitives but 35
+      with painted pixels.
 - [ ] **No `criterion` bench yet** for `cargo bench -p xarast-app --
       viewport` (acceptance criterion 4). It needs the 100 000-object
       synthetic document from `xarast_doc::synth` and a scripted

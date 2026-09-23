@@ -106,6 +106,50 @@ unmeasured rather than estimated. Full context in `docs/memory/ui.md`.
 | Frame build at 1× / 1.25× / 1.5× | no scale cliff | **1.77 / 1.79 / 1.78 ms** | rows are 20/25/30 device px |
 | AccessKit tree, full probe | tree, fields, toggles present | **2,415 nodes, 1,752 labelled** | list roles are published by us, not by egui |
 
+## Corpus render at 100 % (`xarast-cli render`)
+
+```text
+cargo build --release -p xarast-cli
+xarast-cli render $XARAST_XAR_CORPUS/{testfiles,Designs,Templates,TextDesigns} \
+    --out-dir <scratch>          # never into the repository
+```
+
+These are the 59 corpus files on the deterministic CPU config, `Final` quality,
+96 dpi, each framed on its own drawing. Measured 2026-09-23 on a different
+machine from the Phase 4/5 rows: **Intel Core Ultra 9 285, 24 threads, 93 GiB,
+no GPU**. Another agent was building on the same machine at the time, so treat
+the numbers as ±20 %.
+
+| Measure | Value |
+|---|---|
+| Wall time, whole run (one process) | **29.2 s**, peak RSS 505 MiB |
+| Open (read + import), all 59 files | 0.94–0.98 s; slowest is `ProbeX16` at 0.65 s |
+| Render, all 59 files | 26.9–33.4 s |
+| PNG encode + write, all 59 files | 0.69–0.79 s |
+| Render per file, median | **≈ 0.7 ms** |
+| Render per file, p90 | ≈ 135–180 ms |
+| Render, the three `*GradFilledShapes*` files | **9.8 / 10.2 / 10.9 s** (766×739 and 766×880 px, 10 000–20 000 gradient fills) |
+| Render, the other 56 files together | ≈ 2.5 s; next-slowest are `ProbeX16` 1.07 s and `SimpleSphere` 0.66 s |
+
+Ink versus blank:
+
+- **38** files produce scene primitives and **21** do not: the 8 empty
+  templates and 13 text-only `TextDesigns`, since text is Phase 9.
+- **35** files paint pixels and **24** are blank. The extra three
+  (`RedStar`, `Test00`, `TestBitmapFill`) are quick shapes with zero-area
+  bounds, which the display list culls (XARA-T-0013).
+
+`smoke-open` over the same four directories reports "59 opened
+(36 complete, 38 with primitives)". In total, 7 777 text nodes and 25 images
+are still pending.
+
+**The gradient files are the finding.** 10 000 gradient-filled shapes take
+10 s at 0.57 Mpx. Phase 4 measured 20 000 *flat* fills at 24.6 ms at 1080p,
+so gradients cost roughly 400× more per frame. `--quality draft` only brings
+the first file down to 6.5 s. At 192×192 it takes 0.45 s, so the cost scales
+with pixels × gradient objects. That points at per-object, full-bbox ramp
+work that is neither tiled nor cached. Tracked as XARA-T-0014.
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape

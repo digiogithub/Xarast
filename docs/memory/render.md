@@ -45,7 +45,7 @@ What is **not** in it, and who owns it:
 | Fractal (plasma, clouds) generation | Phase 13; `Paint::Fractal` exists and refuses to rasterise until materialised |
 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | Deferred (`research/03 §3.9` M8) |
 | Glyph rasterisation | Phase 9; this crate renders glyph outlines if handed paths |
-| `.xar` corpus rendering end to end | Needs `xarast-cli`, Phase 11 |
+| `.xar` corpus rendering end to end | `xarast-cli render` renders all 59 files (timings in `perf.md`); comparing against the original is Phase 11 |
 
 ---
 
@@ -447,7 +447,7 @@ determinism suite asserts it over four band heights.
 | 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4) | Phase 4 follow-up, on hardware |
 | 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
-| 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | needs `xarast-cli`, Phase 11 |
+| 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the comparison against the original is Phase 11 |
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
 | 7 | `DisplayList::build` costs 106 ns per command (2.12 ms for 20 000), so 100 000 nodes is ~10.6 ms against a 3 ms budget. The cause is the size of `DrawCmd`; boxing the stroke payload is the obvious next step | Phase 4 follow-up |
 | 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not | Phase 5, which owns the idle timer |
