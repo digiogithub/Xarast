@@ -28,11 +28,28 @@ smallvec = "1.16"
 # `docs/10-architecture.md` §3.1. MPL-2.0, used unmodified: see deny.toml.
 imbl = "7.0"
 
-# `.xar` physical layer. flate2 gives raw DEFLATE (`windowBits = -15`) and the
-# zlib CRC-32 the format's compressed blocks are checksummed with. Default
-# backend is pure-Rust miniz_oxide, so there is no C dependency and no `unsafe`
-# of ours. `MIT OR Apache-2.0`.
-flate2 = "1.1"
+# DEFLATE for both formats: raw DEFLATE (`windowBits = -15`) and the zlib
+# CRC-32 of the `.xar` physical layer, and the `.xarast` container through
+# `zip`. `MIT OR Apache-2.0`.
+#
+# **The workspace's one DEFLATE backend is `zlib-rs`** (pure Rust, `Zlib`
+# licence, no C toolchain, no `unsafe` of ours), chosen here and nowhere else
+# (XARA-T-0090). flate2 compiles exactly one backend per build and `zlib-rs`
+# wins over `miniz_oxide` whenever any crate enables it, so the choice is
+# made once for everybody: two backends produce different compressed bytes,
+# which would make a "deterministic" `.xarast` differ between binaries. On a
+# 56 MB `document.svg` it deflates ~3x faster than `miniz_oxide` at level 6
+# (`docs/memory/perf.md`). Its output does not depend on the CPU: the SIMD
+# paths (`compare256`, `slide_hash`) compute the same values as the scalar
+# ones and the hash function depends only on the level. Pinned by
+# `xarast-format/tests/container.rs::deterministic_bytes_are_pinned`.
+# Other crates (`png`, `usvg`) may still ask for `rust_backend`; that only
+# compiles `miniz_oxide`, it does not select it.
+# `runtime_detection` is not optional: without it zlib-rs runs its scalar
+# paths, and inflating `.xar` blocks was ~50 % slower than on miniz_oxide
+# (ProbeX16 parse 176 ms vs 112 ms). With it the import is at parity, and
+# the pinned bytes are the same as the scalar build's.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs", "runtime_detection"] }
 
 # SHA-256: corpus lock verification in tests, `Document::canonical_digest()`
 # and content-hash deduplication of bitmap resources. RustCrypto,
@@ -46,14 +63,10 @@ sha2 = "0.10"
 # deflate64 would only widen the attack surface of the reader. `zopfli` is
 # left out too: far too slow for an interactive save. `MIT`.
 #
-# DEFLATE goes through `flate2` on the workspace's one backend, the pure-Rust
-# `miniz_oxide` of flate2's default features, which the `.xar` reader uses
-# too. Not `zlib-rs`, although it is faster: flate2 switches backend for the
-# whole build as soon as any crate enables another one. Enabling it here
-# silently changed the bytes of a committed `.xar` fuzz seed in workspace
-# builds, and would make a "deterministic" `.xarast` differ between two
-# binaries. One backend for everyone, pinned by the lock file; the golden
-# test in `xarast-format/tests/container.rs` fails if it ever moves.
+# DEFLATE goes through `flate2` on the workspace's one backend, selected on
+# the `flate2` line above (`zlib-rs`), never through `zip`'s
+# `deflate-flate2-zlib-rs` feature: the backend is a workspace decision, and
+# the golden test in `xarast-format/tests/container.rs` fails if it moves.
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 # The manifest (and, from W3/W4, the SVG profile). 0.41 because it is the
 # version already in the graph; `research/06 §13.2` explains why it and not

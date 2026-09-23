@@ -89,10 +89,10 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Pan/zoom, 100k objects, integrated GPU, input → presented, live window | ≤ 16 ms | pan p99 **1.3 ms** (GPU idle p99 5.5 ms), zoom p99 **0.5 ms** (GPU idle 2.8 ms); canvas 1796 × 1338 | **passes** (XARA-T-0050/T-0008, 2026-09-23); table in "Pan and zoom end to end" |
 | Pan/zoom, 100k objects, integrated GPU, 4K canvas, offscreen | ≤ 16 ms | pan p99 **9.6 ms**, zoom p99 **5.8 ms** (to GPU idle) | passes; the CPU tier at 4K is 35–41 ms (T-0052's upload cliff) |
 | Present one CPU frame, 4K, integrated GPU (the pre-T-0050 full `write_texture`) | — | **23–27 ms** (1080p: 0.54–1.6 ms) | off the interactive path since XARA-T-0050; still paid by the CPU tier and by the Final at rest; XARA-T-0052 investigates the cliff |
-| Save a 20 MB `.xarast`, container part (no SVG serialisation yet) | ≤ 1 s | **273 ms** in memory, 285 ms through `write_atomic` to disk (miniz_oxide; 92 ms with zlib-rs) | passes (XARA-US-0021, 2026-09-23); table in "`.xarast` container" |
-| Save a `.xarast` end to end (SVG + meta + container, atomic), from `.xar`, real corpus | ≤ 1 s for 20 MB | ProbeX16 (518 k nodes, 56 MB SVG, **9.5 MB package**): **1.54 s** (SVG 600 ms + package 935 ms); every other corpus file ≤ 210 ms | **fails on vector-dense documents** (XARA-US-0023 round 2, 2026-09-23); table in "`.xarast` save end to end"; XARA-T-0101 / XARA-T-0090 |
-| Re-save a 300 MB photo `.xarast` with unchanged resources | ≤ 1 s | **104 ms** | passes: raw copies, no rehash, no recompression |
-| Open a 20 MB `.xarast`: signature + manifest + thumbnail | ≤ 15 ms | **0.046 ms** | passes |
+| Save a 20 MB `.xarast`, container part (no SVG serialisation) | ≤ 1 s | ~~273 ms~~ **89 ms** in memory, ~~285~~ **98 ms** through `write_atomic` to disk (zlib-rs since XARA-T-0090) | passes; table in "`.xarast` container" |
+| Save a `.xarast` end to end (SVG + meta + container, atomic), from `.xar`, real corpus | ≤ 1 s for 20 MB | ProbeX16 (518 k nodes, **50.8 MB SVG**, 9.5 MB package): ~~1.60 s~~ **0.79 s** (SVG 453 ms + package 337 ms, medians of 7); every other corpus file ≤ 150 ms | **passes** since round 3 (XARA-T-0090 + XARA-T-0101 + the path-writer fix, 2026-09-23); table in "`.xarast` save end to end" |
+| Re-save a 300 MB photo `.xarast` with unchanged resources | ≤ 1 s | ~~104~~ **91 ms** | passes: raw copies, no rehash, no recompression |
+| Open a 20 MB `.xarast`: signature + manifest + thumbnail | ≤ 15 ms | **0.046 ms** | passes (unchanged on zlib-rs) |
 | BLAKE3 throughput, one core | ≥ 1 GB/s | **5.4–5.9 GiB/s** | passes |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
@@ -265,7 +265,28 @@ Where the save time goes (not profiled, inferred): the resources are
 STORED and already hashed in the index, BLAKE3 of 12 MiB is ~2 ms, so the
 rest is DEFLATE of the SVG — which is why the backend alone makes it 3×.
 
-**DEFLATE backend.** `zip` was first wired to `zlib-rs`. flate2 picks one
+**Round 3 (XARA-T-0090, 2026-09-23): `zlib-rs` everywhere.** Same bench,
+`taskset -c 4-7`, load ~2: `save_20mb` **89.4 ms** (89.0–89.9),
+`save_20mb_atomic` **98.0 ms**, `open_20mb` 46.2 µs, `resave_300mb_raw`
+91.4 ms, `blake3_64mb` 11.5 ms. The history below explains why it took
+two rounds.
+
+**`runtime_detection` matters for the `.xar` side.** `cargo bench -p
+xarast-xar --bench import`, pinned, same session:
+
+| Build | ProbeX16 parse / import | All 59 parse / import |
+|---|---|---|
+| `miniz_oxide` (before) | 112 / 293 ms | 156 / 416 ms |
+| `zlib-rs`, default features off (scalar) | 176 / 356 ms | 261–273 / 529–530 ms |
+| `zlib-rs` + `runtime_detection` (shipped) | 123 / **288 ms** | 189 / **419 ms** |
+
+The scalar row breached ProbeX16's 350 ms import budget. The app itself
+never saw it (`png` brings flate2's default features, detection
+included, into its build); `xarast-xar`'s own bench and the fuzz targets
+did. Inflating many small blocks is still a little slower on zlib-rs
+(`20000GradFilledShapes` parse 15.6 vs 10.3 ms); the totals are at parity.
+
+**DEFLATE backend (round 2 history).** `zip` was first wired to `zlib-rs`. flate2 picks one
 backend for the whole build, so that also switched the `.xar` reader's
 tests in workspace builds, and `crates/xarast-xar/tests/fuzz_seeds.rs`
 failed because a committed seed (`fuzz_xar_import/two-blocks-streamed-record.bin`)
@@ -298,14 +319,37 @@ Criterion (`cargo bench -p xarast-format --bench container -- svg`),
 synthetic 100 000-node document: `svg/write_100k` **34.2 ms**,
 `svg/save_100k` (SVG + meta + container into a `Vec`) **114.9 ms**.
 
-Reading it: the budget ("save a 20 MB `.xarast` ≤ 1 s") holds for every
-real file except ProbeX16, whose package is only 9.5 MB but whose SVG is
-56 MB — ~108 bytes per node, because every ink element carries its full
-resolved paint (passes 4–5, hoisting and CSS classes, are not done) — and
-DEFLATE of those 56 MB with `miniz_oxide` is ~60 MB/s. Both halves have a
-filed fix: XARA-T-0101 (passes 4–5, the spec expects ~35 % less SVG) and
-XARA-T-0090 (`zlib-rs`, ~3× faster DEFLATE). Serialisation itself is
-~1.2 µs per node.
+Reading it: the budget ("save a 20 MB `.xarast` ≤ 1 s") held for every
+real file except ProbeX16, whose package is only 9.5 MB but whose SVG was
+56 MB — ~108 bytes per node, every ink element carrying its full resolved
+paint — and DEFLATE of those 56 MB with `miniz_oxide` is ~60 MB/s.
+Serialisation itself was ~1.2 µs per node.
+
+**Round 3 (2026-09-23): ProbeX16 passes.** `xarast-cli convert`, release,
+`taskset -c 4-7`, load 2–5; ProbeX16 over 7 runs, the corpus over 3.
+
+| | Baseline (round 2) | `zlib-rs` only | + passes 4–5 | + path writer on the stack (shipped) |
+|---|---|---|---|---|
+| ProbeX16 `document.svg` | 56.67 MB | 56.67 MB | 50.78 MB | 50.83 MB (+112 separators, the fix) |
+| ProbeX16 package | 9.46 MB | 9.66 MB | 9.48 MB | 9.49 MB |
+| ProbeX16 SVG serialisation | 637 ms (636–640) | 658 ms (628–744) | 602 ms (594–626) | **453 ms** (437–482) |
+| ProbeX16 package write | 966 ms (964–978) | 355 ms (334–366) | 336 ms (325–339) | **337 ms** (328–351) |
+| **ProbeX16 save (SVG + package)** | **1.60 s** | 1.01 s | 0.94 s | **0.79 s** |
+| Corpus SVG / packages | 103.1 / 14.84 MB | 103.1 / 15.14 MB | 96.5 / 14.95 MB | 96.5 / 14.95 MB |
+| Corpus serialisation + package | 1.06 + 1.61 s | 1.12 + 0.80 s | 1.08 + 0.79 s | **0.80 + 0.79 s** |
+
+Where ProbeX16's serialisation went (timing probes, not committed; `perf`
+is not usable on this machine): 561 ms walk = path data 250 ms, paint
+115 ms (gradients: 30 k `<radialGradient>`s, each hashed into `<defs>`),
+quick-shape sidecars 89 ms, element write 57 ms; plan 3 ms; final
+assembly 23 ms. The path writer formatted every number of both spellings
+of every segment into its own `String`; formatting into a stack buffer
+took path data to ~134 ms and quick shapes to ~55 ms. What is left of the
+~450 ms is spread thin (paint ~115 ms, element write ~55 ms, the rest the
+walk); the package write is DEFLATE-bound (~150 MB/s at level 6).
+
+Criterion, synthetic 100 000-node document, pinned: `svg/write_100k`
+34.2 → **30.6 ms**, `svg/save_100k` 114.9 → **63.0 ms**.
 
 ## Phase 2 — document model (development container, historical)
 

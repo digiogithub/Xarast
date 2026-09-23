@@ -809,8 +809,44 @@ fn deterministic_bytes_are_pinned() {
     let z = write(w);
     assert_eq!(
         Digest::of(&z).to_hex(),
-        "a382e13cd16f9109bc3d8d3fc8950561b669d40a65c9e63408aa7ca0ed1fe07e",
+        "b4c3284aa212841fd2547bb377820545d3f941b0a7901ac4baa2e449cb716f17",
         "{} bytes",
         z.len()
+    );
+}
+
+/// The workspace's DEFLATE backend alone (`zlib-rs`, XARA-T-0090), so that a
+/// backend swap is told apart from a layout change in the test above. Level
+/// 6 is what the container writes; level 1 is the escape heuristic's sample.
+#[test]
+fn deflate_backend_is_pinned() {
+    use flate2::{Compression, write::DeflateEncoder};
+    let input: Vec<u8> = (0..20_000u32)
+        .flat_map(|i| {
+            format!(
+                "<path d=\"M{} {}l{} {}z\"/>",
+                i % 613,
+                i * 7 % 997,
+                i % 13,
+                i % 29
+            )
+            .into_bytes()
+        })
+        .collect();
+    let deflate = |level| {
+        let mut e = DeflateEncoder::new(Vec::new(), Compression::new(level));
+        e.write_all(&input).unwrap();
+        e.finish().unwrap()
+    };
+    let (l6, l1) = (deflate(6), deflate(1));
+    assert_eq!(
+        (Digest::of(&l6).to_hex(), Digest::of(&l1).to_hex()),
+        (
+            "3210e5b978f7150e734d38eff1356e95786702d25ceba803ed095b9d3b4b763f".to_owned(),
+            "954bb67044b639afc2a1d794d32ccd968f30e230b526bc9c1cf7225c43fe6b4b".to_owned()
+        ),
+        "the DEFLATE backend changed (expected `zlib-rs`, see the workspace manifest); {} / {} bytes",
+        l6.len(),
+        l1.len()
     );
 }

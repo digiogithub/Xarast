@@ -131,7 +131,10 @@ pub fn convert_one(input: &Path, output: &Path, a: &ConvertArgs) -> Result<Conve
         } else {
             WriteOptions::default()
         },
-        svg: xarast_format::svg::SvgOptions { pretty: a.pretty },
+        svg: xarast_format::svg::SvgOptions {
+            pretty: a.pretty,
+            ..Default::default()
+        },
         ..SaveOptions::default()
     };
     let r = xarast_format::save(&doc, output, &opts)

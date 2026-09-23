@@ -34,6 +34,7 @@ use super::paint::{
     BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, transparency,
 };
 use super::pathdata::path_data;
+use super::style::{self, GroupKind, Styler, Vals, p};
 use super::xml::{attr, base64, fragment_is_well_formed, is_ncname, push_text_escaped};
 use super::{
     FragmentKind, NS_CC, NS_DC, NS_INKSCAPE, NS_RDF, NS_SODIPODI, NS_SVG, NS_XARAST, NS_XLINK,
@@ -70,9 +71,15 @@ pub(crate) fn node_id(doc: &Document, id: NodeId) -> String {
 /// An element under construction: its attributes are collected first so
 /// that foreign ones can be sorted after the known ones and never collide
 /// with them (§8.2 item 6).
+///
+/// An ink element's paint is kept apart, as interned values in `paint`:
+/// it is written through a [`Styler`] slot (passes 4 and 5).
 struct El {
     tag: &'static str,
     attrs: Vec<(String, String)>,
+    /// Whether this is an ink element (its paint goes into a slot).
+    ink: bool,
+    paint: Vals,
 }
 
 impl El {
@@ -80,6 +87,8 @@ impl El {
         El {
             tag,
             attrs: Vec::with_capacity(8),
+            ink: false,
+            paint: Vals::default(),
         }
     }
 
@@ -87,8 +96,19 @@ impl El {
         self.attrs.push((name.to_owned(), value.into()));
     }
 
+    /// Sets one paint property ([`style::PROPS`]).
+    fn p(&mut self, st: &mut Styler, prop: usize, value: &str) {
+        if let Some(v) = self.paint.get_mut(prop) {
+            *v = st.intern(value);
+        }
+    }
+
     fn has(&self, name: &str) -> bool {
         self.attrs.iter().any(|(n, _)| n == name)
+            || style::PROPS
+                .iter()
+                .zip(&self.paint)
+                .any(|(n, &v)| v != 0 && *n == name)
     }
 
     fn start(&self, out: &mut String) {
@@ -210,6 +230,11 @@ pub(crate) struct Emitter<'d, 'b> {
     pub foreign_count: usize,
     /// The root `<svg>`'s own id and foreign attributes, already written.
     pub root_attrs: String,
+    /// Paint slots: passes 4 and 5.
+    pub styler: Styler,
+    /// Above zero while writing somewhere slots cannot follow (the clip
+    /// shape, written into `<defs>`): paint is written inline there.
+    inline: usize,
     frame: Frame,
     attrs: AttrStack,
     pretty: bool,
@@ -223,9 +248,25 @@ impl<'d, 'b> Emitter<'d, 'b> {
     pub(crate) fn new(
         doc: &'d Document,
         frame: Frame,
-        pretty: bool,
+        opts: &super::SvgOptions,
         bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
     ) -> Emitter<'d, 'b> {
+        let pretty = opts.pretty;
+        // Class names must not collide with foreign ones (§8.2): look at
+        // every `class` in the baggage.
+        let foreign = doc.tree.foreign_iter().map(|(_, b)| b);
+        let prefix = style::class_prefix(foreign.flat_map(|b| {
+            let attrs = b
+                .attrs
+                .iter()
+                .filter(|a| &*a.local == "class")
+                .map(|a| &*a.value);
+            let frags = b
+                .children
+                .iter()
+                .flat_map(|c| style::fragment_classes(&c.raw));
+            attrs.chain(frags)
+        }));
         let palette = doc
             .resources
             .colours
@@ -244,6 +285,8 @@ impl<'d, 'b> Emitter<'d, 'b> {
             foreign_hash: blake3::Hasher::new(),
             foreign_count: 0,
             root_attrs: String::new(),
+            styler: Styler::new(opts.hoist, opts.classes, prefix),
+            inline: 0,
             frame,
             attrs: AttrStack::with_defaults(&doc.defaults),
             pretty,
@@ -270,13 +313,83 @@ impl<'d, 'b> Emitter<'d, 'b> {
 
     /// Adds the node's id, its flags and its foreign attributes, then
     /// writes the start tag (without closing it).
+    ///
+    /// An ink element's paint is not written here: it leaves a slot at the
+    /// end of the start tag (or, inside a clip shape, is written inline).
     fn open(&mut self, node: Option<NodeId>, mut el: El) {
+        self.open_el(node, &mut el);
+    }
+
+    /// [`Self::open`] for a container, which also opens its frame for
+    /// passes 4–5 (see [`Self::open_group`]).
+    fn open_container(&mut self, node: Option<NodeId>, mut el: El) {
+        self.open_el(node, &mut el);
+        self.open_group(el.tag, &el.attrs);
+    }
+
+    fn open_el(&mut self, node: Option<NodeId>, el: &mut El) {
         if let Some(n) = node {
             self.stats.elements += 1;
-            self.common(n, &mut el);
+            self.common(n, el);
         }
         self.indent();
         el.start(&mut self.body);
+        if el.ink {
+            if self.inline > 0 {
+                self.styler.write_inline(&el.paint, &mut self.body);
+            } else {
+                let no_class = el.attrs.iter().any(|(n, _)| n == "class");
+                self.styler.ink(self.body.len(), el.paint, no_class);
+            }
+        }
+    }
+
+    /// Opens a container frame for passes 4–5 right after a start tag that
+    /// has not been closed with `>` yet. `el_attrs` are the attributes just
+    /// written; a `<g>` whose own attributes already say something about
+    /// paint (foreign baggage) keeps its children's paint where it is.
+    fn open_group(&mut self, tag: &str, el_attrs: &[(String, String)]) {
+        if self.inline > 0 {
+            return;
+        }
+        let kind = if tag != "g" {
+            GroupKind::Block
+        } else if self.foreign_style(el_attrs)
+            || el_attrs
+                .iter()
+                .any(|(n, _)| n == "class" || style::PROPS.contains(&n.as_str()))
+        {
+            GroupKind::Keep
+        } else {
+            GroupKind::Hoist
+        };
+        let no_class = el_attrs.iter().any(|(n, _)| n == "class");
+        self.styler.open_group(self.body.len(), kind, no_class);
+    }
+
+    /// Whether a `style` attribute says more than `display` (the only
+    /// property the writer itself puts in a container's `style`).
+    fn foreign_style(&self, el_attrs: &[(String, String)]) -> bool {
+        el_attrs
+            .iter()
+            .filter(|(n, _)| n == "style")
+            .any(|(_, v)| !v.starts_with("display:") || v.contains(';'))
+    }
+
+    /// Marks the current container as holding something that relies on
+    /// the initial paint values (text, foreign elements): nothing may be
+    /// hoisted into it or above it.
+    fn block(&mut self) {
+        if self.inline == 0 {
+            self.styler.block();
+        }
+    }
+
+    /// Closes the container frame opened by [`Self::open_group`].
+    fn close_group(&mut self) {
+        if self.inline == 0 {
+            self.styler.close_group();
+        }
     }
 
     /// The attributes every node element carries: id, flags, foreign ones.
@@ -356,6 +469,8 @@ impl<'d, 'b> Emitter<'d, 'b> {
         digest_str(&mut self.foreign_hash, raw);
         self.foreign_count += 1;
         self.stats.foreign_items += 1;
+        // A foreign element may rely on inheriting initial paint values.
+        self.block();
         self.indent();
         self.body.push_str(raw);
         self.newline();
@@ -414,7 +529,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
     /// scope and closes it.
     fn container(&mut self, node: NodeId, el: El, prelude: Option<String>) {
         let tag = el.tag;
-        self.open(Some(node), el);
+        self.open_container(Some(node), el);
         self.body.push('>');
         self.newline();
         self.depth += 1;
@@ -427,6 +542,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
         self.children(node, None);
         self.attrs.pop_scope();
         self.depth -= 1;
+        self.close_group();
         self.close(tag);
     }
 
@@ -722,12 +838,13 @@ impl<'d, 'b> Emitter<'d, 'b> {
         }
         self.spread_y += h.max(0) + 36_000;
         let tag = el.tag;
-        self.open(Some(n), el);
+        self.open_container(Some(n), el);
         self.body.push('>');
         self.newline();
         self.attrs.push_scope();
         self.children(n, None);
         self.attrs.pop_scope();
+        self.close_group();
         self.close(tag);
         self.frame = saved;
     }
@@ -812,8 +929,8 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 }
             }
         }
-        let tag_guess = El::new("path");
-        let mut el = tag_guess;
+        let mut el = El::new("path");
+        el.ink = true;
         let (bounds, filled, stroked, mut known) = build(self, &mut el);
         self.paint(n, &mut el, bounds, filled, stroked, &mut known);
         self.names(n, &mut known);
@@ -1155,20 +1272,21 @@ impl<'d, 'b> Emitter<'d, 'b> {
         // Fill.
         if !is_image {
             let fill_opacity = mul(fill.opacity, ft.alpha);
+            let st = &mut self.styler;
             if fill.value != "#000" || fill_opacity.is_some() {
-                el.a("fill", fill.value.clone());
+                el.p(st, p::FILL, &fill.value);
             }
             if let Some(o) = fill_opacity {
-                el.a("fill-opacity", f64s(o, 3));
+                el.p(st, p::FILL_OPACITY, &f64s(o, 3));
             }
             if fill.value != "none"
                 && let AttrValue::WindingRule(FillRule::EvenOdd) =
                     self.attrs.get(AttrSlot::WindingRule)
             {
-                el.a("fill-rule", "evenodd");
+                el.p(st, p::FILL_RULE, "evenodd");
             }
             if let Some(r) = &fill.palette_ref {
-                el.a("xarast:fill-ref", r.clone());
+                el.p(st, p::FILL_REF, r);
             }
             if let Some(s) = fill.sidecar {
                 known.push(s);
@@ -1185,31 +1303,32 @@ impl<'d, 'b> Emitter<'d, 'b> {
 
         // Stroke.
         if stroke.value != "none" {
-            el.a("stroke", stroke.value.clone());
+            let sty = &mut self.styler;
+            el.p(sty, p::STROKE, &stroke.value);
             if let Some(o) = mul(stroke.opacity, st.alpha) {
-                el.a("stroke-opacity", f64s(o, 3));
+                el.p(sty, p::STROKE_OPACITY, &f64s(o, 3));
             }
             if width == 0 {
                 // A hairline: one device pixel whatever the zoom.
-                el.a("stroke-width", "1");
+                el.p(sty, p::STROKE_WIDTH, "1");
                 el.a("vector-effect", "non-scaling-stroke");
             } else if width != 1000 {
-                el.a("stroke-width", mp(width));
+                el.p(sty, p::STROKE_WIDTH, &mp(width));
             }
             match self.attrs.get(AttrSlot::StartCap) {
-                AttrValue::LineCap(Cap::Round) => el.a("stroke-linecap", "round"),
-                AttrValue::LineCap(Cap::Square) => el.a("stroke-linecap", "square"),
+                AttrValue::LineCap(Cap::Round) => el.p(sty, p::LINECAP, "round"),
+                AttrValue::LineCap(Cap::Square) => el.p(sty, p::LINECAP, "square"),
                 _ => {}
             }
             match self.attrs.get(AttrSlot::JoinType) {
-                AttrValue::JoinType(Join::Round) => el.a("stroke-linejoin", "round"),
-                AttrValue::JoinType(Join::Bevel) => el.a("stroke-linejoin", "bevel"),
+                AttrValue::JoinType(Join::Round) => el.p(sty, p::LINEJOIN, "round"),
+                AttrValue::JoinType(Join::Bevel) => el.p(sty, p::LINEJOIN, "bevel"),
                 _ => {}
             }
             if let AttrValue::MitreLimit(m) = self.attrs.get(AttrSlot::MitreLimit) {
                 let v = i64::from(m.raw()).max(1000);
                 if v != 4000 {
-                    el.a("stroke-miterlimit", mp(v));
+                    el.p(sty, p::MITERLIMIT, &mp(v));
                 }
             }
             if let AttrValue::DashPattern(d) = self.attrs.get(AttrSlot::DashPattern) {
@@ -1217,7 +1336,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 let lengths = d.resolved(w);
                 if !lengths.is_empty() {
                     let dash: Vec<String> = lengths.iter().map(|l| mp(l.round() as i64)).collect();
-                    el.a("stroke-dasharray", dash.join(" "));
+                    el.p(sty, p::DASHARRAY, &dash.join(" "));
                     let mut off = f64::from(d.offset.raw());
                     if let Some(rw) = d.reference_width
                         && rw.raw() > 0
@@ -1225,12 +1344,12 @@ impl<'d, 'b> Emitter<'d, 'b> {
                         off *= width as f64 / f64::from(rw.raw());
                     }
                     if off.round() as i64 != 0 {
-                        el.a("stroke-dashoffset", mp(off.round() as i64));
+                        el.p(sty, p::DASHOFFSET, &mp(off.round() as i64));
                     }
                 }
             }
             if let Some(r) = &stroke.palette_ref {
-                el.a("xarast:stroke-ref", r.clone());
+                el.p(sty, p::STROKE_REF, r);
             }
             if let Some(s) = stroke.sidecar {
                 known.push(s.replacen("<xarast:fill", "<xarast:stroke-fill", 1));
@@ -1402,7 +1521,9 @@ impl<'d, 'b> Emitter<'d, 'b> {
             let saved = std::mem::take(&mut self.body);
             let depth = self.depth;
             self.depth = 0;
+            self.inline += 1;
             self.node(c);
+            self.inline -= 1;
             self.depth = depth;
             let child = std::mem::replace(&mut self.body, saved);
             let clip = self.defs.add(
@@ -1449,13 +1570,14 @@ impl<'d, 'b> Emitter<'d, 'b> {
             self.stats.clips_unsupported += 1;
         }
         let tag = el.tag;
-        self.open(Some(n), el);
+        self.open_container(Some(n), el);
         self.body.push('>');
         self.newline();
         self.depth += 1;
         self.children(n, shape);
         self.depth -= 1;
         self.attrs.pop_scope();
+        self.close_group();
         self.close(tag);
     }
 
@@ -1568,13 +1690,17 @@ impl<'d, 'b> Emitter<'d, 'b> {
         if wrapped {
             let mut g = El::new("g");
             g.a("xarast:kind", "text-story");
-            self.open(Some(n), g);
+            self.open_container(Some(n), g);
+            // Runs elide black and never stroke: text relies on the initial
+            // values, so nothing is hoisted over it.
+            self.block();
             self.body.push('>');
             self.newline();
             self.depth += 1;
             el.attrs.retain(|(k, _)| k != "xarast:kind");
             self.open(None, el);
         } else {
+            self.block();
             self.open(Some(n), el);
         }
         self.body.push('>');
@@ -1604,6 +1730,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             self.fragments(n, &mut next, None);
             self.depth -= 1;
             self.attrs.pop_scope();
+            self.close_group();
             self.close("g");
         } else {
             let mut next = 0usize;

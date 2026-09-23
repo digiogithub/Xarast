@@ -374,3 +374,96 @@ fn a_saved_package_opens_and_holds_the_svg() {
     assert!(report.package.bytes_written > 0);
     assert!(r.verify_all().is_empty());
 }
+
+/// Two groups of ten rectangles with the same red fill and blue 2 pt
+/// stroke; the second also holds a rectangle with no stroke.
+fn groups_fixture() -> Document {
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    for g in 0..2 {
+        b.node(NodeKind::Group(Box::default())).unwrap();
+        b.push_scope().unwrap();
+        b.attribute(flat(rgb(1.0, 0.0, 0.0))).unwrap();
+        b.attribute(AttrValue::StrokeColour(Paint::Flat {
+            value: rgb(0.0, 0.0, 1.0),
+        }))
+        .unwrap();
+        b.attribute(AttrValue::LineWidth(Mp::new(2_000))).unwrap();
+        for i in 0..10 {
+            b.node(rect_shape(i * 20_000, g * 50_000, 10_000, 10_000))
+                .unwrap();
+        }
+        if g == 1 {
+            // Relies on `stroke="none"`: no stroke may be hoisted over it.
+            b.node(rect_shape(0, 200_000, 5_000, 5_000)).unwrap();
+            b.push_scope().unwrap();
+            b.attribute(AttrValue::StrokeColour(Paint::Flat {
+                value: Colour::Direct(ColourValue::rgbt(0.0, 0.0, 0.0, 1.0)),
+            }))
+            .unwrap();
+            b.pop_scope();
+        }
+        b.pop_scope();
+    }
+    b.finish().unwrap().0
+}
+
+fn write_with(doc: &Document, hoist: bool, classes: bool) -> (String, Stats) {
+    let mut res = ResourceIndex::new();
+    let opts = SvgOptions {
+        hoist,
+        classes,
+        ..SvgOptions::default()
+    };
+    let out = write_svg(doc, &mut res, &opts);
+    assert_safe(&out.svg);
+    (out.svg, out.stats)
+}
+
+#[test]
+fn pass_4_hoists_shared_paint_onto_the_group_only_when_every_child_agrees() {
+    let doc = groups_fixture();
+    let (svg, stats) = write_with(&doc, true, false);
+    assert!(!svg.contains("class="), "pass 5 is off");
+    // Every rectangle is red: the fill climbs through both groups and the
+    // layer to the spread, the last `<g>` above them.
+    assert_eq!(svg.matches("fill=\"#f00\"").count(), 1);
+    assert!(svg.contains("xarast:kind=\"spread\""), "{svg}");
+    assert!(svg.contains("xarast:margin=\"36\" fill=\"#f00\">"), "{svg}");
+    // The first group takes the stroke; its rects keep nothing.
+    assert!(
+        svg.contains("xarast:kind=\"group\" stroke=\"#00f\" stroke-width=\"2\">"),
+        "{svg}"
+    );
+    // The second group has a stroke-less child: its strokes stay put.
+    assert_eq!(svg.matches("stroke=\"#00f\"").count(), 1 + 10);
+    assert!(stats.paint_hoisted > 0);
+}
+
+#[test]
+fn pass_5_turns_widely_shared_paint_into_a_css_class() {
+    let doc = groups_fixture();
+    let (svg, stats) = write_with(&doc, false, true);
+    assert!(
+        svg.contains(
+            "<style type=\"text/css\">\n.c1{fill:#f00;stroke:#00f;stroke-width:2}\n</style>"
+        ),
+        "{svg}"
+    );
+    assert_eq!(svg.matches("class=\"c1\"").count(), 20);
+    assert_eq!((stats.paint_classes, stats.paint_classed), (1, 20));
+    assert_eq!(stats.paint_hoisted, 0);
+}
+
+#[test]
+fn passes_4_and_5_together_and_neither() {
+    let doc = groups_fixture();
+    let (plain, _) = write_with(&doc, false, false);
+    assert!(!plain.contains("class=") && !plain.contains("<style"));
+    assert_eq!(plain.matches("fill=\"#f00\"").count(), 21);
+    let (both, stats) = write_with(&doc, true, true);
+    assert!(both.len() < plain.len());
+    // After hoisting, the second group's ten rects still share a stroke
+    // set of two properties: too few for a class.
+    assert_eq!(stats.paint_classes, 0);
+    assert_eq!(both, write(&doc).0, "both passes are the default");
+}

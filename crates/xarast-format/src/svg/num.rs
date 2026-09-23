@@ -6,54 +6,124 @@
 //! shorter is not used (see [`push_fixed`]). Because the model is integral millipoints, a coordinate is
 //! formatted from its integer, never through a float, so the text is exact.
 
-use std::fmt::Write as _;
+/// One formatted number, on the stack: the path writer formats both
+/// spellings of every segment to pick the shorter, so a heap string per
+/// number was most of its time (ProbeX16: 518 k nodes, ~250 ms).
+#[derive(Debug, Clone, Copy)]
+pub struct Num {
+    b: [u8; 24],
+    n: u8,
+}
+
+impl Num {
+    /// Millipoints as points: `12500` → `12.5`, `-500` → `-.5`.
+    #[must_use]
+    pub fn mp(v: i64) -> Num {
+        Num::fixed(v, 3)
+    }
+
+    /// `value / 10^decimals` in the shortest normalised form; `decimals`
+    /// is at most 9. At most 21 bytes: 19 digits, a sign and a point.
+    #[must_use]
+    pub fn fixed(value: i64, decimals: u32) -> Num {
+        let decimals = decimals.min(9);
+        let mut s = Num { b: [0; 24], n: 0 };
+        if value == 0 {
+            s.push(b'0');
+            return s;
+        }
+        let mag = value.unsigned_abs();
+        let scale = 10u64.pow(decimals);
+        let int = mag / scale;
+        let mut frac = mag % scale;
+        let mut frac_digits = decimals;
+        while frac_digits > 0 && frac.is_multiple_of(10) {
+            frac /= 10;
+            frac_digits -= 1;
+        }
+        if value < 0 {
+            s.push(b'-');
+        }
+        // Exponent form (`1e3`) is never written: it only ever shortens a
+        // round thousand of points, and a unit suffix after it (`1e3mm`) is
+        // a classic parser trap.
+        if int != 0 || frac_digits == 0 {
+            s.digits(int, 0);
+        }
+        if frac_digits > 0 {
+            s.push(b'.');
+            s.digits(frac, frac_digits);
+        }
+        s
+    }
+
+    fn push(&mut self, c: u8) {
+        if let Some(slot) = self.b.get_mut(usize::from(self.n)) {
+            *slot = c;
+            self.n += 1;
+        }
+    }
+
+    /// Appends `v` in decimal, zero-padded to `width` digits.
+    fn digits(&mut self, mut v: u64, width: u32) {
+        let mut tmp = [0u8; 20];
+        let mut k = 0usize;
+        loop {
+            if let Some(d) = tmp.get_mut(k) {
+                *d = b'0' + (v % 10) as u8;
+            }
+            k += 1;
+            v /= 10;
+            if v == 0 && k >= width as usize {
+                break;
+            }
+        }
+        for d in tmp.iter().take(k).rev() {
+            self.push(*d);
+        }
+    }
+
+    /// The text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(self.b.get(..usize::from(self.n)).unwrap_or(&[])).unwrap_or("")
+    }
+
+    /// Its length in bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        usize::from(self.n)
+    }
+
+    /// Whether it is empty (never, for a formatted number).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// Whether it has a fractional part.
+    #[must_use]
+    pub fn has_dot(&self) -> bool {
+        self.b.iter().take(usize::from(self.n)).any(|&c| c == b'.')
+    }
+}
 
 /// Appends millipoints as points: `12500` → `12.5`, `-500` → `-.5`.
 pub fn push_mp(out: &mut String, mp: i64) {
-    push_fixed(out, mp, 3);
+    out.push_str(Num::mp(mp).as_str());
 }
 
 /// Millipoints as points, as a new string.
 #[must_use]
 pub fn mp(v: i64) -> String {
-    let mut s = String::new();
-    push_mp(&mut s, v);
-    s
+    Num::mp(v).as_str().to_owned()
 }
 
 /// Appends `value / 10^decimals` in the shortest normalised form.
 ///
 /// `decimals` is at most 9.
 pub fn push_fixed(out: &mut String, value: i64, decimals: u32) {
-    let decimals = decimals.min(9);
-    if value == 0 {
-        out.push('0');
-        return;
-    }
-    let neg = value < 0;
-    let mag = value.unsigned_abs();
-    let scale = 10u64.pow(decimals);
-    let int = mag / scale;
-    let mut frac = mag % scale;
-    let mut frac_digits = decimals;
-    while frac_digits > 0 && frac.is_multiple_of(10) {
-        frac /= 10;
-        frac_digits -= 1;
-    }
-    if neg {
-        out.push('-');
-    }
-    if frac_digits == 0 {
-        // Exponent form (`1e3`) is never written: it only ever shortens a
-        // round thousand of points, and a unit suffix after it (`1e3mm`)
-        // is a classic parser trap.
-        let _ = write!(out, "{int}");
-        return;
-    }
-    if int != 0 {
-        let _ = write!(out, "{int}");
-    }
-    let _ = write!(out, ".{frac:0width$}", width = frac_digits as usize);
+    out.push_str(Num::fixed(value, decimals).as_str());
 }
 
 /// Appends a unitless float rounded to `decimals` places, normalised the
@@ -98,7 +168,9 @@ fn last_number_has_dot(out: &str) -> bool {
     for c in out.chars().rev() {
         match c {
             '.' => return true,
-            '0'..='9' | '-' => {}
+            '0'..='9' => {}
+            // A sign starts the number: what precedes it is the previous
+            // one (`1.5-5` then `.5` needs its space).
             _ => return false,
         }
     }
@@ -152,5 +224,26 @@ mod tests {
             push_separated(&mut s, &mut sep, n);
         }
         assert_eq!(s, "M10-5 .5.25 3 .5 1e3 .5");
+        // The dot of the number before a signed one does not count.
+        let mut s = String::from("M");
+        let mut sep = false;
+        for n in ["1.5", "-5", ".5"] {
+            push_separated(&mut s, &mut sep, n);
+        }
+        assert_eq!(s, "M1.5-5 .5");
+    }
+
+    #[test]
+    fn stack_numbers_match_the_rules() {
+        for (v, d, want) in [
+            (0, 3, "0"),
+            (-1_000, 3, "-1"),
+            (1_234_567, 3, "1234.567"),
+            (7, 9, ".000000007"),
+            (-10, 6, "-.00001"),
+            (i64::MIN, 3, "-9223372036854775.808"),
+        ] {
+            assert_eq!(Num::fixed(v, d).as_str(), want, "{v}");
+        }
     }
 }
