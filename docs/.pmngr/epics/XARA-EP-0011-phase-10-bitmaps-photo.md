@@ -2,12 +2,13 @@
 id: XARA-EP-0011
 type: epic
 title: Phase 10 — Bitmaps & photo
-status: backlog
+status: in_progress
 milestone: XARA-M-0005
 author: mcp
 labels: [phase-10]
 created: 2026-09-23T09:39:43Z
-updated: 2026-09-23T09:39:43Z
+updated: 2026-09-23T16:43:50Z
+started: 2026-09-23T16:43:50Z
 ---
 
 ## Description

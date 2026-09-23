@@ -2,12 +2,13 @@
 id: XARA-US-0051
 type: story
 title: W10.1/W10.2 — Bitmap resources, safe decoding and EXIF
-status: backlog
+status: in_progress
 parent: XARA-EP-0011
 author: mcp
 labels: [phase-10, image]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T16:43:50Z
+started: 2026-09-23T16:43:50Z
 ---
 
 ## Description

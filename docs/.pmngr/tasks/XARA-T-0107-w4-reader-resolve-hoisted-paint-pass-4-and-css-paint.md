@@ -2,13 +2,14 @@
 id: XARA-T-0107
 type: task
 title: "W4 reader: resolve hoisted paint (pass 4) and CSS paint classes (pass 5)"
-status: todo
+status: done
 priority: high
 parent: XARA-US-0024
 author: mcp
 labels: [phase-6, xarast-format, svg]
 created: 2026-09-23T16:23:14Z
-updated: 2026-09-23T16:23:14Z
+updated: 2026-09-23T17:05:18Z
+closed: 2026-09-23T17:05:18Z
 ---
 
 ## Description

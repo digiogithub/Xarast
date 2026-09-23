@@ -2,13 +2,14 @@
 id: XARA-T-0105
 type: task
 title: "W4 decision: how the reader rebuilds attribute nodes from resolved per-element paint"
-status: todo
+status: done
 priority: high
 parent: XARA-US-0024
 author: mcp
 labels: [phase-6, xarast-format, xarast-doc, svg]
 created: 2026-09-23T15:40:55Z
-updated: 2026-09-23T15:40:55Z
+updated: 2026-09-23T17:05:10Z
+closed: 2026-09-23T17:05:10Z
 ---
 
 ## Description
