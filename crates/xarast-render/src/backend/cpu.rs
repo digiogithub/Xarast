@@ -965,7 +965,12 @@ fn composite_layer(
     if blend == BlendFamily::None {
         return;
     }
-    for (d, s) in dst.chunks_exact_mut(4).zip(layer.pixels.chunks_exact(4)) {
+    for (d, s) in dst
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(layer.pixels.as_chunks::<4>().0.iter())
+    {
         if s[3] == 0 {
             continue;
         }

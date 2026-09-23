@@ -975,9 +975,11 @@ const MAX_ARRAY: usize = 1 << 16;
 
 fn tag_list(payload: &[u8]) -> Vec<u32> {
     payload
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .take(MAX_ARRAY)
-        .filter_map(|c| <[u8; 4]>::try_from(c).ok().map(u32::from_le_bytes))
+        .map(|c| u32::from_le_bytes(*c))
         .collect()
 }
 

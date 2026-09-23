@@ -331,10 +331,8 @@ fn transform_kind(kind: &mut NodeKind, m: Matrix) {
         NodeKind::TextStory(t) => {
             t.transform = t.transform.then(m);
         }
-        NodeKind::Attr(a) => {
-            if a.value.linked_to_geometry() {
-                a.value.transform(m);
-            }
+        NodeKind::Attr(a) if a.value.linked_to_geometry() => {
+            a.value.transform(m);
         }
         _ => {}
     }

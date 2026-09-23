@@ -739,14 +739,9 @@ impl<'o> Mapper<'o> {
                 After::Same
             }
 
-            Decoded::Unhandled { tag, .. } => {
-                if class_of(*tag) == Some(TagClass::Ignorable) {
-                    self.skipped = self.skipped.saturating_add(1);
-                    After::Same
-                } else {
-                    self.opaque_node(rec)?;
-                    After::Child
-                }
+            Decoded::Unhandled { tag, .. } if class_of(*tag) == Some(TagClass::Ignorable) => {
+                self.skipped = self.skipped.saturating_add(1);
+                After::Same
             }
 
             // `Decoded` is `#[non_exhaustive]`; a variant added later without

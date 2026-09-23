@@ -339,12 +339,11 @@ impl<'a> Cur<'a> {
     pub fn utf16_rest(&mut self) -> String {
         let bytes = self.rest();
         let units: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .take(MAX_STRING_UNITS)
-            .filter_map(|c| {
-                let (lo, hi) = (c.first()?, c.get(1)?);
-                Some(u16::from_le_bytes([*lo, *hi]))
-            })
+            .map(|c| u16::from_le_bytes(*c))
             .collect();
         String::from_utf16_lossy(&units)
     }

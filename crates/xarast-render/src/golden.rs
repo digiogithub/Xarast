@@ -67,7 +67,9 @@ pub fn encode_png(s: &Surface) -> Result<Vec<u8>, GoldenError> {
         let mut writer = enc.write_header()?;
         let straight: Vec<u8> = s
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| {
                 let a = px[3];
                 if a == 0 {
@@ -108,7 +110,13 @@ pub fn decode_png(bytes: &[u8]) -> Result<Surface, GoldenError> {
     let src = &buf[..info.buffer_size()];
     match info.color_type {
         png::ColorType::Rgba => {
-            for (dst, px) in s.data_mut().chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+            for (dst, px) in s
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<4>().0.iter())
+            {
                 let a = px[3];
                 dst[0] = crate::blend::mul(px[0], a);
                 dst[1] = crate::blend::mul(px[1], a);
@@ -117,7 +125,13 @@ pub fn decode_png(bytes: &[u8]) -> Result<Surface, GoldenError> {
             }
         }
         png::ColorType::Rgb => {
-            for (dst, px) in s.data_mut().chunks_exact_mut(4).zip(src.chunks_exact(3)) {
+            for (dst, px) in s
+                .data_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<3>().0.iter())
+            {
                 dst[0] = px[0];
                 dst[1] = px[1];
                 dst[2] = px[2];
@@ -208,7 +222,13 @@ pub fn compare(a: &Surface, b: &Surface) -> Comparison {
     let mut sq = 0f64;
     let mut deltas: Vec<f64> = Vec::with_capacity(n as usize);
     let mut sum_de = 0f64;
-    for (pa, pb) in a.data().chunks_exact(4).zip(b.data().chunks_exact(4)) {
+    for (pa, pb) in a
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.data().as_chunks::<4>().0.iter())
+    {
         let mut diff = false;
         for c in 0..4 {
             let d = pa[c].abs_diff(pb[c]);
@@ -248,9 +268,11 @@ pub fn diff_heatmap(a: &Surface, b: &Surface) -> Surface {
     let mut out = Surface::new(a.width(), a.height());
     for ((pa, pb), dst) in a
         .data()
-        .chunks_exact(4)
-        .zip(b.data().chunks_exact(4))
-        .zip(out.data_mut().chunks_exact_mut(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.data().as_chunks::<4>().0.iter())
+        .zip(out.data_mut().as_chunks_mut::<4>().0.iter_mut())
     {
         let d = (0..4).map(|c| pa[c].abs_diff(pb[c])).max().unwrap_or(0);
         let hot = d.saturating_mul(8);
@@ -413,7 +435,7 @@ pub fn downsample(s: &Surface, factor: u32) -> Surface {
 #[must_use]
 pub fn coverage_levels(s: &Surface) -> usize {
     let mut seen = [false; 256];
-    for px in s.data().chunks_exact(4) {
+    for px in s.data().as_chunks::<4>().0.iter() {
         seen[px[0] as usize] = true;
     }
     seen.iter().filter(|v| **v).count()

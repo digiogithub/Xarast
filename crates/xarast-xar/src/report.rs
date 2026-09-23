@@ -428,10 +428,8 @@ impl DecodePass {
                     .text_code_units
                     .saturating_add(s.encode_utf16().count() as u64);
             }
-            Decoded::SpreadInformation(info) => {
-                if info.width.raw() > 0 && info.height.raw() > 0 {
-                    self.origin = crate::import::spread_origin(info);
-                }
+            Decoded::SpreadInformation(info) if info.width.raw() > 0 && info.height.raw() > 0 => {
+                self.origin = crate::import::spread_origin(info);
             }
             _ => {}
         }

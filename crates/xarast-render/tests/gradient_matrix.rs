@@ -30,7 +30,7 @@ fn no_gradient_cell_renders_a_single_flat_colour() {
     {
         let s = render_case(case);
         let mut distinct = std::collections::HashSet::new();
-        for px in s.data().chunks_exact(4) {
+        for px in s.data().as_chunks::<4>().0 {
             distinct.insert([px[0], px[1], px[2]]);
             if distinct.len() > 8 {
                 break;

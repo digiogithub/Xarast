@@ -261,7 +261,7 @@ impl Surface {
 
     /// Fills every pixel with one premultiplied colour.
     pub fn fill(&mut self, rgba: [u8; 4]) {
-        for px in self.data.chunks_exact_mut(4) {
+        for px in self.data.as_chunks_mut::<4>().0.iter_mut() {
             px.copy_from_slice(&rgba);
         }
     }

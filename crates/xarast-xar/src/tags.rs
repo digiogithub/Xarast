@@ -214,13 +214,11 @@ impl TagPolicy {
 }
 
 fn absorb(into: &mut BTreeSet<u32>, payload: &[u8]) {
-    for chunk in payload.chunks_exact(4) {
+    for chunk in payload.as_chunks::<4>().0.iter() {
         if into.len() >= TagPolicy::MAX_TAGS {
             return;
         }
-        if let Ok(bytes) = <[u8; 4]>::try_from(chunk) {
-            into.insert(u32::from_le_bytes(bytes));
-        }
+        into.insert(u32::from_le_bytes(*chunk));
     }
 }
 
