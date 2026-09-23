@@ -29,9 +29,70 @@
 use std::sync::Arc;
 
 use xarast_doc::{
-    Attach, AttrNode, AttrSlot, AttrValue, Document, EditError, NodeId, NodeKind, QuickShape, Tx,
+    Attach, AttrNode, AttrSlot, AttrValue, Document, EditError, NodeId, NodeKind, PathNode,
+    QuickShape, Tx,
 };
-use xarast_geom::{Matrix, Mp};
+use xarast_geom::{FillRule, Matrix, Mp, Path};
+
+/// What a [`EditCommand::SetPath`] did to the path, which names the undo
+/// step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathEdit {
+    /// Moved points or handles.
+    Move,
+    /// Reshaped a segment by dragging it.
+    Reshape,
+    /// Added a point.
+    AddPoint,
+    /// Deleted points.
+    DeletePoints,
+    /// Straightened segments.
+    MakeLine,
+    /// Curved segments.
+    MakeCurve,
+    /// Made points smooth.
+    Smooth,
+    /// Made points cusps.
+    Cusp,
+    /// Closed subpaths.
+    Close,
+    /// Broke the path at points.
+    Break,
+    /// Joined two ends.
+    Join,
+    /// Added a segment with the pen.
+    AddSegment,
+}
+
+impl PathEdit {
+    /// The undo label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            PathEdit::Move => "Move Points",
+            PathEdit::Reshape => "Reshape Curve",
+            PathEdit::AddPoint => "Add Point",
+            PathEdit::DeletePoints => "Delete Points",
+            PathEdit::MakeLine => "Make Line",
+            PathEdit::MakeCurve => "Make Curve",
+            PathEdit::Smooth => "Smooth Points",
+            PathEdit::Cusp => "Cusp Points",
+            PathEdit::Close => "Close Path",
+            PathEdit::Break => "Break Path",
+            PathEdit::Join => "Join Ends",
+            PathEdit::AddSegment => "Add Segment",
+        }
+    }
+}
+
+/// Which tool drew a new path, which names the undo step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathOrigin {
+    /// The pen.
+    Pen,
+    /// The freehand tool.
+    Freehand,
+}
 
 /// Every document mutation a tool can ask for. Grows with the phase.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +135,47 @@ pub enum EditCommand {
         /// The new parameters. Any cached `path` is ignored and
         /// regenerated.
         shape: Box<QuickShape>,
+    },
+    /// Replaces a path's geometry: every node edit of the shape editor
+    /// and every segment the pen adds.
+    SetPath {
+        /// The path node.
+        node: NodeId,
+        /// The new geometry.
+        path: Arc<Path>,
+        /// Whether the interior is now painted (`None` keeps it): closing
+        /// a path fills it, as the original does.
+        filled: Option<bool>,
+        /// What the edit was.
+        edit: PathEdit,
+    },
+    /// Creates a path as the last object of a layer, carrying the given
+    /// attributes as its own attribute children.
+    CreatePath {
+        /// The layer it goes onto.
+        layer: NodeId,
+        /// The geometry.
+        path: Arc<Path>,
+        /// Whether the interior is painted: closed paths are.
+        filled: bool,
+        /// The current attributes the new object is given.
+        attrs: Vec<AttrValue>,
+        /// Which tool drew it.
+        origin: PathOrigin,
+    },
+    /// Turns rectangles, ellipses and quick shapes into editable paths of
+    /// the same outline — "Convert to editable shapes". The node keeps
+    /// its identity and its attributes; anything else is left alone.
+    ConvertToPaths {
+        /// The nodes.
+        nodes: Vec<NodeId>,
+    },
+    /// Sets the winding rule of paths, as their own attribute.
+    SetWindingRule {
+        /// The paths.
+        nodes: Vec<NodeId>,
+        /// The rule.
+        rule: FillRule,
     },
 }
 
@@ -128,6 +230,13 @@ impl EditCommand {
             EditCommand::DeleteNodes { .. } => "Delete",
             EditCommand::CreateShape { shape, .. } => create_label(shape),
             EditCommand::SetShapeParams { .. } => "Edit Shape",
+            EditCommand::SetPath { edit, .. } => edit.label(),
+            EditCommand::CreatePath { origin, .. } => match origin {
+                PathOrigin::Pen => "Create Path",
+                PathOrigin::Freehand => "Draw Freehand",
+            },
+            EditCommand::ConvertToPaths { .. } => "Convert to Editable Shapes",
+            EditCommand::SetWindingRule { .. } => "Winding Rule",
         }
     }
 
@@ -146,6 +255,19 @@ impl EditCommand {
                 EditCommand::SetShapeParams { node: a, .. },
                 EditCommand::SetShapeParams { node: b, .. },
             ) => a == b,
+            // Point nudges and typed coordinates: one step per run.
+            (
+                EditCommand::SetPath {
+                    node: a,
+                    edit: PathEdit::Move,
+                    ..
+                },
+                EditCommand::SetPath {
+                    node: b,
+                    edit: PathEdit::Move,
+                    ..
+                },
+            ) => a == b,
             _ => false,
         }
     }
@@ -156,8 +278,13 @@ impl EditCommand {
     pub fn is_noop(&self) -> bool {
         match self {
             EditCommand::TransformNodes { nodes, xf, .. } => nodes.is_empty() || xf.is_identity(),
-            EditCommand::DeleteNodes { nodes } => nodes.is_empty(),
-            EditCommand::CreateShape { .. } | EditCommand::SetShapeParams { .. } => false,
+            EditCommand::DeleteNodes { nodes }
+            | EditCommand::ConvertToPaths { nodes }
+            | EditCommand::SetWindingRule { nodes, .. } => nodes.is_empty(),
+            EditCommand::CreateShape { .. }
+            | EditCommand::SetShapeParams { .. }
+            | EditCommand::SetPath { .. }
+            | EditCommand::CreatePath { .. } => false,
         }
     }
 }
@@ -312,7 +439,101 @@ impl xarast_doc::Command for EditCommand {
                 }
                 tx.set_kind(*node, NodeKind::QuickShape(Box::new(with_outline(shape))))
             }
+            EditCommand::SetPath { .. }
+            | EditCommand::CreatePath { .. }
+            | EditCommand::ConvertToPaths { .. }
+            | EditCommand::SetWindingRule { .. } => run_path_commands(self, tx),
         }
+    }
+}
+
+/// Sets `node`'s own attribute of `value`'s slot: replaces the one among
+/// its attribute children, or adds one as its first child.
+fn set_own_attr(tx: &mut Tx<'_>, node: NodeId, value: AttrValue) -> Result<(), EditError> {
+    let slot = value.slot();
+    let doc = tx.doc();
+    let own = doc.tree.children(node).find(|c| match doc.tree.kind(*c) {
+        Some(NodeKind::Attr(a)) => a.value.slot() == slot,
+        _ => false,
+    });
+    match own {
+        Some(a) => tx.set_attr(a, value),
+        None => {
+            let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(value))))?;
+            tx.attach(attr, node, Attach::FirstChild)
+        }
+    }
+}
+
+fn run_path_commands(cmd: &EditCommand, tx: &mut Tx<'_>) -> Result<(), EditError> {
+    match cmd {
+        EditCommand::SetPath {
+            node, path, filled, ..
+        } => {
+            check_layers(tx, &[*node])?;
+            let Some(NodeKind::Path(old)) = tx.doc().tree.kind(*node) else {
+                return Err(EditError::WrongKind(*node));
+            };
+            let new = PathNode {
+                data: Arc::clone(path),
+                filled: filled.unwrap_or(old.filled),
+                stroked: old.stroked,
+            };
+            tx.set_kind(*node, NodeKind::Path(Box::new(new)))
+        }
+        EditCommand::CreatePath {
+            layer,
+            path,
+            filled,
+            attrs,
+            ..
+        } => {
+            match tx.doc().tree.kind(*layer) {
+                Some(NodeKind::Layer(l)) if !l.locked && !l.guide => {}
+                _ => return Err(EditError::NotPermitted(*layer)),
+            }
+            let node = tx.create(NodeKind::Path(Box::new(PathNode {
+                data: Arc::clone(path),
+                filled: *filled,
+                stroked: true,
+            })))?;
+            tx.attach(node, *layer, Attach::LastChild)?;
+            for a in attrs {
+                let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(a.clone()))))?;
+                tx.attach(attr, node, Attach::LastChild)?;
+            }
+            Ok(())
+        }
+        EditCommand::ConvertToPaths { nodes } => {
+            let nodes = outermost(tx, nodes);
+            check_layers(tx, &nodes)?;
+            for n in nodes {
+                let Some(kind) = tx.doc().tree.kind(n) else {
+                    continue;
+                };
+                if !matches!(kind, NodeKind::Shape(_) | NodeKind::QuickShape(_)) {
+                    continue;
+                }
+                let Some(outline) = crate::picking::geometry_of(kind) else {
+                    continue;
+                };
+                tx.set_kind(
+                    n,
+                    NodeKind::Path(Box::new(PathNode::new((*outline).clone()))),
+                )?;
+            }
+            Ok(())
+        }
+        EditCommand::SetWindingRule { nodes, rule } => {
+            check_layers(tx, nodes)?;
+            for &n in nodes {
+                if matches!(tx.doc().tree.kind(n), Some(NodeKind::Path(_))) {
+                    set_own_attr(tx, n, AttrValue::WindingRule(*rule))?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

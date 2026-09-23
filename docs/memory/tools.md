@@ -7,7 +7,7 @@ Phase spec: [`../phases/phase-07-tools-and-editing.md`](../phases/phase-07-tools
 revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 34, 35; the shell/UI contract in [`app-core.md`](app-core.md).
 
-## Current state (2026-09-23, round 2: XARA-US-0032 / XARA-US-0033 / XARA-T-0152)
+## Current state (2026-09-23, round 3: XARA-US-0034)
 
 | Piece | Where | State |
 |---|---|---|
@@ -20,10 +20,14 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Selector: click, Adjust-toggle, dual state, scale/rotate/skew/centre drags, move, marquee, infobar X/Y/W/H/anchor/lock/angle/scale-lines, double click → creating tool | `selector.rs` | done |
 | Rectangle, Ellipse (draw, Ctrl square/circle, Shift from centre, radius handle, W/H/Radius infobar) | `shapes.rs` | done |
 | Push, Zoom | `tools.rs` | done |
-| Shape editor, Pen, Freehand | `tools.rs` `PendingTool` | "coming soon" |
+| Shape editor (F4): node/handle select, marquee, move, reshape, add/delete point, line/curve, smooth/cusp, close, break, join, X/Y, even-odd | `node_edit.rs` | done (US-0034, T6.1–T6.7) |
+| Pen (Shift+F5): click corner, drag smooth, continue an end, close, Enter/Esc | `pen.rs` | done (T6.8) |
+| Freehand (F3): every sample, chunked incremental fit, smoothing slider, Shift rub-out, closed = filled | `freehand.rs` | done (T6.9, T6.10) |
+| `SetPath`/`CreatePath`/`ConvertToPaths`/`SetWindingRule`, `PathEdit` labels | `ops.rs` | done |
+| `Tool::action` + `ToolAction`; `AppCommand::Action` (L C S Z B J Enter), `ConvertToShapes` (Ctrl+Shift+S), Backspace = Delete | `tool.rs`, `command.rs` | done |
 | Current attributes | `edit.rs` `CurrentAttributes`, `Intent::SetCurrentAttribute` | done (no UI to set them yet) |
 | Keys | `AppCommand` + shell | as before, plus `3` = Zoom to selection; momentary Space / Alt+S (selector), Alt+Z (zoom), Alt+X (push) |
-| `--probe drag|scale|rotate|rect|ellipse` | `xarast-shell` | done |
+| `--probe drag|scale|rotate|rect|ellipse|nodes|pen|freehand` | `xarast-shell` | done |
 
 Tests: `crates/xarast-app/tests/transforms.rs` (18: dual state, scale
 corner/aspect/centre, live Ctrl mid-scale, line widths, rotate with
@@ -45,6 +49,20 @@ one object at 250 000 nodes **339 µs the pair** through `Session` (≈0.17 ms
 each; budget 1 ms), 314 µs through the bare bus. Live window
 (`--probe drag`, GardenPlan.xar, 2056×1286, GPU tiles): input → presented
 p50 2.1 ms, p99 7.8 ms over 100 drag frames, each a preview scene rebuild.
+
+Round 3 (XARA-US-0034): `tests/node_edit.rs` (21: node selection incl.
+Adjust/Adjust+Constrain/marquee/select all/Esc, `Arc::ptr_eq` on point
+selection, node drag one step + undo exact, 45° constrain, Esc at 10 cut
+points, smooth-handle sync + cusp independence, segment reshape, add/delete
+exact on a line, continuity on curves, delete-all deletes the object, every
+path operation and full undo, double click, typed X, winding rule,
+rectangle never converted silently + Convert, pen lines/drag/close/Esc/
+continue, selector double click on a path), `tests/freehand.rs` (4: the
+4000-sample 200 Hz stroke, no sample dropped, rub-out, Esc + closed
+stroke); geometry proptests in `xarast-geom/tests/path_edit.rs`.
+Live window (GardenPlan.xar, 2056×1286, GPU tiles, 100 frames, input →
+presented p50/p99): nodes 2.9/14.7 ms, pen 3.4/8.9 ms, freehand
+3.2/9.8 ms.
 
 ## Decisions taken (and why)
 
@@ -157,13 +175,57 @@ p50 2.1 ms, p99 7.8 ms over 100 drag frames, each a preview scene rebuild.
     are swallowed; Space needs no text field focused.
 27. **Double click** on a rectangle or ellipse (quick shape or
     `ShapeNode`) with the selector selects it and chooses its tool
-    (`ToolRequests::tool`). Paths do not open the (pending) shape editor.
+    (`ToolRequests::tool`); on a path it opens the shape editor.
 28. **Locked layers** refuse `TransformNodes`, `DeleteNodes`,
     `SetShapeParams` (any node on one) and `CreateShape` (the target
     layer) with `EditError::NotPermitted`, document untouched.
 
+29. **Behaviour source for the path tools is `research/04 §4.11`.** The
+    shape editor does not draw (the original's Bézier tool does; here the
+    pen draws). Handles show for a path's one selected node only, as in
+    the original.
+30. **Parametric shapes are never converted silently.** The shape editor
+    edits paths only (the original's Bézier tool ignores rectangles,
+    ellipses and quick shapes too); with one selected it draws its bounds
+    dashed and its infobar offers *Convert to editable shapes*
+    (`Ctrl+Shift+S`, `EditCommand::ConvertToPaths`: same `NodeId`, same
+    attribute children, `NodeKind::Path` of `picking::geometry_of`).
+31. **Point selection** stays `EditState` point indices; tools ask for a
+    new one through `ToolRequests::points` (applied after the commands,
+    so indices refer to the new geometry) and `created_points` (the pen's
+    new end on a created path). `node_edit::Nodes` maps indices ⇄ nodes.
+32. **Keys go to the tool first**: Delete/Backspace, Esc (when no gesture
+    is in flight) and Ctrl+A become `ToolAction`s the tool may take
+    (delete points, deselect points, select all points); otherwise the
+    object-level command runs. L/C/S/Z/B/J/Enter are `AppCommand::Action`
+    and do nothing in tools that ignore them.
+33. **A node edit previews by hiding the path** and drawing its new
+    outline and nodes over it (decision 23's pattern); one `SetPath` step
+    at `DragEnd`, labelled by `PathEdit` (Move Points, Reshape Curve, Add
+    Point, Delete Points, Make Line/Curve, Smooth/Cusp Points, Close Path,
+    Break Path, Join Ends, Add Segment). Deleting every node deletes the
+    object (label "Delete").
+34. **Segment reshape** is ours: both handles move along the remaining
+    offset, weighted `(1−t)` and `t`, scaled so the grabbed point lands
+    exactly under the pointer (`node_edit::reshape`). The original uses a
+    constant 0.656875 factor over `t`; not copied.
+35. **Pen**: one undo step per segment (Create Path, Add Segment, Close
+    Path), as the original. Its state is the selection (the one selected
+    open end) plus a start point held by the tool; Enter/Esc finish by
+    deselecting the end; Esc drops an unused start. Clicking an open end
+    of a selected path picks it up (ours; the original needs the shape
+    editor for that). A closed pen path is filled.
+36. **Freehand tolerance** = `(64 + 160 × smoothing) / zoom` mp, the
+    original's (`research/04 §4.11`); default 50. The machine replays the
+    pointer positions seen below the drag threshold as `DragUpdate`s once
+    a drag starts, so the fitter sees every sample (other tools ignore
+    the extra updates). The preview fits in chunks of 96 samples (frozen
+    prefix + bounded tail); the release refits the whole stroke.
+
 ## Provisional values (observe in the VM before trusting)
 
+- Segment grab = 4 + 3 device px; freehand chunk 96 samples; freehand
+  closes when its ends are within the 6 px grab distance.
 - Drag threshold 4 device px; double click 500 ms / 6 px; pick tolerance
   3 device px; handle grab 6 device px; auto-scroll band 16 px, step ≤ 24
   px/frame; constrain angle 45°.
@@ -183,6 +245,11 @@ p50 2.1 ms, p99 7.8 ms over 100 drag frames, each a preview scene rebuild.
    edit (`parametric_shapes_stay_parametric_through_transforms`).
 7. The pick index never sees a drag frame: it is invalidated only by
    committed mutations.
+8. Selecting path points never changes the path (`Arc::ptr_eq`,
+   `tests/node_edit.rs`); a node drag, a pen segment and a freehand
+   stroke are each one undo step.
+9. The shape editor never changes a quick shape's kind except through
+   `ConvertToPaths`.
 
 ## Dead ends (do not retry)
 
@@ -213,4 +280,14 @@ p50 2.1 ms, p99 7.8 ms over 100 drag frames, each a preview scene rebuild.
       per-node `Transform` inverse; a subtree-level action would fix it.
 - [ ] Nudges, snapping (W4 T4.10, W8), flip and copy-and-transform (T4.6,
       T4.7), bump buttons, UI to set the current attributes (phase 8).
-- [ ] Double click on a path → shape editor once it exists.
+- [x] Double click on a path → shape editor.
+- [ ] Path-point nudges (T6.11, needs the W4 nudge family), Tab/Home/End
+      point cycling, mid-drag snapping of nodes (W8).
+- [ ] Freehand: Alt straight segments, joining to a selected path's end,
+      refitting the last stroke when the smoothing changes (retro fit),
+      pressure. Pen: re-editing the start point's handle.
+- [ ] Shape editor: editable paths inside blends/moulds, the neighbouring
+      handles' X/Y in the infobar, reverse path, arrowheads; join across
+      two path objects.
+- [ ] The menu bar has no entries for the path operations yet (keys and
+      infobar buttons only).

@@ -500,7 +500,68 @@ rejections and widen the search lazily.
 - **Handles** are not in this index. They are picked in device space with
   a fixed pixel radius (T3.7).
 
+## Path editing: `path_edit` and `fit` (phase 7 W6, XARA-US-0034)
+
+`EditPath` (`path_edit.rs`) is the node view of a `Path`: subpaths of
+`EditNode { at, flags, ctrl_in, ctrl_out }`; segment `i` leaves node `i`
+and is a cubic exactly when node `i` has `ctrl_out` (then node `i+1` has
+`ctrl_in`). Every editing tool works on it and writes back with
+`to_path()`.
+
+Decisions:
+
+1. **The round trip is exact** (`from_path(p).to_path() == p`, proptest)
+   for both ways of closing: the `.xar` way (the last point repeats the
+   first, then Close) folds the repeat into node 0 and remembers
+   `explicit_close` + the repeat's flags; the SVG way (Close alone) does
+   not. Subpaths with fewer than two nodes are dropped on write.
+2. **Point indices ⇄ nodes**: `layout()` gives each written point's role
+   (`PointRole::Node`/`Control`); `node_point_index` / `node_at_point_index`
+   (and `xarast_app::node_edit::Nodes`, which caches the map) translate
+   the session's point selection. The repeated closing point maps to node 0.
+3. **Flag model = the original's** (`research/04 §4.11`): `ROTATE` on a
+   node = smooth (collinear handles); `SMOOTH` on a handle = auto-placed,
+   recomputed by `resmooth_around` after a node moves; dragging a handle
+   by hand clears `SMOOTH` on it, its opposite and its node. The doc
+   comment on `PointFlags::SMOOTH` ("tangents collinear") predates this and
+   is loose.
+4. **Flags on write**: a path that came with a flag array keeps it as is;
+   a flagless one gains one only when a flag other than `END_POINT`
+   appears, and then every on-curve point is marked `END_POINT`. So
+   add∘delete on a flagless path is exact.
+5. **Split** = de Casteljau, rounded to mp; the new node is `ROTATE` on a
+   curve, a plain corner on a line. **Delete** of a node between two
+   curves rebuilds one cubic keeping the outer handles' *directions*,
+   recovering the split parameter (the handle-length ratio, refined by a
+   1-D search for the `t` whose re-split best reproduces the deleted
+   node's handles). The original keeps the outer handles unchanged (no
+   refit); we differ so that add∘delete is the identity (criterion 15).
+   Deviation bound in the proptest: `2 / min(t, 1−t)` mp. A line on
+   either side gives a line (the original's rule).
+6. **Smooth** on a node whose handles are already collinear (within the
+   rounding of the node and both ends: `sin θ ≤ 2/la + 2/lc`) only sets
+   `ROTATE`, so smooth → cusp → smooth is the identity on a smooth node;
+   otherwise it auto-places the handles (the original always does).
+   Straight segments stay straight. **Cusp** clears both flags, handles
+   stay.
+7. `close` folds coincident ends; `open` drops the closing segment's
+   handles, so close∘open keeps the point count. `break_at` opens a
+   closed subpath at a node (copies at both ends) or splits an open one;
+   it renumbers nodes — callers re-find nodes by position.
+8. **Fitter** (`fit.rs`, Schneider 1990 from the paper's description):
+   corners where the direction turns > 90° over a window of the
+   tolerance, least-squares handle lengths with fixed tangents, 4 Newton
+   reparameterisations when within 4× the tolerance, else split at the
+   worst sample with a shared tangent. A 90° turn is *not* a corner (the
+   original's "more than 90°"). `fit_stroke_indexed` returns each node's
+   sample index for incremental fitting. Measured: a 4000-sample stroke at
+   the default smoothing fits in well under a frame and stays within the
+   tolerance (`xarast-app/tests/freehand.rs`).
+
 ## Invariants that must not be broken
+
+- `EditPath::from_path(p).to_path() == p` for well-formed paths whose
+  subpaths have ≥ 2 nodes (`tests/path_edit.rs`).
 
 1. **The five `Path` invariants**, enforced by `PathBuilder` by construction
    and checked by `Path::validate()` for paths that did not come through it

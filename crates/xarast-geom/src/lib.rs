@@ -40,6 +40,7 @@
 #![doc(html_no_source)]
 
 pub mod boolean;
+pub mod fit;
 pub mod fixed;
 pub mod flatten;
 pub mod hit;
@@ -48,6 +49,7 @@ pub mod matrix;
 pub mod measure;
 pub mod mp;
 pub mod path;
+pub mod path_edit;
 pub mod point;
 pub mod profile;
 pub mod rect;
@@ -55,6 +57,7 @@ pub mod regular;
 pub mod stroke;
 
 pub use boolean::{BoolOp, boolean, self_union};
+pub use fit::{fit_stroke, fit_stroke_indexed, max_sample_deviation};
 pub use fixed::Fixed16;
 pub use flatten::{
     Polyline, SegmentTrace, Tolerance, VertexSource, flatten, flatten_traced, max_deviation,
@@ -68,6 +71,9 @@ pub use matrix::Matrix;
 pub use measure::{Nearest, PathHitIndex, arclen, fill_contains, nearest_point, point_at_arclen};
 pub use mp::{Mp, ParseMpError};
 pub use path::{Path, PathBuilder, PathError, PointFlags, Segment, SubPathRef, Verb};
+pub use path_edit::{
+    Control, EditNode, EditPath, EditSubpath, NodeRef, PointRole, SegRef, SegmentHit, Side,
+};
 pub use point::{Point, Vector};
 pub use profile::BiasGain;
 pub use rect::Rect;

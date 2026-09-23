@@ -247,6 +247,7 @@ pub fn creating_tool(doc: &Document, node: NodeId) -> Option<ToolId> {
             xarast_doc::ShapeKind::Rect => ToolId::Rectangle,
             xarast_doc::ShapeKind::Ellipse => ToolId::Ellipse,
         }),
+        NodeKind::Path(_) => Some(ToolId::ShapeEditor),
         _ => None,
     }
 }

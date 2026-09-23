@@ -67,11 +67,14 @@ pub mod command;
 pub mod commands;
 pub mod edit;
 pub mod fonts;
+pub mod freehand;
 pub mod geometry;
 pub mod headless;
 pub mod intent;
+pub mod node_edit;
 pub mod ops;
 mod paint;
+pub mod pen;
 pub mod picking;
 pub mod prefs;
 pub mod recent;
@@ -105,7 +108,8 @@ pub use render_thread::{
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use tool::{
     Anchor, CursorKind, GestureEvent, HandleShape, HitResult, Infobar, InfobarField, InfobarItem,
-    InfobarValue, InteractionState, OverlayShape, Preview, Tool, ToolCtx, ToolMachine, ToolView,
+    InfobarValue, InteractionState, OverlayShape, Preview, Tool, ToolAction, ToolCtx, ToolMachine,
+    ToolView,
 };
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};
 pub use walker::{SceneWalker, WalkStats};

@@ -329,14 +329,10 @@ fn delete_is_one_labelled_step_and_undo_brings_the_object_back() {
 fn tools_switch_and_the_reserved_ones_are_refused() {
     let (mut s, _, _) = fixture();
     assert_eq!(s.tools().current(), ToolId::Selector);
-    s.apply(Intent::ChooseTool(ToolId::Pen)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
-    assert_eq!(s.edit.tool.active, ToolId::Pen);
-    // A pending tool says so and ignores the canvas.
-    assert!(matches!(
-        s.infobar().items.as_slice(),
-        [InfobarItem::Note(n)] if n.contains("coming soon")
-    ));
+    s.apply(Intent::ChooseTool(ToolId::Zoom)).unwrap();
+    assert_eq!(s.tools().current(), ToolId::Zoom);
+    assert_eq!(s.edit.tool.active, ToolId::Zoom);
+    // A view tool leaves the document alone.
     let before = s.doc.canonical_digest();
     let p = dev(&s, 125_000, 125_000);
     move_to(&mut s, p);
@@ -347,14 +343,14 @@ fn tools_switch_and_the_reserved_ones_are_refused() {
 
     // Phase 8 and 9 tools cannot be chosen yet.
     s.apply(Intent::ChooseTool(ToolId::Text)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
+    assert_eq!(s.tools().current(), ToolId::Zoom);
 
     // A momentary switch restores the chosen tool on release.
     s.apply(Intent::MomentaryTool(Some(ToolId::Selector)))
         .unwrap();
     assert_eq!(s.tools().current(), ToolId::Selector);
     s.apply(Intent::MomentaryTool(None)).unwrap();
-    assert_eq!(s.tools().current(), ToolId::Pen);
+    assert_eq!(s.tools().current(), ToolId::Zoom);
 }
 
 #[test]

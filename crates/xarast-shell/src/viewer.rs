@@ -751,6 +751,8 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
                 ChordKey::Char(c) => Key::char(c),
                 ChordKey::Home => Key::Named(NamedKey::Home),
                 ChordKey::Delete => Key::Named(NamedKey::Delete),
+                ChordKey::Backspace => Key::Named(NamedKey::Backspace),
+                ChordKey::Enter => Key::Named(NamedKey::Enter),
                 ChordKey::Escape => Key::Named(NamedKey::Escape),
                 ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
             };
@@ -1024,9 +1026,62 @@ fn gesture_setup(
             vec![Intent::ChooseTool(xarast_app::ToolId::Ellipse)],
             (centre.0 - 120.0, centre.1 - 80.0),
         ),
+        (K::Nodes, _) => match path_node_target(s) {
+            Some((at, node)) => (
+                vec![
+                    Intent::Select {
+                        nodes: vec![node],
+                        mode: xarast_app::SelectMode::Replace,
+                    },
+                    Intent::ChooseTool(xarast_app::ToolId::ShapeEditor),
+                ],
+                at,
+            ),
+            None => (
+                vec![Intent::ChooseTool(xarast_app::ToolId::ShapeEditor)],
+                centre,
+            ),
+        },
+        (K::Pen, _) => {
+            let mut prelude = vec![Intent::ChooseTool(xarast_app::ToolId::Pen)];
+            prelude.extend(click((centre.0 - 160.0, centre.1 + 60.0), 0));
+            (prelude, (centre.0 - 40.0, centre.1 - 40.0))
+        }
+        (K::Freehand, _) => (
+            vec![Intent::ChooseTool(xarast_app::ToolId::Freehand)],
+            (centre.0 - 150.0, centre.1),
+        ),
         (_, Some((at, _))) => (Vec::new(), at),
         (_, None) => (Vec::new(), centre),
     }
+}
+
+/// Where the node probe presses: the path node nearest the canvas
+/// centre, in canvas pixels, and its path.
+fn path_node_target(s: &Session) -> Option<((f64, f64), xarast_doc::NodeId)> {
+    let size = s.viewport.size();
+    let (cx, cy) = (f64::from(size.width) / 2.0, f64::from(size.height) / 2.0);
+    xarast_app::edit::selectable_objects(&s.doc)
+        .filter_map(|n| Some((n, xarast_app::node_edit::path_of(&s.doc, n)?)))
+        .flat_map(|(n, p)| {
+            let e = xarast_geom::EditPath::from_path(p);
+            e.node_refs()
+                .filter_map(|r| e.node(r).map(|x| x.at))
+                .map(|at| (s.viewport.doc_to_device(at), n))
+                .collect::<Vec<_>>()
+        })
+        .filter(|(d, _)| {
+            d.x > 40.0
+                && d.y > 40.0
+                && d.x < f64::from(size.width) - 40.0
+                && d.y < f64::from(size.height) - 40.0
+        })
+        .min_by(|(a, _), (b, _)| {
+            (a.x - cx)
+                .hypot(a.y - cy)
+                .total_cmp(&(b.x - cx).hypot(b.y - cy))
+        })
+        .map(|(d, n)| ((d.x, d.y), n))
 }
 
 /// Where the drag probe presses: the centre of the visible selectable
@@ -1069,10 +1124,11 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     HandleShape::Rotate => HandleKind::Rotate,
                     HandleShape::Skew => HandleKind::Skew,
                     HandleShape::Centre => HandleKind::Centre,
-                    HandleShape::Node => HandleKind::Node,
+                    HandleShape::Node | HandleShape::NodeSelected => HandleKind::Node,
+                    HandleShape::Control => HandleKind::Control,
                     HandleShape::Radius => HandleKind::Radius,
                 },
-                active: false,
+                active: shape == HandleShape::NodeSelected,
             }),
             OverlayShape::Rect { rect, dashed } => out.push(OverlayItem::Rect {
                 bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),
@@ -2355,7 +2411,11 @@ mod tests {
         activate(&mut v, "Pen");
         assert_eq!(tool(&v), xarast_app::ToolId::Pen);
         let infobar = v.ui_model(1.0).editing.unwrap().infobar;
-        assert!(format!("{infobar:?}").contains("coming soon"));
+        assert!(format!("{infobar:?}").contains("drag for a smooth point"));
+        activate(&mut v, "Freehand");
+        assert_eq!(tool(&v), xarast_app::ToolId::Freehand);
+        let infobar = v.ui_model(1.0).editing.unwrap().infobar;
+        assert!(format!("{infobar:?}").contains("rub it out"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
         assert_eq!(tool(&v), xarast_app::ToolId::Selector);
         // A tool of a later phase is published, greyed out, and inert.

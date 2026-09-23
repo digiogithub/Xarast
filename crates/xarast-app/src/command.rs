@@ -17,6 +17,7 @@ use std::fmt;
 use crate::edit::ToolId;
 use crate::geometry::DevicePoint;
 use crate::intent::Intent;
+use crate::tool::ToolAction;
 use crate::viewport::ZoomTarget;
 
 /// The key of a [`KeyChord`].
@@ -28,6 +29,10 @@ pub enum ChordKey {
     Home,
     /// The Delete key.
     Delete,
+    /// The Backspace key.
+    Backspace,
+    /// The Enter (Return) key.
+    Enter,
     /// The Escape key.
     Escape,
     /// A function key, `F1` to `F24`.
@@ -125,6 +130,8 @@ impl fmt::Display for KeyChord {
             ChordKey::Char(c) => write!(f, "{}", c.to_ascii_uppercase()),
             ChordKey::Home => f.write_str("Home"),
             ChordKey::Delete => f.write_str("Del"),
+            ChordKey::Backspace => f.write_str("Backspace"),
+            ChordKey::Enter => f.write_str("Enter"),
             ChordKey::Escape => f.write_str("Esc"),
             ChordKey::Function(n) => write!(f, "F{n}"),
         }
@@ -166,6 +173,12 @@ pub enum AppCommand {
     Cancel,
     /// Choose a tool from the palette or by its key.
     Tool(ToolId),
+    /// A command for the tool in force: the shape editor's path
+    /// operations (`research/04 §4.11`), Enter.
+    Action(ToolAction),
+    /// Convert to editable shapes (`Ctrl+Shift+S`): rectangles, ellipses
+    /// and quick shapes become paths.
+    ConvertToShapes,
 }
 
 /// How much one zoom-in or zoom-out step multiplies the zoom.
@@ -174,7 +187,7 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 22] = [
+    pub const ALL: [AppCommand; 30] = [
         AppCommand::Open,
         AppCommand::Close,
         AppCommand::Quit,
@@ -197,6 +210,14 @@ impl AppCommand {
         AppCommand::Tool(ToolId::Freehand),
         AppCommand::Tool(ToolId::Zoom),
         AppCommand::Tool(ToolId::Pan),
+        AppCommand::Action(ToolAction::Finish),
+        AppCommand::Action(ToolAction::MakeLine),
+        AppCommand::Action(ToolAction::MakeCurve),
+        AppCommand::Action(ToolAction::Smooth),
+        AppCommand::Action(ToolAction::Cusp),
+        AppCommand::Action(ToolAction::Break),
+        AppCommand::Action(ToolAction::Join),
+        AppCommand::ConvertToShapes,
     ];
 
     /// The menu label.
@@ -218,6 +239,8 @@ impl AppCommand {
             AppCommand::SelectAll => "Select all",
             AppCommand::Cancel => "Select none",
             AppCommand::Tool(t) => t.label(),
+            AppCommand::Action(a) => a.label(),
+            AppCommand::ConvertToShapes => "Convert to editable shapes",
         }
     }
 
@@ -249,7 +272,10 @@ impl AppCommand {
         // Ctrl+Shift+Z first because every other Linux program shows it;
         // Ctrl+Y is the original's (`research/04 §4.1`).
         const REDO: &[KeyChord] = &[KeyChord::ctrl_shift('z'), KeyChord::ctrl('y')];
-        const DELETE: &[KeyChord] = &[KeyChord::plain(ChordKey::Delete)];
+        const DELETE: &[KeyChord] = &[
+            KeyChord::plain(ChordKey::Delete),
+            KeyChord::plain(ChordKey::Backspace),
+        ];
         const SELECT_ALL: &[KeyChord] = &[KeyChord::ctrl('a')];
         const CANCEL: &[KeyChord] = &[KeyChord::plain(ChordKey::Escape)];
         // The tool keys of `research/04 §4.6`.
@@ -261,6 +287,15 @@ impl AppCommand {
         const PEN: &[KeyChord] = &[KeyChord::shift_f(5)];
         const ZOOM_TOOL: &[KeyChord] = &[KeyChord::shift_f(7)];
         const PUSH: &[KeyChord] = &[KeyChord::shift_f(8)];
+        // The shape editor's keys (`research/04 §4.11`).
+        const FINISH: &[KeyChord] = &[KeyChord::plain(ChordKey::Enter)];
+        const MAKE_LINE: &[KeyChord] = &[KeyChord::char('l')];
+        const MAKE_CURVE: &[KeyChord] = &[KeyChord::char('c')];
+        const SMOOTH: &[KeyChord] = &[KeyChord::char('s')];
+        const CUSP: &[KeyChord] = &[KeyChord::char('z')];
+        const BREAK: &[KeyChord] = &[KeyChord::char('b')];
+        const JOIN: &[KeyChord] = &[KeyChord::char('j')];
+        const CONVERT: &[KeyChord] = &[KeyChord::ctrl_shift('s')];
         const NONE: &[KeyChord] = &[];
         match self {
             AppCommand::Open => OPEN,
@@ -288,6 +323,20 @@ impl AppCommand {
                 ToolId::Pan => PUSH,
                 ToolId::Fill | ToolId::Transparency | ToolId::Text => NONE,
             },
+            AppCommand::Action(a) => match a {
+                ToolAction::Finish => FINISH,
+                ToolAction::MakeLine => MAKE_LINE,
+                ToolAction::MakeCurve => MAKE_CURVE,
+                ToolAction::Smooth => SMOOTH,
+                ToolAction::Cusp => CUSP,
+                ToolAction::Break => BREAK,
+                ToolAction::Join => JOIN,
+                ToolAction::Delete
+                | ToolAction::Cancel
+                | ToolAction::SelectAll
+                | ToolAction::ClosePath => NONE,
+            },
+            AppCommand::ConvertToShapes => CONVERT,
         }
     }
 
@@ -331,6 +380,11 @@ impl AppCommand {
             AppCommand::SelectAll => Intent::SelectAll,
             AppCommand::Cancel => Intent::Cancel,
             AppCommand::Tool(t) => Intent::ChooseTool(t),
+            AppCommand::Action(ToolAction::Delete) => Intent::DeleteSelection,
+            AppCommand::Action(ToolAction::Cancel) => Intent::Cancel,
+            AppCommand::Action(ToolAction::SelectAll) => Intent::SelectAll,
+            AppCommand::Action(a) => Intent::ToolAction(a),
+            AppCommand::ConvertToShapes => Intent::ConvertToShapes,
         }
     }
 }

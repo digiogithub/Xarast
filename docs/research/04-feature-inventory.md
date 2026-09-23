@@ -697,6 +697,34 @@ Facts read from the original as behaviour (added 2026-09-23 for XARA-US-0032/003
 - **Constrain while drawing** puts the pointer on the nearest of the four diagonals from the start point, at its true distance (so the box is a square) (`tools/oprshape.cpp:253-283`).
 - **Adjust while drawing** re-centres: when Adjust goes down the centre becomes the midpoint of the start and the pointer, and the box is drawn symmetrically about it; when it comes up the start becomes the reflection of the pointer through that centre (`tools/oprshape.cpp:336-365`). Adjust together with Constrain switches to a "radius" mode that rotates the shape with the pointer (`tools/oprshape.cpp:247-250`, `:293-312`).
 
+### 4.11 Path tools (Bézier/shape, pen, freehand): observed behaviour
+
+Facts read from the original as behaviour (added 2026-09-23 for XARA-US-0034), never as code. Paths are relative to the original's root.
+
+**Flag model.** An endpoint with `IsRotate` keeps its two handles collinear (a smooth join); without it the point is a cusp. `IsSmooth` on a *control point* means the program places it automatically (`Kernel/paths.cpp:4130-4183`, `:4347+`): next to another curve it lies perpendicular to the bisector of the directions to the two neighbouring endpoints (`:4913-4934`); next to a straight segment it continues that line (`:4972-4993`); at an open end it sits along the chord (`:5009-5013`); its length is a third of its own segment's chord.
+
+**Bézier/shape tool (`TOOL11`).**
+- Click routing tests, in order: a point, near a segment, the nearest selected endpoint, new path (`tools/beztool.cpp:1199-1367`). The tool also draws; Xarast leaves drawing to the pen.
+- Click on an endpoint selects only it and clears other paths' points; Adjust toggles it; Adjust+Constrain toggles every point of the path (`Kernel/nodepath.cpp:739-770`, `:971-1004`, `:1026-1033`). A click on a control handle does nothing (`:771-774`). Handles are shown and hit-testable only when exactly one endpoint of the path is selected (`Kernel/paths.cpp:6809-6856`).
+- Double click on a selected endpoint toggles smooth/cusp (`Kernel/nodepath.cpp:777-797`).
+- Dragging moves every selected point by one offset, their handles with them, then re-places every `IsSmooth` handle of the path (`Kernel/pathedit.cpp:2658-2675`). Constrain snaps the offset to 45° (`Kernel/docview.cpp:274`, `pathedit.cpp:799-810`).
+- Dragging a handle clears `IsSmooth` on it, its opposite and its endpoint (`pathedit.cpp:3450-3453`); with `IsRotate` on the endpoint the opposite handle turns to stay collinear, keeping its own length (`Kernel/paths.cpp:5033-5063`); Constrain snaps the handle to 45° about its endpoint (`pathedit.cpp:3518-3519`).
+- Dragging a segment reshapes it: a line first becomes a curve with handles at thirds, then both handles move along the pointer offset, weighted by the grab parameter (`pathedit.cpp:7869-8499`).
+- Marquee selects endpoints inside; without Adjust it deselects those outside, with Adjust it only adds (`tools/opbezier.cpp:476-531`).
+- A click on a segment with no motion adds a point there, keeping the shape; the new point is selected, `IsRotate` on for a curve, both flags off for a line (`pathedit.cpp:8021-8024`, `:8124`, `:8150-8179`).
+- Delete/Backspace delete the selected points (`beztool.cpp:1149-1160`): curve–curve keeps the outer handles unchanged (no refit, `pathedit.cpp:7274-7278`); a line on either side gives a line (`:6901-6913`, `:7270-7272`); a last segment deletes the subpath, or the object (`:6960-6965`, `:7158-7163`).
+- Make line / make curve (keys L, C) act on segments whose two endpoints are selected; make curve puts handles at thirds with `IsSmooth` and `IsRotate` and re-smooths (`Kernel/pathops.cpp:201-252`, `:275-377`, `:618-690`).
+- Smooth / cusp (keys S, Z): smooth sets both flags on the point and its handles and auto-places them; cusp clears them and leaves the handles where they are (only Constrain moves them) (`pathedit.cpp:5316-5575`, `beztool.cpp:1110-1113`, `:2466-2481`).
+- Dragging an open end onto the other end closes the subpath and fills it (`pathedit.cpp:652-697`, `:4922-4933`); onto another selected path's end joins them (`:701-784`). Enter closes selected open paths whose first or last point is selected (`beztool.cpp:1089-1094`, `pathedit.cpp:10675-10740`). B breaks at the selected points (`beztool.cpp:1134-1147`).
+- Tab/Shift+Tab and Home/End move the point selection; arrow keys nudge points (`beztool.cpp:455-460`, `:1077-1108`). Select/deselect all points are context-menu commands (`nodepath.cpp:909-910`).
+- **Only paths are edited** (and the editable paths inside blends, moulds and brushes): rectangles, ellipses and quick shapes are neither edited nor converted by the tool (`beztool.cpp:1387-1393`, `Kernel/node.cpp:2843-2846`).
+- Infobar: X/Y of the point, the neighbouring handles, and buttons make line, make curve, smooth, cusp, reverse, arrowheads; a retro-smooth slider (`beztool.cpp:1634-1730`, `:3748-3910`, `:4178-4345`).
+- Blobs are 2 px unselected and 3 px selected in radius; hit tests use a 7 px square, and "near a segment" is within the blob half-width (`Kernel/rndrgn.cpp:199`, `:214`, `wxOil/osrndrgn.cpp:3719-3721`, `Kernel/paths.cpp:7182-7186`).
+
+**Pen (`TOOL14`).** The first click or drag only places an internal start point (`tools/pentool.cpp:633-644`); the second makes the path (`Kernel/penedit.cpp:1576-1690`). While dragging, the handle follows the pointer and its mirror through the point is the incoming handle (`:279-286`, `:336-391`, `:1120-1141`); under 2 px of motion is a click (`penedit.h:249`). A selected open end is extended by the next click or drag; after a smooth end the new segment leaves along the mirrored handle, after a cusp or a line the handles go at thirds (`pentool.cpp:850-873`, `penedit.cpp:1315-1366`). A click on the other end closes (`pentool.cpp:823-836`). Esc drops the start point only; Adjust-click away ends the path (`pentool.cpp:601-606`, `:1042-1049`). One undo step per segment (`pentool.cpp:520-548`).
+
+**Freehand (`TOOL6`).** Every distinct pointer position is recorded (`tools/opfree.cpp:1079-1117`). Smoothing 0–100, default 50 (`tools/freehand.cpp:208`, `tools/freeinfo.cpp:686-693`); the fit tolerance is `(64 + 160 × smoothing) / view scale` millipoints, compared squared (`tools/opfree.cpp:921-926`). The fitter cuts at turns of more than 90° and splits at the worst error (`Kernel/fitcurve.cpp:543-552`, `:612-662`); its curves have `IsRotate` on and corners off (`:1045-1075`). Rub-out works only with Adjust held: going back over the stroke deletes it from there on (`opfree.cpp:578-579`, `:1006-1062`). Alt draws straight segments (`:533-574`). Starting or ending on a selected open end joins to it; a stroke whose ends coincide closes and fills (`freehand.cpp:1069-1100`, `opfree.cpp:1411-1560`). One undo step per stroke.
+
 ---
 
 ## 5. Import and export formats with priorities
