@@ -108,6 +108,50 @@ fn perspective(a: Point, c: Point, persp: &Perspective) -> GradMapping {
     }
 }
 
+/// The frame of a bitmap fill or bitmap transparency.
+///
+/// A bitmap fill's control points put the **bottom** row of the image at
+/// `origin`: the original hands `StartPoint`, `EndPoint`, `EndPoint2` to
+/// the tile plotter as the parallelogram's first three corners
+/// (`wxOil/grndrgn.cpp:3501-3521`), and the plotter maps its first corner
+/// to the first stored row of a bottom-up DIB, as the plain bitmap plot
+/// shows by passing a rectangle's low corner first
+/// (`wxOil/grndrgn.cpp:4862-4865`). Converting a bitmap object into a fill
+/// agrees: the object's bottom-left corner becomes `StartPoint` and its
+/// top-left `EndPoint2` (`Kernel/nodebmp.cpp:1210-1212`). `axis_x` is the
+/// bottom-right corner and `axis_y` the top-left one; with perspective,
+/// `p2` is the top-left and `p3` the top-right.
+///
+/// [`Paint::Image`] samples `v = 0` at the image's **top** row (decoded
+/// images are top-down), so the frame starts at the top edge and runs
+/// back to `origin` (XARA-T-0171; using the points as they stand drew
+/// every bitmap fill upside down). Mirror tiling is symmetric about the
+/// tile's edges, so moving the frame's origin by one tile does not change
+/// which tiles are mirrored.
+fn bitmap_frame(
+    origin: Point,
+    axis_x: Point,
+    axis_y: Point,
+    persp: Option<&Perspective>,
+) -> GradMapping {
+    match persp {
+        Some(p) => GradMapping::Perspective {
+            a: p64(p.p2),
+            b: p64(origin),
+            c: p64(p.p3),
+            d: p64(axis_x),
+        },
+        None => {
+            let (o, x, y) = (p64(origin), p64(axis_x), p64(axis_y));
+            GradMapping::Affine {
+                a: y,
+                b: o,
+                c: Point64::new(y.x + x.x - o.x, y.y + x.y - o.y),
+            }
+        }
+    }
+}
+
 /// The mapping of a graduated fill (linear, radial, conical, diamond).
 ///
 /// The original clamps these whatever the mapping says, *except* for the
@@ -376,10 +420,7 @@ pub(crate) fn colour_paint(
             ..
         } => {
             let id = *ctx.images.get(image)?;
-            let mapping = match persp {
-                Some(p) => perspective(*origin, *axis_x, p),
-                None => affine(*origin, *axis_x, *axis_y),
-            };
+            let mapping = bitmap_frame(*origin, *axis_x, *axis_y, persp.as_ref());
             Paint::Image {
                 image: id,
                 mapping,
@@ -552,10 +593,7 @@ pub(crate) fn transparency(
             ..
         } => match ctx.images.get(image) {
             Some(id) => {
-                let mapping = match persp {
-                    Some(p) => perspective(*origin, *axis_x, p),
-                    None => affine(*origin, *axis_x, *axis_y),
-                };
+                let mapping = bitmap_frame(*origin, *axis_x, *axis_y, persp.as_ref());
                 Transparency {
                     family: BlendFamily::Mix,
                     source: TranspSource::Image {
