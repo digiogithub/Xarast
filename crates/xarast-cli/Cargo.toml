@@ -29,3 +29,9 @@ path = "src/main.rs"
 [[bin]]
 name = "xar-dump"
 path = "src/bin/xar-dump.rs"
+
+# `xarast-thumbnailer` is what file managers run (packaging/linux/
+# xarast.thumbnailer): it extracts thumbnail.png and never renders.
+[[bin]]
+name = "xarast-thumbnailer"
+path = "src/bin/xarast-thumbnailer.rs"
