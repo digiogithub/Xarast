@@ -138,3 +138,12 @@ path = "fuzz_targets/fuzz_xarast_manifest.rs"
 test = false
 doc = false
 bench = false
+
+# hit_fill / hit_stroke on arbitrary geometry, transforms and styles, and
+# HitIndex edit sequences against a brute-force list.
+[[bin]]
+name = "fuzz_hit_test"
+path = "fuzz_targets/fuzz_hit_test.rs"
+test = false
+doc = false
+bench = false
