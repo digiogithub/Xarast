@@ -2,13 +2,14 @@
 id: XARA-T-0231
 type: task
 title: "render: Mix over a transparent destination darkens; cap_end and dash offset ignored by the CPU stroker"
-status: in_review
+status: done
 priority: medium
 author: mcp
 labels: [render, bug, phase-11]
 created: 2026-09-23T21:35:10Z
-updated: 2026-09-23T22:07:22Z
+updated: 2026-09-23T22:24:16Z
 started: 2026-09-23T21:58:54Z
+closed: 2026-09-23T22:24:16Z
 ---
 
 ## Description

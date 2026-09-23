@@ -2,13 +2,14 @@
 id: XARA-US-0058
 type: story
 title: W11.3 — Interchange SVG export
-status: in_review
+status: done
 parent: XARA-EP-0012
 author: mcp
 labels: [phase-11, io, svg]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T22:16:54Z
+updated: 2026-09-23T22:24:16Z
 started: 2026-09-23T21:51:16Z
+closed: 2026-09-23T22:24:16Z
 ---
 
 ## Tasks (full table: phase-11 §W11.3)
