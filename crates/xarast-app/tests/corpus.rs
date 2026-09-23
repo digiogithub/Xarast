@@ -221,8 +221,8 @@ fn a_blank_file_is_blank_for_a_reason_the_walker_reports() {
     println!("{} blank files, all explained: {blank:?}", blank.len());
 }
 
-/// Text renders (phase 9): no story in the corpus is left undrawn, only
-/// the text on a path is approximate, and every one of the fourteen
+/// Text renders (phase 9): no story in the corpus is left undrawn, text
+/// on a path follows its path (W9.5), and every one of the fourteen
 /// `TextDesigns` acceptance files draws glyphs of its own besides the
 /// reference bitmap it carries.
 #[test]
@@ -254,8 +254,11 @@ fn every_corpus_story_is_drawn() {
             );
         }
     }
-    assert_eq!(on_path, ["Designs/TextCurve.xar"], "text on a path");
-    println!("{stories} stories drawn; approximate (on a path): {on_path:?}");
+    assert!(
+        on_path.is_empty(),
+        "text on a path drawn straight: {on_path:?}"
+    );
+    println!("{stories} stories drawn");
 }
 
 /// A family the pinned fonts do not have is substituted, and the
