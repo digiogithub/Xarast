@@ -102,7 +102,14 @@ pub fn decode_xar_bitmap(
         }
         (None, _) => return Err(DecodeError::UnknownFormat),
     };
-    if wrapping == XarWrapping::Jpeg8Bpp && !palette.is_empty() && palette.len() <= 256 {
+    // The original reconstructs only a 24 bpp result (`Kernel/bitmap.cpp:817-822`):
+    // an opaque JPEG. Anything else found under tag 71 is kept as decoded.
+    if wrapping == XarWrapping::Jpeg8Bpp
+        && img.format == ImageFormat::Jpeg
+        && !img.info.has_alpha
+        && !palette.is_empty()
+        && palette.len() <= 256
+    {
         snap_to_palette(&mut img.data.pixels, palette);
         img.info.depth = 8;
         img.info.palette_entries = palette.len() as u16;
@@ -110,32 +117,43 @@ pub fn decode_xar_bitmap(
     Ok(img)
 }
 
-/// Maps every (opaque) pixel to its nearest palette entry by squared RGB
+/// Maps every pixel to its nearest palette entry by squared RGB
 /// distance, lowest index on a tie. Undithered, as the original's
-/// reconstruction requests no dithering (`wxOil/dibutil.cpp:3671-3780`).
+/// reconstruction requests no dithering (`wxOil/dibutil.cpp:3741`).
 /// The distance metric of the original lives in the closed rasteriser and
 /// is not observable; nearest-RGB is our choice.
 pub fn snap_to_palette(pixels: &mut [u8], palette: &[[u8; 3]]) {
     if palette.is_empty() {
         return;
     }
-    // JPEG output is opaque, so pixels are straight here. A direct-mapped
-    // cache keyed by the exact colour turns the 256-entry search into one
-    // lookup for every repeated colour; a miss only costs the search.
+    // Matching is on the straight colour; the result is premultiplied back.
+    // For the opaque JPEG of tag 71 both steps are the identity. A
+    // direct-mapped cache keyed by the exact colour turns the 256-entry
+    // search into one lookup for every repeated colour.
     const EMPTY: u32 = u32::MAX;
     let mut cache = vec![(EMPTY, [0u8; 3]); 1 << 16];
     for px in pixels.as_chunks_mut::<4>().0 {
-        let key = u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
+        let a = px[3];
+        let rgb = [0, 1, 2].map(|i| {
+            if a == 255 {
+                px[i]
+            } else {
+                crate::pixels::unpremultiply(px[i], a)
+            }
+        });
+        let key = u32::from(rgb[0]) << 16 | u32::from(rgb[1]) << 8 | u32::from(rgb[2]);
         let slot = (key.wrapping_mul(0x9E37_79B1) >> 16) as usize;
         let out = match cache[slot] {
             (k, o) if k == key => o,
             _ => {
-                let o = nearest(palette, [px[0], px[1], px[2]]);
+                let o = nearest(palette, rgb);
                 cache[slot] = (key, o);
                 o
             }
         };
-        px[..3].copy_from_slice(&out);
+        for (c, o) in px[..3].iter_mut().zip(out) {
+            *c = crate::pixels::premultiply(o, a);
+        }
     }
 }
 

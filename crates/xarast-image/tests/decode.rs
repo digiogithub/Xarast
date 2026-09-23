@@ -340,3 +340,22 @@ fn decode_as_refuses_a_mismatched_format_cleanly() {
     assert!(decode(b"not an image", &DecodeLimits::default()).is_err());
     assert!(decode(&[], &DecodeLimits::default()).is_err());
 }
+
+/// Fuzz finding (`fuzz_image_decode`, 2026-09-23): a translucent WebP
+/// stored under tag 71 had its colour channels overwritten with opaque
+/// palette colours, leaving channels above alpha. Tag 71 only reconstructs
+/// an opaque JPEG, as the original does; anything else is kept as decoded.
+#[test]
+fn jpeg8bpp_leaves_a_translucent_non_jpeg_alone() {
+    let src = pattern(9, 5, true);
+    let png = encode(&DynamicImage::ImageRgba8(src.clone()), F::Png);
+    let d = xar::decode_xar_bitmap(71, &png, &[[255, 0, 0]], &DecodeLimits::default())
+        .expect("png under 71");
+    assert_eq!(&*d.data.pixels, &premul(&src)[..]);
+    assert_eq!(d.info.palette_entries, 0);
+    let mut px = premul(&src);
+    xar::snap_to_palette(&mut px, &[[255, 0, 0], [0, 0, 255]]);
+    for p in px.as_chunks::<4>().0 {
+        assert!(p[..3].iter().all(|c| *c <= p[3]));
+    }
+}
