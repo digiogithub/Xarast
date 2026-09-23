@@ -625,6 +625,7 @@ fn newer_min_reader_and_capabilities_are_diagnosed() {
         name: "mesh-fill-v2".into(),
         optional: true,
         foreign_attrs: vec![],
+        foreign_children: vec![],
     });
     let mf = m.to_xml().unwrap();
     let z = raw_zip(&[

@@ -201,6 +201,8 @@ pub struct Capability {
     pub optional: bool,
     /// Attributes this version does not understand.
     pub foreign_attrs: Vec<ForeignAttr>,
+    /// Child elements this version does not understand.
+    pub foreign_children: Vec<ForeignElement>,
 }
 
 /// One `<mf:file-entry>`.
@@ -285,6 +287,12 @@ pub struct Manifest {
     pub root_media_type: Option<String>,
     /// How many `/` rows were read. Exactly one is conformant.
     pub root_rows: u32,
+    /// Unknown attributes of the `/` row.
+    pub root_foreign_attrs: Vec<ForeignAttr>,
+    /// Unknown children of the `/` row (of every `/` row, if there were
+    /// several). Kept inside the row: moved to the manifest level, a nested
+    /// `mf:file-entry` would turn into a real row.
+    pub root_foreign_children: Vec<ForeignElement>,
     /// Every row except `/`, in document order.
     pub entries: Vec<FileEntry>,
     /// Unknown attributes of `<mf:manifest>`.
@@ -305,6 +313,8 @@ impl Manifest {
             requires_foreign: Vec::new(),
             root_media_type: Some(MIME_TYPE.to_owned()),
             root_rows: 1,
+            root_foreign_attrs: Vec::new(),
+            root_foreign_children: Vec::new(),
             entries: Vec::new(),
             foreign_attrs: Vec::new(),
             foreign_children: Vec::new(),
@@ -356,15 +366,20 @@ impl Element {
 enum Ctx {
     Manifest,
     Entry(usize),
+    RootRow,
     Requires,
-    Capability,
+    Capability(usize),
 }
 
+/// Where a captured foreign fragment goes: always the element it was read
+/// inside, so that re-emitting it can never change what it means.
 #[derive(Clone, Copy)]
 enum Dest {
     Manifest,
     Entry(usize),
+    RootRow,
     Requires,
+    Capability(usize),
 }
 
 struct Capture {
@@ -415,6 +430,11 @@ impl<'a> Parser<'a> {
         // the fragment offsets would be three bytes short. Strip it here and
         // slice fragments from what the reader actually sees.
         let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+        // quick-xml would skip a second BOM too, again without counting
+        // it. A second one is character data before the prolog anyway.
+        if input.starts_with('\u{feff}') {
+            return Err(xml_err("more than one byte-order mark"));
+        }
         check_chars(input)?;
         let mut reader = quick_xml::Reader::from_reader(input.as_bytes());
         let cfg = reader.config_mut();
@@ -638,11 +658,10 @@ impl<'a> Parser<'a> {
                     m.root_rows = m.root_rows.saturating_add(1);
                     if m.root_media_type.is_none() {
                         m.root_media_type = Some(entry.media_type.clone());
+                        m.root_foreign_attrs = entry.foreign_attrs;
                     }
-                    // Children of a `/` row have nowhere to go; the row is
-                    // regenerated, so they are captured to the root.
                     if !empty {
-                        self.ctx.push(Ctx::Entry(usize::MAX));
+                        self.ctx.push(Ctx::RootRow);
                     }
                 } else {
                     m.entries.push(entry);
@@ -661,14 +680,16 @@ impl<'a> Parser<'a> {
             Ctx::Requires if el.is_mf("capability") => {
                 m.requires.push(parse_capability(el)?);
                 if !empty {
-                    self.ctx.push(Ctx::Capability);
+                    self.ctx
+                        .push(Ctx::Capability(m.requires.len().saturating_sub(1)));
                 }
                 return Ok(());
             }
             Ctx::Manifest => Dest::Manifest,
-            Ctx::Entry(usize::MAX) => Dest::Manifest,
             Ctx::Entry(i) => Dest::Entry(i),
-            Ctx::Requires | Ctx::Capability => Dest::Requires,
+            Ctx::RootRow => Dest::RootRow,
+            Ctx::Requires => Dest::Requires,
+            Ctx::Capability(i) => Dest::Capability(i),
         };
         let inherited = self.inherited_bindings();
         let used: BTreeSet<String> = el.used.into_iter().collect();
@@ -728,9 +749,15 @@ impl<'a> Parser<'a> {
         match dest {
             Dest::Manifest => m.foreign_children.push(el),
             Dest::Requires => m.requires_foreign.push(el),
+            Dest::RootRow => m.root_foreign_children.push(el),
             Dest::Entry(i) => {
                 if let Some(e) = m.entries.get_mut(i) {
                     e.foreign_children.push(el);
+                }
+            }
+            Dest::Capability(i) => {
+                if let Some(c) = m.requires.get_mut(i) {
+                    c.foreign_children.push(el);
                 }
             }
         }
@@ -743,7 +770,12 @@ impl<'a> Parser<'a> {
 /// tag), so every name is checked here before it is trusted.
 fn split_qname(q: &str) -> Result<(&str, &str), ManifestError> {
     let (prefix, local) = q.split_once(':').unwrap_or(("", q));
-    if (prefix.is_empty() || is_ncname(prefix)) && is_ncname(local) {
+    let prefix_ok = if q.contains(':') {
+        is_ncname(prefix)
+    } else {
+        true
+    };
+    if prefix_ok && is_ncname(local) {
         Ok((prefix, local))
     } else {
         Err(xml_err(format!("invalid name {q:?}")))
@@ -851,6 +883,8 @@ fn parse_root(el: Element) -> Result<Manifest, ManifestError> {
         requires_foreign: Vec::new(),
         root_media_type: None,
         root_rows: 0,
+        root_foreign_attrs: Vec::new(),
+        root_foreign_children: Vec::new(),
         entries: Vec::new(),
         foreign_attrs,
         foreign_children: Vec::new(),
@@ -951,6 +985,7 @@ fn parse_capability(el: Element) -> Result<Capability, ManifestError> {
         })?,
         optional,
         foreign_attrs,
+        foreign_children: Vec::new(),
     })
 }
 
@@ -986,6 +1021,7 @@ fn assign_prefixes(m: &Manifest) -> BTreeMap<String, String> {
     let attrs = m
         .foreign_attrs
         .iter()
+        .chain(&m.root_foreign_attrs)
         .chain(m.entries.iter().flat_map(|e| &e.foreign_attrs))
         .chain(m.requires.iter().flat_map(|c| &c.foreign_attrs));
     for a in attrs {
@@ -1110,7 +1146,13 @@ fn write_manifest(m: &Manifest) -> Result<String, ManifestError> {
                 o.attr("mf:optional", "true")?;
             }
             o.foreign_attrs(&c.foreign_attrs)?;
-            o.s.push_str("/>\n");
+            if c.foreign_children.is_empty() {
+                o.s.push_str("/>\n");
+            } else {
+                o.s.push_str(">\n");
+                o.children(&c.foreign_children, "      ");
+                o.s.push_str("    </mf:capability>\n");
+            }
         }
         o.children(&m.requires_foreign, "    ");
         o.s.push_str("  </mf:requires>\n");
@@ -1121,7 +1163,14 @@ fn write_manifest(m: &Manifest) -> Result<String, ManifestError> {
         "mf:media-type",
         m.root_media_type.as_deref().unwrap_or(MIME_TYPE),
     )?;
-    o.s.push_str("/>\n");
+    o.foreign_attrs(&m.root_foreign_attrs)?;
+    if m.root_foreign_children.is_empty() {
+        o.s.push_str("/>\n");
+    } else {
+        o.s.push_str(">\n");
+        o.children(&m.root_foreign_children, "    ");
+        o.s.push_str("  </mf:file-entry>\n");
+    }
     for e in &m.entries {
         o.s.push_str("  <mf:file-entry");
         o.attr("mf:full-path", &e.full_path)?;
@@ -1371,8 +1420,25 @@ mod tests {
         // element name.
         let glued = r#"<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0" mf:version="1.0" mf:min-reader="1.0" mf:profile="portable"><mf:file-entry0mf:full-path="resources/x.png" mf:media-type="a/b"/></mf:manifest>"#;
         assert!(matches!(parse(glued), Err(ManifestError::Xml(_))));
+        let empty_prefix = r#"<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0" mf:version="1.0" mf:min-reader="1.0" mf:profile="portable" :x="1"/>"#;
+        assert!(matches!(parse(empty_prefix), Err(ManifestError::Xml(_))));
         let bad_attr = r#"<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0" mf:version="1.0" mf:min-reader="1.0" mf:profile="portable" a:b:c="1"/>"#;
         assert!(parse(bad_attr).is_err());
+    }
+
+    #[test]
+    fn nested_rows_stay_nested() {
+        // Found by fuzz_xarast_manifest: a `mf:file-entry` nested in the `/`
+        // row was carried to the manifest level and became a real row.
+        let src = r#"<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0" mf:version="1.0" mf:min-reader="1.0" mf:profile="portable"><mf:file-entry mf:full-path="/" mf:media-type="application/vnd.xarast+zip" q="1"><mf:file-entry mf:full-path="/" mf:media-type="x/y"/></mf:file-entry><mf:requires><mf:capability mf:name="a"><mf:capability mf:name="b"/></mf:capability></mf:requires></mf:manifest>"#;
+        let m = parse(src).unwrap();
+        assert_eq!(m.root_rows, 1);
+        assert_eq!(m.root_foreign_children.len(), 1);
+        assert_eq!(m.root_foreign_attrs.len(), 1);
+        assert_eq!(m.requires.len(), 1);
+        assert_eq!(m.requires[0].foreign_children.len(), 1);
+        let m1 = parse(&m.to_xml().unwrap()).unwrap();
+        assert_eq!(m1, m);
     }
 
     #[test]
@@ -1389,6 +1455,8 @@ mod tests {
             parse(&m.to_xml().unwrap()).unwrap().foreign_children,
             m.foreign_children
         );
+        // Found by the same target: two BOMs (quick-xml skips both).
+        assert!(parse(&format!("\u{feff}{src}")).is_err());
     }
 
     #[test]
