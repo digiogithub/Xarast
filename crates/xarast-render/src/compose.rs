@@ -284,8 +284,9 @@ impl TileGrid {
         let r = self.rect(key);
         let ox = sx * f64::from(r.x0) + tx;
         let oy = sy * f64::from(r.y0) + ty;
-        // f32-ok: target-local position; the caller only places tiles that
-        // land near the viewport, and `target_rect` clips the rest.
+        // The caller only places tiles that land near the viewport, and
+        // `target_rect` clips the rest.
+        // f32-ok: a target-local position, bounded by the viewport.
         let origin = [ox as f32, oy as f32];
         // f32-ok: a ratio of zoom levels, not a coordinate.
         let inv_scale = [(1.0 / sx) as f32, (1.0 / sy) as f32];
