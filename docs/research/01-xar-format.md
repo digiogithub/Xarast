@@ -998,6 +998,21 @@ payload = `"Default\0"` in UTF-16 (16 bytes) followed by `89 50 4E 47 0D 0A 1A 0
   closed rasteriser and is not observable; `xarast-image` uses nearest
   squared RGB distance, lowest index on a tie.
 
+**68 `PNG` stores transparency in its alpha channel** (2026-09-23). The
+original's 32 bpp bitmaps carry *transparency* (0 = opaque) in the fourth
+byte. Its PNG reader inverts alpha on every read (`wxOil/pngutil.cpp:320`,
+`png_set_invert_alpha`); the native-file path then inverts it back
+(`wxOil/pngfiltr.cpp:385-394`, `PNGFilter::ReadFromFile` with a filter), and
+the native writer inverts twice (`wxOil/pngfiltr.cpp:846-856` then
+`:919-926`). Net effect: a PNG embedded under tag 68 with an alpha channel
+(colour type 4 or 6) stores transparency, and a reader must use
+`255 − alpha` (16-bit: `65535 − alpha`). Verified on the corpus: all 22
+such PNGs are mostly alpha 255 with the visible content at alpha 0
+(`scope3 simple`'s 319×56 "Bitmap": 15 976 pixels `(0,0,0,255)`, the
+orange swoosh at alpha 0). Palette PNGs are written with a single
+transparent index and mean what they say. Preview bitmaps (60–64) use the
+export path and are standard.
+
 Corpus census, all 59 files, decoded through `xarast-image` (phase 10):
 58 × tag 61 (GIF previews), 4 × tag 67 (JPEG), 32 × tag 68 (PNG, 22 with
 alpha), 8 × tag 71 (JPEG8BPP); **no** tag 60, 62–66 or 69 occurs. Every one

@@ -334,7 +334,14 @@ reason the walker *reports*, which is its own test.
     as wide. Fitting with a zero extent cut thick strokes off at the image
     border.
 34. **A bitmap fill with no decoded image counts in `images_pending`**, as a
-    bitmap node does, so a file never looks complete while it is not.
+    bitmap node does, so a file never looks complete while it is not. So
+    does a bitmap *transparency* whose image is missing, and a decode
+    failure counts in `images_failed` instead (XARA-T-0129).
+    **`register_images` decodes, once per walker** (XARA-T-0129; contract
+    and costs in `image.md`, "Walker integration (as built)"). Decoding is
+    parallel across a frame's pending bitmaps but registration is in the
+    resources' order, so the scene stays byte-identical across runs and
+    walkers. Failures are negatively cached until `reset`.
 35. **A rendered frame says what it covers and what is new**
     (XARA-T-0050). `RenderedFrame` carries `scene_epoch`, `covered` (the
     rectangle holding picture, not placeholder backdrop), `fresh` (what
@@ -498,10 +505,12 @@ be better run once at `Tx::commit` than after every call.
 - [ ] **`ClipViewMode::Outside` drops the clip** and counts it in
       `WalkStats::clips_unsupported`. The renderer has no "keep the
       outside" clip; it needs either an inverted path or a mask layer.
-- [ ] **Bitmaps render only when decoded.** The `.xar` importer keeps
-      the encoded bytes and leaves `pixels` empty until Phase 10, so
-      `WalkStats::images_pending` is non-zero on every file with a
-      bitmap. The registration seam is `SceneWalker::register_images`.
+- [x] **Bitmaps render.** `SceneWalker::register_images` decodes the
+      importer's encoded originals through `xarast-image` (XARA-T-0129);
+      `images_pending` is 0 on every corpus file.
+- [ ] **`build_scene(&Session)` re-decodes every bitmap per call** (fresh
+      walker). A per-document decoded-image cache, or decoding off the
+      frame path, is T10.5.5.
 - [ ] **Quick shapes with no cached path draw nothing**
       (`WalkStats::shapes_pending`). Generating the path from the
       parameters is Phase 7; `testfiles/RedStar.xar` and

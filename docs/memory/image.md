@@ -24,9 +24,14 @@ the corpus test.
   and progressive, via zune-jpeg), WebP (lossy, lossless, animated first
   frame), GIF (first frame), TIFF, BMP, headerless DIB, PNM.
 - **Every bitmap in the 59-file corpus decodes** (table below).
+- **The walker decodes and renders them** (XARA-T-0129, 2026-09-23):
+  `images_pending == 0` on every corpus file. See "Walker integration
+  (as built)".
+- **Tag-68 PNG alpha is transparency** (2026-09-23): `decode_xar_bitmap(68)`
+  inverts it and `xar::normalise_xar_png` rewrites such a file as a
+  standard PNG, which the importer does. See "The `.xar` wrappings".
 - Not yet: `xarast-doc` still has its own `BitmapResource` (SHA-256 over
-  pixels + original) and the walker does not decode — see
-  "Walker integration contract". Encoders (T10.2.5), the pyramid, the
+  pixels + original; XARA-T-0156). Encoders (T10.2.5), the pyramid, the
   budget, photo ops and the gallery are later workstreams.
 
 ### Corpus census (all 59 files, `tests/corpus.rs`)
@@ -161,6 +166,19 @@ a `TooLarge` into a successful decode ("import anyway").
   palette has 1–256 entries (as the original); nearest squared-RGB entry,
   lowest index on ties, no dithering, a 64 Ki-entry exact-key cache. Sets
   `depth = 8`, `palette_entries = n`.
+- Tag 68: a PNG of colour type 4 (grey + alpha) or 6 (RGBA) stores
+  **transparency** in its alpha channel, 0 = opaque (facts and
+  `file:line` in `research/01 §4.5`). `decode_xar_bitmap(68, …)` flips the
+  alpha samples in the decoder's native buffer (bitwise NOT, so 8 and 16
+  bit alike) **before** premultiplying — flipping after would have
+  premultiplied the colour of every really-opaque pixel by zero.
+  `normalise_xar_png` does the same flip and re-encodes with `image`'s PNG
+  encoder at the same depth and colour type (lossless, never interlaced),
+  then splices the original's ancillary chunks (`pHYs`, `iCCP`, `sRGB`,
+  text…) around the new `IHDR`/`IDAT` in their original order. Palette
+  PNGs are left alone: the original writes ≤ 8 bpp with a single
+  transparent index, which means what it says. `png_alpha_is_transparency`
+  is the IHDR test (colour type byte at offset 25).
 - 60–64 (previews): plain files.
 
 ## Invariants that must not be broken
@@ -193,39 +211,59 @@ are committed. Nightly in `.github/workflows/fuzz.yml`.
   executions, clean** (7 811 exec/s, peak RSS 658 MB with
   `-malloc_limit_mb=1024`, slowest unit < 1 s, 14 523 new units).
 
-## Walker integration contract (for `SceneWalker::register_images`)
+## Walker integration (as built, XARA-T-0129)
 
-Tracked as **XARA-T-0129** under XARA-US-0051. Owner: whoever owns `xarast-app`.
+`SceneWalker::register_images` (`xarast-app/src/walker.rs`), run once per
+frame before the walk:
 
-1. `xarast-app` adds `xarast-image = { path = "../xarast-image" }`.
-2. In `register_images`, for a resource whose `pixels` are empty and which
-   has `original`, decode once:
-   - `ImageFormat::Png | Jpeg | Gif` → `xarast_image::decode(bytes, &limits)`;
-   - `ImageFormat::Bmp` → `xar::decode_xar_bitmap(65, bytes, &[], &limits)`
-     (sniffs `BM`, else treats it as the headerless DIB);
-   - `ImageFormat::Unknown` (the importer's mapping of BMPZIP) →
-     `xar::decode_xar_bitmap(69, bytes, &[], &limits)`.
-   `limits = DecodeLimits::default()`.
-3. Register `ImageRef::new(d.data.width, d.data.height,
-   d.data.to_straight_rgba8())` — `ImageRef` is **straight** alpha; do not
-   hand it the premultiplied bytes. Use the decoded dimensions, not
-   `res.info` (the importer leaves that zeroed).
-4. Keep a **negative cache** (`HashSet<BitmapId>`) of resources that failed,
-   so a bad bitmap is not re-decoded every frame, and report them in a new
-   `WalkStats::images_failed` rather than `images_pending`.
-5. `images_pending` must then be 0 on every corpus file
-   (`xarast-app/tests/corpus.rs` currently tolerates it).
-6. Cost: the whole corpus decodes in ≈ 120 ms (test profile), the worst file
-   well under the 700 ms first-paint budget; decoding synchronously on the
-   first frame is acceptable for this round. Moving it off the frame path is
-   T10.5.5.
-7. Known gap: the importer maps tag 71 to `ImageFormat::Jpeg` and drops the
-   palette, so JPEG8BPP bitmaps render as the 24 bpp JPEG (visually almost
-   identical) until the importer keeps the palette (doc `BitmapData.palette`
-   exists) or decodes at import with `decode_xar_bitmap(71, …, palette, …)`
-   — T10.2.6, `xarast-xar`.
+1. A resource whose `pixels` are `w·h·4` bytes is registered as is (the
+   native path). One with empty `pixels` and an `original` is decoded.
+2. Decoding (`decode_resource`), `DecodeLimits::default()`:
+   `Jpeg` **with a palette** → `decode_xar_bitmap(71, …, palette)`;
+   `Png | Jpeg | Gif` → `decode`; `Bmp` → `decode_xar_bitmap(65)`;
+   `Unknown` (the importer's BMPZIP) → `decode_xar_bitmap(69)`. PNGs need
+   no tag-68 handling here: the importer already normalised them.
+3. Registered as `ImageRef::new(d.width, d.height, d.to_straight_rgba8())`
+   — straight alpha, decoded dimensions (the importer leaves `info` zeroed).
+4. All pending resources of a frame decode together on scoped threads
+   (`decode_all`, at most `available_parallelism`, work-stealing by an
+   atomic index), results applied in input order so registration — and
+   the scene — stay deterministic. A panicking decoder is a failure.
+5. Failures go into `failed: HashSet<BitmapId>` (cleared by `reset`) and
+   are never retried by that walker. Objects referring to them count in
+   `WalkStats::images_failed`; objects whose bitmap has neither pixels nor
+   bytes count in `images_pending`. A bitmap **transparency** whose image
+   is missing counts too (it composites opaque: a shadow turns into a
+   black box). `is_complete` requires both to be 0.
+6. Cost (release, this machine): the per-file first-walk increase is
+   ≤ 38 ms (leafgirl, a 649×430 JPEG8BPP snap; scope3 27 ms); every other
+   bitmap file ≤ 8 ms. Open-to-first-paint in the real window is unchanged
+   within noise (≈ 330–370 ms for the bitmap files, both before and after;
+   `perf.md`). Moving decode off the frame path entirely is T10.5.5.
+7. `build_scene(&Session)` makes a fresh walker, so it re-decodes every
+   call (thumbnails, tests, export). Fine for the corpus; a per-document
+   decoded-image cache belongs with T10.5.5.
+
+Bitmap **fills** render too, and tile by the fill-mapping attribute
+(XARA-T-0054, `paint.rs::bitmap_repeat`): the fill's own `tiling` wins
+when set (a `.xarast` fill may carry one), otherwise the attribute, and
+unset means repeat — the original's default. `Fill Types simple.xar`'s
+bitmap row shows single, repeating and mirrored tiles, contone and
+duotone.
+
+`.xarast` round trip: bitmaps survive (the package stores the — normalised
+— original bytes), but four writer gaps are now visible and listed in
+`xarast_roundtrip.rs`'s `KNOWN_RENDER_GAPS`: the JPEG8BPP palette
+(XARA-T-0154: leafgirl, Groucho2), duotone contone colours (XARA-T-0155:
+Fill Types simple), bitmap-fill mapping (XARA-T-0109: Fill Types simple,
+WATCH, Spitfire) and the bitmap-transparency image (XARA-T-0111: JagSS100
+simple, scope3 simple).
 
 ## Dead ends (do not retry)
+
+- Inverting a tag-68 PNG's alpha **after** `decode` (on premultiplied
+  output): every pixel the file marks 0 (= opaque) has already had its
+  colour multiplied by zero. The flip must happen on the native buffer.
 
 - Probing JPEG through `image::codecs::jpeg::JpegDecoder`: copies the whole
   input first; 7× over the probe budget on a 24 Mpx photograph.
@@ -237,7 +275,12 @@ Tracked as **XARA-T-0129** under XARA-US-0051. Owner: whoever owns `xarast-app`.
 ## Open TODOs
 
 - Reconcile `xarast-doc::BitmapResource` (SHA-256 over pixels + original)
-  with this crate's (BLAKE3 over pixels) — T10.1.2, `xarast-doc`.
+  with this crate's (BLAKE3 over pixels) — T10.1.2, XARA-T-0156. It did not
+  block the walker, which never stores decoded pixels in the document.
+- Palette PNGs under tag 68 whose `tRNS` has several non-opaque entries:
+  the original expands them to RGBA and so reads their alpha inverted too;
+  we leave palette PNGs alone. No corpus file has one, and the original's
+  writer never produces one.
 - Encoders for resource storage (T10.2.5).
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - A faster tag-71 snap (k-d tree or a 32³ pre-quantised grid) if a real
