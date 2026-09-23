@@ -153,17 +153,34 @@ pollster = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# XDG desktop portals. `rfd` is built with `xdg-portal` only and with its
-# `wayland` and `gtk3` backends off on purpose: the portal path is the one that
-# works inside an AppImage and a Flatpak sandbox, and the GTK backend would
-# drag a C toolkit into the image. `ashpd` covers the settings portal
-# (`org.freedesktop.appearance`). `async-io` rather than `tokio`: the services
-# thread runs a single blocking executor and no async leaks past it. Both MIT.
+# XDG desktop portals. On Linux the shell talks to the portal directly with
+# `ashpd`: the file chooser (`org.freedesktop.portal.FileChooser`) and the
+# settings portal (`org.freedesktop.appearance`). `rfd` is not used there:
+# measured on GNOME 46 (`docs/memory/ui.md`), its portal backend turns every
+# portal failure into "cancelled" and then spawns `zenity` as a fallback, so a
+# missing portal could never be reported. `rfd` stays declared for the native
+# Windows and macOS dialogs of phase 14, where no crate uses it yet.
+# `async-io` rather than `tokio`: the services thread runs a single blocking
+# executor and no async leaks past it. Both MIT.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 ashpd = { version = "0.13", default-features = false, features = [
     "async-io",
+    "file_chooser",
     "settings",
 ] }
+# Wayland drag and drop. `winit` 0.30 implements no drag-and-drop at all on
+# Wayland (only X11 has `HoveredFile`/`DroppedFile`; measured on GNOME 46), so
+# the shell binds `wl_data_device` itself, on `winit`'s own connection. These
+# are the versions `winit` already links, so no new code enters the graph;
+# `client_system` is what lets a second event queue share `winit`'s
+# `wl_display`, and `winit`'s `wayland-dlopen` keeps libwayland-client
+# dlopen'ed. All `MIT`; raw-window-handle is `MIT OR Apache-2.0 OR Zlib`.
+smithay-client-toolkit = { version = "0.19.2", default-features = false }
+wayland-client = "0.31.10"
+wayland-backend = { version = "0.3.10", default-features = false, features = [
+    "client_system",
+] }
+raw-window-handle = "0.6"
 # Clipboard. `wayland-data-control` gives copy/paste that survives focus loss
 # where the compositor implements `wlr-data-control`. `MIT OR Apache-2.0`.
 arboard = { version = "3.6", default-features = false, features = [

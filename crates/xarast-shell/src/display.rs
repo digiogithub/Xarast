@@ -56,12 +56,16 @@ pub struct PlatformCapabilities {
     pub tablet_axes: bool,
     /// Trackpad pinch, pan and rotation gestures are delivered.
     pub gestures: bool,
-    /// Clipboard contents survive the window losing focus or closing.
+    /// Clipboard contents survive the application exiting.
     ///
-    /// On Wayland the clipboard is owned by the focused client, so a copy
-    /// followed by a quit loses the data unless the compositor implements a
-    /// data-control manager. On X11 a clipboard manager usually covers it.
-    pub clipboard_survives_focus_loss: bool,
+    /// A copy always survives the window losing focus — the selection
+    /// belongs to its source until something replaces it (measured on
+    /// GNOME 46, `docs/memory/ui.md`). What does not survive, unless a
+    /// clipboard manager takes the data over, is the source process
+    /// exiting. X11 desktops normally run one. On Wayland it depends on
+    /// the compositor, so the generic answer is the cautious one; GNOME is
+    /// refined in `clipboard::SystemClipboard`.
+    pub clipboard_survives_exit: bool,
     /// The window can set its own position.
     pub can_position_window: bool,
 }
@@ -77,7 +81,7 @@ impl PlatformCapabilities {
         client_side_decorations: true,
         tablet_axes: false,
         gestures: true,
-        clipboard_survives_focus_loss: false,
+        clipboard_survives_exit: false,
         can_position_window: false,
     };
 
@@ -87,7 +91,7 @@ impl PlatformCapabilities {
         client_side_decorations: false,
         tablet_axes: false,
         gestures: false,
-        clipboard_survives_focus_loss: true,
+        clipboard_survives_exit: true,
         can_position_window: true,
     };
 
@@ -97,7 +101,7 @@ impl PlatformCapabilities {
         client_side_decorations: false,
         tablet_axes: false,
         gestures: false,
-        clipboard_survives_focus_loss: false,
+        clipboard_survives_exit: false,
         can_position_window: false,
     };
 
@@ -345,7 +349,7 @@ mod tests {
         assert!(w.fractional_scale && !x.fractional_scale);
         assert!(w.client_side_decorations && !x.client_side_decorations);
         assert!(w.gestures && !x.gestures);
-        assert!(!w.clipboard_survives_focus_loss && x.clipboard_survives_focus_loss);
+        assert!(!w.clipboard_survives_exit && x.clipboard_survives_exit);
         assert!(!w.can_position_window && x.can_position_window);
     }
 

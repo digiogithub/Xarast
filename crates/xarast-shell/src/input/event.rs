@@ -122,11 +122,10 @@ pub enum GestureEvent {
 
 /// A drag-and-drop event.
 ///
-/// `at` is optional because the pinned `winit` 0.30 does not report where a
-/// file was dropped — it reports one event per file with no position at all.
-/// The shape here is the one `winit` 0.31 and the Windows and macOS shells
-/// provide, so the application is written once and the field simply starts
-/// being populated. Until then a drop is treated as a drop on the canvas
+/// On Wayland the shell's own `wl_data_device` fills every field: the
+/// position in device pixels and all the files of a drop in one event. On
+/// X11 the pinned `winit` 0.30 reports one event per file with no position,
+/// so `at` stays `None` there and a drop is treated as a drop on the canvas
 /// centre; see `docs/memory/ui.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DragEvent {

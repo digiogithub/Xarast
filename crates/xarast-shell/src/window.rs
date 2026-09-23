@@ -785,6 +785,13 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     consecutive_failures: u32,
     #[cfg(feature = "accessibility")]
     a11y: Option<A11y>,
+    /// Drag and drop on Wayland, which `winit` 0.30 does not provide.
+    /// Dropped in `exiting`, before the display it borrows.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+    ))]
+    drops: Option<crate::wayland_dnd::WaylandDrops>,
     /// What to do about GPU errors, frame by frame.
     recovery: GpuRecovery,
     /// While set, frames are neither drawn nor presented: the GPU is being
@@ -824,6 +831,11 @@ impl<A: ShellApp> ShellLoop<A> {
             consecutive_failures: 0,
             #[cfg(feature = "accessibility")]
             a11y: None,
+            #[cfg(all(
+                unix,
+                not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+            ))]
+            drops: None,
             recovery: GpuRecovery::new(),
             backoff_until: None,
             inject_errors: std::env::var("XARAST_INJECT_GPU_ERRORS")
@@ -954,6 +966,16 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
             self.a11y = Some(A11y::new(event_loop, &window, &self.waker));
         }
         window.set_visible(true);
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        {
+            use raw_window_handle::HasDisplayHandle;
+            self.drops = window.display_handle().ok().and_then(|h| {
+                crate::wayland_dnd::WaylandDrops::new(h.as_raw(), self.waker.clone())
+            });
+        }
         match Gpu::new(window.clone(), self.config.backends) {
             Ok(gpu) => {
                 self.report = Some(gpu.report.clone());
@@ -1091,6 +1113,13 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_portal_answers();
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        if let Some(drops) = self.drops.as_mut() {
+            drops.dispatch(self.translator.scale(), &mut self.events);
+        }
         self.dispatch(event_loop);
         if let Some(until) = self.backoff_until
             && std::time::Instant::now() >= until
@@ -1103,6 +1132,14 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         let mut ctx = ctx_of!(self);
         self.app.on_exit(&mut ctx);
+        // It borrows the event loop's `wl_display`, which dies with the loop.
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+        ))]
+        {
+            self.drops = None;
+        }
     }
 }
 

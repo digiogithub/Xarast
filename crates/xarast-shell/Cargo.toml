@@ -16,7 +16,7 @@ default = ["portals", "clipboard", "accessibility"]
 # The AccessKit adapter: the interface's accessibility tree on AT-SPI.
 accessibility = ["dep:accesskit_winit"]
 # XDG portal file dialogs and the settings portal, on the services thread.
-portals = ["dep:rfd", "dep:ashpd", "dep:futures-lite"]
+portals = ["dep:ashpd", "dep:futures-lite"]
 # System clipboard. Off in builds that must not touch a display at all.
 clipboard = ["dep:arboard"]
 
@@ -38,11 +38,17 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-rfd = { workspace = true, optional = true }
 ashpd = { workspace = true, optional = true }
 futures-lite = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
 accesskit_winit = { workspace = true, optional = true }
+
+# Wayland drag and drop (`wayland_dnd`), on the free desktops only.
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
+wayland-backend = { workspace = true }
+raw-window-handle = { workspace = true }
 
 [[bin]]
 name = "xarast"
