@@ -1187,6 +1187,7 @@ impl Rasterizer for CpuRasterizer {
             op,
             xf: xf_i,
             paint: SCENE_PAINT,
+            transp: SCENE_PAINT,
             dst_read: false,
             bounds,
         });
@@ -1219,6 +1220,7 @@ impl Rasterizer for CpuRasterizer {
             op,
             xf: xf_i,
             paint: SCENE_PAINT,
+            transp: SCENE_PAINT,
             dst_read: false,
             bounds,
         });
@@ -1242,6 +1244,7 @@ impl Rasterizer for CpuRasterizer {
             op,
             mapping: m,
             paint: SCENE_PAINT,
+            transp: SCENE_PAINT,
             dst_read: false,
             bounds,
         });

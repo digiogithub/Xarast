@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use xarast_geom::{FillRule, StrokeStyle};
 
-use crate::blend::{BlendFamily, Transparency};
+use crate::blend::{BlendFamily, TranspSource, Transparency};
 use crate::cache::CacheKey;
 use crate::paint::{GradMapping, ImageId, Paint};
 use crate::path::PathRef;
@@ -120,6 +120,8 @@ pub enum DrawCmd {
         xf: u32,
         /// The device-space paint, or [`SCENE_PAINT`].
         paint: PaintSlot,
+        /// The device-space transparency, or [`SCENE_PAINT`] for a flat one.
+        transp: PaintSlot,
         /// Whether its transparency reads the destination.
         dst_read: bool,
         /// Device-space bounds, already computed.
@@ -133,6 +135,8 @@ pub enum DrawCmd {
         xf: u32,
         /// The device-space paint, or [`SCENE_PAINT`].
         paint: PaintSlot,
+        /// The device-space transparency, or [`SCENE_PAINT`] for a flat one.
+        transp: PaintSlot,
         /// Whether its transparency reads the destination.
         dst_read: bool,
         /// Device-space bounds.
@@ -146,6 +150,8 @@ pub enum DrawCmd {
         mapping: u32,
         /// The device-space paint, or [`SCENE_PAINT`].
         paint: PaintSlot,
+        /// The device-space transparency, or [`SCENE_PAINT`] for a flat one.
+        transp: PaintSlot,
         /// Whether its transparency reads the destination.
         dst_read: bool,
         /// Device-space bounds.
@@ -320,6 +326,8 @@ pub struct DisplayList {
     xforms: Vec<Transform2D>,
     /// Paints moved into device space.
     paints: Vec<Paint>,
+    /// Graduated and bitmap transparencies moved into device space.
+    transps: Vec<Transparency>,
     /// Image placements moved into device space.
     mappings: Vec<GradMapping>,
     /// The nodes and cache keys of `CachedSurface` commands.
@@ -354,6 +362,7 @@ impl DisplayList {
         let mut cmds: Vec<DrawCmd> = Vec::with_capacity(ops.len());
         let mut xforms: Vec<Transform2D> = vec![view.transform];
         let mut paints: Vec<Paint> = Vec::new();
+        let mut transps: Vec<Transparency> = Vec::new();
         let mut mappings: Vec<GradMapping> = Vec::new();
         // Indices into `xforms`; the bottom entry is the view itself.
         let mut xf_stack: Vec<u32> = vec![0];
@@ -424,6 +433,7 @@ impl DisplayList {
                         op: op_i,
                         xf: xf_i,
                         paint: push_mapped(&mut paints, paint, xf),
+                        transp: push_mapped_transparency(&mut transps, transparency, xf),
                         dst_read,
                         bounds: b,
                     });
@@ -453,6 +463,7 @@ impl DisplayList {
                         op: op_i,
                         xf: xf_i,
                         paint: push_mapped(&mut paints, paint, xf),
+                        transp: push_mapped_transparency(&mut transps, transparency, xf),
                         dst_read,
                         bounds: b,
                     });
@@ -477,6 +488,7 @@ impl DisplayList {
                         op: op_i,
                         mapping: m,
                         paint: push_mapped(&mut paints, paint, xf),
+                        transp: push_mapped_transparency(&mut transps, transparency, xf),
                         dst_read,
                         bounds: b,
                     });
@@ -489,6 +501,7 @@ impl DisplayList {
             cmds,
             xforms,
             paints,
+            transps,
             mappings,
             cached: Vec::new(),
             bounds: bounds.intersection(clip_to),
@@ -517,6 +530,7 @@ impl DisplayList {
             cmds: parts.cmds,
             xforms: parts.xforms,
             paints: parts.paints,
+            transps: Vec::new(),
             mappings: parts.mappings,
             cached: Vec::new(),
             bounds: bounds.intersection(clip),
@@ -545,6 +559,14 @@ impl DisplayList {
         }
     }
 
+    fn transp_of<'a>(&'a self, slot: PaintSlot, own: &'a Transparency) -> Option<&'a Transparency> {
+        if slot == SCENE_PAINT {
+            Some(own)
+        } else {
+            self.transps.get(slot as usize)
+        }
+    }
+
     fn xf_of(&self, i: u32) -> Option<Transform2D> {
         self.xforms.get(i as usize).copied()
     }
@@ -559,6 +581,7 @@ impl DisplayList {
                 op,
                 xf,
                 paint,
+                transp,
                 bounds,
                 ..
             } => match self.op(op)? {
@@ -567,14 +590,14 @@ impl DisplayList {
                     path,
                     rule,
                     paint: own,
-                    transparency,
+                    transparency: own_t,
                 } => DrawItem::Fill {
                     node: *id,
                     path,
                     rule: *rule,
                     paint: self.paint_of(paint, own)?,
                     xf: self.xf_of(xf)?,
-                    transparency,
+                    transparency: self.transp_of(transp, own_t)?,
                     bounds,
                 },
                 _ => return None,
@@ -583,6 +606,7 @@ impl DisplayList {
                 op,
                 xf,
                 paint,
+                transp,
                 bounds,
                 ..
             } => match self.op(op)? {
@@ -591,14 +615,14 @@ impl DisplayList {
                     path,
                     style,
                     paint: own,
-                    transparency,
+                    transparency: own_t,
                 } => DrawItem::Stroke {
                     node: *id,
                     path,
                     style,
                     paint: self.paint_of(paint, own)?,
                     xf: self.xf_of(xf)?,
-                    transparency,
+                    transparency: self.transp_of(transp, own_t)?,
                     bounds,
                 },
                 _ => return None,
@@ -607,6 +631,7 @@ impl DisplayList {
                 op,
                 mapping,
                 paint,
+                transp,
                 bounds,
                 ..
             } => match self.op(op)? {
@@ -614,14 +639,14 @@ impl DisplayList {
                     id,
                     image,
                     paint: own,
-                    transparency,
+                    transparency: own_t,
                     ..
                 } => DrawItem::Image {
                     node: *id,
                     image: *image,
                     mapping: self.mappings.get(mapping as usize)?,
                     paint: self.paint_of(paint, own)?,
-                    transparency,
+                    transparency: self.transp_of(transp, own_t)?,
                     bounds,
                 },
                 _ => return None,
@@ -698,6 +723,49 @@ pub(crate) struct ListParts {
     pub(crate) xforms: Vec<Transform2D>,
     pub(crate) paints: Vec<Paint>,
     pub(crate) mappings: Vec<GradMapping>,
+}
+
+/// Moves a graduated or bitmap transparency into device space, as its
+/// paint is, and returns where the command finds it. A flat one is used
+/// as it is.
+///
+/// The backends evaluate transparency at device pixel centres, so a
+/// mapping left in document space puts the whole ramp thousands of pixels
+/// away and the shape takes one end's level everywhere.
+fn push_mapped_transparency(
+    transps: &mut Vec<Transparency>,
+    t: &Transparency,
+    xf: Transform2D,
+) -> PaintSlot {
+    let source = match &t.source {
+        TranspSource::Flat(_) => return SCENE_PAINT,
+        TranspSource::Gradient {
+            shape,
+            mapping,
+            repeat,
+            ramp,
+        } => TranspSource::Gradient {
+            shape: *shape,
+            mapping: mapping.transformed(xf),
+            repeat: *repeat,
+            ramp: *ramp,
+        },
+        TranspSource::Image {
+            image,
+            mapping,
+            repeat,
+        } => TranspSource::Image {
+            image: *image,
+            mapping: mapping.transformed(xf),
+            repeat: *repeat,
+        },
+    };
+    let slot = idx(transps.len());
+    transps.push(Transparency {
+        family: t.family,
+        source,
+    });
+    slot
 }
 
 /// Moves a paint into device space if it depends on position, and returns
