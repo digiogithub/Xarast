@@ -96,6 +96,10 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | BLAKE3 throughput, one core | ≥ 1 GB/s | **5.4–5.9 GiB/s** | passes |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
+| Hit test, 100k objects: topmost **precise** pick (`HitIndex` + `HitShape::hit`) | ≤ 2 ms | 5.5–13.8 µs | passes (XARA-T-0150, 2026-09-23, load 10–40) |
+| Hit test, 100k objects, adversarial: 100k unfilled outlines all round the point | ≤ 2 ms | **17.7–21 ms** | **fails**; every candidate needs a precise rejection, no index can help (see "Picking") |
+| Marquee over 100k objects, whole page, touch or enclose | ≤ 20 ms | 0.78–1.38 ms | passes |
+| `HitIndex` insert + remove / move one object, 100k | — | 23–30 ns / 69–680 ns | the reason the grid beat a static BVH (8–23 ms rebuild) |
 
 ### Document model
 
@@ -350,6 +354,27 @@ walk); the package write is DEFLATE-bound (~150 MB/s at level 6).
 
 Criterion, synthetic 100 000-node document, pinned: `svg/write_100k`
 34.2 → **30.6 ms**, `svg/save_100k` 114.9 → **63.0 ms**.
+
+### Picking (phase 7 W3, 2026-09-23)
+
+`crates/xarast-geom/benches/hit_index.rs`,
+`taskset -c 4-7 cargo bench -p xarast-geom --bench hit_index`. 100 000
+objects on an A3 page in four scenes: uniform, clustered, mixed sizes
+(1 % page-sized), and all stacked on one point. The load average from
+other agents was 10–40 throughout, so the ranges are across runs and
+scenes, ±30 %. The full grid-versus-BVH table and the reasoning are in
+`geometry.md`, "Picking". The phase document's budgets are 2 ms (pick)
+and 20 ms (marquee); US-0031 also asked for 1 ms and 5 ms, and every row
+that passes passes both.
+
+| Operation, 100k objects | Grid (shipped) | Static BVH (bench only) |
+|---|---|---|
+| Build | 5.5–12 ms | 8.6–23 ms |
+| Topmost pick, bounds only | 2.2–9.9 µs | 0.008–6.3 µs |
+| Precise pick, top-down to the first real hit | 5.5–13.8 µs | — |
+| Marquee, whole page | 0.78–1.38 ms | 5–37 µs |
+| Insert + remove one object | 23–30 ns | 8–23 ms (rebuild) |
+| Adversarial hollow stack, precise | 17.7–21 ms (was 120 ms before hull culling) | — |
 
 ## Phase 2 — document model (development container, historical)
 

@@ -24,7 +24,9 @@ outside `kurbo`, `i_overlay`, `bitflags`, `thiserror` and `slotmap`.
 | `geom::flatten` | `Tolerance`, `Polyline`, `SegmentTrace`, `flatten`, `flatten_traced` | complete |
 | `geom::stroke` | `Cap`, `Join`, `FillRule`, `DashPattern`, `StrokeStyle`, `stroke_to_path`, `dash`, `offset` | complete |
 | `geom::boolean` | `BoolOp`, `boolean`, `self_union`, the refit pipeline | complete |
-| `geom::measure` | `arclen`, `point_at_arclen`, `nearest_point`, `hit_fill`, `hit_stroke`, `HitIndex` | complete |
+| `geom::measure` | `arclen`, `point_at_arclen`, `nearest_point`, `fill_contains` (exact point-in-fill), `PathHitIndex` (one big path's edges) | complete |
+| `geom::hit` | `HitTolerance`, `hit_fill`, `hit_stroke`, their `_transformed` forms, `HitShape`/`ShapeHit` — picking with a radius (phase 7 W3) | complete |
+| `geom::hit_index` | `HitIndex<K>`, `RectMode`, `Candidates` — the object index for picking and marquee (phase 7 W3) | complete |
 | `color::model` | `ColourModel`, `ColourValue`, `Rgba8`, every conversion | complete |
 | `color::fixed24` | `Fixed24` and the inherit sentinel | complete |
 | `color::builtin` | `BuiltinColour`, the negative-reference table | complete |
@@ -55,9 +57,9 @@ reference machine before gating CI on them.
 | `boolean` union | 2 × 1 000 segments | 3 ms | 231 µs | ok |
 | `boolean` union | 2 × 10 000 segments | 40 ms | 4.60 ms | ok |
 | `boolean` union | 2 × 100 000 segments | 600 ms | 39.0 ms | ok |
-| `HitIndex::build` | 10 000 segments | 500 µs | 634 µs | **+27 %** |
-| `hit_fill` via `HitIndex` | 10 000 segments | 15 µs | 0.117 µs | ok, 128× |
-| `hit_fill` exact, for contrast | 10 000 segments | — | 390 µs | — |
+| `PathHitIndex::build` (was `HitIndex`) | 10 000 segments | 500 µs | 634 µs | **+27 %** |
+| `hit_fill` via `PathHitIndex` | 10 000 segments | 15 µs | 0.117 µs | ok, 128× |
+| `fill_contains` exact, for contrast | 10 000 segments | — | 390 µs | — |
 | `arclen` at 1e-6 | 1 000 cubics | 200 µs | 49.5 µs | ok |
 | `ColourTable::resolve` | depth-3 tint chain | 100 ns | 141 ns | **+41 %** |
 | `interpolate` fade | — | 20 ns | 14.3 ns | ok |
@@ -73,11 +75,10 @@ Notes.
   to 4.6 ms and 39 ms. If the boolean ever looks slow again, look here first.
 - `Mp` arithmetic compiles to the same work as the raw `i32` loop, so the
   newtype and the whole overflow contract are free. That was the point.
-- `hit_fill` is the budget line with a real user-facing consequence, since
-  it runs on every pointer move over a document. The index is worth **128×**
-  over the exact winding test — 117 ns against 390 µs — which is the whole
-  reason it exists. The uniform grid is therefore comfortably enough at
-  10 000 segments; 100 000 is still untested.
+- `hit_fill` via the per-path index is worth **128×** over the exact
+  winding test — 117 ns against 390 µs — at 10 000 segments. (That index
+  is now `PathHitIndex`; the object index for phase 7 is `HitIndex`, see
+  "Picking" below, measured on the reference machine.)
 - `HitIndex::build` is 27 % over. It flattens at `Tolerance::EXPORT`, 1 mp,
   which is far finer than a build-time index needs; the obvious fix if the
   budget matters is to build at the render tolerance instead and accept a
@@ -253,9 +254,13 @@ which is what made this visible.
 - A width of `Mp::ZERO` is a **hairline**, which has no document-space
   outline at all. `stroke_to_path` returns `Err(StrokeError::Hairline)`
   rather than inventing a width, so the renderer cannot ignore the case.
-- `kurbo::Stroke` takes a start and an end cap, matching `.xar`'s separate
-  `TAG_STARTCAP`/`TAG_ENDCAP`. When the two differ the path is stroked twice
-  and unioned — rare enough in real documents to beat hand-writing a stroker.
+- `kurbo::Stroke` takes a start and an end cap and applies each to its own
+  end of every open subpath and every dash, matching `.xar`'s separate
+  `TAG_STARTCAP`/`TAG_ENDCAP`, so one pass is enough. **Fixed 2026-09-23:**
+  the code used to stroke a second time with the caps swapped and union
+  the two, which gave *both* ends the union of the two caps (a round start
+  and a square end came out square-and-round at both ends). A test now
+  asserts each end's own cap.
 - `offset()` offsets each segment, rebuilds the joins, and runs the result
   through `self_union` to delete the loops that offsetting a concave region
   always produces. That dependency on the boolean engine is intrinsic.
@@ -312,6 +317,189 @@ NaN, infinite or negative parameters degrade rather than panic, and more
 than `MAX_REGULAR_SIDES` (4096) sides returns `None`, as a bound on
 memory.
 
+## Picking: `hit` and `hit_index` (phase 7 W3, XARA-US-0031)
+
+Added 2026-09-23. Tasks XARA-T-0148 (precise tests), XARA-T-0149
+(`HitIndex`), XARA-T-0150 (grid-versus-BVH verdict), XARA-T-0151
+(`fuzz_hit_test`); the app side is XARA-T-0152.
+
+### What a hit is
+
+A pick is a **disc** in document space: the pointer plus a radius in
+millipoints (the device tolerance times millipoints per pixel,
+`HitTolerance::from_device(px, mp_per_px)`). A fill is hit when the disc
+meets the filled region under the path's fill rule. A stroke is hit when
+the disc meets the **outline the renderer draws** (`kurbo`'s stroker, as
+`stroke_to_path` uses), so caps, joins, the mitre limit and dashes all
+count and a dash gap does not. A stroke whose document-space width is at
+most `min_stroke_width` (one device pixel; a hairline always) is picked as
+a band of that width around the dashed centreline. `HitShape::hit` tests
+the stroke first, since it is painted on top.
+
+The object's matrix is applied to the control points in `f64` **before**
+anything is flattened or measured, so the pick stays a circle on screen
+under any transform. A mirroring matrix negates winding numbers, so the
+rule is applied to the object-space winding (`Positive` still means what
+is drawn).
+
+### How the disc test is exact
+
+1. Only segments whose control box reaches a horizontal band round the
+   pick and extends to its right are flattened, and **within** a curve
+   only the sub-pieces whose box meets the band are subdivided; the rest
+   become their chord. Geometry outside the band contributes zero
+   crossings to a +x ray cast from inside it, so this is exact, and a
+   huge curve passing through costs O(depth) edges.
+2. If the pick point is covered, it is a hit.
+3. Otherwise the boundary of the region, if the disc meets it, lies on
+   edges within the radius. A cheap pass probes either side of each such
+   edge's closest point, which settles NonZero/EvenOdd at the first edge.
+   The exact pass splits each near edge wherever another crosses or
+   overlaps it and probes both sides of every piece. That is what stops
+   an edge between winding −1 and 0 from attracting a `Positive` pick,
+   and cancelling coincident edges from attracting any.
+4. Probes sit `PROBE` = 1e-3 mp off the edge; flattening is at
+   `max(radius / 8, 0.25)` mp. Those are the error bars on "within the
+   radius".
+
+For strokes, only the runs of segments whose control **hull** (not just
+box: a quarter-ellipse's box contains the centre) is within reach are
+stroked. That is exact, not approximate: a run's end is a vertex shared
+with a segment too far away to matter, and the spurious cap there lies
+within that segment's own reach. An allocation-free pass over
+`Path::segments` answers the common miss first.
+
+### Bounds on hostile input
+
+A work limit (2·10^7 edge visits), an edge cap (2^21) and a dash cap
+(10 000 dashes; denser is treated as solid, which it is on screen) keep
+one test bounded. Past a limit the answer is **hit**: the disc is then
+within the radius of the outline, and erring towards a hit is the right
+direction for picking. The dash offset is reduced modulo the period
+before `kurbo` sees it.
+
+### `HitIndex`: the uniform grid won (the open question is closed)
+
+Benchmarked (`benches/hit_index.rs`) against a static BVH written in the
+bench: median split, 4 objects per leaf, max-z per node for best-first
+picking, contiguous subtree ranges so an enclosed node emits a slice,
+O(log n) refit for moves, full rebuild for insert/remove. 100 000
+objects, four scenes (uniform, clustered, mixed sizes with 1 % page-sized,
+all stacked on one point), reference machine, `taskset -c 4-7`. Other
+agents kept the load average at 10–40, so read the figures as ±30 %:
+
+| 100k objects | grid | BVH |
+|---|---|---|
+| build | 5.5–12 ms | 8.6–23 ms |
+| topmost pick, bounds only | 2.2–9.9 µs | 0.008–6.3 µs |
+| marquee, small | 4.5–6.2 µs | 1.3–10 µs |
+| marquee, quarter page | 0.24–0.79 ms | 16–380 µs |
+| marquee, whole page | 0.78–1.38 ms | 5–37 µs |
+| move: nudge / across the page | 69–86 ns / 150–680 ns | 87–92 ns (refit) |
+| insert + remove one object | **23–30 ns** | **8–23 ms** (rebuild) |
+
+**Verdict: the grid.** The BVH queries faster, especially marquees (it
+emits enclosed subtrees wholesale). But every query of both structures
+is two to three orders of magnitude inside the budgets, while a static
+BVH pays a whole rebuild, more than a frame, on every create, delete,
+paste and undo. A dynamic BVH would fix that at the cost of the build
+quality that makes it fast; not worth it at these margins. Revisit only
+if marquee over a million objects becomes a requirement.
+
+Design points the numbers forced:
+
+- **Hashed cells**, not a dense array: only occupied cells cost memory,
+  and one object 14 km away cannot stretch the grid.
+- **Cell side = 2 × median object extent** (floored by half the mean
+  spacing). 1× halved pick time (2 µs vs 5 µs) but doubled whole-page
+  marquee time (3.3 ms vs 1.6 ms), and marquee is the tighter budget.
+- **Objects over 16 cells go on a large list** that every query scans
+  (page backgrounds, frames).
+- **Bounds are stored inline in each cell's list, and every slot records
+  its index in each of its cells.** Without the positions a removal
+  searched the cell's list: under 100 000 stacked objects a move cost
+  12.9 µs. With them it costs 0.15 µs.
+- A query spanning more cells than are occupied walks the occupied cells,
+  so a whole-page marquee is O(objects), never O(area). A multi-cell
+  entry is reported only from its first overlapping cell, so no per-query
+  dedup set is needed.
+- The cell size retunes itself when the population doubles or quarters.
+
+### Budgets (phase 7: pick ≤ 2 ms worst case, marquee ≤ 20 ms)
+
+| | Measured | Verdict |
+|---|---|---|
+| Topmost **precise** pick among 100k (index + `HitShape::hit` top-down) | 5.5–13.8 µs | passes (also the 1 ms asked for in US-0031) |
+| Marquee over 100k, whole page | ≤ 1.38 ms | passes (also 5 ms) |
+| **Adversarial:** 100k *unfilled* outlines all around the pick point | 17.7–21 ms | **fails** |
+
+The failing row is intrinsic. Every candidate's bounds contain the point
+and none of the geometry does, so every one needs a precise rejection:
+about 180 ns each after the hull culling, down from 1.2 µs. No bounds
+index can help. If a real document ever does this, the fix is on the app
+side, not in the index: cache per-object "hollow" facts, or stop after N
+rejections and widen the search lazily.
+
+### Integration contract for `xarast-app` (XARA-T-0152)
+
+- **What is indexed.** Every *selectable ink leaf* (not groups, not
+  attributes) on a layer that is visible, unlocked and not a guide. That
+  is what `edit::selectable_objects` walks today, but recursing into
+  groups. Hidden and locked layers are **never** in the index. Toggling a
+  layer's visibility or lock calls `retain` (or re-inserts its leaves), or
+  simply rebuilds.
+- **Key and bounds.** The key is the leaf's `NodeId`. The bounds are the
+  document bounds cache (`tree.bounds(id)`), which must already include
+  the stroke's reach (half width × the mitre/√2 factor). Empty bounds are
+  allowed and never hit.
+- **Z.** A `u64` where larger is nearer the viewer: the leaf's rank in
+  render order (`walk_render` preorder over the whole document), spaced
+  out as `rank << 16`. Inserting between two objects then takes a
+  midpoint, and reordering one object is a single `set_z`. When no gap is
+  left, rebuild (`HitIndex::from_entries`, 6–12 ms at 100k).
+- **Build** once per document load (`from_entries`), and again on
+  `Intent::InvalidateAll`.
+- **Update** on every committed transaction, not on every drag frame:
+  - moved or reshaped leaves → `set_bounds` with the leaf's new bounds
+    (the bounds cache invalidation climbs);
+  - created leaves → `insert`;
+  - deleted leaves → `remove`;
+  - z-order edits → `set_z`.
+
+  Group and ungroup change no leaf's bounds or z. A live drag preview
+  changes nothing in the index; the selection is already known while
+  dragging.
+- **Pick** (`HitTester::pick`):
+  1. Take `radius = tolerance_px × mp_per_px`.
+     `idx.candidates_at(p, Mp(radius))` yields leaves nearest the viewer
+     first.
+  2. For each, build a `HitShape` from the node's path and **resolved**
+     attributes:
+     - `fill: Some(rule)` only if the fill is not transparent or none;
+     - `stroke: Some(style)` only if the line colour is not none;
+     - `transform` for text glyph runs and images, identity for ordinary
+       paths (their geometry is already in document space).
+  3. Call `hit(p, HitTolerance::from_device(px, mp_per_px))`. The first
+     `Some` wins.
+
+  The pick modes:
+  - `PickMode::TopGroup`: map the hit leaf to its outermost group below
+    the layer (tree ancestors).
+  - `Leaf`: the leaf itself.
+  - `Under { below }`: skip candidates until the first whose z is below
+    `below`'s.
+
+  For images, use a `HitShape` on the image's parallelogram with
+  `fill: Some(NonZero)`. Alpha-aware picking then samples the image at the
+  inverse-mapped point, on the app side.
+- **Marquee** (`pick_all`): `idx.query_rect(rect, RectMode::Touch |
+  Enclose, &mut out)` on leaf bounds, then map leaves to top groups. For
+  `Enclose` in top-group mode, a group is selected when its own bounds are
+  enclosed (check the group's bounds cache once per distinct group found).
+  For `Touch`, any touching leaf selects its group.
+- **Handles** are not in this index. They are picked in device space with
+  a fixed pixel radius (T3.7).
+
 ## Invariants that must not be broken
 
 1. **The five `Path` invariants**, enforced by `PathBuilder` by construction
@@ -346,7 +534,14 @@ memory.
    inclusion–exclusion test). Boolean output therefore goes through
    `Path::canonically_ordered()`, which canonicalises only the start vertex
    and the subpath order — the two things the engine does not define.
-9. **Area identities carry two slack terms, and both are physical.** The
+9. **Filling closes open subpaths; `kurbo`'s winding number does not.**
+   `BezPath::winding` sums the segments it is given and casts its ray to
+   the left, so on a path with an open subpath its answer depends on the
+   ray's direction. Anything that asks `kurbo` for a winding number must
+   close the subpaths first (`measure::closed_for_fill`); `fill_contains`
+   does since 2026-09-23. `kurbo`'s stroke output also has unclosed
+   subpaths.
+10. **Area identities carry two slack terms, and both are physical.** The
    relative `1e-4` from the phase document, plus `4·sqrt(area)` for the
    millipoint lattice (a one-millipoint band around a shape of area `A` has
    area of order `4·sqrt(A)`), plus — for identities that compare results
@@ -377,6 +572,16 @@ memory.
   the millipoint quantisation jitter *adds* length, so the "dense
   approximation" comes out longer than the exact value. Sample the curve in
   `f64` instead.
+- **Comparing `kurbo` winding contributions per segment across a
+  mirroring transform.** The ray direction flips with the mirror, so
+  per-segment numbers legitimately differ; only totals over closed
+  contours compare.
+- **A control *box* to decide which stroke segments can reach a pick.** A
+  quarter-ellipse's box contains the ellipse's centre, so every hollow
+  shape went to the stroker (120 ms for the adversarial stack); the
+  control *hull* is the right lower bound (18 ms).
+- **Asserting that a larger pick radius keeps every hit** (fuzz). False on
+  zero-area slivers, where two flattening tolerances disagree.
 - **`parry2d`** — pure Apache-2.0, physics-shaped, its shape model does not
   fit Béziers. **`geo`** — polylines only, GIS coordinates. **`bezier-rs`** —
   its own authors moved to `kurbo`. **`geo-booleanop`** — abandoned in 2020.
@@ -448,8 +653,19 @@ flattener should go.
   operation did not touch.
 - **The `cavalier_contours` offset spike** has not been run. The current
   `offset()` is kurbo-per-segment plus self-union and meets its tests.
-- **Whether the uniform grid suffices for `HitIndex` at 100 000 segments.**
-  Fallback is a static BVH built here, not a new dependency.
+- ~~Whether the uniform grid suffices for `HitIndex` at 100 000.~~
+  **Settled 2026-09-23: the grid**, see "Picking" above (XARA-T-0150).
+- **`stroke_to_path` passes the dash offset to `kurbo` unreduced.** The hit
+  test reduces it modulo the period because `kurbo` walks the offset one
+  element at a time; the renderer's path does not, so a hostile offset of
+  2^30 with a 1 mp pattern is slow there. Same fix, one line.
+- **Nearest point on a path for snapping** (phase 7 W8): `nearest_point`
+  exists and is exact per segment, but snapping needs it through
+  `HitIndex` candidates with a transform. Filed as XARA-T-0153.
+- **Precise marquee touch** (geometry, not bounds, meeting the rectangle)
+  is not provided; the marquee is on bounds, as the phase document
+  specifies. A `rect_touches` built on the disc test's band machinery
+  would be the way if it is ever wanted.
 - **Arc segments**, if `i_curve` is adopted.
 - **Cross-architecture `f64` determinism** is not gated. No `mul_add` and no
   fast-math anywhere in the geometry path, which is the precondition;
