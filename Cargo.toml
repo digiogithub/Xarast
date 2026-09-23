@@ -168,6 +168,19 @@ ashpd = { version = "0.13", default-features = false, features = [
     "file_chooser",
     "settings",
 ] }
+# Wayland drag and drop. `winit` 0.30 implements no drag-and-drop at all on
+# Wayland (only X11 has `HoveredFile`/`DroppedFile`; measured on GNOME 46), so
+# the shell binds `wl_data_device` itself, on `winit`'s own connection. These
+# are the versions `winit` already links, so no new code enters the graph;
+# `client_system` is what lets a second event queue share `winit`'s
+# `wl_display`, and `winit`'s `wayland-dlopen` keeps libwayland-client
+# dlopen'ed. All `MIT`; raw-window-handle is `MIT OR Apache-2.0 OR Zlib`.
+smithay-client-toolkit = { version = "0.19.2", default-features = false }
+wayland-client = "0.31.10"
+wayland-backend = { version = "0.3.10", default-features = false, features = [
+    "client_system",
+] }
+raw-window-handle = "0.6"
 # Clipboard. `wayland-data-control` gives copy/paste that survives focus loss
 # where the compositor implements `wlr-data-control`. `MIT OR Apache-2.0`.
 arboard = { version = "3.6", default-features = false, features = [

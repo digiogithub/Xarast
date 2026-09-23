@@ -60,6 +60,11 @@ mod paint;
 pub mod portal;
 pub mod scale;
 pub mod viewer;
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
+mod wayland_dnd;
 mod window;
 
 /// The input-method seam.
