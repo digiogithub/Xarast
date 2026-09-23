@@ -38,6 +38,20 @@ intent that changes nothing returns `Changed::empty()`, and that is
 checked by a test, because "did anything happen" is the question an
 idle-CPU budget rests on.
 
+**Application-level intents** (XARA-US-0082): `ShowOpenDialog`,
+`OpenFile(path)`, `CloseDocument`, `ClearRecent`, `Quit`. `AppState::apply`
+handles them itself; a `Session` ignores them. The two only the platform
+can do (`ShowOpenDialog`, `Quit`) are queued as `PlatformRequest`s that the
+shell drains with `AppState::take_requests()` and carries out — the core
+never shows a dialog or ends the process. `Changed::ACTIVE` says a
+different document (or none) now has the canvas: re-title, re-size, frame.
+
+**The command table** (`command.rs`, phase-05 W4.7): `AppCommand` names
+each menu operation with its `label()`, its `shortcuts()` as
+toolkit-neutral `KeyChord`s (first = the one a menu shows),
+`needs_document()` and `intent(canvas_centre)`. The menu bar draws it,
+the shell binds keys from it; both therefore raise the same intents.
+
 `Modifiers` is the semantic triple `constrain` / `adjust` /
 `alternative` plus `snap`, never `Ctrl`/`Shift`/`Alt`. The shell owns
 that mapping table. They are sampled continuously, never latched at drag
@@ -95,14 +109,16 @@ scale factor and calls `Intent::SetDpi`.
 | `geometry` | `DevicePoint`, `DeviceSize`, `DocPoint`, `DocPointF`, `DocRect`, the saturating `f64 → Mp` quantiser |
 | `edit` | `EditState`, `ControlPoints`, `SelectMode`, `Modifiers`, `ToolId`, `ToolState`, `selectable_objects` |
 | `viewport` | `Viewport`, `ZoomTarget`, `page_rect`, `spread_rect`, `drawing_rect` (no pages), `drawing_or_page_rect`, `content_rect`, `nodes_rect` |
-| `intent` | `Intent`, `Changed`, `PointerButton`, `PointerSample` |
+| `intent` | `Intent`, `Changed`, `PlatformRequest`, `PointerButton`, `PointerSample` |
+| `command` | `AppCommand`, `KeyChord`, `ChordKey`, `ZOOM_STEP` — the command table |
+| `recent` | `RecentFiles`, `MAX_RECENT` (10), `default_store_path` (`$XDG_STATE_HOME/xarast/recent`) |
 | `paint` (private) | document fill → `xarast_render::Paint`, document transparency → `Transparency` |
 | `walker` | `SceneWalker`, `WalkStats` — the arena→`Scene` walk |
 | `commands` | `SetLayerVisible`, `SetLayerLocked`, `RenameLayer`, `SetActiveLayer`, `AddLayer`, `DeleteNode` |
 | `session` | `Session`, `DocumentId`, `FileKind`, `Dirty`, `SessionError`, `build_scene`, `BuiltScene` |
 | `headless` | `render`, `render_to_png`, `convert_to_png`, `HeadlessOptions`, `HeadlessFrame`, `HeadlessResult` (with `WalkStats`, `SceneStats`, zoom and view) |
 | `prefs` | `Preferences`, `Unit`, `ThemePref`, `RendererPref` |
-| `app` | `AppState`, `DocumentSessions`, `DiagnosticLog` |
+| `app` | `AppState` (with `open_replacing`, `with_recent_store`, `take_requests`), `DocumentSessions`, `DiagnosticLog` |
 | `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `FrameReuse`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread, and the worker that reuses pixels |
 | `reuse` (private) | the pixel-reuse policy: `plan`, scroll, nearest-neighbour rescale, the zoom-out ring, Final columns |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
@@ -326,6 +342,23 @@ reason the walker *reports*, which is its own test.
     backdrop border is therefore gone from the window; the headless tools
     keep the CPU rescale.
 
+37. **Single-document model for the first usable viewer**
+    (XARA-US-0082). `Intent::OpenFile` → `AppState::open_replacing`: the
+    new session is opened *first* and the others are closed only once it
+    succeeded, so a failed open leaves the current document on screen
+    (the error is in the problem list and returned). A path that fails is
+    dropped from the recent list. `DocumentSessions` still holds many;
+    tabs are later.
+38. **Recent files are state, not settings**: `$XDG_STATE_HOME/xarast/recent`
+    (a relative or empty `XDG_STATE_HOME` is ignored, as the spec says),
+    plain text under a `xarast-recent 1` header, one absolute path per
+    line (raw bytes on Unix, so non-UTF-8 paths survive; paths with a line
+    break are refused). Parsing never fails: an unknown header is an empty
+    list, bad lines are skipped, at most 10 are kept. Written through a
+    temporary file and a rename. Pruned of missing files at load. The
+    store is opt-in (`with_recent_store`): tests and probes keep the list
+    in memory and never touch the user's state directory.
+
 ---
 
 ## Invariants that must not be broken
@@ -350,6 +383,9 @@ reason the walker *reports*, which is its own test.
    remove work, which is a corpus test.
 9. **Tools never touch the arena.** Every mutation is a
    `xarast_doc::Command` dispatched through `Session::dispatch`.
+10. **No two commands share a key chord** (`no_two_commands_share_a_key`),
+    and the core never performs a platform action: it queues a
+    `PlatformRequest`.
 
 ### The one friction with `xarast-doc`
 
