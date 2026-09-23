@@ -200,8 +200,8 @@ Every one is deliberate, and every one is a phase that owns it:
 - **A tag-71 (JPEG8BPP) palette is kept** in `BitmapData::palette` as
   opaque `Rgba8`, with `pixels` empty and `original` the JPEG (T10.2.6).
   The walker hands it to `decode_xar_bitmap(71, …)`. It takes part in the
-  resource's SHA-256 dedup key. `.xarast` does not persist it yet
-  (XARA-T-0154).
+  resource's SHA-256 dedup key. `.xarast` stores it as a blob named by
+  `xarast:palette` (XARA-T-0154, `research/06 §6.9.1`).
 - **Text is structural only.** Strings, lines, kerns, stories and the
   2900–2920 attributes are decoded; nothing is shaped, measured or
   positioned.

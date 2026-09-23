@@ -15,6 +15,11 @@ path. Round 4 (2026-09-23): the writer gaps the corpus round trip found —
 opaque subtrees (XARA-T-0108), fill mapping (T-0109), first re-save
 differences (T-0110), ambiguous twins (T-0111) — closed; the round trip
 is exact for all 59 files (below) and its tests have no exception list.
+Round 5 (2026-09-23, after bitmaps started decoding — T-0129): the
+JPEG8BPP palette (XARA-T-0154, also the cause of T-0157's scope3 gap),
+bitmap transparencies as luminance masks and contone fills as duotone
+filters for browsers; the render round trip is exact again for 59/59 and
+`KNOWN_RENDER_GAPS` is deleted.
 
 | Workstream | State | Where |
 |---|---|---|
@@ -91,6 +96,28 @@ stats, foreign_count, foreign_digest }`.
   resvg, Inkscape and Chrome. The original encoded bytes go into the
   `ResourceIndex` once per bitmap; every `href` written counts one
   reference.
+- **Bitmap palettes** (`research/06 §6.9.1`, XARA-T-0154): a `.xar`
+  tag-71 bitmap keeps its snap palette in `BitmapData::palette`; the
+  writer stores it as a `resources/blobs/b3-….bin` blob (`r g b a` per
+  entry, 1–256) and writes `xarast:palette` wherever it writes the
+  image's `href` — the node `<image>`, the fill pattern's `<image>`, the
+  transparency twin, the mask pattern's `<image>` (`BitmapRef::attrs`).
+  `write_svg`'s href closure inserts the blob and counts it on every
+  cache hit like the image. The reader keys bitmaps by *(href, palette)*
+  (`bitmap_for`); a bad palette is a `DanglingReference` warning. The
+  normal form prints the palette's BLAKE3 with the image's.
+- **Bitmap transparency / contone for browsers** (`§6.9.2`): a bitmap
+  transparency also gets a `<mask>` (rect of the image pattern through
+  `<filter xarast:filter="transparency-mask">`, `1 − BT.601 luma`, alpha
+  forced to 1 — what the CPU renderer's `LevelSampler` reads); a contone
+  pattern's `<image>` goes through `<filter xarast:filter="contone">`
+  (luma matrix + `feComponentTransfer` tables from the key colours as
+  written: 2 entries for a fade, 17 for rainbows). The reader knows a
+  `<filter>` only by that marker (`root.rs::is_known_def`); any other is
+  foreign and kept. A `<mask>` whose rect is not a gradient falls back to
+  the twin (`flat_or_twin` with alpha 1), and the mask box padding
+  (`mask_pad`, the only place an unstroked element's line width lives)
+  is read whether the mask is a gradient or not.
 - **Gradients** are exact for linear/circular/elliptical fills. With
   `gradientUnits="userSpaceOnUse"` a radial gradient's `cx`/`cy` default to
   **50 % of the viewport**, so an elliptical one (unit circle mapped by
@@ -230,6 +257,26 @@ Inkscape on 8 files checked; Chrome is identical on 7 and differs on
 (SSIM 0.99999: Chrome composites an inherited `fill-opacity` over a
 gradient a hair differently than an explicit one).
 
+### Conformance with bitmaps decoded (2026-09-23, round 5)
+
+Same method (`xarast-cli render --frame page` vs `cargo xtask
+svg-render` at the same width, 8 × 8 grey SSIM; script-driven, not in
+CI): **mean 0.971, 34/59 ≥ 0.99** (was 0.942 / 28 before the reference
+drew bitmaps). The bitmap files: Groucho2 0.995, WATCH 0.980, WATCH2
+0.971, JagSS100 simple 0.941 → **0.969** and scope3 simple 0.900 →
+**0.926** with the transparency masks (their shadows were black boxes in
+resvg), leafgirl 0.875 (its JPEG8BPP figure: resvg draws the unsnapped
+JPEG), Spitfire 0.850 (fine photo texture resampled differently),
+`Fill Types simple` 0.844 (procedural rows still flat — XARA-T-0102).
+Checked by eye: tag-68 PNGs with normalised alpha composite correctly
+(scope3's logo), photos and bitmap fills sit where the CPU render puts
+bitmap nodes, contone/duotone tiles show their colours. **Finding
+(XARA-T-0171):** the CPU backend samples bitmap *fills and
+transparencies* upside down relative to the documented mapping (Fill
+Types' "Xara" tiles are mirrored vertically in Xarast, upright in resvg;
+scope3/JagSS100 shadows land in the wrong place). The `.xarast` round
+trip cannot see it (both sides share the renderer).
+
 ### Conformance (2026-09-23, by hand; XARA-T-0106 automates it)
 
 All 59 corpus files convert, and every `document.svg`, `meta.xml` and
@@ -349,6 +396,15 @@ normal forms are equal. It is independent of where attributes sit, of
 hoisting and classes, and of def ids.
 
 ### Round trip numbers (2026-09-23, corpus of 59)
+
+Round 5, with bitmaps decoded (the walker renders tag-68/-71 images,
+T-0129): model **59/59**, bytes **59/59**, render **59/59
+pixel-identical** — Groucho2, leafgirl and scope3 simple differed only by
+the missing JPEG8BPP palette (scope3's two wood-tile JPEGs are tag 71;
+T-0157 had no other cause). `KNOWN_RENDER_GAPS` and its "fail when a
+listed file passes" mechanism are deleted. The duotone fill of `Fill
+Types simple` (XARA-T-0155) already came back exact after the
+exact-twins work (`xarast:contone-refs`). ProbeX16 save 0.79–0.82 s.
 
 Round 4, after XARA-T-0108…0111; both tests have **no exception list**:
 
@@ -621,6 +677,12 @@ the file means", not crashes; each input is now a unit test in
   sidecars) is subtle; running `write_svg` is exact and costs only for
   documents with baggage.
 
+- Carrying a JPEG8BPP palette inline (`xarast:palette="#rrggbb …"`): 2 KB
+  of text per reference, repeated on every element naming the image; the
+  blob is content-addressed once.
+- Recognising the writer's `<filter>`s by id prefix or by shape: foreign
+  filters would be dropped. The `xarast:filter` marker is the contract.
+
 ## Open TODOs
 
 - W4 leftovers: F4.7 deletion accounting (XARA-T-0113); header data
@@ -631,6 +693,10 @@ the file means", not crashes; each input is now a unit test in
   per-key transparency modes are taken from the side's mode; a tinted
   palette reference on a key (`Colour::Indexed { tint: Some }`) is
   written as its 8-bit value.
+- Bitmap names (`BitmapResource::name`, the gallery name) are not
+  written; a reload has empty names (not part of the normal form). The
+  SVG mask/pattern of a bitmap ignores `Simple` (clamp) and mirrored
+  tiling — patterns always repeat — and a transparency's contone levels.
 - W3 leftovers: baking/`BakeProvider`
   (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
