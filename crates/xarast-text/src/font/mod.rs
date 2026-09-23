@@ -18,7 +18,9 @@ use fontique::{
     Blob, Collection, CollectionOptions, FallbackKey, FontInfoOverride, GenericFamily, QueryFamily,
     QueryStatus, SourceCache, SourceKind,
 };
+use skrifa::MetadataProvider;
 use skrifa::raw::TableProvider;
+use skrifa::string::StringId;
 
 use crate::style::{FontQuery, FontStyle};
 use lru::FaceLru;
@@ -555,6 +557,24 @@ impl DbInner {
         id
     }
 
+    /// The face for bytes `parley` shaped with. Normally one we already
+    /// loaded (the source cache hands out the same blob); otherwise the face
+    /// is recorded from its own name table and kept resident.
+    pub(crate) fn face_for_parley(&mut self, font: &parley::FontData) -> FaceId {
+        let key = (font.data.id(), font.index);
+        if let Some(&id) = self.by_blob.get(&key) {
+            return id;
+        }
+        let data = FaceData {
+            blob: font.data.clone(),
+            index: font.index,
+        };
+        let info = info_from_bytes(&data);
+        let id = self.push_face(info, Origin::Resident(data));
+        self.by_blob.insert(key, id);
+        id
+    }
+
     pub(crate) fn face_data(&mut self, id: FaceId) -> Option<FaceData> {
         let entry = self.faces.get(id.0 as usize)?;
         match &entry.origin {
@@ -732,5 +752,39 @@ impl DbInner {
         let name: Arc<str> = Arc::from(fam.name());
         let embedded = matches!(font.source().kind(), SourceKind::Memory(_));
         Some(self.face_for_font_info(&font, &name, embedded))
+    }
+}
+
+/// Reads a face's identity from its own tables, for faces that reach us as
+/// bytes only.
+fn info_from_bytes(data: &FaceData) -> FaceInfo {
+    let Some(font) = data.font_ref() else {
+        return FaceInfo {
+            family: Arc::from(""),
+            weight: 400,
+            style: FontStyle::Normal,
+            stretch: 100,
+            embedded: false,
+        };
+    };
+    let strings = |id| {
+        font.localized_strings(id)
+            .english_or_first()
+            .map(|s| s.chars().collect::<String>())
+    };
+    let family = strings(StringId::TYPOGRAPHIC_FAMILY_NAME)
+        .or_else(|| strings(StringId::FAMILY_NAME))
+        .unwrap_or_default();
+    let a = font.attributes();
+    FaceInfo {
+        family: Arc::from(family),
+        weight: round_u16(a.weight.value(), 1, 1000),
+        style: match a.style {
+            skrifa::attribute::Style::Normal => FontStyle::Normal,
+            skrifa::attribute::Style::Italic => FontStyle::Italic,
+            skrifa::attribute::Style::Oblique(x) => FontStyle::Oblique(x),
+        },
+        stretch: round_u16(a.stretch.ratio() * 100.0, 50, 200),
+        embedded: false,
     }
 }

@@ -5,6 +5,9 @@
 //!   ladder, script fallback with a preference override, faces embedded in a
 //!   document (shadowing system faces of the same name), and shared,
 //!   LRU-cached face data.
+//! * [`Shaper`] — shaping through `parley` (HarfBuzz-class shaping by
+//!   `harfrust`), UAX #14 line breaking through ICU4X, UAX #9 reordering,
+//!   Xara-style justification and line spacing, in millipoints.
 //! * [`FontDb::glyph_outline`] — cached glyph outlines as `kurbo::BezPath`,
 //!   what the renderer and convert-to-shapes draw.
 //!
@@ -14,13 +17,19 @@
 //! See `docs/phases/phase-09-text.md` and `docs/memory/text.md`.
 
 pub mod font;
+mod layout;
+pub mod metrics;
 mod outline;
+mod shape;
 pub mod style;
 
 pub use font::{
     FaceData, FaceId, FaceInfo, FontDb, FontDbOptions, FontError, FontMatch, FontSubstitution,
     GenericName, ScriptTag, SubstitutionReason, Synthesis,
 };
+pub use layout::{DEFAULT_TAB_INTERVAL, GlyphRun, LaidCluster, LaidLine, Layout, PlacedGlyph};
+pub use metrics::{CharMetrics, FaceMetrics, FontMetrics, ScaledMetrics};
+pub use shape::{NOMINAL_SIZE, Shaper};
 pub use style::{
     Direction, FontFeature, FontQuery, FontStyle, FontVariation, Justification, LineSpacing,
     ManualKern, ParagraphStyle, StoryInput, StoryMode, StyleRange, TabKind, TabStop, TextScript,

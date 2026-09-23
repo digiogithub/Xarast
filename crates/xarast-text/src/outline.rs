@@ -3,7 +3,7 @@
 //! Outlines are extracted **once per glyph at unit scale** — in font units, y
 //! up, unhinted — and cached by `(face, glyph, variation coordinates)`.
 //! Drawing a glyph at a size is a transform
-//! (`GlyphRun::glyph_transform`), never a
+//! ([`GlyphRun::glyph_transform`](crate::GlyphRun::glyph_transform)), never a
 //! re-extraction, so converting a story at several sizes costs one
 //! extraction per distinct glyph (phase 9, W9.6).
 
@@ -143,7 +143,7 @@ impl FontDb {
     }
 
     /// [`FontDb::glyph_outline`] for normalised coordinates, as a
-    /// `GlyphRun` carries them. Trailing zero coordinates
+    /// [`GlyphRun`](crate::GlyphRun) carries them. Trailing zero coordinates
     /// are insignificant and are ignored for caching.
     #[must_use]
     pub fn glyph_outline_normalized(
