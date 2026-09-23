@@ -267,6 +267,9 @@ pub struct Rendered {
     pub ink_pixels: u64,
     /// What the walk could not draw.
     pub walk: WalkStats,
+    /// Fonts the document asked for that were replaced, as
+    /// `"requested -> used"`.
+    pub font_substitutions: Vec<String>,
     /// Milliseconds opening (read + import).
     pub open_ms: f64,
     /// Milliseconds walking and rendering.
@@ -328,6 +331,11 @@ pub fn render_one(input: &Path, output: &Path, a: &RenderArgs) -> Result<Rendere
         commands: out.commands,
         ink_pixels,
         walk: out.walk,
+        font_substitutions: out
+            .font_substitutions
+            .iter()
+            .map(|s| format!("{} -> {}", s.requested, s.used))
+            .collect(),
         open_ms,
         render_ms,
         png_ms,
@@ -339,6 +347,7 @@ pub fn render_one(input: &Path, output: &Path, a: &RenderArgs) -> Result<Rendere
 pub fn pending_summary(w: &WalkStats) -> String {
     let parts: Vec<String> = [
         ("text", w.text_pending),
+        ("text-on-path", w.text_on_path_pending),
         ("shapes", w.shapes_pending),
         ("images", w.images_pending),
         ("images-failed", w.images_failed),
@@ -437,6 +446,10 @@ fn print_line(input: &Path, r: &Rendered) {
             format!(" [not drawn: {pending}]")
         }
     );
+    // Never silent: a substituted font changes what the page looks like.
+    for s in &r.font_substitutions {
+        eprintln!("{}: font substituted: {s}", input.display());
+    }
 }
 
 #[cfg(test)]

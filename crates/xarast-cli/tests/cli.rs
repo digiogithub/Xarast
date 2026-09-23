@@ -18,6 +18,11 @@ fn bin() -> &'static str {
 fn run(args: &[&str]) -> Output {
     Command::new(bin())
         .args(args)
+        // Pinned fonts: a test never depends on the machine's.
+        .env(
+            "XARAST_FONT_DIR",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../xarast-text/tests/fonts"),
+        )
         .output()
         .expect("spawn xarast-cli")
 }

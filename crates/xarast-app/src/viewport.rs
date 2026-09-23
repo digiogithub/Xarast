@@ -443,6 +443,17 @@ pub fn spread_rect(doc: &xarast_doc::Document) -> DocRect {
 /// (architecture §4).
 #[must_use]
 pub fn drawing_rect(doc: &xarast_doc::Document) -> DocRect {
+    drawing_rect_with(doc, None)
+}
+
+/// [`drawing_rect`], laying text out with `fonts` rather than the process's
+/// shared font service. Text stories have no cached bounds (their metrics
+/// are derived, not node data), so framing lays them out.
+#[must_use]
+pub fn drawing_rect_with(
+    doc: &xarast_doc::Document,
+    fonts: Option<&crate::fonts::FontService>,
+) -> DocRect {
     let tree = &doc.tree;
     let mut r = DocRect::EMPTY;
     for layer in tree.children(doc.active_spread()).filter(|&id| {
@@ -450,7 +461,7 @@ pub fn drawing_rect(doc: &xarast_doc::Document) -> DocRect {
     }) {
         let b = match tree.bounds(layer).get() {
             Some(b) => b,
-            None => ink_rect(doc, layer),
+            None => ink_rect(doc, layer, fonts),
         };
         if !b.is_empty() {
             r = if r.is_empty() { b } else { r.union(b) };
@@ -468,7 +479,11 @@ pub fn drawing_rect(doc: &xarast_doc::Document) -> DocRect {
 /// [`xarast_doc::Document::update_bounds`] without writing the cache, and
 /// starts from the defaults: attributes above a layer are not a thing a
 /// `.xar` file writes.
-fn ink_rect(doc: &xarast_doc::Document, root: xarast_doc::NodeId) -> DocRect {
+fn ink_rect(
+    doc: &xarast_doc::Document,
+    root: xarast_doc::NodeId,
+    fonts: Option<&crate::fonts::FontService>,
+) -> DocRect {
     use xarast_doc::{NodeKind, WalkEvent};
     let tree = &doc.tree;
     let mut stack = xarast_doc::AttrStack::with_defaults(&doc.defaults);
@@ -497,11 +512,21 @@ fn ink_rect(doc: &xarast_doc::Document, root: xarast_doc::NodeId) -> DocRect {
             )
         )
     };
-    for ev in tree.walk_render(root) {
+    let mut shared: Option<std::sync::Arc<crate::fonts::FontService>> = None;
+    let mut walk = tree.walk_render(root);
+    while let Some(ev) = walk.next() {
         match ev {
             WalkEvent::EnterScope { .. } => stack.push_scope(),
             WalkEvent::Visit { node } => match tree.kind(node) {
                 Some(NodeKind::Attr(a)) => stack.push(std::sync::Arc::new(a.value.clone())),
+                Some(NodeKind::TextStory(_)) => {
+                    let f = match fonts {
+                        Some(f) => f,
+                        None => shared.get_or_insert_with(crate::fonts::shared),
+                    };
+                    add(crate::text::story_rect(f, tree, node, &mut stack));
+                    walk.control(xarast_doc::Descend::Skip);
+                }
                 _ if own_ink(node) && tree.links(node).first_child.is_none() => add(
                     xarast_doc::bounds::compute_bounds_with(tree, node, half_width(&stack)),
                 ),
@@ -526,7 +551,16 @@ fn ink_rect(doc: &xarast_doc::Document, root: xarast_doc::NodeId) -> DocRect {
 /// what "fit the drawing" frames.
 #[must_use]
 pub fn drawing_or_page_rect(doc: &xarast_doc::Document) -> DocRect {
-    let d = drawing_rect(doc);
+    drawing_or_page_rect_with(doc, None)
+}
+
+/// [`drawing_or_page_rect`] with the fonts text is laid out with.
+#[must_use]
+pub fn drawing_or_page_rect_with(
+    doc: &xarast_doc::Document,
+    fonts: Option<&crate::fonts::FontService>,
+) -> DocRect {
+    let d = drawing_rect_with(doc, fonts);
     if d.is_empty() || d.width() <= Mp::ZERO || d.height() <= Mp::ZERO {
         page_rect(doc)
     } else {

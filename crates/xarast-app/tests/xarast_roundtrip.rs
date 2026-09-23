@@ -53,6 +53,32 @@ const KNOWN_RENDER_GAPS: &[&str] = &[
     "Designs/scope3 simple.xar",
 ];
 
+/// Files whose text the writer still writes approximately — one `<tspan>`
+/// per line, no tracking or kerns — while the application now draws text
+/// from the real layout (phase 9). They must still render; XARA-T-0172
+/// makes the writer use the layout and empties this list.
+const KNOWN_TEXT_GAPS: &[&str] = &[
+    "testfiles/ProbeX16.xar",
+    "testfiles/ScaleTest.xar",
+    "testfiles/ScaleTest2.xar",
+    "Designs/GardenPlan.xar",
+    "Designs/TextCurve.xar",
+    "TextDesigns/AngledText.xar",
+    "TextDesigns/BaselineShift.xar",
+    "TextDesigns/FontChangesInText.xar",
+    "TextDesigns/Kerning.xar",
+    "TextDesigns/LineSpacing.xar",
+    "TextDesigns/ManualKern.xar",
+    "TextDesigns/Paragraph.xar",
+    "TextDesigns/Rotated.xar",
+    "TextDesigns/SimpleText.xar",
+    "TextDesigns/SuperSub.xar",
+    "TextDesigns/TextJust.xar",
+    "TextDesigns/Tracking.xar",
+    "TextDesigns/embeddedFonts.xar",
+    "TextDesigns/hebrew.xar",
+];
+
 fn corpus() -> Option<(PathBuf, Vec<String>)> {
     let required = std::env::var("XARAST_CORPUS_REQUIRED").as_deref() == Ok("1");
     let root = PathBuf::from(
@@ -102,6 +128,11 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
     let mut worst: Vec<(String, u8, f64)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut gaps: Vec<String> = Vec::new();
+    let mut text_gaps: Vec<String> = Vec::new();
+    // Pinned fonts: a render never depends on the machine's.
+    let _ = xarast_app::fonts::set_shared(xarast_app::fonts::FontService::from_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"),
+    ));
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let original = Session::open_bytes(DocumentId(1), Path::new(rel), &bytes)
@@ -148,6 +179,10 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
                 gaps.push(rel.clone());
                 continue;
             }
+            if KNOWN_TEXT_GAPS.contains(&rel.as_str()) {
+                text_gaps.push(rel.clone());
+                continue;
+            }
             failures.push(format!(
                 "{rel}: {differing} pixels differ ({:.4} %), by up to {max} levels",
                 fraction * 100.0
@@ -157,4 +192,5 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
     eprintln!("{exact}/59 pixel-identical; the others: {worst:?}");
     assert!(failures.is_empty(), "{failures:#?}");
     assert_eq!(gaps, KNOWN_RENDER_GAPS, "update KNOWN_RENDER_GAPS");
+    assert_eq!(text_gaps, KNOWN_TEXT_GAPS, "update KNOWN_TEXT_GAPS");
 }

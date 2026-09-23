@@ -213,6 +213,9 @@ pub struct Session {
     dirty: Dirty,
     modified: bool,
     diagnostics: Vec<String>,
+    /// How many of the walker's font substitutions were already handed
+    /// out by [`Session::take_font_substitutions`].
+    substitutions_reported: usize,
 }
 
 impl Session {
@@ -254,6 +257,7 @@ impl Session {
             dirty: Dirty::everything(size),
             modified: false,
             diagnostics: Vec::new(),
+            substitutions_reported: 0,
         }
     }
 
@@ -383,6 +387,19 @@ impl Session {
         self.walker.resolver()
     }
 
+    /// Font substitutions the walks made since the last call, each once per
+    /// session: the problem list reports them, since a substituted face
+    /// changes what the page looks like and must never go unsaid.
+    pub fn take_font_substitutions(&mut self) -> Vec<xarast_text::FontSubstitution> {
+        let all = self.walker.font_substitutions();
+        let fresh = all
+            .get(self.substitutions_reported..)
+            .map(<[_]>::to_vec)
+            .unwrap_or_default();
+        self.substitutions_reported = all.len();
+        fresh
+    }
+
     /// What the last walk found: pending images, skipped text, and so on.
     #[must_use]
     pub const fn walk_stats(&self) -> WalkStats {
@@ -433,6 +450,15 @@ impl Session {
         self.dirty.scene = false;
         self.scene_epoch += 1;
         self.scene_ink = crate::viewport::content_rect(&self.doc);
+        // Text has no cached bounds: add what the walk drew.
+        let text = self.walker.text_ink();
+        if !text.is_empty() {
+            self.scene_ink = if self.scene_ink.is_empty() {
+                text
+            } else {
+                self.scene_ink.union(text)
+            };
+        }
         // A previewed move draws its nodes outside the committed bounds;
         // the render thread skips strips outside the ink, so widen it.
         if let Some((nodes, m)) = &self.preview.transform {
