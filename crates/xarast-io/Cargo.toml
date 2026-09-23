@@ -26,6 +26,7 @@ xarast-color = { path = "../xarast-color" }
 thiserror = { workspace = true }
 serde = { workspace = true }
 flate2 = { workspace = true }
+rayon = { workspace = true }
 jpeg-encoder = { workspace = true }
 image-webp = { workspace = true }
 oxipng = { workspace = true, optional = true }

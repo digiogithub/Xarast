@@ -48,7 +48,9 @@ pub fn encode_webp(
     let enc = WebPEncoder::new(&mut out);
     if opaque {
         let rgb: Vec<u8> = rgba
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect();
         enc.encode(&rgb, width, height, ColorType::Rgb8)

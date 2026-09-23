@@ -14,9 +14,9 @@
 
 use std::io::Write;
 
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
+use rayon::prelude::*;
 
+use crate::deflate::ChunkedZlib;
 use crate::options::{PngColour, PngDepth, PngOptions};
 
 /// Bytes an IDAT chunk holds before it is written out.
@@ -198,68 +198,94 @@ fn convert_row(h: &PngHeader, rgba: &[u8], palette: Option<&PaletteMap>, out: &m
     }
 }
 
-/// The five PNG filters, picked per row.
-struct Filterer {
-    bpp: usize,
-    prev: Vec<u8>,
-    cand: [Vec<u8>; 5],
+/// Filters one row into `out` (type byte first) with the filter whose
+/// output has the smallest sum of absolute signed bytes. `cand` is
+/// scratch.
+fn filter_row(bpp: usize, prev: &[u8], row: &[u8], cand: &mut [Vec<u8>; 5], out: &mut Vec<u8>) {
+    for c in cand.iter_mut() {
+        c.clear();
+    }
+    for i in 0..row.len() {
+        let x = row[i];
+        let a = if i >= bpp { row[i - bpp] } else { 0 };
+        let b = prev[i];
+        let c = if i >= bpp { prev[i - bpp] } else { 0 };
+        cand[0].push(x);
+        cand[1].push(x.wrapping_sub(a));
+        cand[2].push(x.wrapping_sub(b));
+        #[allow(clippy::cast_possible_truncation)]
+        let avg = ((u16::from(a) + u16::from(b)) / 2) as u8;
+        cand[3].push(x.wrapping_sub(avg));
+        cand[4].push(x.wrapping_sub(paeth(a, b, c)));
+    }
+    let score =
+        |v: &Vec<u8>| -> u64 { v.iter().map(|&b| u64::from((b as i8).unsigned_abs())).sum() };
+    let mut best = 0;
+    let mut best_score = score(&cand[0]);
+    for (t, c) in cand.iter().enumerate().skip(1) {
+        let s = score(c);
+        if s < best_score {
+            best = t;
+            best_score = s;
+        }
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    out.push(best as u8);
+    out.extend_from_slice(&cand[best]);
 }
 
-impl Filterer {
-    fn new(bpp: usize, row_len: usize) -> Filterer {
-        Filterer {
-            bpp,
-            prev: vec![0; row_len],
-            cand: std::array::from_fn(|_| Vec::with_capacity(row_len + 1)),
-        }
+/// Filters `rows` (each `row_len` bytes; `prev` is the row above the
+/// first) in parallel. Each row depends only on itself and the unfiltered
+/// row above, so the result is the same on any thread count.
+fn filter_rows(bpp: usize, prev: &[u8], rows: &[u8], row_len: usize) -> Vec<u8> {
+    if row_len == 0 {
+        return vec![0; rows.len()];
     }
+    let n = rows.len() / row_len;
+    let mut out = vec![0u8; n * (row_len + 1)];
+    out.par_chunks_mut(row_len + 1).enumerate().for_each_init(
+        || {
+            (
+                std::array::from_fn(|_| Vec::with_capacity(row_len)),
+                Vec::with_capacity(row_len + 1),
+            )
+        },
+        |(cand, buf): &mut ([Vec<u8>; 5], Vec<u8>), (i, dst)| {
+            let row = &rows[i * row_len..(i + 1) * row_len];
+            let above = if i == 0 {
+                prev
+            } else {
+                &rows[(i - 1) * row_len..i * row_len]
+            };
+            buf.clear();
+            filter_row(bpp, above, row, cand, buf);
+            dst.copy_from_slice(buf);
+        },
+    );
+    out
+}
 
-    fn reset(&mut self, row_len: usize) {
-        self.prev.clear();
-        self.prev.resize(row_len, 0);
+/// Converts rows of straight RGBA8 (`stride` bytes each) in parallel.
+fn convert_rows(
+    h: &PngHeader,
+    rgba: &[u8],
+    stride: usize,
+    palette: Option<&PaletteMap>,
+) -> Vec<u8> {
+    let row_len = h.width as usize * h.bpp();
+    let n = rgba.len().checked_div(stride).unwrap_or(0);
+    let mut out = vec![0u8; n * row_len];
+    if row_len == 0 {
+        return out;
     }
-
-    /// Filters one row; returns the chosen filtered bytes, type first.
-    fn filter(&mut self, row: &[u8]) -> &[u8] {
-        let bpp = self.bpp;
-        let prev = &self.prev;
-        for (t, c) in self.cand.iter_mut().enumerate() {
-            c.clear();
-            #[allow(clippy::cast_possible_truncation)]
-            c.push(t as u8);
-        }
-        for i in 0..row.len() {
-            let x = row[i];
-            let a = if i >= bpp { row[i - bpp] } else { 0 };
-            let b = prev[i];
-            let cc = if i >= bpp { prev[i - bpp] } else { 0 };
-            self.cand[0].push(x);
-            self.cand[1].push(x.wrapping_sub(a));
-            self.cand[2].push(x.wrapping_sub(b));
-            #[allow(clippy::cast_possible_truncation)]
-            let avg = ((u16::from(a) + u16::from(b)) / 2) as u8;
-            self.cand[3].push(x.wrapping_sub(avg));
-            self.cand[4].push(x.wrapping_sub(paeth(a, b, cc)));
-        }
-        let score = |v: &Vec<u8>| -> u64 {
-            v[1..]
-                .iter()
-                .map(|&b| u64::from((b as i8).unsigned_abs()))
-                .sum()
-        };
-        let mut best = 0;
-        let mut best_score = score(&self.cand[0]);
-        for t in 1..5 {
-            let s = score(&self.cand[t]);
-            if s < best_score {
-                best = t;
-                best_score = s;
-            }
-        }
-        self.prev.clear();
-        self.prev.extend_from_slice(row);
-        &self.cand[best]
-    }
+    out.par_chunks_mut(row_len).enumerate().for_each_init(
+        || Vec::with_capacity(row_len),
+        |buf, (i, dst)| {
+            convert_row(h, &rgba[i * stride..(i + 1) * stride], palette, buf);
+            dst.copy_from_slice(buf);
+        },
+    );
+    out
 }
 
 fn paeth(a: u8, b: u8, c: u8) -> u8 {
@@ -320,9 +346,9 @@ impl PaletteMap {
 /// [`encode_png`].
 pub struct PngStream<'w> {
     header: PngHeader,
-    z: ZlibEncoder<IdatWriter<'w>>,
-    filt: Filterer,
-    row: Vec<u8>,
+    z: ChunkedZlib<IdatWriter<'w>>,
+    /// The last converted row, for the next row's filters.
+    prev: Vec<u8>,
     rows_done: u32,
 }
 
@@ -392,15 +418,14 @@ impl<'w> PngStream<'w> {
         let row_len = header.width as usize * header.bpp();
         Ok(PngStream {
             header,
-            z: ZlibEncoder::new(
+            z: ChunkedZlib::new(
                 IdatWriter {
                     out,
                     buf: Vec::with_capacity(IDAT_CHUNK),
                 },
-                Compression::new(header.level),
-            ),
-            filt: Filterer::new(header.bpp(), row_len),
-            row: Vec::with_capacity(row_len),
+                header.level,
+            )?,
+            prev: vec![0; row_len],
             rows_done: 0,
         })
     }
@@ -412,11 +437,17 @@ impl<'w> PngStream<'w> {
     /// When writing fails.
     pub fn write_rgba_rows(&mut self, rgba: &[u8]) -> Result<(), PngError> {
         let stride = self.header.width as usize * 4;
-        for src in rgba.chunks_exact(stride) {
-            convert_row(&self.header, src, None, &mut self.row);
-            let f = self.filt.filter(&self.row);
-            self.z.write_all(f)?;
-            self.rows_done += 1;
+        let row_len = self.prev.len();
+        let conv = convert_rows(&self.header, rgba, stride, None);
+        let filtered = filter_rows(self.header.bpp(), &self.prev, &conv, row_len);
+        self.z.write_all(&filtered)?;
+        let n = rgba.len() / stride.max(1);
+        if n > 0 && row_len > 0 {
+            self.prev.copy_from_slice(&conv[(n - 1) * row_len..]);
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.rows_done += n as u32;
         }
         Ok(())
     }
@@ -478,16 +509,13 @@ pub fn encode_png(out: &mut dyn Write, header: PngHeader, rgba: &[u8]) -> Result
     }
     write_head(out, &header, palette.as_ref())?;
     let bpp = header.bpp();
-    let mut z = ZlibEncoder::new(
+    let mut z = ChunkedZlib::new(
         IdatWriter {
             out,
             buf: Vec::with_capacity(IDAT_CHUNK),
         },
-        Compression::new(header.level),
-    );
-    let mut row = Vec::new();
-    let mut px = Vec::new();
-    let mut filt = Filterer::new(bpp, 0);
+        header.level,
+    )?;
     let passes: &[(usize, usize, usize, usize)] = if header.interlace {
         &ADAM7
     } else {
@@ -498,16 +526,22 @@ pub fn encode_png(out: &mut dyn Write, header: PngHeader, rgba: &[u8]) -> Result
             continue;
         }
         let pw = (w - x0).div_ceil(dx);
-        filt.reset(pw * bpp);
+        // The pass's pixels, gathered into rows of `pw` RGBA pixels.
+        let mut px = Vec::with_capacity(pw * 4 * (h - y0).div_ceil(dy));
         for y in (y0..h).step_by(dy) {
-            px.clear();
             for x in (x0..w).step_by(dx) {
                 let o = (y * w + x) * 4;
                 px.extend_from_slice(&rgba[o..o + 4]);
             }
-            convert_row(&header, &px, palette.as_ref(), &mut row);
-            z.write_all(filt.filter(&row))?;
         }
+        let sub = PngHeader {
+            #[allow(clippy::cast_possible_truncation)]
+            width: pw as u32,
+            ..header
+        };
+        let row_len = pw * bpp;
+        let conv = convert_rows(&sub, &px, pw * 4, palette.as_ref());
+        z.write_all(&filter_rows(bpp, &vec![0; row_len], &conv, row_len))?;
     }
     let out = z.finish()?.finish_into()?;
     write_chunk(out, b"IEND", &[])?;

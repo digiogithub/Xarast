@@ -474,7 +474,13 @@ impl Exporter for WebPExporter {
         let surface = render_for_export(&built, &p, req, progress, &mut report)?;
         progress.report(Stage::Encode, 0.0);
         let te = Instant::now();
-        let opaque = p.clear[3] == 255 && surface.data().as_chunks::<4>().0.iter().all(|px| px[3] == 255);
+        let opaque = p.clear[3] == 255
+            && surface
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|px| px[3] == 255);
         let bytes = crate::webp::encode_webp(surface.data(), p.width, p.height, &o, opaque)
             .map_err(|e| ExportError::Encode(e.to_string()))?;
         drop(surface);

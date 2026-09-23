@@ -30,6 +30,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod deflate;
 pub mod jpeg;
 pub mod model;
 pub mod options;
