@@ -52,6 +52,10 @@ pub enum EditError {
     /// without one.
     #[error("fill edit does not apply: {0}")]
     FillEdit(&'static str),
+    /// A text edit that does not fit the story: an offset past its text or
+    /// inside a character.
+    #[error("text edit does not apply: {0}")]
+    TextEdit(&'static str),
 }
 
 /// An atomic, invertible change.
