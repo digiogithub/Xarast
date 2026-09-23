@@ -61,6 +61,16 @@ exceptions = [
     # and supply our own faces through `xarast-text`, which phase 9 builds
     # anyway. Revisit there.
     { name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+
+    # `jpeg-encoder` (JPEG export, `xarast-io`) is `(MIT OR Apache-2.0) AND
+    # IJG`: its forward DCT is derived from the Independent JPEG Group's
+    # library. The IJG licence is permissive (use, copy, modify, distribute,
+    # no fee, no copyleft); its one condition on a binary distribution is
+    # that the documentation state "this software is based in part on the
+    # work of the Independent JPEG Group", which
+    # `docs/11-licensing-and-clean-room.md` §4.1 carries. Allowed narrowly,
+    # to this one crate.
+    { name = "jpeg-encoder", allow = ["IJG"] },
 ]
 
 [bans]

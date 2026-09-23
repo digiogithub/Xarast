@@ -137,6 +137,16 @@ With `MIT OR Apache-2.0` as the project licence:
 **Automated enforcement:** `cargo deny check licenses` in CI, with the allow
 list in `deny.toml`. No dependency lands without passing it.
 
+### 4.1 Third-party acknowledgements
+
+Licences whose conditions ask for a statement in the documentation of a
+binary distribution. The release notes, the About box and the AppImage's
+bundled notices must carry each statement below, verbatim.
+
+| Crate | Licence | Statement required |
+|---|---|---|
+| `jpeg-encoder` (JPEG export, `xarast-io`) | `(MIT OR Apache-2.0) AND IJG` | "This software is based in part on the work of the Independent JPEG Group." |
+
 Known watch items: the render engine design considers `resvg`/`usvg` (MPL-2.0),
 and some compression backends are dual BSD/GPL-2 (`zstd`). Both must be recorded
 in `deny.toml` with their justification.

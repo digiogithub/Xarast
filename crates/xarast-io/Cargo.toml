@@ -11,7 +11,33 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The "optimise (slower)" PNG pass. Off by default: it builds libdeflate
+# from C and can take many times the encode itself (`docs/memory/export.md`).
+oxipng = ["dep:oxipng"]
+
 [dependencies]
 xarast-doc = { path = "../xarast-doc" }
 xarast-image = { path = "../xarast-image" }
 xarast-render = { path = "../xarast-render" }
+xarast-geom = { path = "../xarast-geom" }
+xarast-color = { path = "../xarast-color" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+flate2 = { workspace = true }
+jpeg-encoder = { workspace = true }
+image-webp = { workspace = true }
+oxipng = { workspace = true, optional = true }
+
+[dev-dependencies]
+png = { workspace = true }
+image = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+criterion = { workspace = true }
+sha2 = { workspace = true }
+
+[[bench]]
+name = "export"
+harness = false
