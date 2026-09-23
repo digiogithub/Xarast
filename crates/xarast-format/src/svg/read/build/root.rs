@@ -274,6 +274,9 @@ fn is_known_def(e: &Elem) -> bool {
             &*e.local,
             "linearGradient" | "radialGradient" | "mask" | "pattern" | "clipPath" | "style"
         ))
+        // The writer's own bitmap-transparency filter; any other filter
+        // is foreign and kept.
+        || (e.is(NS_SVG, "filter") && xa(e, "filter") == Some("transparency-mask"))
         || e.is(NS_XARAST, "document")
         || e.is(NS_XARAST, "palette")
         || e.is(NS_XARAST, "paint-class")

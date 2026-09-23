@@ -277,9 +277,7 @@ impl<'d> Reader<'d, '_, '_> {
                 None
             } else if let Some(m) = mask {
                 let r = self.mask_transparency(m, cctx, info, fill_blend);
-                if let Some((_, _, pad)) = &r {
-                    mask_pad = *pad;
-                }
+                mask_pad = self.mask_pad(m, info);
                 // The opacity left is the colour's own.
                 if o < 0.9995
                     && let Some(FillGeometry::Flat {
@@ -290,7 +288,12 @@ impl<'d> Reader<'d, '_, '_> {
                     c.a = (o.clamp(0.0, 1.0) * 255.0).round() as u8;
                     *v = ColourValue::from_rgba8(c);
                 }
-                r.map(|(t, tiling, _)| (t, tiling))
+                match r {
+                    Some((t, tiling, _)) => Some((t, tiling)),
+                    // A mask that is not a gradient (a bitmap
+                    // transparency's) only draws what the twin records.
+                    None => self.flat_or_twin(fill_tt, 1.0, fill_blend, cctx),
+                }
             } else {
                 let alpha = o / (f64::from(f.alpha.max(1)) / 255.0);
                 self.flat_or_twin(fill_tt, alpha, fill_blend, cctx)
@@ -315,10 +318,9 @@ impl<'d> Reader<'d, '_, '_> {
             }
         } else if info.image {
             let mask = attr(e, "", "mask").and_then(|m| self.by_ref(m));
-            let t = match mask {
-                Some(m) => self
-                    .mask_transparency(m, cctx, info, blend)
-                    .map(|(t, tiling, _)| (t, tiling)),
+            let t = match mask.and_then(|m| self.mask_transparency(m, cctx, info, blend)) {
+                Some((t, tiling, _)) => Some((t, tiling)),
+                None if mask.is_some() => self.flat_or_twin(fill_tt, 1.0, blend, cctx),
                 None => self.flat_or_twin(fill_tt, opacity, blend, cctx),
             };
             if let Some((t, tiling)) = t {
@@ -338,12 +340,16 @@ impl<'d> Reader<'d, '_, '_> {
                     * opacity;
                 let alpha = o / (f64::from(s.alpha.max(1)) / 255.0);
                 let mask = xa(e, "stroke-mask").and_then(|m| self.by_ref(m));
-                let t = match mask {
-                    Some(m) => self
-                        .mask_transparency(m, cctx, info, stroke_blend)
-                        .map(|(t, _, _)| t),
+                let t = match mask.and_then(|m| self.mask_transparency(m, cctx, info, stroke_blend))
+                {
+                    Some((t, _, _)) => Some(t),
                     None => self
-                        .flat_or_twin(stroke_tt, alpha, stroke_blend, cctx)
+                        .flat_or_twin(
+                            stroke_tt,
+                            if mask.is_some() { 1.0 } else { alpha },
+                            stroke_blend,
+                            cctx,
+                        )
                         .map(|(t, _)| t),
                 };
                 if let Some(t) = t {
@@ -1077,6 +1083,15 @@ impl<'d> Reader<'d, '_, '_> {
             contone,
             profile: profile_of(xa(p, "profile")).unwrap_or(BiasGain::IDENTITY),
         })
+    }
+
+    /// How far the writer's `<mask>` box reaches beyond the element's box.
+    fn mask_pad(&self, m: usize, info: InkInfo) -> Option<i64> {
+        let mask = self.elem(m).filter(|x| x.is(NS_SVG, "mask"))?;
+        match (attr(mask, "", "x").and_then(parse::mp), info.bounds) {
+            (Some(x), Some(b)) => Some(b.0.saturating_sub(x)),
+            _ => None,
+        }
     }
 
     /// A graduated transparency: the writer's `<mask>` over the element's

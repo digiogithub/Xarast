@@ -1357,9 +1357,14 @@ fn a_jpeg8bpp_palette_survives_as_a_blob_beside_the_jpeg() {
         .filter(|n| n.starts_with("resources/blobs/"))
         .collect();
     assert_eq!(blobs.len(), 2, "{names:?}");
-    // The bitmap node, the fill pattern and the transparency twin.
+    // The bitmap node, the fill pattern, the transparency twin and the
+    // pattern of its mask.
     let named = svg.matches("xarast:palette=\"resources/blobs/").count();
-    assert_eq!(named, 3, "{svg}");
+    assert_eq!(named, 4, "{svg}");
+    // A browser draws the bitmap transparency: a luminance mask of the
+    // image through the writer's own filter.
+    assert_eq!(svg.matches(" mask=\"url(#m").count(), 1, "{svg}");
+    assert!(svg.contains("xarast:filter=\"transparency-mask\""), "{svg}");
 
     let mut o = open(&first);
     assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);

@@ -732,31 +732,7 @@ pub(crate) fn colour_paint(
                     ..PaintOut::default()
                 };
             };
-            // The unit square of the image, top row first, onto the
-            // parallelogram: its top-left corner is `origin + (axis_y -
-            // origin)` in document space, which is up.
-            let (ox, oy) = ctx.frame.pt(*origin);
-            let (xx, xy) = ctx.frame.pt(*axis_x);
-            let (yx, yy) = ctx.frame.pt(*axis_y);
-            let (ux, uy) = (xx - ox, xy - oy);
-            let (vx, vy) = (yx - ox, yy - oy);
-            let mut body = String::new();
-            attr(&mut body, "patternUnits", "userSpaceOnUse");
-            attr(&mut body, "width", "1");
-            attr(&mut body, "height", "1");
-            attr(
-                &mut body,
-                "patternTransform",
-                &format!(
-                    "matrix({} {} {} {} {} {})",
-                    mp(ux),
-                    mp(uy),
-                    mp(-vx),
-                    mp(-vy),
-                    mp(ox + vx),
-                    mp(oy + vy)
-                ),
-            );
+            let mut body = bitmap_pattern_head(ctx, *origin, *axis_x, *axis_y);
             attr(&mut body, "xarast:fill", "bitmap");
             if *own != Tiling::None {
                 attr(&mut body, "xarast:tile-mode", repeat_name(*own));
@@ -789,12 +765,7 @@ pub(crate) fn colour_paint(
                 attr(&mut body, "xarast:fill-repeat", repeat_name(tiling));
             }
             effect_attr(&mut body, effect);
-            body.push_str("><image");
-            attr(&mut body, "width", "1");
-            attr(&mut body, "height", "1");
-            attr(&mut body, "preserveAspectRatio", "none");
-            bm.attrs(&mut body);
-            body.push_str("/></pattern>");
+            bitmap_pattern_tail(&mut body, &bm);
             let id = ctx.defs.add('p', "pattern", &body);
             PaintOut {
                 value: format!("url(#{id})"),
@@ -802,6 +773,90 @@ pub(crate) fn colour_paint(
             }
         }
     }
+}
+
+/// The opening of a bitmap `<pattern>`: the unit square of the image, top
+/// row first, onto the parallelogram. Its top-left corner is `origin +
+/// (axis_y - origin)` in document space, which is up.
+fn bitmap_pattern_head(ctx: &PaintCtx<'_>, origin: Point, axis_x: Point, axis_y: Point) -> String {
+    let (ox, oy) = ctx.frame.pt(origin);
+    let (xx, xy) = ctx.frame.pt(axis_x);
+    let (yx, yy) = ctx.frame.pt(axis_y);
+    let (ux, uy) = (xx - ox, xy - oy);
+    let (vx, vy) = (yx - ox, yy - oy);
+    let mut body = String::new();
+    attr(&mut body, "patternUnits", "userSpaceOnUse");
+    attr(&mut body, "width", "1");
+    attr(&mut body, "height", "1");
+    attr(
+        &mut body,
+        "patternTransform",
+        &format!(
+            "matrix({} {} {} {} {} {})",
+            mp(ux),
+            mp(uy),
+            mp(-vx),
+            mp(-vy),
+            mp(ox + vx),
+            mp(oy + vy)
+        ),
+    );
+    body
+}
+
+/// The image of a bitmap `<pattern>` and its end tag.
+fn bitmap_pattern_tail(body: &mut String, bm: &BitmapRef) {
+    body.push_str("><image");
+    attr(body, "width", "1");
+    attr(body, "height", "1");
+    attr(body, "preserveAspectRatio", "none");
+    bm.attrs(body);
+    body.push_str("/></pattern>");
+}
+
+/// A bitmap transparency as a luminance `<mask>` over the element's box:
+/// the image tiled as a bitmap fill is, through a filter that turns each
+/// texel into `1 - luma` (BT.601 on the straight colour, alpha ignored).
+/// A texel's transparency level is its luma (0 opaque … 255 clear), so the
+/// mask is its complement. The mask carries no model data: the twin does.
+fn bitmap_mask(
+    ctx: &mut PaintCtx<'_>,
+    bm: &BitmapRef,
+    origin: Point,
+    axis_x: Point,
+    axis_y: Point,
+    bounds: (i64, i64, i64, i64),
+) -> String {
+    let (x0, y0, x1, y1) = bounds;
+    let mut pattern = bitmap_pattern_head(ctx, origin, axis_x, axis_y);
+    bitmap_pattern_tail(&mut pattern, bm);
+    let pattern = ctx.defs.add('p', "pattern", &pattern);
+    let row = "-.299 -.587 -.114 0 1";
+    let filter = ctx.defs.add(
+        'f',
+        "filter",
+        &format!(
+            " xarast:filter=\"transparency-mask\" color-interpolation-filters=\"sRGB\"><feColorMatrix type=\"matrix\" \
+             values=\"{row} {row} {row} 0 0 0 0 1\"/></filter>"
+        ),
+    );
+    let mut body = String::new();
+    attr(&mut body, "maskUnits", "userSpaceOnUse");
+    let rect = |b: &mut String| {
+        attr(b, "x", &mp(x0));
+        attr(b, "y", &mp(y0));
+        attr(b, "width", &mp(x1 - x0));
+        attr(b, "height", &mp(y1 - y0));
+    };
+    rect(&mut body);
+    attr(&mut body, "color-interpolation", "sRGB");
+    body.push_str("><rect");
+    rect(&mut body);
+    attr(&mut body, "fill", &format!("url(#{pattern})"));
+    attr(&mut body, "filter", &format!("url(#{filter})"));
+    body.push_str("/></mask>");
+    ctx.stats.masks += 1;
+    ctx.defs.add('m', "mask", &body)
 }
 
 fn ramp_twin(side: &mut String, k: &KeyRamp, tiling: Tiling) {
@@ -1035,10 +1090,25 @@ pub(crate) fn transparency(
                 sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
-        FillGeometry::Bitmap { .. } => {
-            ctx.stats.fills_approximated += 1;
+        FillGeometry::Bitmap {
+            image,
+            origin,
+            axis_x,
+            axis_y,
+            ..
+        } => {
+            // The twin is the model; the mask is what a browser draws.
+            let sidecar = Some(transparency_twin(ctx, t, tiling));
+            let mask = match (bounds, (ctx.bitmap_href)(*image)) {
+                (Some(b), Some(bm)) => Some(bitmap_mask(ctx, &bm, *origin, *axis_x, *axis_y, b)),
+                _ => {
+                    ctx.stats.fills_approximated += 1;
+                    None
+                }
+            };
             TranspOut {
-                sidecar: Some(transparency_twin(ctx, t, tiling)),
+                mask,
+                sidecar,
                 ..TranspOut::default()
             }
         }
