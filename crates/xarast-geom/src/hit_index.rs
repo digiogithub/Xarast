@@ -13,10 +13,13 @@
 //!
 //! # The structure: a hashed uniform grid
 //!
-//! Chosen over a static BVH by benchmark at 100 000 objects; the numbers
-//! and the reasoning are in `docs/memory/geometry.md`. In short: queries
-//! were comparable, and the grid's edits are O(cells an object covers)
-//! where a BVH has to be refitted or rebuilt.
+//! Chosen over a static BVH by benchmark at 100 000 objects
+//! (`benches/hit_index.rs`); the numbers are in `docs/memory/geometry.md`.
+//! In short: the BVH answers queries several times faster, but both are
+//! two to three orders of magnitude inside the budgets, while inserting or
+//! removing one object costs the grid tens of nanoseconds and a static BVH
+//! a 10–20 ms rebuild — more than a frame, on every create, delete, paste
+//! and undo.
 //!
 //! - Cells are squares of side `cell_size` millipoints, keyed by their
 //!   integer coordinates in a hash map, so only occupied cells cost memory
