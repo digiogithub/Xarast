@@ -465,4 +465,5 @@ determinism suite asserts it over four band heights.
   Clean rerun: 4.66 M execs at ~7 760 exec/s.
 - `fuzz_display_list`: renders every accepted scene twice on the
   deterministic backend and compares bytes; asserts the display list is
-  balanced and inside the viewport. Found only TODO 11.
+  balanced and inside the viewport. Found only TODO 11. Clean rerun with
+  the bounds in place: 565 k execs at ~940 exec/s.

@@ -419,7 +419,8 @@ are meant to be one change.
 
 The lesson: **a repair that can fail must check its own result.** Every
 `let _ = tree.attach(…)` in a repair path is a latent `Inconsistent`.
-Clean rerun afterwards: 10 minutes, ~8 300 exec/s, no findings.
+Clean rerun afterwards: 10 minutes, 3.8 M execs at ~6 300 exec/s, no
+findings.
 
 ## Dead ends (do not retry)
 
