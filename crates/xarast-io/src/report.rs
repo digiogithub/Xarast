@@ -82,6 +82,28 @@ pub enum Compromise {
         /// What was approximated, and how.
         what: Arc<str>,
     },
+    /// A vector format drew `count` objects of a kind in a simpler
+    /// construct (the SVG writer counts per kind, not per object).
+    Simplified {
+        /// What was simplified, and how.
+        what: Arc<str>,
+        /// How many objects.
+        count: usize,
+    },
+    /// Preserved unknown data from a previous load (foreign SVG
+    /// attributes and elements) was not written: the interchange dialect
+    /// carries none.
+    UnknownDataDropped {
+        /// How many objects lost data.
+        count: usize,
+    },
+    /// Text refers to a font the file does not carry.
+    FontNotEmbedded {
+        /// The family.
+        family: Arc<str>,
+        /// Why it is not embedded.
+        reason: Arc<str>,
+    },
     /// A transparency family was mapped to a same-shaped but differently
     /// defined blend mode of the target format.
     BlendModeApproximated {
@@ -112,6 +134,13 @@ impl std::fmt::Display for Compromise {
             }
             Compromise::Approximated { node, what } => {
                 write!(f, "object {} approximated: {what}", node.0)
+            }
+            Compromise::Simplified { what, count } => write!(f, "{what}: {count}"),
+            Compromise::UnknownDataDropped { count } => {
+                write!(f, "preserved unknown data dropped from {count} objects")
+            }
+            Compromise::FontNotEmbedded { family, reason } => {
+                write!(f, "font {family} not embedded: {reason}")
             }
             Compromise::BlendModeApproximated { node, ours, theirs } => {
                 write!(f, "object {}: {ours:?} drawn as {theirs}", node.0)

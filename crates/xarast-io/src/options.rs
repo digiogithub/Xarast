@@ -20,6 +20,8 @@ pub enum FormatId {
     WebP,
     /// PDF 1.7, vector.
     Pdf,
+    /// SVG 1.1, the interchange dialect of the `.xarast` profile.
+    Svg,
 }
 
 impl FormatId {
@@ -31,6 +33,7 @@ impl FormatId {
             FormatId::Jpeg => "jpg",
             FormatId::WebP => "webp",
             FormatId::Pdf => "pdf",
+            FormatId::Svg => "svg",
         }
     }
 
@@ -42,6 +45,7 @@ impl FormatId {
             FormatId::Jpeg => "JPEG",
             FormatId::WebP => "WebP",
             FormatId::Pdf => "PDF",
+            FormatId::Svg => "SVG",
         }
     }
 }
@@ -277,6 +281,34 @@ impl Default for PdfOptions {
     }
 }
 
+/// Where an SVG export's bitmaps go (T11.3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SvgResources {
+    /// `data:` URIs inside the `.svg`: one self-contained file.
+    #[default]
+    Inline,
+    /// Files in a folder next to the `.svg` named `<stem>_files`, referred
+    /// to by relative paths.
+    Sidecar,
+}
+
+/// SVG options (W11.3).
+///
+/// Text is written as text in the fonts the document names (fonts are
+/// not embedded yet: T11.3.4); numbers are the profile's exact three
+/// decimals of a point (T11.3.5 adds fewer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SvgOptions {
+    /// Where bitmaps go.
+    pub resources: SvgResources,
+    /// Drop ids nothing refers to, comments and indentation.
+    pub minify: bool,
+    /// Indent one space per level, for reading and diffs.
+    pub pretty: bool,
+}
+
 /// One entry per format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", tag = "format")]
@@ -290,6 +322,8 @@ pub enum FormatOptions {
     WebP(WebPOptions),
     /// PDF.
     Pdf(PdfOptions),
+    /// SVG.
+    Svg(SvgOptions),
 }
 
 impl Default for FormatOptions {
@@ -307,6 +341,7 @@ impl FormatOptions {
             FormatOptions::Jpeg(_) => FormatId::Jpeg,
             FormatOptions::WebP(_) => FormatId::WebP,
             FormatOptions::Pdf(_) => FormatId::Pdf,
+            FormatOptions::Svg(_) => FormatId::Svg,
         }
     }
 
@@ -318,6 +353,7 @@ impl FormatOptions {
             FormatId::Jpeg => FormatOptions::Jpeg(JpegOptions::default()),
             FormatId::WebP => FormatOptions::WebP(WebPOptions::default()),
             FormatId::Pdf => FormatOptions::Pdf(PdfOptions::default()),
+            FormatId::Svg => FormatOptions::Svg(SvgOptions::default()),
         }
     }
 
@@ -327,7 +363,7 @@ impl FormatOptions {
         match self {
             FormatOptions::Png(p) => p.colour.has_alpha(),
             FormatOptions::Jpeg(_) => false,
-            FormatOptions::WebP(_) | FormatOptions::Pdf(_) => true,
+            FormatOptions::WebP(_) | FormatOptions::Pdf(_) | FormatOptions::Svg(_) => true,
         }
     }
 }
@@ -361,6 +397,11 @@ mod tests {
                 rasterise_dpi: 150,
                 blend_fidelity: BlendFidelity::PreferNative,
                 compress: false,
+            }),
+            FormatOptions::Svg(SvgOptions {
+                resources: SvgResources::Sidecar,
+                minify: true,
+                pretty: false,
             }),
             FormatOptions::default(),
         ];

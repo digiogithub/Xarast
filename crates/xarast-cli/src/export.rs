@@ -1,5 +1,5 @@
-//! `xarast-cli export`: documents to PNG, JPEG, WebP or PDF through the
-//! export filters of `xarast-io` (phase 11 T11.1.7, W11.4).
+//! `xarast-cli export`: documents to PNG, JPEG, WebP, PDF or SVG through
+//! the export filters of `xarast-io` (phase 11 T11.1.7, W11.3, W11.4).
 //!
 //! The CLI builds an [`ExportRequest`] from flags and hands it, with a
 //! [`SessionSource`], to the same [`Registry`] the export dialog uses.
@@ -15,7 +15,8 @@ use xarast_geom::{Mp, Point, Rect};
 use xarast_io::{
     Background, BlendFidelity, Compromise, ExportArea, ExportError, ExportRequest, ExportSizing,
     ExportSource, FormatId, FormatOptions, NoProgress, PDF_RASTERISE_DPI, PngColour,
-    PngCompression, PngDepth, Registry, SourceScene, Subsampling, WebPMode, XAR_EXPORT_REFUSAL,
+    PngCompression, PngDepth, Registry, SourceScene, Subsampling, SvgResources, WebPMode,
+    XAR_EXPORT_REFUSAL,
 };
 use xarast_render::{RenderQuality, Scene};
 
@@ -25,14 +26,14 @@ use crate::inputs::{expand, ms};
 
 /// Usage for `export`.
 pub const USAGE: &str = "\
-xarast-cli export — export documents to PNG, JPEG, WebP or PDF
+xarast-cli export — export documents to PNG, JPEG, WebP, PDF or SVG
 
 USAGE:
-    xarast-cli export <IN.xar|IN.xarast> -o <OUT.png|.jpg|.webp|.pdf> [OPTIONS]
+    xarast-cli export <IN.xar|IN.xarast> -o <OUT.png|.jpg|.webp|.pdf|.svg> [OPTIONS]
     xarast-cli export <IN|DIR>... --out-dir <DIR> --format <FMT> [OPTIONS]
 
 WHAT AND HOW BIG
-    --format FMT         png, jpeg, webp or pdf (default: from -o's extension)
+    --format FMT         png, jpeg, webp, pdf or svg (default: from -o's extension)
     --area WHAT          drawing (default; the page when nothing is drawn),
                          page, spread, or x0,y0,x1,y1 in points
     --bleed PT           grow the area by PT points on every side
@@ -64,6 +65,12 @@ PDF (one vector page the size of the area; --dpi and pixels do not apply)
                          Bleach as Screen
     --no-compress        leave the streams readable
 
+SVG (plain SVG 1.1 for browsers and Inkscape; the viewBox is the area)
+    --resources R        inline (default): images as data: URIs;
+                         sidecar: files in <OUT stem>_files/ beside the .svg
+    --minify             drop unreferenced ids, comments and indentation
+    --pretty             indent one space per level
+
 COMMON
     --no-dpi             do not write the resolution into the file
     --quiet              print only failures and the summary
@@ -94,9 +101,10 @@ fn format_of(text: &str) -> Result<FormatId, String> {
         "jpg" | "jpeg" | "jpe" | "jfif" => Ok(FormatId::Jpeg),
         "webp" => Ok(FormatId::WebP),
         "pdf" => Ok(FormatId::Pdf),
+        "svg" => Ok(FormatId::Svg),
         "xar" | "web" => Err(XAR_EXPORT_REFUSAL.to_owned()),
         other => Err(format!(
-            "`{other}` is not an export format (png, jpeg, webp, pdf)"
+            "`{other}` is not an export format (png, jpeg, webp, pdf, svg)"
         )),
     }
 }
@@ -172,6 +180,9 @@ struct FormatFlags {
     raster_dpi: Option<u32>,
     blend: Option<BlendFidelity>,
     no_compress: bool,
+    resources: Option<SvgResources>,
+    minify: bool,
+    pretty: bool,
 }
 
 impl FormatFlags {
@@ -222,6 +233,18 @@ impl FormatFlags {
                 p.blend_fidelity = self.blend.unwrap_or(p.blend_fidelity);
                 p.compress = !self.no_compress;
             }
+            FormatOptions::Svg(v) => {
+                if png_only || jpeg_only || self.quality.is_some() {
+                    return Err("SVG takes no PNG or JPEG options".into());
+                }
+                v.resources = self.resources.unwrap_or(v.resources);
+                v.minify = self.minify;
+                v.pretty = self.pretty;
+            }
+        }
+        let svg_only = self.resources.is_some() || self.minify || self.pretty;
+        if svg_only && id != FormatId::Svg {
+            return Err("--resources, --minify and --pretty are SVG options".into());
         }
         let pdf_only = self.raster_dpi.is_some() || self.blend.is_some() || self.no_compress;
         if pdf_only && id != FormatId::Pdf {
@@ -352,6 +375,17 @@ pub fn parse(argv: &[String]) -> Result<ExportArgs, String> {
                 });
             }
             "--no-compress" => f.no_compress = true,
+            "--resources" => {
+                f.resources = Some(match it.value(&arg)?.as_str() {
+                    "inline" => SvgResources::Inline,
+                    "sidecar" => SvgResources::Sidecar,
+                    other => {
+                        return Err(format!("--resources: `{other}` is not inline or sidecar"));
+                    }
+                });
+            }
+            "--minify" => f.minify = true,
+            "--pretty" => f.pretty = true,
             "--quiet" | "-q" => quiet = true,
             other if other.starts_with('-') && other.len() > 1 => {
                 return Err(format!("unknown option {other}"));
@@ -486,6 +520,15 @@ impl ExportSource for SessionSource<'_> {
             compromises,
         })
     }
+
+    fn document(&self) -> Option<&xarast_doc::Document> {
+        Some(&self.session.doc)
+    }
+
+    fn svg_text_placer(&self) -> Option<xarast_format::svg::Placer> {
+        // Text placed where Xarast draws it (XARA-T-0172).
+        Some(xarast_app::svg_text::placer())
+    }
 }
 
 fn output_for(
@@ -556,7 +599,8 @@ pub fn run(a: &ExportArgs) -> Exit {
                 encode_ms += ms(r.encode_time);
                 bytes += r.bytes_written;
                 if !a.quiet {
-                    let size = if req.options.format() == FormatId::Pdf {
+                    let vector = matches!(req.options.format(), FormatId::Pdf | FormatId::Svg);
+                    let size = if vector {
                         format!("{}x{} pt page", r.pixels.0, r.pixels.1)
                     } else {
                         format!("{}x{} px at {:.1} dpi", r.pixels.0, r.pixels.1, r.dpi)

@@ -9,10 +9,12 @@ Memory note for **export** (`xarast-io`, the export entry of
 Round 1 (2026-09-23, XARA-US-0056 + XARA-US-0057): the export model, the
 filter registry and deterministic **raster** export to PNG, JPEG and WebP.
 Round 2 (2026-09-23, XARA-US-0059): **vector PDF 1.7** export, one page per
-export, with the fidelity ladder (section "PDF" below). SVG export (W11.3,
-XARA-US-0058, still backlog), batch export (T11.1.6), export hints in the
-document (T11.1.5), palette quantisation (T11.2.8), AVIF (T11.2.7) and the
-dialog (T11.1.8, XARA-T-0192) are not built yet.
+export, with the fidelity ladder (section "PDF" below). Round 3
+(2026-09-24, XARA-US-0058): **SVG** export through the `.xarast` profile's
+mapper in its `Interchange` dialect (section "SVG" below). Batch export
+(T11.1.6), export hints in the document (T11.1.5), palette quantisation
+(T11.2.8), AVIF (T11.2.7) and the dialog (T11.1.8, XARA-T-0192) are not
+built yet.
 
 | Piece | Where |
 |---|---|
@@ -30,6 +32,11 @@ dialog (T11.1.8, XARA-T-0192) are not built yet.
 | Gradients → shadings, graduated transparency → soft-mask content | `crates/xarast-io/src/pdf/shading.rs` |
 | Ladder step 3: object / backdrop rasters | `crates/xarast-io/src/pdf/rasterise.rs`, `DisplayList::with_commands`, `export::ListRasteriser` |
 | `PdfOptions`, `PdfVersion`, `BlendFidelity` | `crates/xarast-io/src/options.rs` |
+| `SvgExporter`, the bitmap linker, the report mapping | `crates/xarast-io/src/svg.rs` |
+| `SvgOptions`, `SvgResources` (export side) | `crates/xarast-io/src/options.rs` |
+| `SvgDialect`, `BitmapLinker`, `SvgOptions::{area, background, minify}` (mapper side) | `crates/xarast-format/src/svg/mod.rs` |
+| The interchange projection | `crates/xarast-format/src/svg/interchange.rs` |
+| `cargo xtask svg-check [--interchange]` (usvg + resvg) | `xtask/src/main.rs` |
 
 The whole 59-file corpus exports to all three formats with **zero errors**,
 at 96 and at 300 dpi, and two runs are byte-identical for every file and
@@ -37,7 +44,96 @@ format (numbers in `perf.md`, "Export"). The only compromises the corpus
 reports are 25 font substitutions and one text-on-path drawn straight
 (plus `AlphaFlattened` for every JPEG over a transparent background).
 
-## PDF (W11.4, XARA-US-0059)
+## SVG (W11.3, XARA-US-0058)
+
+### One mapper, two dialects
+
+There is **one** SVG mapper, `xarast_format::svg::write_svg`. `.xarast`
+calls it with `SvgDialect::Native` (the default); `SvgExporter` calls it
+with `SvgDialect::Interchange`. Everything the phase lists as shared —
+element mapping, gradients, ramp baking, masks with
+`color-interpolation="sRGB"`, blend modes, clips, text placement — is the
+same code. What Interchange changes, and where:
+
+| Aspect | Native | Interchange | Where |
+|---|---|---|---|
+| `xarast:` attributes and elements | written | removed, an element with its subtree; `xmlns:xarast` too | `interchange::project`, the last step of `write_svg` |
+| Foreign baggage (unknown data from a load) | re-emitted | not written; nodes counted in `Stats::foreign_omitted` → `Compromise::UnknownDataDropped` | `Emitter::common` / `fragment` |
+| Foreign namespace declarations | written | not written | `assemble` |
+| Bitmaps | `resources/…` in the `ResourceIndex` (+ palette blobs) | whatever `SvgOptions::bitmaps` (a `BitmapLinker`) returns | the href closure in `write_svg` |
+| `href` + `xlink:href` on images | both | `xlink:href` only (the root says `version="1.1"`; stops a `data:` image being stored twice) | `interchange::write_attrs` |
+| Root frame | first spread's pages | `SvgOptions::area` (the export area, bleed included), same coordinates | `write_svg` → `ViewBox` |
+| Background | none | `SvgOptions::background` → a `<rect>` over the viewBox, first in the body | `assemble` |
+| Ids | stable, the identity model | kept; `minify` drops those nothing refers to (`url(#…)`, `href="#…"`, `inkscape:current-layer`) plus comments and indentation | `interchange::project` |
+| Baked content | `xarast:generated` | unmarked (the attribute goes with the rest) | projection |
+
+**Why a projection pass instead of an `if` at every write.** The
+parametric layer is ~290 emission sites across `emit.rs`, `paint.rs`,
+`style.rs` and `text.rs`, many of them whole elements pushed as strings.
+Guarding each one would fork the mapper in all but name and rot the first
+time someone adds a twin. The projection is ~200 lines, runs once over the
+writer's own (well-formed, `"`-quoted, escaped) output, and makes "no
+`xarast:` in interchange" true by construction. It is not a general XML
+parser and must not be fed foreign text — which is why baggage is dropped
+in the emitter, not in the projection. Anything that must *differ in
+content* (not just disappear) between dialects goes into the mapper
+behind `SvgOptions::dialect`; that list is the table above.
+
+### How it works
+
+- `ExportSource` gained two defaulted methods (additive):
+  `document() -> Option<&Document>` and `svg_text_placer() -> Option<Placer>`.
+  SVG export maps the model, not the scene, so a scene-only source
+  (`SceneSource`) is refused with `UnsupportedFormat`; `build_scene` is
+  never called. `SessionSource` (CLI) returns the session's document and
+  `xarast_app::svg_text::placer()`. XARA-T-0192's `Session` impl must do
+  the same.
+- **Bitmaps** (`svg.rs`, `Links`): PNG / JPEG / GIF originals **with no
+  reconstruction palette** pass through byte for byte; anything else (the
+  `.xar` BMP flavours, JPEG8BPP, pixel-only bitmaps) is decoded by the
+  walker's rules (tag 71 with palette, 65, 69) and written as an RGBA PNG
+  by our encoder. Deduplicated by encoded bytes. `Inline`: `data:` URIs.
+  `Sidecar`: `<stem>_files/image-N.ext`, N in first-use (document) order,
+  the folder name sanitised to `[A-Za-z0-9._-]` (resvg does not
+  percent-decode relative paths; with `%20` the images vanished, mean |Δ|
+  1.5 → 12.6 on scope3). Each file is written atomically.
+- **Report**: the writer's counters become `NotRendered` (missing images,
+  outline-less quick shapes, unsupported clips, unknown `.xar` records,
+  arrowheads, feathering) and the new **`Compromise::Simplified { what,
+  count }`** (approximated fills, perspective, contrast/brightness blends,
+  variable-width strokes, text on a path); the writer counts per kind, not
+  per object, hence a new variant rather than `Approximated { node }`.
+  Every first `font-family` the file names is a **`FontNotEmbedded`**
+  (T11.3.4, XARA-T-0233). `pixels` is the area in points, `dpi` 72,
+  `commands` the elements written, `render_time` the mapping.
+- CLI: `--format svg` / `-o x.svg`, `--resources inline|sidecar`,
+  `--minify`, `--pretty`; `--background` works (paper/colour → the rect).
+
+### Validation (2026-09-24, after XARA-T-0231 merged)
+
+- `crates/xarast-io/tests/svg.rs` (5): no `xarast`, only SVG / metadata /
+  Inkscape prefixes, viewBox = area, `UnknownDataDropped`, inline and
+  sidecar images (one reference per image, deduplicated), byte-identical
+  runs (plain, minify, pretty), minify + background, scene-only refusal,
+  cancel leaves nothing. `interchange` unit tests: projection, idempotent
+  minify, quoted `>`, single image reference. CLI: a small `.xar` to SVG,
+  flag refusals, cross-process determinism, and the corpus test exports
+  SVG too and greps for `xarast:`.
+- Corpus (59 files, `--background paper`): 59/59 exported, 82.9 MB, two
+  runs byte-identical; `cargo xtask svg-check --interchange` parses and
+  renders all 59 inline and all 59 sidecar+minify files.
+- **resvg vs our PNG export** (72 dpi, paper, SVG rendered at the PNG's
+  width with `cargo xtask svg-render`): median mean |Δ| **1.30/255**,
+  52/59 files under 4/255, 8 templates exact. Worst: Fill Types simple
+  20.0 (conical/diamond/multi-colour fills — the profile's bake ladder,
+  XARA-T-0102), WATCH2 17.0 (its background is such a fill), TextJust 14.9
+  (glyph rendering of small text; positions come from our layout), leafgirl
+  12.7 (resvg draws seams between tiles of a bitmap-fill `<pattern>`),
+  SimpleText 5.7, WATCH 5.5. Sidecar + minify gives the same numbers.
+  Heights differ by one row on some files (resvg rounds the height up).
+  Scripts: scratch only; automating it is XARA-T-0236.
+
+
 
 ### The T11.4.1 spike: `pdf-writer`, not `krilla`
 
@@ -268,6 +364,11 @@ row), nor are Contrast, Brightness, Bevel.
 - The export band height must stay a function of `(width, height)` only, and
   strips must start on the band grid.
 - Nothing in `xarast-io` writes `.xar`.
+- **SVG export has no mapper of its own**: it calls
+  `xarast_format::svg::write_svg` with `SvgDialect::Interchange`, and an
+  interchange file never contains `xarast:` (tests in `xarast-io`,
+  `xarast-format` and the CLI corpus test check it). Sidecar image names
+  are a function of document order only.
 - **PDF: only `pdf/writer.rs` names `pdf-writer`.** Everything else speaks
   `Canvas`/`Resource`/`GState`.
 - **PDF numbers never carry `NaN`** (`writer::num` writes zero); geometry
@@ -303,6 +404,11 @@ row), nor are Contrast, Brightness, Bevel.
   backdrop over the paper.
 - **`StreamShadingType` import**: `pdf-writer` 0.15 does not re-export it;
   the `/ShadingType 4` key is written by hand.
+- **A second SVG writer for export** (walking the display list as PDF
+  does): the phase forbids the fork, and the scene has already lost what
+  SVG can say natively (groups, gradients as gradients, text as text).
+- **Percent-encoding sidecar paths**: resvg does not decode them; sanitise
+  the folder name instead.
 - **Comparing Poppler renders of placed images pixel for pixel**: Poppler
   resamples even at 1:1 (mean |Δ| 5–8/255 on the image cases); assert the
   report instead.
@@ -317,7 +423,11 @@ row), nor are Contrast, Brightness, Bevel.
 - T11.1.5 export hints in `meta.xml` (the option structs are serde-ready and
   `#[serde(default)]`), T11.1.6 batch export, T11.2.8 palette quantisation
   (PNG `Palette` is exact-only and refuses > N colours), T11.2.7 AVIF,
-  T11.5.2 ICC passthrough, W11.3 SVG (XARA-US-0058).
+  T11.5.2 ICC passthrough.
+- SVG follow-ups: XARA-T-0233 (fonts: WOFF2 subset or outlines),
+  XARA-T-0234 (precision), XARA-T-0235 (`Reference` resources, physical
+  size, full minify), XARA-T-0236 (resvg check and comparison in CI); the
+  shared bake ladder is XARA-T-0102 (profile).
 - PDF follow-ups: XARA-T-0227 (bitmap transparency, ramp alpha, layer
   masks, per-family ΔE), XARA-T-0228 (embedded subset fonts), XARA-T-0229
   (images: DCT passthrough), XARA-T-0230 (multi-page, XMP, output intent,

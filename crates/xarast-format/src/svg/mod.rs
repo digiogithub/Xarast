@@ -20,6 +20,7 @@
 //! | [`xml`] | escaping and the well-formedness guarantees |
 //! | `style` | passes 4–5: paint hoisted onto `<g>`, CSS paint classes |
 //! | `text` | §6.7: text runs, their twins, and the [`TextPlacer`] hook |
+//! | [`interchange`] | [`SvgDialect::Interchange`]: the base layer alone, for a standalone `.svg` (phase 11 W11.3) |
 //!
 //! Passes 3 (default elision) and 8 (minimal indentation) are done inline.
 //! Passes 4 (attribute hoisting) and 5 (CSS classes) work on paint *slots*
@@ -29,7 +30,9 @@
 //!
 //! The writer never produces `<script>`, event attributes,
 //! `<foreignObject>`, SMIL, a DOCTYPE or an entity. Every `href` it writes
-//! is either `#id` or a `resources/…` path inside the package. The only
+//! is either `#id` or a `resources/…` path inside the package — or, in the
+//! interchange dialect, whatever [`SvgOptions::bitmaps`] returns (the
+//! exporter's `data:` URIs and sidecar paths). The only
 //! text it does not generate itself is preserved foreign baggage, which is
 //! re-emitted verbatim only when it is a well-formed fragment; stripping
 //! active content from baggage is the reader's job (`§5.3`).
@@ -37,6 +40,7 @@
 pub mod defs;
 mod emit;
 pub mod frame;
+pub mod interchange;
 pub mod num;
 mod paint;
 pub mod pathdata;
@@ -85,6 +89,49 @@ pub enum FragmentKind {
     ProcessingInstruction,
 }
 
+/// The one parameter that separates the `.xarast` writer from the
+/// interchange exporter (phase 11 W11.3, T11.3.1). The mapper is the same
+/// code path for both; see `docs/memory/xarast-format.md` for the exact
+/// list of what differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SvgDialect {
+    /// Inside `.xarast`: the `xarast:` parametric layer, stable ids,
+    /// preserved foreign data, `resources/…` hrefs.
+    #[default]
+    Native,
+    /// A standalone `.svg` for browsers and Inkscape: the base layer only.
+    /// No `xarast:` vocabulary (the [`interchange`] projection), no foreign
+    /// baggage (counted in [`Stats::foreign_omitted`]), no package
+    /// resources (bitmaps go through [`SvgOptions::bitmaps`]).
+    Interchange,
+}
+
+/// Where an interchange SVG's bitmaps go: called once per bitmap the
+/// document draws, it returns the `href` to write (a `data:` URI or a
+/// relative path), or `None` when the bitmap cannot be written. Compared
+/// by identity.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct BitmapLinker(
+    pub  std::sync::Arc<
+        dyn Fn(BitmapId, &xarast_doc::BitmapResource) -> Option<String> + Send + Sync,
+    >,
+);
+
+impl std::fmt::Debug for BitmapLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BitmapLinker(..)")
+    }
+}
+
+impl PartialEq for BitmapLinker {
+    fn eq(&self, other: &BitmapLinker) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for BitmapLinker {}
+
 /// Options for [`write_svg`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvgOptions {
@@ -101,6 +148,22 @@ pub struct SvgOptions {
     /// it, lines start at the story's origin. The `xarast:` twin, and so
     /// what a reader rebuilds, is the same either way.
     pub text: Option<Placer>,
+    /// Native (inside `.xarast`, the default) or Interchange.
+    pub dialect: SvgDialect,
+    /// The document rectangle (millipoints, y up) the root `viewBox`,
+    /// `width` and `height` frame. `None`: the first spread's pages, as
+    /// `.xarast` always does. Coordinates do not change either way.
+    pub area: Option<xarast_geom::Rect>,
+    /// Interchange only: a rectangle of this colour under everything,
+    /// covering the root `viewBox` (an opaque export background). `None`:
+    /// transparent.
+    pub background: Option<xarast_color::Rgba8>,
+    /// Interchange only: drop ids nothing refers to, comments and the
+    /// indentation between elements.
+    pub minify: bool,
+    /// Interchange only: where bitmaps go. `None` writes them into the
+    /// resource index as `.xarast` does.
+    pub bitmaps: Option<BitmapLinker>,
 }
 
 impl Default for SvgOptions {
@@ -110,6 +173,11 @@ impl Default for SvgOptions {
             hoist: true,
             classes: true,
             text: None,
+            dialect: SvgDialect::Native,
+            area: None,
+            background: None,
+            minify: false,
+            bitmaps: None,
         }
     }
 }
@@ -177,6 +245,13 @@ pub struct Stats {
     /// Foreign items that could not be written (bad name, malformed
     /// fragment, clash with a known attribute).
     pub foreign_dropped: usize,
+    /// Interchange: nodes whose foreign baggage (preserved unknown data)
+    /// was not written.
+    pub foreign_omitted: usize,
+    /// Interchange: `xarast:` elements the projection removed.
+    pub private_elements: usize,
+    /// Interchange: `xarast:` attributes the projection removed.
+    pub private_attributes: usize,
     /// `<defs>` requests satisfied by an identical definition.
     pub defs_deduplicated: usize,
     /// Pass 4: paint attributes removed from children because their `<g>`
@@ -260,18 +335,26 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
             _ => None,
         });
     let page = first_spread.unwrap_or_else(|| xarast_doc::SpreadNode::default().page_size);
-    let w = i64::from(page.hi.x.raw()) - i64::from(page.lo.x.raw());
-    let h = i64::from(page.hi.y.raw()) - i64::from(page.lo.y.raw());
     let frame = frame::Frame {
         ox: i64::from(page.lo.x.raw()),
         oy: i64::from(page.hi.y.raw()),
+    };
+    // The root viewBox, in the first spread's frame.
+    let framed = opts.area.unwrap_or(page);
+    let view = ViewBox {
+        x: i64::from(framed.lo.x.raw()) - frame.ox,
+        y: frame.oy - i64::from(framed.hi.y.raw()),
+        w: i64::from(framed.hi.x.raw()) - i64::from(framed.lo.x.raw()),
+        h: i64::from(framed.hi.y.raw()) - i64::from(framed.lo.y.raw()),
     };
 
     let mut cache: HashMap<BitmapId, Option<paint::BitmapRef>> = HashMap::new();
     let mut unrenderable = 0usize;
     let mut href = |id: BitmapId| -> Option<paint::BitmapRef> {
         if let Some(hit) = cache.get(&id) {
-            if let Some(r) = hit {
+            if let Some(r) = hit
+                && opts.bitmaps.is_none()
+            {
                 resources.count_path(&r.href);
                 if let Some(p) = &r.palette {
                     resources.count_path(p);
@@ -280,6 +363,16 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
             return hit.clone();
         }
         let res = doc.resources.bitmap(id)?;
+        if let Some(link) = &opts.bitmaps {
+            let out = (link.0)(id, res).map(|href| paint::BitmapRef {
+                href,
+                width: res.info.width,
+                height: res.info.height,
+                palette: None,
+            });
+            cache.insert(id, out.clone());
+            return out;
+        }
         let out = bitmap_entry(res).and_then(|(kind, ext, bytes, renderable)| {
             let rid = resources.insert(kind, ext, bytes).ok()?;
             let path = resources
@@ -319,8 +412,16 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
     stats.paint_classed = e.styler.stats.classed;
     let digest: [u8; 32] = e.foreign_hash.finalize().into();
     let count = e.foreign_count;
-    let svg = assemble(&e, doc, w, h, count, &digest);
+    let svg = assemble(&e, doc, view, opts, count, &digest);
     drop(e);
+    let svg = if opts.dialect == SvgDialect::Interchange {
+        let (svg, p) = interchange::project(&svg, opts.minify);
+        stats.private_elements = p.elements;
+        stats.private_attributes = p.attributes;
+        svg
+    } else {
+        svg
+    };
     stats.images_unrenderable = unrenderable;
     stats.bitmaps = cache.values().filter(|r| r.is_some()).count();
     stats.bytes = svg.len();
@@ -332,12 +433,21 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
     }
 }
 
+/// The root `viewBox`, in integer millipoints of the first spread's frame.
+#[derive(Debug, Clone, Copy)]
+struct ViewBox {
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+}
+
 /// Header, `<defs>`, named view, body.
 fn assemble(
     e: &emit::Emitter<'_, '_>,
     doc: &Document,
-    w: i64,
-    h: i64,
+    view: ViewBox,
+    opts: &SvgOptions,
     foreign_count: usize,
     digest: &[u8; 32],
 ) -> String {
@@ -354,13 +464,25 @@ fn assemble(
     attr(&mut s, "xmlns:dc", NS_DC);
     attr(&mut s, "xmlns:cc", NS_CC);
     attr(&mut s, "xmlns:rdf", NS_RDF);
-    for (uri, prefix) in &e.ns.foreign {
-        attr(&mut s, &format!("xmlns:{prefix}"), uri);
+    if opts.dialect == SvgDialect::Native {
+        for (uri, prefix) in &e.ns.foreign {
+            attr(&mut s, &format!("xmlns:{prefix}"), uri);
+        }
     }
     let to_mm = |v: i64| v as f64 / 1000.0 / 72.0 * 25.4;
-    attr(&mut s, "width", &format!("{}mm", f64s(to_mm(w), 3)));
-    attr(&mut s, "height", &format!("{}mm", f64s(to_mm(h), 3)));
-    attr(&mut s, "viewBox", &format!("0 0 {} {}", mp(w), mp(h)));
+    attr(&mut s, "width", &format!("{}mm", f64s(to_mm(view.w), 3)));
+    attr(&mut s, "height", &format!("{}mm", f64s(to_mm(view.h), 3)));
+    attr(
+        &mut s,
+        "viewBox",
+        &format!(
+            "{} {} {} {}",
+            mp(view.x),
+            mp(view.y),
+            mp(view.w),
+            mp(view.h)
+        ),
+    );
     attr(&mut s, "version", "1.1");
     // The root node's own id and baggage.
     s.push_str(&e.root_attrs);
@@ -458,6 +580,25 @@ fn assemble(
             s.push_str("/>");
         }
         s.push_str("</sodipodi:namedview>\n");
+    }
+    if let Some(c) = opts
+        .background
+        .filter(|_| opts.dialect == SvgDialect::Interchange)
+    {
+        s.push_str("<rect");
+        attr(&mut s, "x", &mp(view.x));
+        attr(&mut s, "y", &mp(view.y));
+        attr(&mut s, "width", &mp(view.w));
+        attr(&mut s, "height", &mp(view.h));
+        attr(
+            &mut s,
+            "fill",
+            &format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b),
+        );
+        if c.a < 255 {
+            attr(&mut s, "fill-opacity", &f64s(f64::from(c.a) / 255.0, 4));
+        }
+        s.push_str("/>\n");
     }
     e.styler.write_body(&e.body, &mut s);
     s.push_str("</svg>\n");
