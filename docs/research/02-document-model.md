@@ -1173,6 +1173,91 @@ With `MakeRefToIndexedColour(IndexedColour*)` (`doccolor.h:105`) the colour beco
 
 The `ColourContext`s (`colcontx.h`) perform the conversion between models and depend on the document (profiles): `ColourContextRGBT`, `ColourContextCMYK`, `ColourContextHSVT`, `ColourContextGreyT`, `ColourContextWebRGBT`.
 
+#### 5.10.1 Conversion formulas and derived colours (phase 8 reading, 2026-09-23)
+
+Facts only, for the clean-room implementation in `xarast-color`. All formulas
+are stated in our own notation; components are in `0..1`.
+
+**Which code path Xara LX actually runs.** Every conversion has two branches:
+a CMS branch and a "version 1.1" branch. The LX build defines `NO_XARACMS`
+(`Makefile.am:4`, and again unconditionally at `colcontx.cpp:118-119`), so
+the **non-CMS branch is the shipped behaviour** and the intermediate "CIE"
+value every conversion passes through is really plain RGB. There is no
+`ColourContextCIET` class at all; a `COLOURMODEL_CIET` value has no
+converter in LX.
+
+| Conversion | Formula (shipped branch) | Reference |
+|---|---|---|
+| RGB → "CIE" → RGB | identity | `colcontx.cpp:1259-1296`, `1323-1370` |
+| CMYK → RGB | `R = 1 − min(1, C + K)`, likewise G (M), B (Y) | `colcontx.cpp:2114-2116` |
+| RGB → CMYK | if `R, G, B ≤ 0`: `(0, 0, 0, 1)`. Else `C₀ = 1 − R` (etc.), `K = max(min(C₀, M₀, Y₀) − 0.5, 0)`, `C = C₀ − K` (etc.) — black is generated only past a 50 % threshold | `colcontx.cpp:2208-2245` |
+| CMYK → CMYK | pass-through, no conversion even between two CMYK contexts | `colcontx.cpp:2990-2995` |
+| HSV → RGB | standard six-sector formula with `h·6`, sector `i = ⌊h·6⌋`, `f = h·6 − i`; `S = 0` gives grey; sector 0 (and 6) is `(V, T, P)` | `colcontx.cpp:3109-3145` |
+| RGB → HSV | standard max/min formula; **when `max − min ≤ 1e-6` both H and S are 0**; a negative hue has 1 added | `colcontx.cpp:3240-3272` |
+| Grey → RGB | `R = G = B = I` | `colcontx.cpp:3735-3762` |
+| RGB → Grey | `I = 0.305 R + 0.586 G + 0.109 B` — **not** Rec. 601; these are the kernel's weights, distinct from CDraw's blend luminance (`research/03 §2.10`) | `colcontx.cpp:3834` (and `1899` for the grey output filter) |
+| transparency component | every `ConvertToCIET`/`ConvertFromCIET` writes transparency 0: a conversion **drops** it | e.g. `colcontx.cpp:1296`, `3830` |
+
+Consequence worth stating: the RGB → CMYK formula is **exactly invertible**
+by the naive CMYK → RGB one (`(C₀ − K) + K = C₀ ≤ 1`, so the `min(1, …)`
+never clips), so matching the original costs no round-trip accuracy.
+
+**8-bit quantisation.** A `FIXED24` component (`value × 2²⁴`) is packed to a
+byte as `((v₂₄ + 0x8000) clamped to [0, 0x1000000]) × 255 >> 24`
+(`colcontx.h:586-600`): the rounding offset is half of 1/256, not half of
+1/255, and the result truncates. It differs from `round(v × 255)` only in a
+narrow band just above `k + 0.5`, but a 90 % tint of black (`0.1 × 255 =
+25.5`) lands in it: the file's cached RGB for "90% Black" in
+`testfiles/OneLine.xar` is 25, not 26 (`research/01 §9.3`). The cached RGB of
+`TAG_DEFINECOMPLEXCOLOUR` is produced by exactly this packing
+(`colcomp.cpp:1822-1832`). Unpacking multiplies the byte by `0x010101`
+(`colcontx.h:622-634`).
+
+**Derived colours** (`IndexedColour::GetSourceColour`, `colourix.cpp:615-690`).
+The parent is resolved recursively to its own source definition, then:
+
+- **Linked** (`colourix.cpp:648-674`): the parent value is converted into the
+  child's model (only if the models differ), then every component the child
+  does not inherit is overwritten by the child's own. Converting a colour
+  *to* Linked starts with all four components overriding
+  (`colourix.cpp:1216-1226`).
+- **Tint** (`colourix.cpp:679-683`): applied by the **child's model's**
+  context, to the parent value **without converting it first**; making a
+  colour a tint sets its model to the parent's model
+  (`colourix.cpp:1229-1241`), which is what keeps that consistent. The tint
+  factor `f` is the fraction of the parent that remains. `f ≤ 0` gives white,
+  `f ≥ 1` the parent unchanged; otherwise, per model:
+
+  | Model | Tint | Reference |
+  |---|---|---|
+  | RGB | each channel `1 − f (1 − c)` | `colcontx.cpp:1587-1604` |
+  | CMYK | each of C, M, Y, K multiplied by `f` | `colcontx.cpp:2445-2462` |
+  | HSV | `S ← S f`, `V ← 1 − f (1 − V)`, hue unchanged | `colcontx.cpp:3527-3545` |
+  | Grey | `I ← 1 − f (1 − I)` | `colcontx.cpp:4011-4026` |
+
+  Transparency is not touched by a tint.
+- **Shade** (a tint whose "is shade" flag is set, `colourix.cpp:1606-1620`,
+  `1762-1771`): two **signed** values `x` (saturation) and `y` (value) in
+  `[-1, 1]`, stored as components 1 and 2 (`colcomp.cpp:1974-1980`; written
+  as raw signed `FIXED24`, so a reader must not clamp them to `0..1`). Every
+  non-HSV context converts to HSV, shades there and converts back
+  (`colcontx.cpp:1639-1647`, `2499-2507`, `4062-4070`). In HSV
+  (`colcontx.cpp:3577-3610`): for `x < 0`, `S ← S (1 − |x|)`; for `x > 0`,
+  `S ← x + S (1 − x)`; `x = 0` leaves S. The same with `y` on V. So 0 is
+  "no change", −1 is "all the way to 0" and +1 "all the way to 1".
+- **Cycle prevention** (`IndexedColour::SetLinkedParent`,
+  `colourix.cpp:1188-1265`): linking a colour to itself or to one of its own
+  descendants (`IsADescendantOf`, `colourix.cpp:1040-1055`) is refused. The
+  parent must also be named and not deleted.
+- **Unlinking** (making a derived colour Normal or Spot again,
+  `colourix.cpp:1244-1255`): the currently resolved definition is copied
+  into the colour's own components, so it keeps its appearance.
+- **Deleting** a colour (`ColourManager::HideColours`, `colormgr.cpp:1978-2035`):
+  without "force" only unused colours go; with it, every reference in the
+  document is first **coerced to an immediate colour** (undoably), then the
+  colour is hidden. Xara retains a hidden parent internally so that undo can
+  bring it back (`colourix.cpp:643-647`).
+
 ---
 
 ## 6. Groups, composites and "live" objects
