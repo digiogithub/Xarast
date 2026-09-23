@@ -207,6 +207,50 @@ pub struct Tree {
     /// Maximum depth accepted by [`Tree::attach`]. Mirrors
     /// [`BuildLimits::max_depth`](crate::BuildLimits).
     pub(crate) max_depth: usize,
+    /// The change journal: what committed actions touched since the last
+    /// [`Tree::drain_changes`]. See [`ChangeLog`].
+    journal: ChangeLog,
+}
+
+/// One entry of the change journal: a node an action touched, and its
+/// parent at the time — the *old* parent for a detach, the new one for an
+/// attach, the current one for an in-place change.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TreeChange {
+    /// The node.
+    pub node: NodeId,
+    /// Its parent when the action applied, if it had one.
+    pub parent: Option<NodeId>,
+}
+
+/// What changed in a tree since the journal was last drained.
+///
+/// Every [`Action`](crate::Action) that applies — forward, undo, redo or
+/// rollback — appends here; the builder does not. A consumer that keeps a
+/// derived index (the application's pick index) drains it after each
+/// mutation and updates only what the entries name. When the journal
+/// cannot be trusted to be complete — a fresh tree, or more than
+/// [`ChangeLog::CAPACITY`] entries since the last drain — `overflowed` is
+/// set and the consumer must rebuild from scratch.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeLog {
+    /// The changes, oldest first.
+    pub changes: Vec<TreeChange>,
+    /// The list is incomplete: rebuild whatever derives from the tree.
+    pub overflowed: bool,
+}
+
+impl ChangeLog {
+    /// Past this many entries the journal gives up and reports an
+    /// overflow; a consumer rebuilds anyway at that size.
+    pub const CAPACITY: usize = 1 << 16;
+
+    fn overflowed() -> ChangeLog {
+        ChangeLog {
+            changes: Vec::new(),
+            overflowed: true,
+        }
+    }
 }
 
 impl Tree {
@@ -238,7 +282,34 @@ impl Tree {
             next_rev: 1,
             resources_rev: 0,
             max_depth: Tree::DEFAULT_MAX_DEPTH,
+            // Nobody has seen this tree: whatever derives from it rebuilds.
+            journal: ChangeLog::overflowed(),
         }
+    }
+
+    /// Takes the change journal, leaving it empty.
+    ///
+    /// Draining is not an edit: it changes no node, no revision and
+    /// nothing the canonical digest reads.
+    pub fn drain_changes(&mut self) -> ChangeLog {
+        std::mem::take(&mut self.journal)
+    }
+
+    /// Records that an action touched `node`, whose parent was `parent`.
+    pub(crate) fn note_change(&mut self, node: NodeId, parent: Option<NodeId>) {
+        if self.journal.overflowed {
+            return;
+        }
+        if self.journal.changes.len() >= ChangeLog::CAPACITY {
+            self.journal = ChangeLog::overflowed();
+            return;
+        }
+        self.journal.changes.push(TreeChange { node, parent });
+    }
+
+    /// Marks the journal incomplete.
+    pub(crate) fn note_everything_changed(&mut self) {
+        self.journal = ChangeLog::overflowed();
     }
 
     /// The root node, which is always a [`NodeKind::Document`].

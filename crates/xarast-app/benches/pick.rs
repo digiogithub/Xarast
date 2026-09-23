@@ -9,7 +9,9 @@ use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use xarast_app::tool::{PICK_TOLERANCE_PX, PickMode, Picker};
+use xarast_app::{DocumentId, EditCommand, Intent, Session};
 use xarast_doc::{SynthSpec, synthetic_document};
+use xarast_geom::Vector;
 
 fn bench(c: &mut Criterion) {
     let doc = synthetic_document(SynthSpec {
@@ -32,6 +34,44 @@ fn bench(c: &mut Criterion) {
     g.bench_function("pick, index warm", |b| {
         b.iter(|| black_box(p.pick(&doc, centre, PICK_TOLERANCE_PX, 750.0, PickMode::TopGroup)));
     });
+
+    // XARA-T-0168: the first pick after a one-object edit, through the
+    // session's incrementally kept index. Undo then pick, redo then pick:
+    // each pick applies one step's journal.
+    let mut s = Session::adopt(DocumentId(1), doc, None);
+    let n = xarast_app::edit::selectable_objects(&s.doc)
+        .min_by_key(|n| s.doc.tree.preorder(*n).count())
+        .expect("an object");
+    s.apply_edit(EditCommand::translate(vec![n], Vector::raw(1_000, 0)))
+        .expect("move");
+    let rebuilds = s.picker().rebuilds();
+    let _ = s
+        .picker()
+        .pick(&s.doc, centre, PICK_TOLERANCE_PX, 750.0, PickMode::TopGroup);
+    g.bench_function("undo + first pick after it (incremental)", |b| {
+        b.iter(|| {
+            black_box(s.apply(Intent::Undo).expect("undo"));
+            black_box(s.picker().pick(
+                &s.doc,
+                centre,
+                PICK_TOLERANCE_PX,
+                750.0,
+                PickMode::TopGroup,
+            ));
+            black_box(s.apply(Intent::Redo).expect("redo"));
+            black_box(s.picker().pick(
+                &s.doc,
+                centre,
+                PICK_TOLERANCE_PX,
+                750.0,
+                PickMode::TopGroup,
+            ));
+        });
+    });
+    assert!(
+        s.picker().rebuilds() <= rebuilds + 1,
+        "the edits were applied incrementally"
+    );
     g.finish();
 }
 

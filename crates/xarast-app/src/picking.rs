@@ -13,21 +13,29 @@
 //!   stories are not leaves; their contents are. A top-level object with no
 //!   pickable leaf (a text story until phase 9 draws text, an unrendered
 //!   live effect) is indexed as its bounding box, so it stays selectable.
-//! * **Z** is the leaf's rank in render order, `rank << 16`.
+//! * **Z**: each top-level object of a layer owns a key; its leaves take
+//!   `key`, `key + 1`, … in paint order, and consecutive objects' ranges
+//!   are `TOP_GAP` (2^24) apart, so an object inserted between two takes a
+//!   key in the gap without renumbering anything.
 //! * **Fill** is tested only when the fill is painted (not "no colour",
 //!   and the path is filled); the **stroke** only when the line colour is
 //!   not "no colour". A transparent interior does not hit.
-//! * **When**: the index is built lazily on the first pick after a
-//!   committed change, never on a drag frame, and never by undo itself —
-//!   the undo budget is 1 ms and a rebuild at 100 000 objects is several.
-//!   Incremental updates (`set_bounds`, `insert`, `remove` per committed
-//!   transaction) are the follow-up that removes the rebuild entirely.
+//! * **When** (XARA-T-0168): built once, lazily. After that the session
+//!   hands the picker the tree's change journal after every committed
+//!   mutation (undo and redo included), and the next pick removes and
+//!   re-walks only the top-level objects the journal touches. It rebuilds
+//!   instead when the journal overflowed, a layer or spread changed, a
+//!   loose layer-level attribute changed (it reaches every later object),
+//!   more than a quarter of the objects changed, or no key is left in the
+//!   gap. Never on a drag frame, never on the undo path itself.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use xarast_doc::{AttrSlot, AttrStack, AttrValue, Document, NodeId, NodeKind, WalkEvent};
+use xarast_doc::{
+    AttrSlot, AttrStack, AttrValue, ChangeLog, Document, NodeId, NodeKind, TreeChange, WalkEvent,
+};
 use xarast_geom::{
     Cap, FillRule, HitIndex, HitShape, HitTolerance, Join, Matrix, Mp, Path, RectMode, ShapeHit,
     StrokeStyle,
@@ -88,19 +96,37 @@ struct Leaf {
     z: u64,
 }
 
+/// A top-level object of a layer: its z range starts at `key`, and its
+/// leaves hold `key`, `key + 1`, ... in paint order.
+#[derive(Debug)]
+struct Top {
+    key: u64,
+    leaves: Vec<NodeId>,
+}
+
 #[derive(Debug, Default)]
 struct Built {
     index: HitIndex<NodeId>,
     leaves: HashMap<NodeId, Leaf>,
+    /// Every indexed top-level object.
+    tops: HashMap<NodeId, Top>,
+    /// The tops by key: render order.
+    order: BTreeMap<u64, NodeId>,
+    /// Layers with attribute nodes directly under them.
+    layer_attrs: HashSet<NodeId>,
 }
 
 /// The pick index of one document, built lazily.
 ///
-/// Holds no reference to the document: the session calls
-/// [`Picker::invalidate`] after every mutation, and the next pick rebuilds.
+/// Holds no reference to the document: the session hands it the tree's
+/// change journal after every mutation ([`Picker::note_changes`]), and the
+/// next pick applies it — re-walking only the top-level objects the
+/// journal names — or rebuilds when the journal cannot be trusted.
 #[derive(Debug, Default)]
 pub struct Picker {
     built: RefCell<Option<Built>>,
+    pending: RefCell<Vec<TreeChange>>,
+    rebuilds: std::cell::Cell<u64>,
 }
 
 fn half_width(stack: &AttrStack) -> Mp {
@@ -223,119 +249,370 @@ fn editable_layer(l: &xarast_doc::LayerNode) -> bool {
     l.visible && !l.locked && !l.guide
 }
 
+/// The gap left between two top-level objects' z ranges, so that an
+/// object inserted between them later takes a key without renumbering.
+const TOP_GAP: u64 = 1 << 24;
+
+/// How far an incremental update walks a sibling list looking for an
+/// indexed neighbour before it gives up and rebuilds.
+const MAX_SIBLING_WALK: usize = 4096;
+
+/// One leaf found while walking a top-level object, before it has a z.
+struct Found {
+    node: NodeId,
+    bounds: DocRect,
+    geometry: Geometry,
+    fill: Option<FillRule>,
+    stroke: Option<StrokeStyle>,
+}
+
+/// Why an incremental update gave up: the caller rebuilds.
+#[derive(Debug)]
+struct Rebuild;
+
+/// The leaves of the top-level object `top` of a layer, in paint order,
+/// given the attributes in force just before it. `stack` is left as it
+/// was.
+fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found> {
+    let tree = &doc.tree;
+    let mut out: Vec<Found> = Vec::new();
+    let add = |node: NodeId, stack: &AttrStack, out: &mut Vec<Found>| {
+        let Some(kind) = tree.kind(node) else { return };
+        let Some(path) = geometry_of(kind) else {
+            return;
+        };
+        let (filled, stroked) = match kind {
+            NodeKind::Path(p) => (p.filled, p.stroked),
+            NodeKind::Bitmap(_) => (true, false),
+            _ => (true, true),
+        };
+        let bitmap = matches!(kind, NodeKind::Bitmap(_));
+        let fill = (filled
+            && (bitmap
+                || matches!(stack.get(AttrSlot::FillGeometry),
+                    AttrValue::Fill(p) if paints(doc, p))))
+        .then(|| match stack.get(AttrSlot::WindingRule) {
+            AttrValue::WindingRule(r) => *r,
+            _ => FillRule::NonZero,
+        });
+        let stroke = (stroked
+            && matches!(stack.get(AttrSlot::StrokeColour),
+                AttrValue::StrokeColour(p) if paints(doc, p)))
+        .then(|| stroke_style(stack));
+        if fill.is_none() && stroke.is_none() {
+            return;
+        }
+        let reach = stroke.as_ref().map_or(Mp::ZERO, |s| {
+            Mp::from_f64_round(half_width(stack).to_f64() * s.mitre_limit.max(1.0))
+        });
+        let bounds = xarast_doc::bounds::compute_bounds_with(tree, node, reach);
+        out.push(Found {
+            node,
+            bounds,
+            geometry: Geometry::Path(path),
+            fill,
+            stroke,
+        });
+    };
+    for ev in tree.walk_render(top) {
+        match ev {
+            WalkEvent::EnterScope { .. } => stack.push_scope(),
+            WalkEvent::Visit { node } => match tree.kind(node) {
+                Some(NodeKind::Attr(a)) => stack.push(Arc::new(a.value.clone())),
+                k if own_ink(k) && tree.links(node).first_child.is_none() => {
+                    add(node, stack, &mut out);
+                }
+                _ => {}
+            },
+            WalkEvent::LeaveScope { parent } => {
+                if own_ink(tree.kind(parent)) {
+                    add(parent, stack, &mut out);
+                }
+                stack.pop_scope();
+            }
+        }
+    }
+    // An object with nothing testable stays selectable by its box.
+    if out.is_empty() && tree.kind(top).is_some_and(|k| k.is_ink() && !k.is_attr()) {
+        let bounds = crate::viewport::nodes_rect(doc, [top]);
+        if !bounds.is_empty() {
+            out.push(Found {
+                node: top,
+                bounds,
+                geometry: Geometry::Bounds,
+                fill: None,
+                stroke: None,
+            });
+        }
+    }
+    out
+}
+
+/// Where a changed node sits, as far as the index cares.
+enum Located {
+    /// Under a layer the index does not cover, or a page or grid.
+    Ignore,
+    /// Inside (or being) this top-level object of an indexed layer.
+    Top(NodeId),
+}
+
+fn attached(doc: &Document, n: NodeId) -> bool {
+    doc.tree.contains(n) && doc.tree.is_reachable(n)
+}
+
 impl Built {
     fn build(doc: &Document) -> Built {
         let tree = &doc.tree;
-        let mut rank: u64 = 0;
+        let mut built = Built::default();
         let mut entries: Vec<(NodeId, DocRect, u64)> = Vec::new();
-        let mut leaves: HashMap<NodeId, Leaf> = HashMap::new();
+        let mut next_key: u64 = TOP_GAP;
         let layers: Vec<NodeId> = tree
             .preorder(tree.root())
             .filter(|id| matches!(tree.kind(*id), Some(NodeKind::Layer(l)) if editable_layer(l)))
             .collect();
         for layer in layers {
             let mut stack = AttrStack::with_defaults(&doc.defaults);
-            // The layer's child on the path to the current node.
-            let top_of = |node: NodeId| -> NodeId {
-                std::iter::once(node)
-                    .chain(tree.ancestors(node))
-                    .find(|n| tree.links(*n).parent == Some(layer))
-                    .unwrap_or(node)
-            };
-            let mut with_leaf: HashSet<NodeId> = HashSet::new();
-            let mut add = |node: NodeId, stack: &AttrStack, rank: &mut u64| {
-                let Some(kind) = tree.kind(node) else { return };
-                let Some(path) = geometry_of(kind) else {
-                    return;
-                };
-                let (filled, stroked) = match kind {
-                    NodeKind::Path(p) => (p.filled, p.stroked),
-                    NodeKind::Bitmap(_) => (true, false),
-                    _ => (true, true),
-                };
-                let bitmap = matches!(kind, NodeKind::Bitmap(_));
-                let fill = (filled
-                    && (bitmap
-                        || matches!(stack.get(AttrSlot::FillGeometry),
-                            AttrValue::Fill(p) if paints(doc, p))))
-                .then(|| match stack.get(AttrSlot::WindingRule) {
-                    AttrValue::WindingRule(r) => *r,
-                    _ => FillRule::NonZero,
-                });
-                let stroke = (stroked
-                    && matches!(stack.get(AttrSlot::StrokeColour),
-                        AttrValue::StrokeColour(p) if paints(doc, p)))
-                .then(|| stroke_style(stack));
-                if fill.is_none() && stroke.is_none() {
-                    return;
+            for top in tree.children(layer) {
+                if let Some(NodeKind::Attr(a)) = tree.kind(top) {
+                    stack.push(Arc::new(a.value.clone()));
+                    built.layer_attrs.insert(layer);
+                    continue;
                 }
-                let reach = stroke.as_ref().map_or(Mp::ZERO, |s| {
-                    Mp::from_f64_round(half_width(stack).to_f64() * s.mitre_limit.max(1.0))
+                let found = collect_top(doc, top, &mut stack);
+                if found.is_empty() {
+                    continue;
+                }
+                let key = next_key;
+                next_key = key + found.len() as u64 + TOP_GAP;
+                built.place_top(top, key, found, |node, bounds, z| {
+                    entries.push((node, bounds, z));
                 });
-                let bounds = xarast_doc::bounds::compute_bounds_with(tree, node, reach);
-                *rank += 1;
-                let z = *rank << 16;
-                let top = top_of(node);
-                with_leaf.insert(top);
-                entries.push((node, bounds, z));
-                leaves.insert(
-                    node,
-                    Leaf {
-                        geometry: Geometry::Path(path),
-                        fill,
-                        stroke,
-                        top,
-                        z,
-                    },
-                );
-            };
-            for ev in tree.walk_render(layer) {
-                match ev {
-                    WalkEvent::EnterScope { .. } => stack.push_scope(),
-                    WalkEvent::Visit { node } => match tree.kind(node) {
-                        Some(NodeKind::Attr(a)) => stack.push(Arc::new(a.value.clone())),
-                        k if own_ink(k) && tree.links(node).first_child.is_none() => {
-                            add(node, &stack, &mut rank);
-                        }
-                        _ => {}
-                    },
-                    WalkEvent::LeaveScope { parent } => {
-                        if own_ink(tree.kind(parent)) {
-                            add(parent, &stack, &mut rank);
-                        }
-                        stack.pop_scope();
+            }
+        }
+        built.index = HitIndex::from_entries(entries);
+        built
+    }
+
+    /// Records a top-level object's leaves from `key` up; `index` is told
+    /// about each leaf.
+    fn place_top(
+        &mut self,
+        top: NodeId,
+        key: u64,
+        found: Vec<Found>,
+        mut index: impl FnMut(NodeId, DocRect, u64),
+    ) {
+        let mut ids = Vec::with_capacity(found.len());
+        for (i, f) in found.into_iter().enumerate() {
+            let z = key + i as u64;
+            index(f.node, f.bounds, z);
+            ids.push(f.node);
+            self.leaves.insert(
+                f.node,
+                Leaf {
+                    geometry: f.geometry,
+                    fill: f.fill,
+                    stroke: f.stroke,
+                    top,
+                    z,
+                },
+            );
+        }
+        self.order.insert(key, top);
+        self.tops.insert(top, Top { key, leaves: ids });
+    }
+
+    fn remove_top(&mut self, top: NodeId) {
+        if let Some(t) = self.tops.remove(&top) {
+            self.order.remove(&t.key);
+            for l in t.leaves {
+                self.index.remove(l);
+                self.leaves.remove(&l);
+            }
+        }
+    }
+
+    /// Which top-level object of an indexed layer `node` (attached) lies
+    /// in.
+    fn locate(doc: &Document, node: NodeId) -> Result<Located, Rebuild> {
+        let tree = &doc.tree;
+        let mut cur = node;
+        let mut guard = 0usize;
+        while let Some(parent) = tree.links(cur).parent {
+            if let Some(NodeKind::Layer(l)) = tree.kind(parent) {
+                if !editable_layer(l) {
+                    return Ok(Located::Ignore);
+                }
+                // A loose attribute under a layer reaches every object
+                // after it.
+                if tree.kind(cur).is_some_and(NodeKind::is_attr) {
+                    return Err(Rebuild);
+                }
+                return Ok(Located::Top(cur));
+            }
+            cur = parent;
+            guard += 1;
+            if guard > tree.node_count() {
+                return Err(Rebuild);
+            }
+        }
+        // Above the layers: a page or a grid changes nothing picked;
+        // anything else (a layer's flags, a spread) is a rebuild.
+        match tree.kind(node) {
+            Some(NodeKind::Page(_) | NodeKind::Grid(_)) => Ok(Located::Ignore),
+            _ => Err(Rebuild),
+        }
+    }
+
+    /// The attributes in force just before `top`, a child of `layer`.
+    fn stack_before(&self, doc: &Document, layer: NodeId, top: NodeId) -> AttrStack {
+        let mut stack = AttrStack::with_defaults(&doc.defaults);
+        if self.layer_attrs.contains(&layer) {
+            let tree = &doc.tree;
+            let mut attrs = Vec::new();
+            let mut p = tree.links(top).prev;
+            while let Some(s) = p {
+                if let Some(NodeKind::Attr(a)) = tree.kind(s) {
+                    attrs.push(a);
+                }
+                p = tree.links(s).prev;
+            }
+            for a in attrs.into_iter().rev() {
+                stack.push(Arc::new(a.value.clone()));
+            }
+        }
+        stack
+    }
+
+    /// A key for `n` leaves of `top`, between its indexed neighbours.
+    fn allocate(&self, doc: &Document, top: NodeId, n: u64) -> Result<u64, Rebuild> {
+        let tree = &doc.tree;
+        let fit = |lo: u64, hi: u64| -> Result<u64, Rebuild> {
+            let room = hi
+                .checked_sub(lo)
+                .and_then(|r| r.checked_sub(n))
+                .ok_or(Rebuild)?;
+            if room == 0 {
+                return Err(Rebuild);
+            }
+            Ok(lo + (room / 2).clamp(1, TOP_GAP))
+        };
+        let mut p = tree.links(top).prev;
+        let mut steps = 0usize;
+        while let Some(s) = p {
+            if let Some(t) = self.tops.get(&s) {
+                let lo = t.key + t.leaves.len() as u64;
+                let hi = self
+                    .order
+                    .range(t.key + 1..)
+                    .next()
+                    .map_or(u64::MAX, |(k, _)| *k);
+                return fit(lo, hi);
+            }
+            steps += 1;
+            if steps > MAX_SIBLING_WALK {
+                return Err(Rebuild);
+            }
+            p = tree.links(s).prev;
+        }
+        let mut q = tree.links(top).next;
+        steps = 0;
+        while let Some(s) = q {
+            if let Some(t) = self.tops.get(&s) {
+                let hi = t.key;
+                let lo = self.order.range(..hi).next_back().map_or(0, |(k, below)| {
+                    k + self.tops.get(below).map_or(0, |b| b.leaves.len() as u64)
+                });
+                return fit(lo, hi);
+            }
+            steps += 1;
+            if steps > MAX_SIBLING_WALK {
+                return Err(Rebuild);
+            }
+            q = tree.links(s).next;
+        }
+        // The first indexed object of its layer: no neighbour to key from.
+        Err(Rebuild)
+    }
+
+    /// Applies what the journal says changed. `Err` means the caller must
+    /// rebuild; the index may then be half updated.
+    fn update(&mut self, doc: &Document, changes: &[TreeChange]) -> Result<(), Rebuild> {
+        let tree = &doc.tree;
+        let mut dirty: HashSet<NodeId> = HashSet::new();
+        let mut gone: HashSet<NodeId> = HashSet::new();
+        for ch in changes {
+            if attached(doc, ch.node) {
+                if let Located::Top(t) = Built::locate(doc, ch.node)? {
+                    dirty.insert(t);
+                }
+            } else {
+                if self.tops.contains_key(&ch.node) {
+                    gone.insert(ch.node);
+                }
+                if let Some(l) = self.leaves.get(&ch.node) {
+                    dirty.insert(l.top);
+                }
+            }
+            let Some(p) = ch.parent else { continue };
+            if !attached(doc, p) {
+                // Inside a subtree that was itself detached: that detach
+                // has its own entry.
+                if let Some(l) = self.leaves.get(&p) {
+                    dirty.insert(l.top);
+                }
+                continue;
+            }
+            match tree.kind(p) {
+                Some(NodeKind::Layer(l)) => {
+                    // A loose attribute added to or taken from a layer.
+                    let attr = !self.tops.contains_key(&ch.node)
+                        && tree.kind(ch.node).is_none_or(NodeKind::is_attr);
+                    if editable_layer(l) && attr {
+                        return Err(Rebuild);
+                    }
+                }
+                _ => {
+                    if let Located::Top(t) = Built::locate(doc, p)? {
+                        dirty.insert(t);
                     }
                 }
             }
-            // Objects with nothing testable stay selectable by their box.
-            for top in tree.children(layer) {
-                let ink = tree.kind(top).is_some_and(|k| k.is_ink() && !k.is_attr());
-                if !ink || with_leaf.contains(&top) {
-                    continue;
-                }
-                let bounds = crate::viewport::nodes_rect(doc, [top]);
-                if bounds.is_empty() {
-                    continue;
-                }
-                rank += 1;
-                let z = rank << 16;
-                entries.push((top, bounds, z));
-                leaves.insert(
-                    top,
-                    Leaf {
-                        geometry: Geometry::Bounds,
-                        fill: None,
-                        stroke: None,
-                        top,
-                        z,
-                    },
-                );
+        }
+        if dirty.len() + gone.len() > (self.tops.len() / 4).max(MAX_SIBLING_WALK) {
+            return Err(Rebuild);
+        }
+        for t in gone.iter().chain(dirty.iter()) {
+            self.remove_top(*t);
+        }
+        for t in dirty {
+            if !attached(doc, t) {
+                continue;
             }
+            let Located::Top(top) = Built::locate(doc, t)? else {
+                continue;
+            };
+            if top != t {
+                // A leaf's recorded top is no longer top-level (it was
+                // grouped): its new top has an entry of its own.
+                continue;
+            }
+            let Some(layer) = tree.links(t).parent else {
+                continue;
+            };
+            let mut stack = self.stack_before(doc, layer, t);
+            let found = collect_top(doc, t, &mut stack);
+            if found.is_empty() {
+                continue;
+            }
+            let key = self.allocate(doc, t, found.len() as u64)?;
+            let mut index = std::mem::take(&mut self.index);
+            self.place_top(t, key, found, |node, bounds, z| {
+                index.insert(node, bounds, z);
+            });
+            self.index = index;
         }
-        Built {
-            index: HitIndex::from_entries(entries),
-            leaves,
-        }
+        Ok(())
     }
 
     fn hit(&self, leaf: &Leaf, p: DocPoint, tol: HitTolerance) -> Option<HitPart> {
@@ -363,15 +640,65 @@ impl Picker {
         Picker::default()
     }
 
-    /// The document changed: the next pick rebuilds.
+    /// Forget everything: the next pick rebuilds.
     pub fn invalidate(&mut self) {
         *self.built.get_mut() = None;
+        self.pending.get_mut().clear();
+    }
+
+    /// Takes note of what a committed mutation changed, as the tree's
+    /// journal reports it ([`xarast_doc::Tree::drain_changes`]). Cheap: the
+    /// work is done by the next pick, never on the undo path.
+    pub fn note_changes(&mut self, log: ChangeLog) {
+        if self.built.get_mut().is_none() {
+            return;
+        }
+        let pending = self.pending.get_mut();
+        if log.overflowed || pending.len() + log.changes.len() > ChangeLog::CAPACITY {
+            self.invalidate();
+            return;
+        }
+        pending.extend(log.changes);
+    }
+
+    /// How many times the index has been built from scratch: a test's
+    /// window on "this edit was incremental".
+    #[must_use]
+    pub fn rebuilds(&self) -> u64 {
+        self.rebuilds.get()
     }
 
     fn with<R>(&self, doc: &Document, f: impl FnOnce(&Built) -> R) -> R {
         let mut slot = self.built.borrow_mut();
-        let built = slot.get_or_insert_with(|| Built::build(doc));
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        if !pending.is_empty()
+            && let Some(built) = slot.as_mut()
+            && built.update(doc, &pending).is_err()
+        {
+            *slot = None;
+        }
+        let built = slot.get_or_insert_with(|| {
+            self.rebuilds.set(self.rebuilds.get() + 1);
+            Built::build(doc)
+        });
         f(built)
+    }
+
+    /// Every indexed leaf as `(leaf, top, bounds)`, in z order: what a
+    /// test compares between an incrementally updated index and a fresh
+    /// one.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn dump(&self, doc: &Document) -> Vec<(NodeId, NodeId, DocRect)> {
+        self.with(doc, |b| {
+            let mut v: Vec<(u64, NodeId, NodeId, DocRect)> = b
+                .index
+                .iter()
+                .map(|(k, r, z)| (z, k, b.leaves.get(&k).map_or(k, |l| l.top), r))
+                .collect();
+            v.sort_by_key(|e| e.0);
+            v.into_iter().map(|(_, k, t, r)| (k, t, r)).collect()
+        })
     }
 
     /// The object under `at`, within `radius_px` device pixels at
@@ -390,11 +717,10 @@ impl Picker {
         self.with(doc, |b| {
             let below_z = match mode {
                 PickMode::Under { below } => b
-                    .leaves
-                    .values()
-                    .filter(|l| l.top == below)
-                    .map(|l| l.z)
-                    .min(),
+                    .tops
+                    .get(&below)
+                    .map(|t| t.key)
+                    .or_else(|| b.leaves.get(&below).map(|l| l.z)),
                 _ => None,
             };
             b.index.candidates_at(at, radius).find_map(|(node, z)| {
@@ -413,6 +739,81 @@ impl Picker {
                     part,
                 })
             })
+        })
+    }
+
+    /// Where an object snap near `p` lands (`phase-07 §W8`, XARA-T-0153):
+    /// the nearest, within `radius`, of the bounding-box corners, edge
+    /// middles and centres of the leaves near `p`; failing those, the
+    /// nearest point of their painted outlines. Objects whose top-level object is in `exclude` (the ones
+    /// being dragged) are ignored. Goes through the index, so it costs
+    /// the objects near the pointer, not the document.
+    #[must_use]
+    pub fn object_snap(
+        &self,
+        doc: &Document,
+        p: DocPoint,
+        radius: Mp,
+        exclude: &[NodeId],
+    ) -> Option<DocPoint> {
+        self.with(doc, |b| {
+            let skip = |node: NodeId| {
+                b.leaves
+                    .get(&node)
+                    .is_none_or(|l| exclude.contains(&l.top) || exclude.contains(&node))
+            };
+            let r = radius.to_f64().abs();
+            let dist =
+                |q: DocPoint| (q.x.to_f64() - p.x.to_f64()).hypot(q.y.to_f64() - p.y.to_f64());
+            let mid =
+                |a: Mp, c: Mp| Mp::new(((i64::from(a.raw()) + i64::from(c.raw())) / 2) as i32);
+            let mut best: Option<(f64, DocPoint)> = None;
+            for (node, _) in b.index.candidates_at(p, radius) {
+                if skip(node) {
+                    continue;
+                }
+                // The geometry's own box, not the indexed one, which is
+                // widened by the stroke's reach.
+                let bounds = match b.leaves.get(&node).map(|l| &l.geometry) {
+                    Some(Geometry::Path(path)) => path.bounds(),
+                    _ => match b.index.get(node) {
+                        Some((r, _)) => r,
+                        None => continue,
+                    },
+                };
+                for x in [bounds.lo.x, mid(bounds.lo.x, bounds.hi.x), bounds.hi.x] {
+                    for y in [bounds.lo.y, mid(bounds.lo.y, bounds.hi.y), bounds.hi.y] {
+                        let q = DocPoint::new(x, y);
+                        let d = dist(q);
+                        if d <= r && best.is_none_or(|(bd, _)| d < bd) {
+                            best = Some((d, q));
+                        }
+                    }
+                }
+            }
+            // A point beats a line, as magnetic snapping does: the outline
+            // is only a candidate when no corner or centre is in reach
+            // (otherwise the outline, which passes through the corner,
+            // would always be at least as near).
+            if let Some((_, q)) = best {
+                return Some(q);
+            }
+            xarast_geom::nearest_in_index(&b.index, p, radius, |node| {
+                if skip(node) {
+                    return None;
+                }
+                match &b.leaves.get(&node)?.geometry {
+                    Geometry::Path(path) => xarast_geom::nearest_point_transformed(
+                        path,
+                        Matrix::IDENTITY,
+                        p,
+                        radius,
+                        0.5,
+                    ),
+                    Geometry::Bounds => None,
+                }
+            })
+            .map(|(_, n)| n.point)
         })
     }
 

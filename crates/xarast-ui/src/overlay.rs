@@ -39,6 +39,8 @@ pub enum HandleKind {
     Radius,
     /// A Bézier control handle, drawn as a small dot.
     Control,
+    /// Where a drag snapped: a cross in the accent colour, transient.
+    Snap,
 }
 
 impl HandleKind {
@@ -50,6 +52,7 @@ impl HandleKind {
         match self {
             HandleKind::Centre => 9.0,
             HandleKind::Control => 5.0,
+            HandleKind::Snap => 11.0,
             _ => 7.0,
         }
     }
@@ -189,6 +192,18 @@ impl OverlayPainter<'_> {
         };
         let w = self.scale.hairline_width() as f32;
         match kind {
+            HandleKind::Snap => {
+                let stroke = egui::Stroke::new(2.0 * w, self.tokens.accent);
+                painter.line_segment(
+                    [c - egui::vec2(half, 0.0), c + egui::vec2(half, 0.0)],
+                    stroke,
+                );
+                painter.line_segment(
+                    [c - egui::vec2(0.0, half), c + egui::vec2(0.0, half)],
+                    stroke,
+                );
+                painter.circle_stroke(c, half * 0.6, egui::Stroke::new(w, self.tokens.accent));
+            }
             HandleKind::Radius => {
                 painter.circle_filled(c, half - w, self.tokens.accent);
                 painter.circle_stroke(c, half, egui::Stroke::new(w, self.tokens.surface_sunken));

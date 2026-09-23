@@ -26,6 +26,7 @@ use crate::edit::{EditState, SelectMode, ToolId};
 use crate::geometry::DeviceSize;
 use crate::intent::{Changed, Intent};
 use crate::ops::EditCommand;
+use crate::structure::StructureOp;
 use crate::tool::{
     CanvasInput, CursorKind, Infobar, InfobarField, OverlayShape, Preview, ToolAction, ToolCtx,
     ToolMachine, ToolRequests, ToolView, ViewRequest,
@@ -205,6 +206,8 @@ pub struct Session {
     picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
     last_edit: Option<EditCommand>,
+    /// Where the drag in flight last snapped, for the feedback marker.
+    last_snap: Option<crate::snap::SnapHit>,
     /// The document changed since the viewport's scroll bounds were
     /// derived from it.
     scroll_bounds_stale: bool,
@@ -255,6 +258,7 @@ impl Session {
             preview: Preview::default(),
             picker: crate::tool::Picker::new(),
             last_edit: None,
+            last_snap: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
             dirty: Dirty::everything(size),
@@ -641,6 +645,12 @@ impl Session {
         &self.preview
     }
 
+    /// The pick index, kept up to date incrementally.
+    #[must_use]
+    pub const fn picker(&self) -> &crate::tool::Picker {
+        &self.picker
+    }
+
     /// The tools and the interaction machine, read-only.
     #[must_use]
     pub const fn tools(&self) -> &ToolMachine {
@@ -662,7 +672,14 @@ impl Session {
         if !self.edit.show_overlays {
             return Vec::new();
         }
-        self.tools.overlay(self.view())
+        let mut out = self.tools.overlay(self.view());
+        if let Some(hit) = self.last_snap {
+            out.push(OverlayShape::Handle {
+                at: hit.at,
+                shape: crate::tool::HandleShape::Snap,
+            });
+        }
+        out
     }
 
     /// The infobar of the tool in force.
@@ -708,6 +725,15 @@ impl Session {
             changed |= Changed::DOCUMENT;
         }
         if requests.overlay_changed {
+            changed |= Changed::SELECTION;
+        }
+        let snap = if self.tools.is_dragging() {
+            requests.snapped
+        } else {
+            None
+        };
+        if snap != self.last_snap {
+            self.last_snap = snap;
             changed |= Changed::SELECTION;
         }
         if self.tools.state() != state_before
@@ -821,7 +847,9 @@ impl Session {
 
     fn after_mutation(&mut self) {
         self.modified = true;
-        self.picker.invalidate();
+        // Hand the picker what changed; it re-walks only those objects at
+        // the next pick (XARA-T-0168), never here on the undo path.
+        self.picker.note_changes(self.doc.tree.drain_changes());
         self.edit.prune(&self.doc);
         // The scroll bounds need the drawing's extent, which is a walk of
         // the whole document while the bounds cache is cold: 30 ms at
@@ -949,6 +977,69 @@ impl Session {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
                 }
             }
+            Intent::Group => {
+                let nodes: Vec<_> = self.edit.selection().collect();
+                changed |= self.structure(StructureOp::Group(nodes))?;
+            }
+            Intent::Ungroup => {
+                let nodes: Vec<_> = self.edit.selection().collect();
+                changed |= self.structure(StructureOp::Ungroup(nodes))?;
+            }
+            Intent::Arrange(op) => {
+                let nodes: Vec<_> = self.edit.selection().collect();
+                changed |= self.structure(StructureOp::Reorder(nodes, op))?;
+            }
+            Intent::Align(spec) => {
+                let nodes: Vec<_> = self.edit.selection().collect();
+                let page = crate::viewport::page_rect(&self.doc);
+                let moves = crate::structure::align_moves(&self.doc, &nodes, spec, page);
+                if !moves.is_empty() {
+                    let label = if spec.x.distributes() || spec.y.distributes() {
+                        "Distribute"
+                    } else {
+                        "Align"
+                    };
+                    changed |= self.structure(StructureOp::MoveEach(moves, label))?;
+                }
+            }
+            Intent::Duplicate => {
+                let nodes: Vec<_> = self.edit.selection().collect();
+                changed |= self.structure(StructureOp::Duplicate(
+                    nodes,
+                    crate::structure::DUPLICATE_OFFSET,
+                ))?;
+            }
+            Intent::ToggleSnap(kind) => {
+                let on = !self.edit.snap.enabled(kind);
+                self.edit.snap.set_enabled(kind, on);
+                changed |= Changed::UI;
+                // Mid-drag: the gesture re-evaluates at the pointer now
+                // (`research/04 §4.4`, WorksInDrag).
+                if self.tools.is_dragging() {
+                    changed |= self
+                        .canvas_input(CanvasInput::Modifiers(self.edit.modifiers))?
+                        .0;
+                }
+            }
+            Intent::ToggleGrid => {
+                let mut grid = crate::snap::grid_of(&self.doc);
+                grid.visible = !grid.visible;
+                self.dispatch(&crate::snap::GuideCommand(crate::snap::GuideOp::SetGrid(
+                    grid,
+                )))?;
+                changed |= Changed::UI | Changed::SELECTION;
+            }
+            Intent::ToggleGuides => {
+                if let Some(layer) = crate::snap::guide_layer(&self.doc) {
+                    let visible = !crate::snap::guides_visible(&self.doc);
+                    self.dispatch(&crate::commands::SetLayerVisible { layer, visible })?;
+                    changed |= Changed::UI | Changed::DOCUMENT;
+                }
+            }
+            Intent::Guides(op) => {
+                self.dispatch(&crate::snap::GuideCommand(op))?;
+                changed |= Changed::UI | Changed::SELECTION;
+            }
             Intent::InfobarEdit { field, value } => {
                 changed |= self.infobar_edit(field, value)? | Changed::UI;
             }
@@ -1040,6 +1131,11 @@ impl Session {
             | Intent::OpenFile(_)
             | Intent::CloseDocument
             | Intent::ClearRecent
+            | Intent::Copy
+            | Intent::Cut
+            | Intent::Paste { .. }
+            | Intent::PasteText { .. }
+            | Intent::ShowDialog(_)
             | Intent::Quit => {}
         }
         Ok(self.finish_apply(changed))
@@ -1059,6 +1155,100 @@ impl Session {
     /// whether the tool took it.
     fn tool_action(&mut self, action: ToolAction) -> Result<(Changed, bool), SessionError> {
         self.run_tool(|m, cx| m.action(action, cx))
+    }
+
+    /// Runs a structure operation on the document and selects what it
+    /// created (the group, the ungrouped members, the copies). An
+    /// operation that finds nothing to do records no undo step.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the command returns; the document is left as it was.
+    pub fn structure(&mut self, op: StructureOp) -> Result<Changed, SessionError> {
+        let mut changed = self.cancel_gesture();
+        let empty = match &op {
+            StructureOp::Group(n)
+            | StructureOp::Ungroup(n)
+            | StructureOp::Reorder(n, _)
+            | StructureOp::Duplicate(n, _)
+            | StructureOp::Cut(n) => n.is_empty(),
+            StructureOp::MoveEach(m, _) => m.is_empty(),
+        };
+        if empty {
+            return Ok(changed);
+        }
+        let cmd = crate::structure::StructureCommand::new(op);
+        match self.dispatch(&cmd) {
+            Ok(_) => {}
+            // Nothing to do (already at the front, no groups selected):
+            // no undo step, no change.
+            Err(SessionError::Edit(e)) if e == crate::structure::NOTHING_TO_DO => {
+                return Ok(changed);
+            }
+            Err(e) => return Err(e),
+        }
+        let created = cmd.created.take();
+        if !created.is_empty() {
+            self.edit.select(created, SelectMode::Replace);
+        }
+        changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+        Ok(changed)
+    }
+
+    /// The selection as a self-contained fragment for the clipboard, or
+    /// `None` when nothing is selected.
+    #[must_use]
+    pub fn copy_selection(&self) -> Option<xarast_doc::Document> {
+        let nodes: Vec<_> = self.edit.selection().collect();
+        crate::structure::copy_fragment(&self.doc, &nodes)
+    }
+
+    /// Pastes a fragment onto the active layer: at its own coordinates when
+    /// `in_place`, else centred in the view. Selects what was pasted.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NotPermitted`] when the active layer is locked or
+    /// hidden; the document is left as it was.
+    pub fn paste_fragment(
+        &mut self,
+        fragment: Arc<xarast_doc::Document>,
+        in_place: bool,
+    ) -> Result<Changed, SessionError> {
+        let mut changed = self.cancel_gesture();
+        let Some(layer) = self
+            .edit
+            .active_layer()
+            .or_else(|| self.doc.active_layer(self.doc.active_spread()))
+        else {
+            return Ok(changed);
+        };
+        let offset = if in_place {
+            xarast_geom::Vector::ZERO
+        } else {
+            let b = crate::structure::fragment_bounds(&fragment);
+            if b.is_empty() {
+                xarast_geom::Vector::ZERO
+            } else {
+                let view = self.viewport.visible_doc_rect();
+                view.centre() - b.centre()
+            }
+        };
+        let bitmaps = crate::structure::import_bitmaps(&mut self.doc, &fragment);
+        let cmd = crate::structure::PasteFragment {
+            fragment,
+            layer,
+            offset,
+            bitmaps,
+            created: std::cell::RefCell::new(Vec::new()),
+        };
+        self.dispatch(&cmd)?;
+        let created = cmd.created.take();
+        if !created.is_empty() {
+            self.edit.select(created, SelectMode::Replace);
+        }
+        changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+        Ok(changed)
     }
 
     /// Whether a drag holds the pointer at the canvas edge, so the shell

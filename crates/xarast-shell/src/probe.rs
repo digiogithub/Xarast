@@ -1,5 +1,5 @@
 //! Scripted pan, zoom and editing latency probes
-//! (`xarast --probe pan|zoom|drag|scale|rotate|rect|ellipse|nodes|pen|freehand`).
+//! (`xarast --probe pan|zoom|drag|scale|rotate|rect|ellipse|nodes|pen|freehand|snap|arrange|paste`).
 //!
 //! The probe drives the real viewer with intents it generates itself, one
 //! per frame, never with input injected into the desktop: the maintainer's
@@ -53,6 +53,18 @@ pub enum ProbeKind {
     /// The freehand tool: one long stroke. The release fits it and
     /// commits one "Draw Freehand".
     Freehand,
+    /// A selector drag with the grid shown and snapping to the grid, to
+    /// guides and to objects on (`phase-07 §W8`): every frame resolves a
+    /// snap through the pick index; the snap marker is drawn.
+    Snap,
+    /// Structure operations (`phase-07 §W7`) before a drag: select the
+    /// object, duplicate it three times, distribute the four, open the
+    /// Alignment panel and group them; then drag the group.
+    Arrange,
+    /// Copy the object and paste it through the **system clipboard**, then
+    /// drag the pasted copy. Writes the clipboard: run it only in an
+    /// isolated session (`docs/memory/ui.md`), never on a live desktop.
+    Paste,
 }
 
 impl ProbeKind {
@@ -70,6 +82,9 @@ impl ProbeKind {
             "nodes" => Some(ProbeKind::Nodes),
             "pen" => Some(ProbeKind::Pen),
             "freehand" => Some(ProbeKind::Freehand),
+            "snap" => Some(ProbeKind::Snap),
+            "arrange" => Some(ProbeKind::Arrange),
+            "paste" => Some(ProbeKind::Paste),
             _ => None,
         }
     }
@@ -86,6 +101,9 @@ impl ProbeKind {
             ProbeKind::Nodes => "nodes",
             ProbeKind::Pen => "pen",
             ProbeKind::Freehand => "freehand",
+            ProbeKind::Snap => "snap",
+            ProbeKind::Arrange => "arrange",
+            ProbeKind::Paste => "paste",
         }
     }
 
@@ -215,7 +233,10 @@ impl Probe {
             | ProbeKind::Ellipse
             | ProbeKind::Nodes
             | ProbeKind::Pen
-            | ProbeKind::Freehand => {
+            | ProbeKind::Freehand
+            | ProbeKind::Snap
+            | ProbeKind::Arrange
+            | ProbeKind::Paste => {
                 if let Some(intent) = self.prelude.pop_front() {
                     return intent;
                 }

@@ -156,6 +156,37 @@ pub enum Intent {
     Redo,
     /// Delete the selected objects.
     DeleteSelection,
+    /// Group the selected objects (`Ctrl+G`).
+    Group,
+    /// Ungroup the selected groups (`Ctrl+U`).
+    Ungroup,
+    /// Change the selection's z-order.
+    Arrange(crate::structure::ZOrder),
+    /// Align or distribute the selected objects.
+    Align(crate::structure::AlignSpec),
+    /// Duplicate the selection, offset (`Ctrl+D`).
+    Duplicate,
+    /// Copy the selection to the clipboard (`Ctrl+C`).
+    Copy,
+    /// Copy the selection to the clipboard and delete it (`Ctrl+X`).
+    Cut,
+    /// Paste from the clipboard: into the middle of the view, or, in
+    /// place, at the coordinates it was copied from. The core asks the
+    /// shell for the clipboard's text ([`PlatformRequest::ReadClipboard`]);
+    /// the answer comes back as [`Intent::PasteText`].
+    Paste {
+        /// At the original coordinates (`Ctrl+Shift+V`).
+        in_place: bool,
+    },
+    /// The shell's answer to [`PlatformRequest::ReadClipboard`]: the
+    /// clipboard's text, or `None` when there is no clipboard to read (the
+    /// application's own last copy is pasted then).
+    PasteText {
+        /// The text.
+        text: Option<String>,
+        /// As in [`Intent::Paste`].
+        in_place: bool,
+    },
     /// `Esc`: cancel the gesture in flight, or, when there is none,
     /// select nothing (`research/04 §4.1`).
     Cancel,
@@ -173,6 +204,22 @@ pub enum Intent {
     /// scroll the view one step and carry the gesture along. The shell
     /// sends it while [`crate::Session::wants_autoscroll`] says so.
     AutoScroll,
+
+    // ── snapping, grid and guides ─────────────────────────────────────
+    /// Switch one kind of snapping on or off. Works in the middle of a
+    /// drag, which re-evaluates at once (`research/04 §4.4`).
+    ToggleSnap(crate::snap::SnapKind),
+    /// Show or hide the grid.
+    ToggleGrid,
+    /// Show or hide the guides.
+    ToggleGuides,
+    /// Add, move or delete a guide, or change the grid: an undoable
+    /// document edit (`phase-07` T8.2, T8.6).
+    Guides(crate::snap::GuideOp),
+
+    /// Open a dialog or panel of the interface (the core only relays it,
+    /// as [`PlatformRequest::ShowDialog`]).
+    ShowDialog(Dialog),
 
     // ── the tools ─────────────────────────────────────────────────────
     /// Choose a tool.
@@ -225,6 +272,24 @@ pub enum PlatformRequest {
     ShowOpenDialog,
     /// End the application.
     Quit,
+    /// Put this text on the system clipboard: a copy's SVG flavour.
+    SetClipboardText(String),
+    /// Open a dialog or panel of the interface.
+    ShowDialog(Dialog),
+    /// Read the system clipboard's text and answer with
+    /// [`Intent::PasteText`].
+    ReadClipboard {
+        /// Passed back in the answer.
+        in_place: bool,
+    },
+}
+
+/// A dialog or panel of the interface the core can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Dialog {
+    /// Arrange › Alignment…
+    Align,
 }
 
 bitflags::bitflags! {

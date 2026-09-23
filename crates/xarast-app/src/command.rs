@@ -16,7 +16,9 @@ use std::fmt;
 
 use crate::edit::ToolId;
 use crate::geometry::DevicePoint;
-use crate::intent::Intent;
+use crate::intent::{Dialog, Intent};
+use crate::snap::SnapKind;
+use crate::structure::ZOrder;
 use crate::tool::ToolAction;
 use crate::viewport::ZoomTarget;
 
@@ -37,6 +39,9 @@ pub enum ChordKey {
     Escape,
     /// A function key, `F1` to `F24`.
     Function(u8),
+    /// A key of the numeric keypad, by the character it types (`.`, `2`,
+    /// `*`): only the keypad's key matches, not the main block's.
+    NumPad(char),
 }
 
 /// A key and the modifiers held with it.
@@ -98,6 +103,12 @@ impl KeyChord {
         KeyChord::plain(ChordKey::Function(n))
     }
 
+    /// A key of the numeric keypad.
+    #[must_use]
+    pub const fn numpad(c: char) -> KeyChord {
+        KeyChord::plain(ChordKey::NumPad(c))
+    }
+
     /// A function key with Shift.
     #[must_use]
     pub const fn shift_f(n: u8) -> KeyChord {
@@ -134,6 +145,7 @@ impl fmt::Display for KeyChord {
             ChordKey::Enter => f.write_str("Enter"),
             ChordKey::Escape => f.write_str("Esc"),
             ChordKey::Function(n) => write!(f, "F{n}"),
+            ChordKey::NumPad(c) => write!(f, "NumPad {c}"),
         }
     }
 }
@@ -179,6 +191,34 @@ pub enum AppCommand {
     /// Convert to editable shapes (`Ctrl+Shift+S`): rectangles, ellipses
     /// and quick shapes become paths.
     ConvertToShapes,
+    /// Edit › Cut.
+    Cut,
+    /// Edit › Copy.
+    Copy,
+    /// Edit › Paste: into the middle of the view.
+    Paste,
+    /// Edit › Paste in place: at the copied coordinates.
+    PasteInPlace,
+    /// Edit › Duplicate.
+    Duplicate,
+    /// Arrange › Group.
+    Group,
+    /// Arrange › Ungroup.
+    Ungroup,
+    /// Arrange › a z-order operation.
+    Arrange(ZOrder),
+    /// Arrange › Alignment…: open the align panel.
+    AlignDialog,
+    /// View › Snap to grid (works mid-drag).
+    SnapToGrid,
+    /// View › Snap to guides (works mid-drag).
+    SnapToGuides,
+    /// View › Snap to objects (works mid-drag).
+    SnapToObjects,
+    /// View › Show grid.
+    ShowGrid,
+    /// View › Show guides.
+    ShowGuides,
 }
 
 /// How much one zoom-in or zoom-out step multiplies the zoom.
@@ -187,14 +227,33 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 30] = [
+    pub const ALL: [AppCommand; 49] = [
         AppCommand::Open,
         AppCommand::Close,
         AppCommand::Quit,
         AppCommand::Undo,
         AppCommand::Redo,
+        AppCommand::Cut,
+        AppCommand::Copy,
+        AppCommand::Paste,
+        AppCommand::PasteInPlace,
+        AppCommand::Duplicate,
         AppCommand::Delete,
         AppCommand::SelectAll,
+        AppCommand::Group,
+        AppCommand::Ungroup,
+        AppCommand::Arrange(ZOrder::BringToFront),
+        AppCommand::Arrange(ZOrder::BringForward),
+        AppCommand::Arrange(ZOrder::SendBackward),
+        AppCommand::Arrange(ZOrder::SendToBack),
+        AppCommand::Arrange(ZOrder::LayerUp),
+        AppCommand::Arrange(ZOrder::LayerDown),
+        AppCommand::AlignDialog,
+        AppCommand::SnapToGrid,
+        AppCommand::SnapToGuides,
+        AppCommand::SnapToObjects,
+        AppCommand::ShowGrid,
+        AppCommand::ShowGuides,
         AppCommand::Cancel,
         AppCommand::ZoomIn,
         AppCommand::ZoomOut,
@@ -241,14 +300,35 @@ impl AppCommand {
             AppCommand::Tool(t) => t.label(),
             AppCommand::Action(a) => a.label(),
             AppCommand::ConvertToShapes => "Convert to editable shapes",
+            AppCommand::Cut => "Cut",
+            AppCommand::Copy => "Copy",
+            AppCommand::Paste => "Paste",
+            AppCommand::PasteInPlace => "Paste in place",
+            AppCommand::Duplicate => "Duplicate",
+            AppCommand::Group => "Group",
+            AppCommand::Ungroup => "Ungroup",
+            AppCommand::Arrange(z) => z.label(),
+            AppCommand::AlignDialog => "Alignment…",
+            AppCommand::SnapToGrid => "Snap to grid",
+            AppCommand::SnapToGuides => "Snap to guides",
+            AppCommand::SnapToObjects => "Snap to objects",
+            AppCommand::ShowGrid => "Show grid",
+            AppCommand::ShowGuides => "Show guides",
         }
     }
 
     /// Whether the key works in the middle of a drag (`WorksInDrag` in
-    /// the original): only `Esc`, which cancels it.
+    /// the original): `Esc`, which cancels it, and the snapping toggles
+    /// (`research/04 §4.4`).
     #[must_use]
     pub const fn works_in_drag(self) -> bool {
-        matches!(self, AppCommand::Cancel)
+        matches!(
+            self,
+            AppCommand::Cancel
+                | AppCommand::SnapToGrid
+                | AppCommand::SnapToGuides
+                | AppCommand::SnapToObjects
+        )
     }
 
     /// Every key that runs the command; the first is the one a menu shows.
@@ -297,6 +377,27 @@ impl AppCommand {
         const JOIN: &[KeyChord] = &[KeyChord::char('j')];
         const CONVERT: &[KeyChord] = &[KeyChord::ctrl_shift('s')];
         const NONE: &[KeyChord] = &[];
+        // Edit and Arrange, `research/04 §4.2`, §4.3.
+        const CUT: &[KeyChord] = &[KeyChord::ctrl('x')];
+        const COPY: &[KeyChord] = &[KeyChord::ctrl('c')];
+        const PASTE: &[KeyChord] = &[KeyChord::ctrl('v')];
+        const PASTE_IN_PLACE: &[KeyChord] = &[KeyChord::ctrl_shift('v')];
+        const DUPLICATE: &[KeyChord] = &[KeyChord::ctrl('d')];
+        const GROUP: &[KeyChord] = &[KeyChord::ctrl('g')];
+        const UNGROUP: &[KeyChord] = &[KeyChord::ctrl('u')];
+        const FRONT: &[KeyChord] = &[KeyChord::ctrl('f')];
+        const FORWARD: &[KeyChord] = &[KeyChord::ctrl_shift('f')];
+        const BACKWARD: &[KeyChord] = &[KeyChord::ctrl_shift('b')];
+        const BACK: &[KeyChord] = &[KeyChord::ctrl('b')];
+        const LAYER_UP: &[KeyChord] = &[KeyChord::ctrl_shift('u')];
+        const LAYER_DOWN: &[KeyChord] = &[KeyChord::ctrl_shift('d')];
+        const ALIGN: &[KeyChord] = &[KeyChord::ctrl_shift('l')];
+        // View, `research/04 §4.4`.
+        const SNAP_GRID: &[KeyChord] = &[KeyChord::numpad('.')];
+        const SNAP_GUIDES: &[KeyChord] = &[KeyChord::numpad('2')];
+        const SNAP_OBJECTS: &[KeyChord] = &[KeyChord::numpad('*')];
+        const SHOW_GRID: &[KeyChord] = &[KeyChord::char('#')];
+        const SHOW_GUIDES: &[KeyChord] = &[KeyChord::numpad('1')];
         match self {
             AppCommand::Open => OPEN,
             AppCommand::Close => CLOSE,
@@ -337,6 +438,27 @@ impl AppCommand {
                 | ToolAction::ClosePath => NONE,
             },
             AppCommand::ConvertToShapes => CONVERT,
+            AppCommand::Cut => CUT,
+            AppCommand::Copy => COPY,
+            AppCommand::Paste => PASTE,
+            AppCommand::PasteInPlace => PASTE_IN_PLACE,
+            AppCommand::Duplicate => DUPLICATE,
+            AppCommand::Group => GROUP,
+            AppCommand::Ungroup => UNGROUP,
+            AppCommand::Arrange(z) => match z {
+                ZOrder::BringToFront => FRONT,
+                ZOrder::BringForward => FORWARD,
+                ZOrder::SendBackward => BACKWARD,
+                ZOrder::SendToBack => BACK,
+                ZOrder::LayerUp => LAYER_UP,
+                ZOrder::LayerDown => LAYER_DOWN,
+            },
+            AppCommand::AlignDialog => ALIGN,
+            AppCommand::SnapToGrid => SNAP_GRID,
+            AppCommand::SnapToGuides => SNAP_GUIDES,
+            AppCommand::SnapToObjects => SNAP_OBJECTS,
+            AppCommand::ShowGrid => SHOW_GRID,
+            AppCommand::ShowGuides => SHOW_GUIDES,
         }
     }
 
@@ -385,6 +507,20 @@ impl AppCommand {
             AppCommand::Action(ToolAction::SelectAll) => Intent::SelectAll,
             AppCommand::Action(a) => Intent::ToolAction(a),
             AppCommand::ConvertToShapes => Intent::ConvertToShapes,
+            AppCommand::Cut => Intent::Cut,
+            AppCommand::Copy => Intent::Copy,
+            AppCommand::Paste => Intent::Paste { in_place: false },
+            AppCommand::PasteInPlace => Intent::Paste { in_place: true },
+            AppCommand::Duplicate => Intent::Duplicate,
+            AppCommand::Group => Intent::Group,
+            AppCommand::Ungroup => Intent::Ungroup,
+            AppCommand::Arrange(z) => Intent::Arrange(z),
+            AppCommand::AlignDialog => Intent::ShowDialog(Dialog::Align),
+            AppCommand::SnapToGrid => Intent::ToggleSnap(SnapKind::Grid),
+            AppCommand::SnapToGuides => Intent::ToggleSnap(SnapKind::Guide),
+            AppCommand::SnapToObjects => Intent::ToggleSnap(SnapKind::Object),
+            AppCommand::ShowGrid => Intent::ToggleGrid,
+            AppCommand::ShowGuides => Intent::ToggleGuides,
         }
     }
 }

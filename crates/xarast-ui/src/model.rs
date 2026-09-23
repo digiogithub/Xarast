@@ -368,6 +368,8 @@ pub struct EditingView {
     pub selected: usize,
     /// The tool's infobar, described by the tool.
     pub infobar: xarast_app::Infobar,
+    /// The snapping switches, for the View menu's ticks.
+    pub snap: xarast_app::snap::SnapSettings,
 }
 
 /// Something the interface wants the application to do.
@@ -448,6 +450,8 @@ pub enum UiCommand {
     SetGuidesVisible(bool),
     /// Replace the grid settings.
     SetGrid(GridSettings),
+    /// Align or distribute the selection (the alignment panel).
+    Align(xarast_app::structure::AlignSpec),
     /// Change the unit measurements are shown in.
     SetUnit(Unit),
     /// Set the fill colour, `None` for "no colour".

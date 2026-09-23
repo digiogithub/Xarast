@@ -191,6 +191,7 @@ impl Workspace {
             });
 
         self.menu.windows(ctx, &tokens);
+        self.menu.align_window(ctx, model, &mut out);
 
         WorkspaceOutput {
             commands: out.drain(),

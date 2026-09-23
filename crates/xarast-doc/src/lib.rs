@@ -113,6 +113,8 @@ pub use text::{
 pub use text_model::{
     CharRun, ItemEntry, KernAt, LineEntry, StoryFlow, StoryText, TextCursor, TextPos,
 };
-pub use tree::{Attach, Links, NodeData, NodeFlags, NodeId, Tag, Tree, TreeError};
+pub use tree::{
+    Attach, ChangeLog, Links, NodeData, NodeFlags, NodeId, Tag, Tree, TreeChange, TreeError,
+};
 pub use validate::{Invariant, ValidationReport};
 pub use walk::{Ancestors, Children, Descend, Postorder, Preorder, RenderWalk, WalkEvent};

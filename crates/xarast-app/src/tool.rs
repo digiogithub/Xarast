@@ -58,7 +58,7 @@
 use std::collections::HashSet;
 
 use xarast_doc::{Document, NodeId};
-use xarast_geom::{Matrix, Mp};
+use xarast_geom::{Matrix, Mp, Vector};
 
 use crate::edit::{EditState, Modifiers, SelectMode, ToolId};
 use crate::geometry::{DevicePoint, DocPoint, DocPointF64Ext, DocRect};
@@ -237,6 +237,8 @@ pub enum HandleShape {
     Control,
     /// A shape's own handle: the rectangle's corner radius.
     Radius,
+    /// Where a drag snapped: a transient marker (`phase-07` T8.5).
+    Snap,
 }
 
 /// One thing a tool wants drawn over the document, in document space.
@@ -578,6 +580,9 @@ pub struct ToolRequests {
     /// Points to select on the object a creation command makes (the pen
     /// selects the end it will continue from).
     pub created_points: Option<Vec<u32>>,
+    /// What the last snapped point of this step landed on, for the
+    /// feedback marker (set by [`ToolCtx::snap_point`]).
+    pub snapped: Option<crate::snap::SnapHit>,
 }
 
 impl ToolRequests {
@@ -673,6 +678,45 @@ impl ToolCtx<'_> {
     #[must_use]
     pub fn enclosed(&self, rect: DocRect) -> Vec<NodeId> {
         self.picker.enclosed(self.doc, rect)
+    }
+
+    /// Snaps a point a gesture produced, by the session's snapping
+    /// switches (`phase-07 §W8`), and records what it landed on for the
+    /// feedback marker. The point is returned unchanged when nothing is
+    /// in reach or snapping is off.
+    pub fn snap_point(&mut self, p: DocPoint) -> DocPoint {
+        if !self.edit.snap.any() {
+            return p;
+        }
+        let exclude: Vec<NodeId> = self.edit.selection().collect();
+        let r = crate::snap::SnapResolver::for_document(
+            self.doc,
+            &self.edit.snap,
+            self.viewport,
+            self.picker,
+            &exclude,
+        );
+        let (q, hit) = r.snap(p);
+        self.requests.snapped = hit;
+        q
+    }
+
+    /// Snaps a box being moved by `delta` (its nine anchor points), for a
+    /// move of `moving`. Returns the corrected displacement.
+    pub fn snap_move(&mut self, moving: &[NodeId], bounds: DocRect, delta: Vector) -> Vector {
+        if !self.edit.snap.any() {
+            return delta;
+        }
+        let r = crate::snap::SnapResolver::for_document(
+            self.doc,
+            &self.edit.snap,
+            self.viewport,
+            self.picker,
+            moving,
+        );
+        let (d, hit) = r.snap_move(bounds, delta);
+        self.requests.snapped = hit;
+        d
     }
 }
 

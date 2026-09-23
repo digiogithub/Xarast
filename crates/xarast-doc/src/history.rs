@@ -120,9 +120,13 @@ impl Action {
         match self {
             Action::Attach { node, anchor, how } => {
                 doc.tree.attach(*node, *anchor, *how)?;
+                let parent = doc.tree.links(*node).parent;
+                doc.tree.note_change(*node, parent);
             }
             Action::Detach { node, .. } => {
+                let parent = doc.tree.get(*node).and_then(|n| n.links.parent);
                 doc.tree.detach(*node)?;
+                doc.tree.note_change(*node, parent);
             }
             Action::SetKind { node, new } => {
                 let n = doc
@@ -132,6 +136,7 @@ impl Action {
                 n.kind = (**new).clone();
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetFlags { node, new } => {
                 let detached = doc
@@ -151,6 +156,7 @@ impl Action {
                         NodeFlags::empty()
                     };
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::Transform { node, matrix } => {
                 let n = doc
@@ -160,6 +166,7 @@ impl Action {
                 transform_kind(&mut n.kind, *matrix);
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetAttr { node, new } => {
                 let n = doc
@@ -172,6 +179,7 @@ impl Action {
                 }
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetResource { id, new } => {
                 let ResourceRef::Bitmap(b) = id else {
@@ -181,6 +189,7 @@ impl Action {
                     .replace_bitmap_pixels(*b, new.clone())
                     .ok_or(EditError::MissingResource(*id))?;
                 doc.tree.touch_resources();
+                doc.tree.note_everything_changed();
             }
             Action::SetForeign { node, new } => {
                 if !doc.tree.contains(*node) {
@@ -452,8 +461,14 @@ impl<'d> Tx<'d> {
 
     /// Applies one action, recording its inverse.
     pub fn act(&mut self, action: Action) -> Result<(), EditError> {
+        let bytes = action.size_hint(self.doc);
+        self.act_costing(action, bytes)
+    }
+
+    /// [`Tx::act`] with the retained cost given rather than estimated.
+    fn act_costing(&mut self, action: Action, bytes: usize) -> Result<(), EditError> {
         let inverse = action.inverse(self.doc);
-        self.bytes += action.size_hint(self.doc);
+        self.bytes += bytes;
         self.note_spreads_before(&action);
         let applied = action.apply(self.doc);
         self.note_spreads_after(&action);
@@ -517,11 +532,17 @@ impl<'d> Tx<'d> {
             .tree
             .anchor_of(node)
             .ok_or(EditError::NotPermitted(node))?;
-        self.act(Action::Detach {
-            node,
-            prev_anchor,
-            prev_how,
-        })?;
+        // A move retains nothing: the node is attached again at once. Costing
+        // the detach as a deletion charged the whole subtree to the history
+        // budget, so regrouping a large drawing evicted its own undo step.
+        self.act_costing(
+            Action::Detach {
+                node,
+                prev_anchor,
+                prev_how,
+            },
+            size_of::<Action>(),
+        )?;
         self.act(Action::Attach { node, anchor, how })?;
         Ok(())
     }

@@ -68,7 +68,10 @@ pub use hit::{
 };
 pub use hit_index::{Candidates, HitIndex, HitIndexStats, RectMode};
 pub use matrix::Matrix;
-pub use measure::{Nearest, PathHitIndex, arclen, fill_contains, nearest_point, point_at_arclen};
+pub use measure::{
+    Nearest, PathHitIndex, arclen, fill_contains, nearest_in_index, nearest_point,
+    nearest_point_transformed, point_at_arclen,
+};
 pub use mp::{Mp, ParseMpError};
 pub use path::{Path, PathBuilder, PathError, PointFlags, Segment, SubPathRef, Verb};
 pub use path_edit::{

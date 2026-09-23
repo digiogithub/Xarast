@@ -611,3 +611,71 @@ fn a_restore_never_reuses_a_revision() {
     let restored = doc.tree.by_tag(tag).unwrap();
     assert!(doc.tree.content_rev(restored) > moved);
 }
+
+#[test]
+fn a_move_is_not_charged_as_a_deletion() {
+    let f = fixture();
+    let (group, layer_id) = (f.group, f.layer);
+    let mut doc = f.doc;
+    let mut bus = CommandBus::new();
+    bus.dispatch(
+        &mut doc,
+        &cmd("Move", move |tx| {
+            tx.move_node(group, layer_id, Attach::FirstChild)
+        }),
+    )
+    .unwrap();
+    let moved = bus.history().bytes_used();
+    bus.dispatch(&mut doc, &cmd("Delete", move |tx| tx.delete(group)))
+        .unwrap();
+    let deleted = bus.history().bytes_used() - moved;
+    assert!(
+        moved < deleted,
+        "a move retains nothing ({moved} bytes), a delete its subtree ({deleted})"
+    );
+}
+
+#[test]
+fn the_change_journal_names_what_every_action_touched() {
+    let f = fixture();
+    let (group, shape, layer_id) = (f.group, f.shape_a, f.layer);
+    let mut doc = f.doc;
+    // A fresh tree has never been seen: the journal says so.
+    assert!(doc.tree.drain_changes().overflowed);
+    assert_eq!(doc.tree.drain_changes(), crate::tree::ChangeLog::default());
+    let mut bus = CommandBus::new();
+    bus.dispatch(
+        &mut doc,
+        &cmd("Move", move |tx| {
+            tx.transform(shape, Matrix::translate(Vector::raw(5, 0)))
+        }),
+    )
+    .unwrap();
+    let log = doc.tree.drain_changes();
+    assert!(!log.overflowed);
+    assert!(
+        log.changes
+            .iter()
+            .any(|c| c.node == shape && c.parent == Some(group))
+    );
+    bus.dispatch(&mut doc, &cmd("Delete", move |tx| tx.delete(group)))
+        .unwrap();
+    let log = doc.tree.drain_changes();
+    assert!(
+        log.changes
+            .iter()
+            .any(|c| c.node == group && c.parent == Some(layer_id))
+    );
+    // Undo journals too: the group comes back under the layer.
+    bus.undo(&mut doc);
+    let log = doc.tree.drain_changes();
+    assert!(
+        log.changes
+            .iter()
+            .any(|c| c.node == group && c.parent == Some(layer_id))
+    );
+    // Draining is not an edit.
+    let before = doc.canonical_digest();
+    let _ = doc.tree.drain_changes();
+    assert_eq!(doc.canonical_digest(), before);
+}

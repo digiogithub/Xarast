@@ -335,6 +335,13 @@ impl ShapeTool {
 
     fn update(&mut self, cx: &mut ToolCtx<'_>, to: DocPoint) {
         let m = cx.modifiers;
+        // The dragged corner snaps (`phase-07` T8.7); the radius handle
+        // does not, it is a length along the edge.
+        let to = if matches!(self.drag, Some(ShapeDrag::Create { .. })) {
+            cx.snap_point(to)
+        } else {
+            to
+        };
         match &mut self.drag {
             Some(ShapeDrag::Create {
                 start,
@@ -400,11 +407,14 @@ impl Tool for ShapeTool {
                         shape: q.clone(),
                         base: q,
                     },
-                    None => ShapeDrag::Create {
-                        start: *from,
-                        centre: cx.modifiers.adjust.then_some(*from),
-                        shape: None,
-                    },
+                    None => {
+                        let from = cx.snap_point(*from);
+                        ShapeDrag::Create {
+                            start: from,
+                            centre: cx.modifiers.adjust.then_some(from),
+                            shape: None,
+                        }
+                    }
                 });
                 cx.requests.overlay_changed = true;
             }

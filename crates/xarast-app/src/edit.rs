@@ -334,6 +334,8 @@ pub struct EditState {
     pub show_overlays: bool,
     /// What newly drawn objects are given.
     pub current: CurrentAttributes,
+    /// The snapping switches (`phase-07 §W8`).
+    pub snap: crate::snap::SnapSettings,
 }
 
 impl EditState {
@@ -351,6 +353,7 @@ impl EditState {
             modifiers: Modifiers::default(),
             show_overlays: true,
             current: CurrentAttributes::default(),
+            snap: crate::snap::SnapSettings::default(),
         }
     }
 

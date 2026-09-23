@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use xarast_app::AppCommand;
+use xarast_app::structure::{AlignSpec, AlignTarget, AxisAlign, ZOrder};
 
 use crate::model::{CommandSink, UiCommand, UiModel};
 use crate::theme::ThemeTokens;
@@ -30,7 +31,12 @@ pub const ABOUT_TITLE: &str = "About Xarast";
 #[derive(Debug, Default)]
 pub struct AppMenu {
     about_open: bool,
+    align_open: bool,
+    align_to: AlignTarget,
 }
+
+/// The accessible title of the alignment panel.
+pub const ALIGN_TITLE: &str = "Alignment";
 
 impl AppMenu {
     /// A menu bar with nothing open.
@@ -48,6 +54,17 @@ impl AppMenu {
         self.about_open = open;
     }
 
+    /// Whether the alignment panel is showing.
+    pub fn is_align_open(&self) -> bool {
+        self.align_open
+    }
+
+    /// Opens or closes the alignment panel (Arrange › Alignment…,
+    /// `Ctrl+Shift+L`).
+    pub fn set_align_open(&mut self, open: bool) {
+        self.align_open = open;
+    }
+
     /// Draws the menu bar into `ui` (the workspace's top panel).
     pub fn bar(&mut self, ui: &mut egui::Ui, model: &UiModel, out: &mut CommandSink) {
         egui::MenuBar::new().ui(ui, |ui| {
@@ -61,6 +78,7 @@ impl AppMenu {
                 command_item(ui, model, AppCommand::Quit, out);
             });
             ui.menu_button("Edit", |ui| edit_menu(ui, model, out));
+            ui.menu_button("Arrange", |ui| arrange_menu(ui, model, out));
             ui.menu_button("View", |ui| {
                 for c in [AppCommand::ZoomIn, AppCommand::ZoomOut] {
                     command_item(ui, model, c, out);
@@ -74,6 +92,18 @@ impl AppMenu {
                 ] {
                     command_item(ui, model, c, out);
                 }
+                ui.separator();
+                let doc = model.document.as_ref();
+                let snap = model.editing.as_ref().map(|e| e.snap).unwrap_or_default();
+                for (c, on) in [
+                    (AppCommand::ShowGrid, doc.is_some_and(|d| d.grid.visible)),
+                    (AppCommand::ShowGuides, doc.is_some_and(|d| d.show_guides)),
+                    (AppCommand::SnapToGrid, snap.grid),
+                    (AppCommand::SnapToGuides, snap.guides),
+                    (AppCommand::SnapToObjects, snap.objects),
+                ] {
+                    toggle_item(ui, model, c, on, out);
+                }
             });
             ui.menu_button("Help", |ui| {
                 let about = ui.button(format!("{ABOUT_TITLE}…"));
@@ -83,6 +113,82 @@ impl AppMenu {
                 }
             });
         });
+    }
+
+    /// Draws the alignment panel when it is open: the nine anchors, the
+    /// distributions, and what they are relative to.
+    pub fn align_window(&mut self, ctx: &egui::Context, model: &UiModel, out: &mut CommandSink) {
+        if !self.align_open {
+            return;
+        }
+        let enabled = model.editing.as_ref().is_some_and(|e| e.selected > 0);
+        let mut open = true;
+        let mut to = self.align_to;
+        egui::Window::new(ALIGN_TITLE)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(240.0)
+            .show(ctx, |ui| {
+                ui.label("Align");
+                // Rows top to bottom: document y is up, so the top row is
+                // the high edge.
+                let rows = [
+                    (AxisAlign::Max, ["Top left", "Top centre", "Top right"]),
+                    (AxisAlign::Centre, ["Middle left", "Centre", "Middle right"]),
+                    (
+                        AxisAlign::Min,
+                        ["Bottom left", "Bottom centre", "Bottom right"],
+                    ),
+                ];
+                let cols = [AxisAlign::Min, AxisAlign::Centre, AxisAlign::Max];
+                egui::Grid::new("align-anchors").show(ui, |ui| {
+                    for (y, labels) in rows {
+                        for (x, label) in cols.iter().zip(labels) {
+                            let b = ui.add_enabled(enabled, egui::Button::new(label));
+                            if b.clicked() {
+                                out.push(UiCommand::Align(AlignSpec { x: *x, y, to }));
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+                ui.label("Distribute");
+                let dist = [
+                    ("Left edges", AxisAlign::DistributeMin, true),
+                    ("Centres", AxisAlign::DistributeCentre, true),
+                    ("Right edges", AxisAlign::DistributeMax, true),
+                    ("Horizontal gaps", AxisAlign::DistributeGaps, true),
+                    ("Bottom edges", AxisAlign::DistributeMin, false),
+                    ("Middles", AxisAlign::DistributeCentre, false),
+                    ("Top edges", AxisAlign::DistributeMax, false),
+                    ("Vertical gaps", AxisAlign::DistributeGaps, false),
+                ];
+                egui::Grid::new("align-distribute").show(ui, |ui| {
+                    for (i, (label, how, horizontal)) in dist.into_iter().enumerate() {
+                        let b = ui.add_enabled(enabled, egui::Button::new(label));
+                        if b.clicked() {
+                            let (x, y) = if horizontal {
+                                (how, AxisAlign::None)
+                            } else {
+                                (AxisAlign::None, how)
+                            };
+                            out.push(UiCommand::Align(AlignSpec { x, y, to }));
+                        }
+                        if i % 4 == 3 {
+                            ui.end_row();
+                        }
+                    }
+                });
+                ui.separator();
+                ui.label("Relative to");
+                ui.radio_value(&mut to, AlignTarget::Selection, "Selection");
+                ui.radio_value(&mut to, AlignTarget::Page, "Page");
+                ui.radio_value(&mut to, AlignTarget::FirstSelected, "First selected");
+            });
+        self.align_to = to;
+        self.align_open = open;
     }
 
     /// Draws the About box when it is open.
@@ -162,6 +268,54 @@ fn labelled_item(
     }
 }
 
+/// A menu item that switches something on and off, ticked when on.
+fn toggle_item(
+    ui: &mut egui::Ui,
+    model: &UiModel,
+    command: AppCommand,
+    on: bool,
+    out: &mut CommandSink,
+) {
+    let enabled = model.document.is_some() || !command.needs_document();
+    let label = format!("{} {}", if on { "✔" } else { "  " }, command.label());
+    let shortcut = command.primary_shortcut().map(|k| k.to_string());
+    let mut button = egui::Button::new(label);
+    if let Some(k) = &shortcut {
+        button = button.shortcut_text(k.as_str());
+    }
+    let response = ui.add_enabled(enabled, button);
+    menu_item_node(ui.ctx(), response.id, command.label(), shortcut);
+    if response.clicked() {
+        out.push(UiCommand::App(command));
+        ui.close();
+    }
+}
+
+/// Arrange › Group, Ungroup, the z-order moves and Alignment….
+fn arrange_menu(ui: &mut egui::Ui, model: &UiModel, out: &mut CommandSink) {
+    let selected = model.editing.as_ref().is_some_and(|e| e.selected > 0);
+    for c in [AppCommand::Group, AppCommand::Ungroup] {
+        labelled_item(ui, c, c.label(), selected, out);
+    }
+    ui.separator();
+    for z in [
+        ZOrder::BringToFront,
+        ZOrder::BringForward,
+        ZOrder::SendBackward,
+        ZOrder::SendToBack,
+    ] {
+        let c = AppCommand::Arrange(z);
+        labelled_item(ui, c, c.label(), selected, out);
+    }
+    ui.separator();
+    for z in [ZOrder::LayerUp, ZOrder::LayerDown] {
+        let c = AppCommand::Arrange(z);
+        labelled_item(ui, c, c.label(), selected, out);
+    }
+    ui.separator();
+    command_item(ui, model, AppCommand::AlignDialog, out);
+}
+
 /// "Undo Move", or plain "Undo" greyed out when there is nothing to undo.
 #[must_use]
 pub fn undo_menu_label(verb: &str, what: Option<&str>) -> String {
@@ -192,6 +346,16 @@ fn edit_menu(ui: &mut egui::Ui, model: &UiModel, out: &mut CommandSink) {
     );
     ui.separator();
     let selected = editing.is_some_and(|e| e.selected > 0);
+    for (c, on) in [
+        (AppCommand::Cut, selected),
+        (AppCommand::Copy, selected),
+        (AppCommand::Paste, model.document.is_some()),
+        (AppCommand::PasteInPlace, model.document.is_some()),
+        (AppCommand::Duplicate, selected),
+    ] {
+        labelled_item(ui, c, c.label(), on, out);
+    }
+    ui.separator();
     labelled_item(
         ui,
         AppCommand::Delete,
