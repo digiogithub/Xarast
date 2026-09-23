@@ -2,12 +2,12 @@
 id: XARA-T-0223
 type: task
 title: T9.4.6 — Typing, grapheme-aware deletion, undo per typing burst
-status: in_progress
+status: in_review
 parent: XARA-US-0047
 author: mcp
 labels: [phase-9, tools, text]
 created: 2026-09-23T21:28:57Z
-updated: 2026-09-23T21:48:04Z
+updated: 2026-09-23T22:14:29Z
 started: 2026-09-23T21:48:04Z
 ---
 
