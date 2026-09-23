@@ -8,7 +8,7 @@ command modules of `xarast-doc` (`palette`, `fill_edit`). Phase spec:
 phase). Phase-1 colour decisions (naive CMYK, the inherit sentinel, the
 depth limit) stay in [`geometry.md`](geometry.md).
 
-## Current state (2026-09-24, XARA-US-0037 / 0038 / 0041)
+## Current state (2026-09-24, XARA-US-0037 / 0038 / 0041 / 0042)
 
 | Piece | Where | State |
 |---|---|---|
@@ -34,6 +34,33 @@ depth limit) stay in [`geometry.md`](geometry.md).
 | Colour editor UI: 2D field + slider, numeric entry, derivation editor, Redefine / Apply | `xarast-ui/src/colour_field.rs`, `panels/colour.rs` | done (XARA-US-0041) |
 | `History::discard_redo` | `xarast-doc/src/history.rs` | done (for the editor's Esc) |
 | `History::{hold_redo, restore_held_redo, release_held_redo}` | `xarast-doc/src/history.rs` | done (Esc brings back the redo branch) |
+| Colour-line order: `ColourTable::{listed, next_entry_index, move_listed}`, `MoveColour`, `PaletteCommand::Move` | `xarast-color/src/table/edit.rs`, `xarast-doc/src/palette.rs`, `colour_editor.rs` | done (XARA-US-0042) |
+| Colour bar / gallery model: `ColourBarView`, `Swatch`, `ColourSource`, `ColourBarOp`, `DragPoint`, `DropKind`, `Intent::ColourBar`, `selected_stop` | `xarast-app/src/colour_bar.rs` | done (XARA-US-0042) |
+| Drop picking `Picker::pick_drop`; `Tool::fill_selection` / `FillSelection` | `xarast-app/src/picking.rs`, `tool.rs`, `fill_tool.rs` | done (XARA-US-0042) |
+| Colour editor edits the fill tool's selected stop (T-0247) | `colour_editor.rs` via `colour_bar::selected_stop` | done |
+| Colour bar widget, colour gallery panel | `xarast-ui/src/colour_bar.rs`, `panels/gallery.rs` | done (XARA-US-0042) |
+| Eyedropper (T8.7.6) | — | **not done**, filed |
+
+Tests (XARA-US-0042): `xarast-app/tests/colour_bar.rs` (13: the bar's
+order; click = fill / right = line, one step each, undo by digest; a
+click flattens a gradient except onto the fill tool's selected stop;
+nothing selected = current attribute; a named swatch is a live
+reference; **criterion 10** — a colour dropped on an intermediate stop
+changes that stop only, whole `FillGeometry` compared; a drop on the arm
+adds a stop; an empty interior takes a drop, Shift over the outline sets
+the line; a gradient says "flat colour" and flattens; nothing / cancel
+leave digest and history; reorder by drop and by menu, a move to where it
+is records no step, a direct colour redefines a plain named colour but
+not a tint; gallery rename and delete (objects keep their look, the
+editor leaves the deleted entry); the editor edits the fill tool's end
+blob only, one step), `xarast-doc/tests/fill_palette.rs`
+(`colours_join_the_end_of_the_line_and_move_along_it`), `xarast-ui`
+`colour_bar` (5) and `panels::gallery` (1) unit tests, the
+accessibility test `the_colour_bar_and_the_gallery_name_every_swatch_with_its_value`,
+the shell's `colour_drags_resolve_against_the_canvas_and_speak_in_the_status_line`.
+Bench: `cargo bench -p xarast-app --bench pick -- "colour drag"` — two
+moves over the 100k-object synthetic document **12.5 µs** (≈ 6 µs a
+move; budget 1 ms).
 
 Tests: `xarast-app/tests/colour_editor.rs` (14: a 60-event drag is one
 step and undoes by digest; Esc mid-drag leaves digest, labels, serial and
@@ -219,6 +246,65 @@ Plain round-to-nearest would get **545** of them wrong.
     after a drag that changed nothing still works. `History::clear` reaps
     a held branch too.
 
+25. **The colour-line order is `entry_index`.** The file formats already
+    carry it (`research/01 §9.2`: the entry's position in the document's
+    colour list), so ordering needs no new table structure:
+    `ColourTable::listed` sorts the **named** entries by `(entry_index,
+    slot)`; `move_listed` renumbers them `1..=n`; `CreateColour` gives a
+    named colour `next_entry_index` (the end of the line). Unnamed
+    entries are local colours and never listed. A move to where the entry
+    already is changes nothing — the app checks first, so no empty step is
+    recorded (a doc command with no action would still commit one).
+26. **What a swatch is.** "No colour", the named colours in line order,
+    then 14 standard colours chosen for Xarast (`colour_bar::STANDARD`;
+    not the original's template palette). A named swatch applies a live
+    `Colour::Indexed` reference; a standard one a direct colour. "No
+    colour" is `rgbt(0, 0, 0, 1)` — the importer's representation, which
+    the renderer and the picker already treat as "paint nothing"
+    (`colour_bar::no_colour`); XARA-T-0204 will replace it.
+27. **A click follows the original's colour-change mutation**
+    (`Kernel/fillattr.cpp`, `AttrColourChange::MutateFill`): with the fill
+    tool's handle selected only that stop changes (`selected_stop`: tool in
+    force = Fill, colour channel, the set's nodes still selected, the stop
+    exists); otherwise each selected object's fill (or line) is
+    **replaced** by a flat colour — a gradient is flattened
+    (`SetFillGeometry`, "Set Fill"). The colour *editor* never flattens
+    (decision 20): it edits the start colour, or now the selected stop.
+28. **A colour drag never touches the document before the drop.** The
+    session holds `ColourDrag { source, point, target }`; `DragTo`
+    re-resolves only when the point moved and reports `Changed::UI` only
+    when the target changed; `DragDrop` resolves again at the last point
+    (the document may have changed under a drag that sat still) and
+    applies one command; `DragCancel` just forgets. No history hold is
+    needed, unlike the editor (decision 24).
+29. **Drop resolution order** (`phase-08 §W8.7`): fill-tool stop/end blob
+    (`hit_sets` over `fill_sets::<ColourFill>`, 5 px) → arm (insert a stop
+    at the arm parameter; graduated shapes only) → with Shift, the outline
+    (`pick_drop`: the stroke's own half-width, or 3 px for thinner lines,
+    via `HitTolerance::min_stroke_width = 6 px`) → the interior (fill;
+    `FlattenFill` when the fill in force is not flat) → a named colour of
+    the bar or gallery (a named source reorders to that slot; a direct one
+    redefines a Normal/Spot entry in its own model; tints, shades, links
+    and "no colour" are refused) → nothing. Without Shift an outline hit
+    means the object's fill. Drops go to the **leaf** hit (the object
+    under the pointer, inside its groups), and never change the selection.
+30. **An interior painted with "no colour" still takes a drop.** The pick
+    index's leaves keep `interior: Option<FillRule>` for every filled
+    path, painted or not; `pick_drop` tests it, `pick` still does not
+    (a transparent interior never selects, `tools.md` decision 25). A
+    leaf with neither painted fill nor stroke is still not indexed, so a
+    wholly invisible object inside a group cannot take a drop (a lone one
+    is indexed by its box and can).
+31. **Deleting from the gallery is `OnDelete::Detach`**: objects keep
+    their look as direct colours, derived colours become normal. The
+    editor moves off a deleted entry (`colour_editor::forget_entry`)
+    first. No confirmation is asked (filed).
+32. **The editor follows the fill tool's selected stop** (XARA-T-0247):
+    `selection_colour` / `set_selection_colour` use `selected_stop` for
+    the fill slot, and the title says which stop ("Fill end colour of 1
+    object", "Fill stop 2 …", "Fill corner 3 …"). Edits coalesce as before
+    (same label, same nodes).
+
 ## Invariants that must not be broken
 
 1. Every `ColourValue` component is in `0..=1` and finite (phase 1); shade
@@ -235,6 +321,11 @@ Plain round-to-nearest would get **545** of them wrong.
    unchanged.
 8. A cancelled colour-editor drag leaves the document, the undo list, the
    redo list and the state serial exactly as they were before it.
+9. A colour drag (bar or gallery) changes nothing before its drop; a drop
+   is at most one undo step; a cancelled drag or a drop on nothing leaves
+   digest and history untouched.
+10. Every listed (named) entry's `entry_index` is unique after any
+    `move_listed`; the order of `listed` is total (ties broken by slot).
 
 ## Dead ends (do not retry)
 
@@ -260,8 +351,8 @@ Plain round-to-nearest would get **545** of them wrong.
       palette half of XARA-T-0212. The repaint set
       (`ColourUses::users_of`) is still the walker task XARA-T-0203; a
       palette edit today repaints through the whole-resources bump.
-- [ ] Colour editor on a gradient: edits the **start** colour only; the
-      fill tool's selected stop is not the editor's target yet (filed).
+- [x] Colour editor on a gradient: follows the fill tool's selected stop
+      (XARA-T-0247, decision 32); the start colour otherwise.
 - [ ] Colour editor: "no colour" cannot be set from it (waits for
       XARA-T-0204); spot colours are editable as normal ones (no ink
       name / separation UI).
@@ -275,3 +366,9 @@ Plain round-to-nearest would get **545** of them wrong.
       a real XYZ transform. No corpus file uses it.
 - [ ] The original drops transparency in every model conversion; we carry
       it. Revisit only if a file shows the difference.
+- [ ] Eyedropper (T8.7.6, `Ctrl+E`): not done (filed).
+- [ ] Colour drops on the **transparency** tool's handles, and on a
+      stroke's own gradient handles: not resolved (only the fill tool's
+      colour handles are targets). Filed.
+- [ ] "Set Fill" is also the label of a line-colour click/drop
+      (`SetFillGeometry` names itself by payload, not slot). Filed.

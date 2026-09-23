@@ -193,6 +193,60 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   taken for the editor; it adds ~40 widgets and two meshes to a panel,
   far below the spike's 1,789-control probe. Unmeasured, not assumed.
 
+### Colour bar, gallery and colour drag (phase 8, XARA-US-0042)
+
+- **Seam**: `UiModel::colour_bar: Option<ColourBarView>` in (swatches +
+  the drag in flight), `UiCommand::ColourBar(ColourBarOp)` and
+  `UiCommand::ColourDragAt { x, y, shift }` out. The shell maps the first
+  1:1 onto `Intent::ColourBar`, and turns the second (window points) into
+  `DragPoint::Canvas` (canvas device pixels, via the adapter's
+  `CanvasRegion`) or `DragPoint::Elsewhere`. What a click or drop *does*
+  is `xarast-app`'s (`colour.md` decisions 25–32). `SetFill`/`SetLine`
+  survive and become colour-bar clicks.
+- **Layout**: the bar is a `TopBottomPanel::bottom` declared after the
+  status bar, so it sits between the canvas and the status bar
+  (`COLOUR_BAR_HEIGHT` = swatch + 10 pt), only with a document open. The
+  colour panel lost its colour line (the editor keeps the panel); the
+  gallery (`panels::gallery`, "Colour gallery") is a third dock pane
+  under the colour panel.
+- **One painted strip** (the phase's mitigation for a 256-swatch bar):
+  one allocation, then `ui.interact` per **visible** swatch only, each a
+  focusable AccessKit `Button` named `swatch_label` ("Brand red
+  (document colour)") with `current_text_value` = `#RRGGBB` ("none" for no
+  colour). Paging: ◀/▶ buttons ("Previous colours"/"More colours") a
+  page at a time; the wheel over the strip 3 swatches a notch.
+- **Gestures**: left click = fill, right click or Shift+click = line
+  (`click_slot`); a drag picks the colour up (`drive_drag`). The menu
+  (right click on the strip's empty part, or the "Colour menu" ☰ button)
+  acts on the named colour last clicked: New colour, Edit, Move left/right,
+  Delete. Right click on a swatch is the line colour, as in the original,
+  so the menu cannot live there.
+- **Drag plumbing** (`colour_bar::drive_drag`, shared by bar and gallery):
+  the owner widget and a "cancelled" flag live in egui temp memory under
+  one id — **not** egui's drag state, which egui itself drops on `Esc`
+  (the release then still reported `drag_stopped`, dropping a cancelled
+  colour; measured). Each frame the primary button is down: `Esc` →
+  `DragCancel` (the rest of the press is ignored); pointer over a
+  registered named slot → `DragTo(Entry(id))`; else `ColourDragAt`. The
+  button up → `DragDrop` unless cancelled. Named slots register their
+  rectangles per pass (`register_slot`); the owner reads this pass's and
+  the previous pass's, so it works whichever widget is drawn first. The
+  pointer shape is `Copy` / `NoDrop` from `ColourDragView::allowed`
+  (`Grabbing` before the first answer); the status line shows
+  `ColourDragView::status` (the viewer puts it in `StatusInfo::message`).
+- **Intra-window only**: no `wl_data_device` or OS drag is involved; the
+  shell already routes motion and releases to its adapter, and a release
+  without a canvas press is ignored there, so a drop never reaches a tool.
+- **Spatial index (phase-08 §W8.7 asks to record it)**: no new index —
+  drop hit-testing goes through phase 7's pick index (`Picker::pick_drop`,
+  `HitIndex` + exact `HitShape`), ≈ 6 µs a move at 100k objects.
+- **Gallery**: named colours as a derivation tree (`gallery::tree`:
+  children under their parent, a colour whose parent is not named is a
+  root), each row a draggable swatch (also a drop slot) and a selectable
+  name ("Paper (tint)"); New / Edit / Rename / Delete act on the chosen
+  row; double click edits it in the colour editor. `F9` does not show it
+  yet: the dock has no show/focus plumbing (filed).
+
 ## Panels and canvas
 
 ### Current state
@@ -209,7 +263,9 @@ integration) in about a tenth of a second.
 | `rulers` | `Ruler::draw` plus the pure `ticks()`/`major_step()` used by the tests; 1-2-5 steps, imperial and pica subdivisions |
 | `grid`, `guides` | Rectangular grid with subdivision dropout and snapping arithmetic; guides created by dragging from a ruler, moved, deleted by dropping back |
 | `panels::layers` | Virtualised list, visibility, lock, active layer, reorder, rename, full keyboard operation |
-| `panels::colour` | Colour line with "no colour"; the phase-8 colour editor over `xarast_app::colour_editor` (target, 2D field, numbers, derivation, Redefine/Apply), named colours marked |
+| `panels::colour` | The phase-8 colour editor over `xarast_app::colour_editor` (target, 2D field, numbers, derivation, Redefine/Apply) |
+| `colour_bar` | The colour bar under the canvas (paging, menu, click = fill / right = line, colour drag shared with the gallery) |
+| `panels::gallery` | The colour gallery: named colours as a derivation tree, New/Edit/Rename/Delete, draggable swatches |
 | `colour_field` | The editor's field/strip meshes, axes per model, component ranges and units, press tracking |
 | `panels::status` | Coordinates in the document's unit, zoom, quality, cache pressure, renderer tier |
 | `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState` |
@@ -221,8 +277,8 @@ integration) in about a tenth of a second.
 | `menus` | `AppMenu`: the in-window File/View/Help menu bar, the About box, and `empty_state` (Open… + recent files) (XARA-US-0082) |
 
 **Stubbed or absent on purpose:** the command palette, the problem list
-(needs the diagnostics feed), galleries, and anything Phase 7 and later
-own. No tool handles are produced — the overlay takes them, it does not
+(needs the diagnostics feed), the galleries other than colour, and
+anything Phase 7 and later own. No tool handles are produced — the overlay takes them, it does not
 invent them.
 
 ### Decisions taken (and why)
@@ -360,6 +416,10 @@ invent them.
 - **`RichText::strong()` for headings.** The theme maps egui's strong
   text to `widgets.active.fg_stroke` = the on-accent colour, almost
   invisible on the dark backdrop. Colour headings with `tokens.text`.
+- **egui's own drag state for a drag `Esc` can cancel.** egui ends a
+  drag on `Esc` by itself, yet still reports `drag_stopped` at the
+  release; keep the owner and the cancel flag yourself
+  (`colour_bar::drive_drag`).
 - **Querying a menu item by its visible text in kittest.** The status bar
   also says "100 %"; use `get_by_role_and_label(Role::MenuItem, …)`.
 - **Minor ruler tick values from `index / subdivisions` plus
