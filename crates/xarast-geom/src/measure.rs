@@ -115,6 +115,79 @@ pub fn nearest_point(path: &Path, p: Point, accuracy: f64) -> Option<Nearest> {
     best
 }
 
+/// The closest point to `p` on `path` carried through `m`, if it is within
+/// `radius` millipoints (XARA-T-0153, snapping to outlines).
+///
+/// The matrix is applied to the control points in `f64` before anything
+/// is measured, as the hit test does, so a rotated or skewed object snaps
+/// to what is drawn and not to a rounded copy. A segment whose transformed
+/// control box lies farther than `radius` from `p` is skipped without
+/// being measured: a curve lies inside its control hull, so nothing on it
+/// can be nearer than that box. `accuracy` is `kurbo`'s nearest-point
+/// accuracy, in millipoints.
+#[must_use]
+pub fn nearest_point_transformed(
+    path: &Path,
+    m: crate::Matrix,
+    p: Point,
+    radius: Mp,
+    accuracy: f64,
+) -> Option<Nearest> {
+    let acc = if accuracy.is_finite() && accuracy > 0.0 {
+        accuracy
+    } else {
+        1e-3
+    };
+    let r = radius.to_f64().abs();
+    let a = m.to_affine();
+    let target = p.to_kurbo();
+    let mut best: Option<Nearest> = None;
+    for (sp, si, seg) in path.indexed_segments() {
+        let k = a * seg.to_kurbo();
+        let b = k.bounding_box();
+        let dx = (b.x0 - target.x).max(target.x - b.x1).max(0.0);
+        let dy = (b.y0 - target.y).max(target.y - b.y1).max(0.0);
+        let bound = best.as_ref().map_or(r, |n| n.distance.min(r));
+        if dx.hypot(dy) > bound {
+            continue;
+        }
+        let n = k.nearest(target, acc);
+        let d = n.distance_sq.sqrt();
+        if d <= r && best.as_ref().is_none_or(|b| d < b.distance) {
+            best = Some(Nearest {
+                point: Point::from_kurbo(k.eval(n.t)),
+                distance: d,
+                subpath: sp,
+                segment: si,
+                t: n.t,
+            });
+        }
+    }
+    best
+}
+
+/// The nearest point within `radius` of `p` over every object of an index
+/// whose bounds come that close: `measure` gives an object's nearest point
+/// (for example [`nearest_point_transformed`] on its outline), and the
+/// closest wins, ties to the object nearer the viewer.
+pub fn nearest_in_index<K: Copy + Eq + std::hash::Hash>(
+    index: &crate::HitIndex<K>,
+    p: Point,
+    radius: Mp,
+    mut measure: impl FnMut(K) -> Option<Nearest>,
+) -> Option<(K, Nearest)> {
+    let mut best: Option<(K, Nearest)> = None;
+    for (key, _z) in index.candidates_at(p, radius) {
+        let Some(n) = measure(key) else { continue };
+        if n.distance <= radius.to_f64().abs()
+            && best.as_ref().is_none_or(|(_, b)| n.distance < b.distance)
+        {
+            best = Some((key, n));
+        }
+    }
+    best
+}
+
 /// Whether `p` lies inside the path's fill under `rule`.
 ///
 /// Exact: the winding number is computed against the curves themselves, not
