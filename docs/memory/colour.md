@@ -25,8 +25,10 @@ depth limit) stay in [`geometry.md`](geometry.md).
 | Palette loops broken at build (`repair_cycles` + `Repaired` diagnostic) | `builder.rs` | done |
 | Fill commands `SetFillGeometry`, `MoveFillControl`, `InsertStop`, `MoveStop`, `RemoveStop`, `SetStopValue`, `SetFillProfile`, `SetRampMapping`, `SetFillEffect`, `SetTiling`, `SetTranspMode` | `xarast-doc/src/fill_edit.rs` | done |
 | Pure helpers `move_control`, `set_stop`, `stop_value`, `ramp_insert`, `ramp_move`, `rebuild_ramp`, `fill_arm`, `arm_position`, `fill_in_force`, `set_own_attr` | `fill_edit.rs` | done |
-| `MutateFill` (T8.2.5), group transparency (T8.2.7), "no colour" value (T8.1.5), `.xarast` palette round trip (T8.1.7) | — | **not done**, filed |
-| Walker using `PaletteResolver` + epoch in cache keys; app `EditCommand` variants | `xarast-app` | **not done**, filed |
+| `MutateFill`, `mutate_fill` (the W8.2 mapping table), `FillShape`, `MutationLoss` | `xarast-doc/src/fill_mutate.rs` | done (XARA-US-0039, for the type menu) |
+| Group transparency (T8.2.7), "no colour" value (T8.1.5), `.xarast` palette round trip (T8.1.7) | — | **not done**, filed |
+| App `EditCommand::Fill` for the fill commands | `xarast-app/src/ops.rs`, `fill_tool.rs` | done (XARA-US-0039) |
+| Walker using `PaletteResolver` + epoch in cache keys; palette `EditCommand` variants | `xarast-app` | **not done**, filed |
 
 Tests: `xarast-color/tests/palette.rs` (24, incl. `table::cycles` over 1 000
 random graphs and the round-trip error table), `xarast-xar/tests/palette_corpus.rs`
@@ -137,6 +139,14 @@ Plain round-to-nearest would get **545** of them wrong.
     `ramp_move` returns the new index so a tool keeps hold of the stop.
 17. **A transparency stop value is a level**; the stop keeps its mode.
     `SetTranspMode` rewrites every stop's mode.
+18. **`mutate_fill` follows the W8.2 table**: flat → gradient takes the
+    bounding box (diagonal for linear, inscribed circle otherwise) and a
+    caller-given far value (`desaturated` for colour, `clear_end` = 255 for
+    transparency); gradient ↔ gradient maps `start`/`centre` and
+    `end`/`major`/`corner1`, the third point `start + perp(end − start)`
+    unless the source had one; to three/four colour drops the ramp and
+    seeds the extra colours from its middle stop or `to`. Bitmap, fractal
+    and noise sources are refused. The fill commands derive `PartialEq`.
 
 ## Invariants that must not be broken
 
@@ -169,14 +179,15 @@ Plain round-to-nearest would get **545** of them wrong.
 - [ ] Walker: resolve through `PaletteResolver`, fold `palette_epoch` into
       render cache keys, repaint `ColourUses::users_of(changed)`
       (XARA-T-0203).
-- [ ] App: `EditCommand` variants for the fill and palette commands; fill
-      and transparency tools (XARA-T-0212; W8.3/W8.4 next round).
+- [x] App: `EditCommand::Fill` and the fill/transparency tools
+      (XARA-US-0039). Palette commands still dispatch directly
+      (rest of XARA-T-0212).
 - [ ] `ColourUses` incremental maintenance in the attribute-set paths
       (today: rebuild on load and after a batch).
 - [ ] T8.1.5 "no colour" as a first-class `Colour` value (XARA-T-0204;
       today it is `Option<Colour>` in the importer); T8.1.7 palette
       `.xarast` round trip with signed shades (XARA-T-0205); T8.2.5
-      `MutateFill` (XARA-T-0210); T8.2.7 group transparency (XARA-T-0211).
+      `MutateFill` (XARA-T-0210, done); T8.2.7 group transparency (XARA-T-0211).
 - [ ] `ColourModel::Ciet` has no converter in the original at all; ours is
       a real XYZ transform. No corpus file uses it.
 - [ ] The original drops transparency in every model conversion; we carry
