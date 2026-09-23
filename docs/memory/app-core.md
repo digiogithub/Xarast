@@ -49,7 +49,7 @@ A `const` block in `lib.rs` asserts `Send` for `EditState`, `Viewport`,
 `Session`, `AppState` and `Intent`, so a change that breaks it fails to
 compile here rather than in the shell. They are `Send`, not `Sync`: the
 document lives on one thread and the render thread gets an immutable
-display list (architecture §5).
+scene and resolver snapshot (architecture §5).
 
 ### 3. Scene building
 
@@ -94,18 +94,20 @@ scale factor and calls `Intent::SetDpi`.
 |---|---|
 | `geometry` | `DevicePoint`, `DeviceSize`, `DocPoint`, `DocPointF`, `DocRect`, the saturating `f64 → Mp` quantiser |
 | `edit` | `EditState`, `ControlPoints`, `SelectMode`, `Modifiers`, `ToolId`, `ToolState`, `selectable_objects` |
-| `viewport` | `Viewport`, `ZoomTarget`, `page_rect`, `spread_rect`, `drawing_rect`, `nodes_rect` |
+| `viewport` | `Viewport`, `ZoomTarget`, `page_rect`, `spread_rect`, `drawing_rect` (no pages), `drawing_or_page_rect`, `content_rect`, `nodes_rect` |
 | `intent` | `Intent`, `Changed`, `PointerButton`, `PointerSample` |
 | `paint` (private) | document fill → `xarast_render::Paint`, document transparency → `Transparency` |
 | `walker` | `SceneWalker`, `WalkStats` — the arena→`Scene` walk |
 | `commands` | `SetLayerVisible`, `SetLayerLocked`, `RenameLayer`, `SetActiveLayer`, `AddLayer`, `DeleteNode` |
 | `session` | `Session`, `DocumentId`, `FileKind`, `Dirty`, `SessionError`, `build_scene`, `BuiltScene` |
-| `headless` | `render`, `render_to_png`, `convert_to_png`, `HeadlessOptions` |
+| `headless` | `render`, `render_to_png`, `convert_to_png`, `HeadlessOptions`, `HeadlessFrame`, `HeadlessResult` (with `WalkStats`, `SceneStats`, zoom and view) |
 | `prefs` | `Preferences`, `Unit`, `ThemePref`, `RendererPref` |
 | `app` | `AppState`, `DocumentSessions`, `DiagnosticLog` |
-| `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread |
+| `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `FrameReuse`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread, and the worker that reuses pixels |
+| `reuse` (private) | the pixel-reuse policy: `plan`, scroll, nearest-neighbour rescale, the zoom-out ring, Final columns |
+| `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
 
-Tests: 11 viewport, 11 session/selection/command, 8 corpus (the 59 real
+Tests: 13 viewport, 11 session/selection/command, 8 corpus (the 59 real
 `.xar` files, through `XARAST_XAR_CORPUS`, never copied into the
 repository). `examples/render_headless.rs` is the whole headless path in
 one file.
@@ -205,11 +207,14 @@ reason the walker *reports*, which is its own test.
     main-thread counter, strictly increasing. `RenderRequest::Cancel {
     up_to_generation }` drops the waiting frame and makes the worker
     discard an in-flight result instead of publishing it; a result is
-    never published over a newer one. A rasterisation in progress is not
-    interrupted (the CPU backend renders a frame as one call).
+    never published over a newer one. A `Final` is drawn in columns and
+    abandoned between them for newer input (decision 27); a `Draft` is
+    never interrupted.
 20. **`FrameJob` carries the `Resolver`, which the §U5.5 sketch omits.**
-    `Arc<DisplayList>` + `Arc<Resolver>` + `ViewParams` + pasteboard and
-    page colours — invariant 6 applied across threads. `Resolver` and
+    `Arc<Scene>` + scene epoch + `Arc<Resolver>` + `ViewParams` + ink
+    rectangle + pasteboard and page colours — invariant 6 applied across
+    threads. (It carried an `Arc<DisplayList>` until XARA-US-0005; see
+    decision 24.) `Resolver` and
     `RampCache` derive `Clone` for this; `Session::resolver_snapshot`
     clones once per scene rebuild and hands the same `Arc` to every frame
     of a pan.
@@ -220,6 +225,66 @@ reason the walker *reports*, which is its own test.
     Production is `CpuFrameRenderer` (interactive config); the tests use a
     gated renderer to hold a frame in flight deterministically, which is
     the only way to test supersession without sleeps deciding the result.
+    It is called once per rectangle drawn (a strip, a column), not once
+    per frame, and receives the display list the worker built.
+23. **Draft while interacting, one Final after 120 ms idle**
+    (XARA-US-0005, `schedule`). `QualityScheduler` is a pure state
+    machine: `note(now, changed)` marks interaction (anything that
+    `needs_redraw`) and returns the generation of a Final to cancel;
+    `next(now, doc)` says `Submit(Draft|Final)`, `Wait` or `Idle`;
+    `deadline()` is when the owed Final is due. Time is always passed in,
+    so the tests use a synthetic clock and no sleeps. `Canvas` wraps it
+    around a `RenderThread`: `note`, `pump` (rebuilds the scene if the
+    session says so, submits, returns the deadline), `take_latest`,
+    `is_settled`. **The first frame of a document is Final**: nothing is
+    on screen to refine, and Draft-then-Final would be two full renders.
+24. **The worker builds the display lists, so a job carries the scene.**
+    Which list to build depends on what the worker holds (its kept
+    frame), which the main thread cannot know without racing it.
+    `Session` keeps its scene in an `Arc` and rebuilds in place when it
+    is the only owner, else into a fresh one (never clone-then-clear);
+    `scene_epoch` counts rebuilds so the worker can tell "same scene".
+25. **Pixel reuse lives on the render thread** (`reuse.rs`). The worker
+    keeps the last frame it published (and publishes a clone, ~1 ms at
+    1080p). A pan by whole pixels scrolls it (`scroll_surface`) and
+    draws only the exposed strips, at either quality, but a `Final` only
+    reuses pixels that are themselves exact `Final` pixels. A `Draft` pan
+    by a fractional offset is **snapped** to whole pixels and the frame
+    reports the snapped view; the `Final` redraws exactly. A `Draft` zoom
+    resamples the kept frame (nearest) and paints only the backdrop into
+    the border a zoom-out uncovers (decision 26). Anything else (new
+    scene epoch, resize, dpi, colours, rotation) is a full frame.
+    `RenderedFrame::{reuse, exact}` say what happened; the viewer's
+    screenshot waits for an exact frame. Scrolled and column-drawn frames
+    match a one-call render to within 1/255 (tests).
+26. **A Draft zoom-out's border is left to the Final.** Rasterising it
+    cost ~190 ms a frame over 100 000 objects: the border is short, wide
+    strips, and the CPU backend runs a strip shorter than a band on one
+    core (XARA-T-0034). With the backdrop there instead, a zoom frame is
+    ~1.6 ms. Revisit when T-0034 lands.
+27. **A Final is drawn in up to four full-height columns** (no narrower
+    than 256 px), each its own display list, checking between columns
+    for a cancel or a newer job. Columns, not row slabs: the backend's
+    parallelism is across bands, and 192-row slabs doubled a 1080p Final.
+28. **Strips outside the scene's ink are backdrop, with no list built.**
+    `FrameJob::ink` is `viewport::content_rect` (whole-tree bounds, a
+    superset of anything drawn, taken at rebuild) in device space plus
+    2 px. A `DisplayList::build` scans every scene op however small the
+    rect (XARA-T-0033), so not building is the only cheap build.
+29. **Draft is a view parameter; the scene stays at the session's
+    quality.** Re-walking at Draft quality would shorten ramps and switch
+    images to nearest, but the walk is ~100 ms at 250 000 nodes, on the
+    first and last frame of every gesture. So Draft frames only scale
+    flatness (XARA-T-0035 moves the other two knobs into the view). The
+    session's quality is still the ceiling: `Canvas::pump` never submits
+    above it.
+30. **Headless framing is an enum** (XARA-T-0012): `HeadlessFrame::
+    {Session, FitDrawing, Fit(rect), Fixed { zoom, centre_on }}` plus
+    `dpi: Option<f64>`, and `HeadlessResult` returns `WalkStats`,
+    `SceneStats`, the zoom and the `ViewParams`. `drawing_rect` now means
+    the drawing without the pages (the active spread's visible, non-guide
+    layers); `drawing_or_page_rect` is what fitting frames;
+    `content_rect` keeps the whole-tree bounds for culling.
 
 ---
 
@@ -271,6 +336,24 @@ be better run once at `Tx::commit` than after every call.
 ---
 
 ## Dead ends (do not retry)
+
+- **Row slabs for an interruptible Final.** 192-row slabs cost 730 ms
+  against 370 ms for one call at 224 000 primitives: each slab is one or
+  two bands, so most cores idle. Use full-height columns.
+- **One display list for the view, filtered per column.** Cloning the
+  surviving `DrawCmd`s cost 65 ms at 224 000 primitives, more than
+  building each column's list from the scene.
+- **Re-walking the document with the strip as the dirty rect** to get a
+  small scene for a pan strip: 30–130 ms per strip on the synthetic
+  document, slower than the `DisplayList::build` scan it was meant to
+  avoid. Group bounds there cover most of the page, so the walk culls
+  late.
+- **Re-walking the scene at `Draft` quality for interaction.** ~100 ms
+  at 250 000 nodes, on the first and last frame of a gesture. See
+  decision 29.
+- **Deciding pixel reuse on the main thread.** It cannot know which
+  frame the worker holds (superseded frames are never drawn), so any
+  plan it makes can be for the wrong base. The worker decides.
 
 - **`build_scene` returning a bare `Scene`.** It compiles and it renders
   nothing but solid colours, because the ramp and image ids in the
@@ -337,9 +420,21 @@ be better run once at `Tx::commit` than after every call.
       Phase 7.
 - [x] **Render-thread protocol** (XARA-T-0002): `render_thread`, see
       decisions 18–22. The running binary uses it (XARA-T-0003).
-- [ ] **Draft/Final scheduling (U5.6) is not wired.** The viewer always
-      renders `Final`; `Intent::SetQuality` exists, the 120 ms idle timer
-      and `FrameRequest::RedrawAfter` are the pieces to join.
+- [x] **Draft/Final scheduling (U5.6)** (XARA-US-0005): `schedule`,
+      decisions 23–29, wired into `xarast-shell::viewer` (one commit, that
+      file only). The status bar still shows a fixed "Final"; showing the
+      scheduled quality is a `viewer.rs`/`xarast-ui` change.
+- [ ] **Pan misses 16 ms when every strip has ink**: 51–57 ms at 3× zoom
+      over 100 000 objects, of which ~35 ms is two `DisplayList::build`
+      scans (XARA-T-0033) and ~15 ms raster of strips that run on one
+      core (XARA-T-0034). See `perf.md`. Nothing more to gain here
+      without those, short of overscan (render a margin round the view so
+      most pan frames are a pure crop), which trades a 20–40 % costlier
+      Final for occasional re-centring spikes.
+- [ ] **The Draft rescale is nearest-neighbour and cumulative**: a long
+      continuous zoom resamples resampled pixels. It is blurry by design
+      and the Final replaces it, but a bilinear filter from the last exact
+      frame would look better.
 - [ ] **No surface reuse on the render thread.** Every frame allocates a
       fresh `Surface`; a return path (`recycle(surface)`) would save a
       canvas-sized allocation per frame.
@@ -351,26 +446,18 @@ be better run once at `Tx::commit` than after every call.
       window and through `examples/render_headless.rs`, so it is a
       walker/renderer fidelity gap (gradient + transparency stack), not a
       composition bug.
-- [x] **`xarast-cli` is wired** (XARA-T-0004). `xarast-cli render` and
-      `xarast-cli smoke-open` use only the public API: `Session::open`,
-      `Session::viewport`, `headless::render` and `Session::walk_stats`.
-      Three API gaps are worked around in `crates/xarast-cli/src/render.rs`
-      and tracked as XARA-T-0012:
-      1. `HeadlessResult` has no `WalkStats`, so the CLI walks a second time.
-      2. `HeadlessOptions` cannot express a fixed zoom or dpi, so the CLI
-         sets `session.viewport` itself and passes `fit_drawing: false`.
-      3. **`drawing_rect` includes the page nodes**, because
-         `compute_bounds_with` gives `Page` its rectangle. "The drawing" is
-         therefore pages ∪ ink, and `fit_drawing` frames the whole page
-         around a small drawing. The CLI uses its own `ink_rect`: the
-         children of the active spread's visible, non-guide layers.
+- [x] **`xarast-cli` is wired** (XARA-T-0004), and since XARA-T-0012 it
+      needs no workarounds: it frames through `HeadlessOptions`
+      (`HeadlessFrame::Fit`/`Fixed` plus `dpi`) and reads the zoom and the
+      `WalkStats` from `HeadlessResult`. The former gaps were no walk
+      stats (the CLI walked twice), no fixed zoom/dpi (it set the session
+      viewport by hand), and `drawing_rect` including the page nodes (it
+      kept its own `ink_rect`).
 - [ ] **Quick shapes with a cached path have zero-area bounds**
       (XARA-T-0013). `RedStar`, `Test00` and `TestBitmapFill` walk to one
       primitive, but the display list culls it, so they paint nothing.
       That is why the corpus has 38 files with scene primitives but 35
       with painted pixels.
-- [ ] **No `criterion` bench yet** for `cargo bench -p xarast-app --
-      viewport` (acceptance criterion 4). It needs the 100 000-object
-      synthetic document from `xarast_doc::synth` and a scripted
-      pan/zoom; the walk itself is already measured indirectly by the
-      corpus test's 21 s for 59 files × 6 walks.
+- [x] **`cargo bench -p xarast-app -- viewport`** (XARA-US-0006,
+      acceptance criterion 4): `benches/viewport.rs`, numbers in
+      `perf.md`.

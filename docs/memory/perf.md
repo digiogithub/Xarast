@@ -81,7 +81,10 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Blend LUT set, 12 families | ≤ 15 ms | 0.28 ms | passes |
 | `.xar` full import, `ProbeX16.xar` (7.4 MB) | ≤ 350 ms | **644 ms** | **1.8× over** |
 | `.xar` full import, whole corpus (59 files, 12.3 MB) | ≤ 3 s | 0.87–0.89 s | passes |
-| Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | not yet | XARA-T-0008, needs the viewer |
+| Pan, 100k objects, CPU, Draft through the scheduler, fit page | ≤ 16 ms | 5.3–6.6 ms | passes (strips mostly off the ink) |
+| Pan, 100k objects, CPU, Draft through the scheduler, zoomed 3× | ≤ 16 ms | **51–57 ms** | **fails, ~3.4×**; XARA-T-0033, XARA-T-0034 |
+| Zoom (wheel notch), 100k objects, CPU, Draft through the scheduler | ≤ 16 ms | 1.5–1.6 ms | passes; the zoom-out border is left to the Final |
+| Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | not yet | XARA-T-0008; there is no GPU render thread yet |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
 
@@ -122,6 +125,47 @@ cache, and every build allocates a large, fresh vector. That is not yet
 profiled. Story XARA-US-0016 owns it.
 
 The W0 spike and the G1/G2 verdicts are in `docs/memory/render.md`.
+
+### Viewport through the Draft → Final scheduler
+
+`cargo bench -p xarast-app -- viewport` (XARA-US-0006, 2026-09-23). The
+synthetic document at `SynthSpec { nodes: 250_000, .. }`: **105 852
+objects, each filled and stroked, so 224 218 primitives**, 1920 × 1080,
+CPU backend in its interactive configuration (all 24 threads). Each figure
+is one canvas frame from the intent to the collected pixels: `apply`,
+`Canvas::note`, `Canvas::pump`, the render thread, `take_latest`. Two
+views: **fit** (the whole page; the drawing fills the height and the sides
+are pasteboard) and **zoomed** (3× that, every pixel over the drawing, so
+every exposed strip has ink: the worst case for reuse). Two runs at load
+7–15 agree to within 3 %; a third taken while the load rose to 25 read
+up to 60 % higher and is discarded.
+
+| Frame | fit | zoomed | What the render thread did |
+|---|---|---|---|
+| `pan_draft`: 9 px right, 5 px up | **5.3–6.6 ms** | **51–57 ms** | scroll + two strips. Zoomed: 35 ms of `DisplayList::build` (two scans of all 224k ops) + 15 ms raster |
+| `zoom_draft`: one notch in or out | **1.5–1.6 ms** | **1.5–1.6 ms** | nearest resample of the kept frame; backdrop in the uncovered border |
+| `final_after_idle`: the upgrade | 284–287 ms | 340–363 ms | four full-height columns: ~105 ms of list builds + 170–235 ms raster |
+| `full_draft`: no reuse, for reference | 231–235 ms | 262–270 ms | one full Draft frame |
+
+**Verdict against ≤ 16 ms.** Zoom passes everywhere. Pan passes at fit
+page and **fails by ~3.4× when the view is full of ink**. Reuse turns a
+230–270 ms full Draft into 54 ms, but what is left is not in `xarast-app`:
+
+- `DisplayList::build` visits every scene op for any dirty rect, 15–19 ms
+  per strip at 224k primitives however few commands survive
+  (XARA-T-0033). A diagonal pan has two strips.
+- The CPU backend parallelises over horizontal bands, so a short, wide
+  strip runs on one core (XARA-T-0034). Rasterising a zoom-out's border
+  this way cost ~270 ms, which is why the Draft now leaves it to the Final.
+
+The Final is off the interactive path, but new input waits for the column
+in flight: about a quarter of 285–360 ms. It is 1.2–1.4× a full Draft
+because four column builds cost more than one full build.
+
+Also measured while building it (probe, not in the bench): a full scene
+walk of this document is ~100 ms, and a walk culled to a 9 px strip is
+30–130 ms, so neither re-walking at Draft quality nor walking strips is a
+way round the list-build scan.
 
 ### `.xar` import
 
@@ -304,8 +348,13 @@ that will recur:
 - [x] Re-measure `preorder` and `Tree::get` on it — `preorder` passes
       (1.07 ms), `Tree::get` is at budget (5.1 ns including the bench's own
       index arithmetic). It was the container.
-- [ ] Measure pan/zoom (XARA-T-0008), open-to-first-paint (XARA-T-0009) and
-      cold start (XARA-T-0010) once the viewer is wired.
+- [x] Pan/zoom on the CPU through the scheduler: `cargo bench -p xarast-app
+      -- viewport` (XARA-US-0006). Zoom passes, pan fails 3.4× when zoomed
+      into the drawing; see the section above.
+- [ ] Pan/zoom on the integrated GPU (XARA-T-0008), open-to-first-paint
+      (XARA-T-0009) and cold start (XARA-T-0010).
+- [ ] `DisplayList::build` culled builds (XARA-T-0033) and single-core
+      short strips (XARA-T-0034): the two things between pan and 16 ms.
 - [ ] `Tx::commit` walks the whole tree on every edit
       (`keep_one_active_layer`): about 1 ms per command at 100k nodes.
 - [ ] `.xar` import maps at about 1.2 µs per node: `ProbeX16.xar` takes 644 ms
