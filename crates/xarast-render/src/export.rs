@@ -261,6 +261,67 @@ pub fn render_export(
     Ok((out, stats))
 }
 
+/// Rasterises prebuilt display lists for export, on the same deterministic
+/// CPU backend as [`render_export_strips`].
+///
+/// Vector export uses it for the objects it cannot express natively (the
+/// PDF fidelity ladder's "rasterise" step). It builds the backend once, so
+/// many small renders share the blend tables. Like the rest of this module
+/// it names [`CpuBackend`] and never a trait object: the GPU cannot reach
+/// an export through it.
+#[derive(Debug)]
+pub struct ListRasteriser {
+    backend: CpuBackend,
+}
+
+impl Default for ListRasteriser {
+    fn default() -> ListRasteriser {
+        ListRasteriser::new()
+    }
+}
+
+impl ListRasteriser {
+    /// A rasteriser on the deterministic CPU configuration.
+    #[must_use]
+    pub fn new() -> ListRasteriser {
+        ListRasteriser {
+            backend: CpuBackend::new(CpuConfig::deterministic()),
+        }
+    }
+
+    /// Renders `dl` onto a `width × height` surface cleared to `background`
+    /// (premultiplied RGBA). The list's view must map onto that grid.
+    /// Bands follow [`export_band_lines`], so the pixels depend on the list
+    /// and the size only.
+    ///
+    /// # Errors
+    ///
+    /// `BadSize` for an empty or oversized surface, `Backend`, or
+    /// `Cancelled`.
+    pub fn render(
+        &mut self,
+        dl: &DisplayList,
+        resolver: &Resolver,
+        width: u32,
+        height: u32,
+        background: [u8; 4],
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Surface, ExportRenderError<std::convert::Infallible>> {
+        if width == 0 || height == 0 || width > MAX_EXPORT_SIDE || height > MAX_EXPORT_SIDE {
+            return Err(ExportRenderError::BadSize { width, height });
+        }
+        let mut s = Surface::filled(width, height, background);
+        let band = export_band_lines(width, height);
+        match self
+            .backend
+            .render_rows(dl, resolver, 0, band, &mut s, cancelled)?
+        {
+            RowsOutcome::Cancelled => Err(ExportRenderError::Cancelled),
+            RowsOutcome::Done(_) => Ok(s),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

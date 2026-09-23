@@ -875,6 +875,27 @@ never calls `begin_frame` (export, corpus tools) never evicts.
 | 18 | Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5) | XARA-T-0222 |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
+### Vector export (PDF, XARA-US-0059, 2026-09-23)
+
+- **Export is CPU-only, including vector export's fallback.** PDF's
+  fidelity ladder rasterises through `export::ListRasteriser`, which names
+  `CpuBackend` with `CpuConfig::deterministic()`; `DisplayList::with_commands`
+  reuses a list's side tables with a chosen command stream and
+  `DisplayList::op_of` identifies an object across lists built from one
+  scene for different views. Guarded by
+  `tests/export.rs::a_list_rasterised_through_its_own_commands_matches_the_export`.
+- **The PDF fidelity matrix** (native / workaround / rasterise, per
+  feature) and the T11.4.1 crate spike are in `export.md`, section "PDF".
+  **Per-family blend decision: not measured yet** (T11.4.6, XARA-T-0227);
+  until it is, every family except Mix is rasterised with its backdrop by
+  default, and `PreferNative` maps only Stained Glass → Multiply and
+  Bleach → Screen. Darken, Lighten, Hue, Saturation and Luminosity are
+  deliberately *not* mapped to PDF's same-named modes.
+- **Found, not fixed (XARA-T-0231):** `blend::composite` mixes against the
+  destination's straight colour even when its alpha is zero, so partly
+  transparent Mix over a transparent destination darkens (≈ `c·a²`); the
+  CPU stroker ignores `StrokeStyle::cap_end` and `DashPattern::offset`.
+
 ### Fuzzing, first runs (2026-09-23)
 
 - `fuzz_ramp`: NaN stop offsets — possible, `Stop` and `TranspStop` have

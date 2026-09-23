@@ -282,6 +282,40 @@ fn export_writes_every_format_at_the_requested_resolution() {
     );
 }
 
+#[test]
+fn export_writes_a_vector_pdf_page_the_size_of_the_area() {
+    let dir = scratch("export-pdf");
+    let input = write(&dir, "square.xar", &square_xar());
+    let out = dir.join("sq.pdf");
+    let o = run(&[
+        "export",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--area",
+        "72,72,144,180",
+        "--no-compress",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("72x108 pt page"), "{}", stdout(&o));
+    let bytes = std::fs::read(&out).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.starts_with("%PDF-1.7"));
+    assert!(text.contains("/MediaBox [0 0 72 108]"), "{text}");
+    assert!(!text.contains("/Subtype /Image"), "a flat square is vector");
+    // PDF options on another format, and PNG options on PDF, are refused.
+    for args in [
+        vec!["--raster-dpi", "150", "-o", "x.png"],
+        vec!["--interlace", "-o", "x.pdf"],
+        vec!["--raster-dpi", "5", "-o", "x.pdf"],
+    ] {
+        let mut a = vec!["export", input.to_str().unwrap()];
+        a.extend(args);
+        let o = run(&a);
+        assert_ne!(o.status.code(), Some(0), "{a:?}");
+    }
+}
+
 fn image_size(path: &Path) -> (u32, u32) {
     let bytes = std::fs::read(path).unwrap();
     if bytes.starts_with(b"\x89PNG") {
@@ -335,7 +369,7 @@ fn export_refuses_xar_with_the_architecture_reason() {
 fn export_is_byte_identical_across_processes() {
     let dir = scratch("export-determinism");
     let input = write(&dir, "square.xar", &square_xar());
-    for ext in ["png", "jpg", "webp"] {
+    for ext in ["png", "jpg", "webp", "pdf"] {
         let a = dir.join(format!("a.{ext}"));
         let b = dir.join(format!("b.{ext}"));
         for out in [&a, &b] {
@@ -425,7 +459,7 @@ fn corpus_renders_small_with_no_failure() {
 #[test]
 fn corpus_exports_to_every_format_with_no_failure() {
     let root = corpus_or_skip!();
-    for fmt in ["png", "jpeg", "webp"] {
+    for fmt in ["png", "jpeg", "webp", "pdf"] {
         let out = scratch(&format!("corpus-export-{fmt}"));
         let mut args = vec![
             "export".to_owned(),

@@ -172,14 +172,14 @@ fn frac(done: u32, total: u32) -> f32 {
 
 /// A file written next to its destination and renamed into place, so a
 /// failed or cancelled export never leaves a partial file.
-struct AtomicFile {
+pub(crate) struct AtomicFile {
     tmp: PathBuf,
     dest: PathBuf,
     done: bool,
 }
 
 impl AtomicFile {
-    fn new(dest: &Path) -> AtomicFile {
+    pub(crate) fn new(dest: &Path) -> AtomicFile {
         let name = dest
             .file_name()
             .map_or_else(|| "export".into(), |n| n.to_string_lossy().into_owned());
@@ -207,7 +207,7 @@ impl AtomicFile {
         Ok(len)
     }
 
-    fn write_all(self, bytes: &[u8]) -> std::io::Result<u64> {
+    pub(crate) fn write_all(self, bytes: &[u8]) -> std::io::Result<u64> {
         let mut w = self.create()?;
         w.write_all(bytes)?;
         self.commit(w)

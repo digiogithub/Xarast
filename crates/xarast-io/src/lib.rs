@@ -10,6 +10,7 @@
 //! | [`registry`] | The [`Exporter`] trait, [`Capabilities`] and the [`Registry`] |
 //! | [`source`] | [`ExportSource`], the seam the application implements, and [`Progress`] |
 //! | [`raster`] | PNG, JPEG and WebP through the deterministic CPU rasteriser |
+//! | [`pdf`] | PDF 1.7, vector, with the fidelity ladder (T11.4) |
 //! | [`report`] | [`ExportReport`], [`Compromise`], [`ExportError`] |
 //!
 //! # Three rules
@@ -34,6 +35,7 @@ pub mod deflate;
 pub mod jpeg;
 pub mod model;
 pub mod options;
+pub mod pdf;
 pub mod png;
 pub mod raster;
 pub mod registry;
@@ -46,9 +48,10 @@ pub use model::{
     SizingError,
 };
 pub use options::{
-    FormatId, FormatOptions, JpegOptions, PngColour, PngCompression, PngDepth, PngOptions,
-    Subsampling, WebPMode, WebPOptions,
+    BlendFidelity, FormatId, FormatOptions, JpegOptions, PDF_RASTERISE_DPI, PdfOptions, PdfVersion,
+    PngColour, PngCompression, PngDepth, PngOptions, Subsampling, WebPMode, WebPOptions,
 };
+pub use pdf::PdfExporter;
 pub use raster::{JpegExporter, PngExporter, WebPExporter};
 pub use registry::{Capabilities, Exporter, Registry, XAR_EXPORT_REFUSAL};
 pub use report::{Compromise, ExportError, ExportReport};

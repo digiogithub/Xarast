@@ -147,6 +147,13 @@ image-webp = "0.2.4"
 # default feature. `parallel` stays off so the trial order, and therefore
 # the output, is fixed; `zopfli` and the CLI (`binary`) are not wanted.
 oxipng = { version = "10.2", default-features = false }
+# PDF export (phase 11 W11.4): the low-level object and content-stream
+# writer from the Typst project. Chosen over `krilla`, the high-level writer
+# built on it, by the T11.4.1 spike (`docs/memory/export.md`): `krilla`
+# cannot carry a baked ramp as a sampled function, has no mesh shadings,
+# works in `f32` scene coordinates, pins a second `skrifa` and needs a newer
+# `rust-version`. Pure Rust, four small dependencies. `MIT OR Apache-2.0`.
+pdf-writer = "0.15"
 
 # ── Application core ─────────────────────────────────────────────────────────
 # Insertion-ordered set/map. The selection is an ordered set: "the first
