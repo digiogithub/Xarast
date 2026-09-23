@@ -392,7 +392,14 @@ impl Session {
     ///
     /// Rebuild the scene first when [`Session::dirty`] says it is stale;
     /// this only re-projects the scene that exists.
-    pub fn frame_job(&mut self, background: [u8; 4]) -> crate::render_thread::FrameJob {
+    ///
+    /// `background` is the pasteboard; `page` is the colour the page is
+    /// filled with underneath the drawing.
+    pub fn frame_job(
+        &mut self,
+        background: [u8; 4],
+        page: [u8; 4],
+    ) -> crate::render_thread::FrameJob {
         let view = self.view_params();
         let list =
             xarast_render::DisplayList::build(&self.scene, &view, &DirtyRect::of(view.viewport));
@@ -402,6 +409,13 @@ impl Session {
             resolver: self.resolver_snapshot(),
             view,
             background,
+            page: Some((
+                crate::viewport::device_rect_of(
+                    &self.viewport,
+                    crate::viewport::page_rect(&self.doc),
+                ),
+                page,
+            )),
             generation: 0,
         }
     }

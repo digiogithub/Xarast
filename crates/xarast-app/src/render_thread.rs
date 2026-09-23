@@ -72,8 +72,13 @@ pub struct FrameJob {
     pub resolver: Arc<Resolver>,
     /// The view the list was built for; its `viewport` is the target size.
     pub view: ViewParams,
-    /// Premultiplied colour the target is cleared to before drawing.
+    /// Premultiplied colour the target is cleared to before drawing: the
+    /// pasteboard.
     pub background: [u8; 4],
+    /// The page, in device pixels, and the premultiplied colour it is
+    /// filled with before the document is drawn over it. The scene has no
+    /// page of its own: the page is the viewer's backdrop, not ink.
+    pub page: Option<(xarast_render::DeviceRect, [u8; 4])>,
     /// Assigned by [`RenderThread::submit`]; whatever is here on the way in
     /// is overwritten.
     pub generation: u64,
@@ -363,6 +368,26 @@ impl Drop for RenderThread {
     }
 }
 
+/// Fills a device rectangle, clipped to the surface.
+fn fill_rect(s: &mut Surface, r: xarast_render::DeviceRect, colour: [u8; 4]) {
+    let r = r.intersection(s.bounds());
+    if r.is_empty() {
+        return;
+    }
+    let stride = s.width() as usize * 4;
+    let (x0, x1) = (r.x0 as usize * 4, r.x1 as usize * 4);
+    for row in s
+        .data_mut()
+        .chunks_mut(stride)
+        .skip(r.y0 as usize)
+        .take(r.height() as usize)
+    {
+        for px in row[x0..x1].as_chunks_mut::<4>().0 {
+            *px = colour;
+        }
+    }
+}
+
 fn worker_loop<R: FrameRenderer>(shared: &Shared, mut renderer: R, waker: &Waker) {
     loop {
         let job = {
@@ -380,6 +405,9 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, mut renderer: R, waker: &Waker
 
         let (w, h) = (job.view.viewport.width(), job.view.viewport.height());
         let mut surface = Surface::filled(w.max(1), h.max(1), job.background);
+        if let Some((rect, colour)) = job.page {
+            fill_rect(&mut surface, rect, colour);
+        }
         let (timings, error) = match renderer.render(&job, &mut surface) {
             Ok(t) => (t, None),
             Err(e) => (FrameTimings::default(), Some(e)),
@@ -430,6 +458,7 @@ mod tests {
             resolver: Arc::new(Resolver::new()),
             view,
             background: [10, 20, 30, 255],
+            page: Some((DeviceRect::new(-5, 20, 4, 40), [200, 200, 200, 255])),
             generation: 0,
         }
     }
@@ -503,6 +532,10 @@ mod tests {
         assert_eq!(f.doc, DocumentId(7));
         assert_eq!((f.surface.width(), f.surface.height()), (64, 32));
         assert_eq!(f.surface.pixel(3, 3), Some([10, 20, 30, 255]));
+        // The page is filled, clipped to the surface.
+        assert_eq!(f.surface.pixel(0, 25), Some([200, 200, 200, 255]));
+        assert_eq!(f.surface.pixel(3, 31), Some([200, 200, 200, 255]));
+        assert_eq!(f.surface.pixel(4, 25), Some([10, 20, 30, 255]));
         assert!(f.error.is_none());
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
         assert_eq!(rt.stats().rendered, 1);
@@ -626,13 +659,13 @@ mod tests {
         s.apply(crate::Intent::Resize(crate::DeviceSize::new(320, 200)))
             .unwrap();
         s.rebuild_scene(None).unwrap();
-        let a = s.frame_job([255, 255, 255, 255]);
+        let a = s.frame_job([128, 128, 128, 255], [255, 255, 255, 255]);
         s.apply(crate::Intent::Pan { dx: 5.0, dy: 0.0 }).unwrap();
-        let b = s.frame_job([255, 255, 255, 255]);
+        let b = s.frame_job([128, 128, 128, 255], [255, 255, 255, 255]);
         assert!(Arc::ptr_eq(&a.resolver, &b.resolver), "a pan re-uses it");
         assert_ne!(a.view.transform, b.view.transform);
         s.rebuild_scene(None).unwrap();
-        let c = s.frame_job([255, 255, 255, 255]);
+        let c = s.frame_job([128, 128, 128, 255], [255, 255, 255, 255]);
         assert!(
             !Arc::ptr_eq(&b.resolver, &c.resolver),
             "a rebuild renews it"
