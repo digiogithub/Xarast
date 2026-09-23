@@ -331,6 +331,37 @@ pub(crate) fn build_story(
     }
 }
 
+/// A story laid out for "Convert to shapes" (T9.6.3): one outline per
+/// attribute run with the attributes it paints with, exactly the geometry
+/// the walker draws, plus the story's logical text. `None` when `story` is
+/// not a text story or nothing of it would be drawn (no ink, or no font).
+pub(crate) fn story_outlines(
+    fonts: &FontService,
+    doc: &xarast_doc::Document,
+    story: NodeId,
+) -> Option<(Vec<xarast_doc::OutlineRun>, String)> {
+    let Some(NodeKind::TextStory(node)) = doc.tree.kind(story) else {
+        return None;
+    };
+    let mut stack = xarast_doc::attr::resolve_inherited(&doc.tree, story, &doc.defaults);
+    let st = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
+        Arc::new(a.value.clone())
+    })?;
+    let g = build_story(fonts, &doc.tree, &st, node);
+    if g.unrendered || g.runs.is_empty() {
+        return None;
+    }
+    let runs = g
+        .runs
+        .into_iter()
+        .map(|r| xarast_doc::OutlineRun {
+            path: Arc::new(r.path.path().clone()),
+            attrs: r.attrs,
+        })
+        .collect();
+    Some((runs, layout_text(&st).to_owned()))
+}
+
 /// The document-space box a story's lines occupy (advance boxes, not ink),
 /// or an empty rectangle when it holds no text. `attrs` is the state in
 /// force at the story, as for [`StoryText::collect`].

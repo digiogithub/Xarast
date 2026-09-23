@@ -426,6 +426,9 @@ fn describe(out: &mut String, kind: &NodeKind) {
             if let Some(n) = &g.name {
                 let _ = write!(out, " \"{n}\"");
             }
+            if let Some(t) = &g.source_text {
+                let _ = write!(out, " was-text {t:?}");
+            }
         }
         NodeKind::Live(l) => {
             let _ = write!(out, " {} {:?}", l.kind.type_name(), l.role);

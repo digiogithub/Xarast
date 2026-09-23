@@ -68,6 +68,7 @@ pub mod snapshot;
 pub mod structure;
 pub mod synth;
 pub mod text;
+pub mod text_convert;
 pub mod text_edit;
 pub mod text_model;
 pub mod tree;
@@ -124,6 +125,7 @@ pub use synth::{SynthSpec, synthetic_document};
 pub use text::{
     Justification, LineSpacing, Script, TabStop, TextItem, TextLayout, TextLineNode, TextStoryNode,
 };
+pub use text_convert::{OutlineRun, convert_story_to_shapes, is_text_slot};
 pub use text_edit::{DeleteRange, InsertText, delete_range, insert_text, new_story};
 pub use text_model::{
     CharRun, ItemEntry, KernAt, LineEntry, StoryFlow, StoryText, TextCursor, TextPos,

@@ -215,6 +215,15 @@ undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
     Ctrl+Shift+C, which is Inkscape's "Object to Path" and was free.
     `command.rs::no_two_commands_share_a_key` and the shell's
     `every_chord_of_the_command_table_reaches_its_command` guard clashes.
+    **Text joins it (XARA-US-0049):** the same command converts a text
+    story into a group of glyph outlines (`crate::convert`, `text.md`
+    "Convert to shapes"), and a selected group converts every shape and
+    story inside it, as the original's command does. The session runs
+    `convert::ConvertCommand` (like `StructureCommand`, it reports
+    `(before, after)` pairs through a `RefCell`) and reselects: a story's
+    group replaces it in the selection, shapes keep their id. Nothing
+    convertible → `NOTHING_TO_DO`, no undo step. `EditCommand::
+    ConvertToPaths` shares `convert_nodes` for tools that emit it.
 31. **Point selection** stays `EditState` point indices; tools ask for a
     new one through `ToolRequests::points` (applied after the commands,
     so indices refer to the new geometry) and `created_points` (the pen's
