@@ -27,6 +27,8 @@ Modules, all of them in `crates/xarast-doc/src/`:
 | `attr::resolve` | `AttrResolver`, `resolve_uncached` |
 | `attr::tags` | the `.xar` tag → slot reconciliation table and its tests |
 | `fill` | `FillGeometry<S>`, `Ramp`, `RampStop`, `Perspective`, `Tiling`, `RampMapping`, `Paint`, `TranspPaint` |
+| `fill_edit` | phase 8 fill/transparency commands (`SetFillGeometry`, `MoveFillControl`, ramp edits, profile, mapping, effect, tiling, transparency mode), `PaintSlot`, `FillChannel`, `FillHandle`, `StopTarget`, `set_own_attr` — see `colour.md` |
+| `palette` | phase 8 palette commands, `ColourUses`, `PaletteResolver`, the palette's share of the digest — see `colour.md` |
 | `foreign` | `ForeignBaggage`, `ForeignAttr`, `ForeignChild`, `ForeignChildKind`, `ForeignMarks` — per-node data a `.xarast` reader did not understand (XARA-T-0089) |
 | `structure` | `DocumentNode`, `SpreadNode`, `PageNode`, `LayerNode`, `GridNode`, `FrameProps`, `AnimProps` |
 | `text` | `TextStoryNode`, `TextLineNode`, `TextItem`, `TextLayout`, `Justification`, `LineSpacing`, `Script`, `TabStop` |
@@ -345,6 +347,24 @@ New in Phase 2:
     The F4.7 foreign-baggage marks ride in the same `Tx` calls
     (`transform`, `set_attr`, `set_kind`), so every `EditCommand` gets them
     for free; `tests/tools.rs` pins it for a selector move.
+36. **The palette is undoable as a whole** (phase 8, XARA-US-0037):
+    `Action::SetPalette { new: Arc<ColourTable> }`, inverse = the table as
+    it was. Its apply moves the palette epoch strictly forward (undo
+    included) and bumps `resources_rev`. `EditError` gained `Palette(
+    ColourEditError)` and `FillEdit(&'static str)`. Details and the reasons
+    in `colour.md` decisions 7, 8.
+37. **`canonical_digest` now includes the colour table** (slot order, ids,
+    every field except the epoch and the cached order), because palette
+    edits must be provably undoable. Digests of documents with a palette
+    changed value once; every comparison in the workspace is within one
+    document, so nothing pinned a value.
+38. **`DocumentBuilder::finish` breaks palette loops** with
+    `ColourTable::repair_cycles` and a `Repaired` warning: a loaded file is
+    never rejected for a derivation loop.
+39. **Fill edits localise**: `fill_edit::set_own_attr` replaces the node's
+    own attribute of the slot or adds one as the first child — the same
+    rule `xarast-app`'s private `set_own_attr` follows; the app can switch
+    to the public one.
 
 ## The `.xar` attribute tag reconciliation
 
