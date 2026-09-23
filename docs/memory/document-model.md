@@ -27,6 +27,7 @@ Modules, all of them in `crates/xarast-doc/src/`:
 | `attr::resolve` | `AttrResolver`, `resolve_uncached` |
 | `attr::tags` | the `.xar` tag → slot reconciliation table and its tests |
 | `fill` | `FillGeometry<S>`, `Ramp`, `RampStop`, `Perspective`, `Tiling`, `RampMapping`, `Paint`, `TranspPaint` |
+| `foreign` | `ForeignBaggage`, `ForeignAttr`, `ForeignChild`, `ForeignChildKind`, `ForeignMarks` — per-node data a `.xarast` reader did not understand (XARA-T-0089) |
 | `structure` | `DocumentNode`, `SpreadNode`, `PageNode`, `LayerNode`, `GridNode`, `FrameProps`, `AnimProps` |
 | `text` | `TextStoryNode`, `TextLineNode`, `TextItem`, `TextLayout`, `Justification`, `LineSpacing`, `Script`, `TabStop` |
 | `live` | `LiveNode`, `LiveRole`, `LiveKind`, `RegenState` and the seven parameter structs |
@@ -285,6 +286,31 @@ New in Phase 2:
     so they had to go somewhere.
 31. **`imbl` is MPL-2.0 and is used unmodified**, for checkpoints and for the
     benchmark. `deny.toml` carries the exception with its justification.
+32. **Foreign baggage is a side table on `Tree`, keyed by `NodeId`**
+    (XARA-T-0089, phase 6, 2026-09-23). `SecondaryMap<NodeId,
+    Arc<ForeignBaggage>>`, next to the bounds cache: `NodeData` stays at
+    exactly 64 bytes and a document with no baggage pays one empty map.
+    What `research/06 §8.2` asks per node: unknown attributes as
+    `(uri, prefix hint, local, value)`; unknown child elements, unknown SVG
+    elements, comments and PIs as **verbatim text** with their position
+    (how many elements standing for the node's non-attribute children
+    precede them); and the §8.5 marks `DIRTY`, `STALE`,
+    `BASE_AUTHORITATIVE`. Keying by `NodeId` is what makes it survive
+    edits for free: move, regroup and change layer are relinks, a deleted
+    node keeps its baggage while the history retains it (so undo brings it
+    back), `destroy_subtree` drops it, `Document::snapshot`/`restore` carry
+    it across the id remap. Changes go through `Action::SetForeign`
+    (inverse: the previous `Arc`), `Tx::set_foreign`, `Tx::mark_foreign`
+    (adds marks, records nothing when the node has no baggage or already
+    has them) and `DocumentBuilder::foreign` at import. Setting empty
+    baggage removes the entry, so "empty" and "absent" are one state.
+    `set_foreign` is not refused on a locked node: keeping or marking data
+    we do not understand is never an edit of the user's artwork. The
+    canonical digest folds baggage in **only where present**, flagged by
+    bit 16 of the per-node flags word (`NodeFlags` uses 16 bits), so every
+    document without baggage digests exactly as before. Automatic marking
+    of edited nodes (F4.7) is not done here: that is W4's policy, applied
+    in commands, never in the arena.
 
 ## The `.xar` attribute tag reconciliation
 
@@ -388,6 +414,9 @@ Plus, from this phase:
     angle and ratio parameters on live effects.
 19. **Invariant 6 is a command-level invariant, not an arena-level one.**
     Raw tree surgery may break it; a `Tx` may not leave it broken.
+20. **Foreign baggage exists only on live nodes and is never empty**:
+    `destroy_subtree` removes it, and `Tree::set_foreign` stores empty
+    baggage as none. Pinned by `tests::foreign`.
 
 ## Fixed defects worth remembering
 
@@ -490,14 +519,9 @@ findings.
 
 ## Open TODOs
 
-- [ ] **Per-node foreign-baggage container (XARA-T-0089, phase 6 risk K1).**
-      The model has none. `research/06 §8.2`/`§8.5` need, per node, unknown
-      foreign attributes `(uri, local, value)`, verbatim unknown child
-      fragments with their sibling position, comments/PIs, and the
-      `foreign-dirty`/`foreign-stale`/`base-authoritative` marks, surviving
-      edits and undo. It must land before the `.xarast` SVG reader (W4); a
-      side table keyed by `NodeId` is the least invasive shape. Found by the
-      phase-6 format owner, who did not touch `xarast-doc`.
+- [x] **Per-node foreign-baggage container (XARA-T-0089, phase 6 risk K1).**
+      Done 2026-09-23 (8b0834d): decision 32, invariant 20. Automatic
+      dirty/stale marking of edited nodes is W4's F4.7.
 - [x] Benchmark arena vs `imbl` over a 100 000-node traversal. **Done; the
       arena wins; `10-architecture.md` §3.1 and §7 updated.**
 - [x] Settle the exact `AttrSlot` set against the `.xar` tags. **Done; 46,
