@@ -78,6 +78,9 @@ pub struct CanvasResponse {
     pub pointer_doc: Option<(Mp, Mp)>,
     /// Input the canvas did not consume, in order.
     pub unconsumed: Vec<CanvasInput>,
+    /// Whether the canvas has keyboard focus: the host's view keys (arrows
+    /// pan) apply when it does, or when nothing else has focus.
+    pub focused: bool,
     /// True when the user is mid-interaction, which is the signal to render
     /// at `Draft` quality and to schedule the `Final` repaint after the
     /// interaction stops.
@@ -117,6 +120,24 @@ impl FrameCtx<'_> {
     }
 }
 
+/// Who turns wheel, pinch, pan-drag and view keys into navigation.
+///
+/// Exactly one party may, or a wheel notch is applied twice. A host that
+/// feeds `egui` its input *and* translates the same input into pan and
+/// zoom itself — the shell does, through its intent adapter — must say
+/// [`CanvasNavigation::External`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasNavigation {
+    /// The widget navigates: wheel, Ctrl+wheel, pinch, middle or space
+    /// drag, and arrows, `+`, `-`, `Ctrl+1`, `Ctrl+0` while it has focus.
+    #[default]
+    Internal,
+    /// The host navigates. The widget still hosts guides, reports the
+    /// pointer and hands tool input on, but emits no `Pan` or `ZoomAbout`
+    /// of its own, and a middle or space drag is not tool input.
+    External,
+}
+
 /// The canvas widget.
 ///
 /// Holds only *interaction* state — which guide is being dragged, whether a
@@ -126,6 +147,7 @@ pub struct CanvasWidget {
     dragging_guide: Option<usize>,
     creating_guide: Option<Axis>,
     panning: bool,
+    navigation: CanvasNavigation,
 }
 
 /// How far into the canvas region a ruler strip reaches, in logical points.
@@ -142,6 +164,16 @@ impl CanvasWidget {
     /// A fresh widget.
     pub fn new() -> CanvasWidget {
         CanvasWidget::default()
+    }
+
+    /// Chooses who navigates; see [`CanvasNavigation`].
+    pub fn set_navigation(&mut self, navigation: CanvasNavigation) {
+        self.navigation = navigation;
+    }
+
+    /// Who navigates.
+    pub fn navigation(&self) -> CanvasNavigation {
+        self.navigation
     }
 
     /// True while the user is dragging a guide out of, or along, a ruler.
@@ -259,6 +291,7 @@ impl CanvasWidget {
             hovered: pointer_in_region.is_some(),
             pointer_doc,
             unconsumed,
+            focused: response.has_focus(),
             interacting,
         }
     }
@@ -337,6 +370,20 @@ impl CanvasWidget {
         let (ui, response, region, pointer, pointer_doc) =
             (f.ui, f.response, f.region, f.pointer, f.pointer_doc);
         let mut interacting = false;
+        if self.navigation == CanvasNavigation::External {
+            // The host navigates. A pan-drag is still not tool input, so
+            // it is remembered, but nothing is emitted for it.
+            let (space, middle) =
+                ui.input(|i| (i.key_down(egui::Key::Space), i.pointer.middle_down()));
+            if (middle || space) && response.dragged() {
+                self.panning = true;
+                interacting = true;
+            } else if !response.dragged() {
+                self.panning = false;
+            }
+            Self::hand_on(f, self.panning, self.is_dragging_guide(), unconsumed);
+            return interacting || (response.dragged() && !self.panning);
+        }
         let anchor = pointer
             .map(|p| ((p.x - region.min.x) as f64, (p.y - region.min.y) as f64))
             .unwrap_or((region.width() as f64 / 2.0, region.height() as f64 / 2.0));
@@ -433,23 +480,31 @@ impl CanvasWidget {
             });
         }
 
-        // Anything the canvas did not claim goes to the tools.
-        if let Some((x, y)) = pointer_doc {
-            if response.drag_started() && !self.is_dragging_guide() && !self.panning {
+        let _ = pointer_doc;
+        if response.dragged() && !self.is_dragging_guide() && !self.panning {
+            interacting = true;
+        }
+        Self::hand_on(f, self.panning, self.is_dragging_guide(), unconsumed);
+        interacting
+    }
+
+    /// Anything the canvas did not claim goes to the tools.
+    fn hand_on(f: &FrameCtx<'_>, panning: bool, guide: bool, unconsumed: &mut Vec<CanvasInput>) {
+        let response = f.response;
+        if let Some((x, y)) = f.pointer_doc {
+            if response.drag_started() && !guide && !panning {
                 unconsumed.push(CanvasInput::PointerPressed { x, y });
             }
-            if response.dragged() && !self.is_dragging_guide() && !self.panning {
+            if response.dragged() && !guide && !panning {
                 unconsumed.push(CanvasInput::PointerDragged { x, y });
-                interacting = true;
             }
-            if response.drag_stopped() && !self.is_dragging_guide() {
+            if response.drag_stopped() && !guide {
                 unconsumed.push(CanvasInput::PointerReleased { x, y });
             }
             if response.hovered() && !response.dragged() {
                 unconsumed.push(CanvasInput::PointerMoved { x, y });
             }
         }
-        interacting
     }
 
     /// The page edge, the grid and the guides.
@@ -665,6 +720,98 @@ mod tests {
             "device width {} vs logical {}",
             r.rect_device.width,
             r.rect_points.width()
+        );
+    }
+
+    #[test]
+    fn external_navigation_leaves_wheel_pinch_drag_and_keys_to_the_host() {
+        let doc = DocumentView::default();
+        let navigating = |c: &UiCommand| {
+            matches!(
+                c,
+                UiCommand::Pan { .. } | UiCommand::ZoomAbout { .. } | UiCommand::ZoomTo(_)
+            )
+        };
+        let at = egui::pos2(500.0, 400.0);
+        let cases = [
+            (
+                egui::Modifiers::NONE,
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ),
+            (
+                egui::Modifiers::CTRL,
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, 1.0),
+                    modifiers: egui::Modifiers::CTRL,
+                },
+            ),
+            (egui::Modifiers::NONE, egui::Event::Zoom(1.5)),
+        ];
+        for (modifiers, event) in cases {
+            let ctx = egui::Context::default();
+            let mut widget = CanvasWidget::new();
+            widget.set_navigation(CanvasNavigation::External);
+            // Several frames: egui smooths a wheel over time.
+            let mut inputs = vec![input_with(vec![egui::Event::PointerMoved(at)])];
+            let mut first = input_with(vec![egui::Event::PointerMoved(at), event.clone()]);
+            first.modifiers = modifiers;
+            inputs.push(first);
+            for _ in 0..10 {
+                let mut i = input_with(vec![]);
+                i.modifiers = modifiers;
+                inputs.push(i);
+            }
+            let tokens = ThemeTokens::of(ResolvedTheme::Dark);
+            let mut all = Vec::new();
+            for input in inputs {
+                let mut out = CommandSink::new();
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        widget.show(ui, &doc, Scale::new(1.0), &tokens, &[], &mut out);
+                    });
+                });
+                all.extend(out.drain());
+            }
+            assert!(!all.iter().any(navigating), "{event:?} navigated: {all:?}");
+        }
+
+        // A middle drag is neither a pan command nor tool input.
+        let ctx = egui::Context::default();
+        let mut widget = CanvasWidget::new();
+        widget.set_navigation(CanvasNavigation::External);
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Middle,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let (r, out) = frames(
+            &doc,
+            &mut widget,
+            &ctx,
+            vec![
+                input_with(vec![egui::Event::PointerMoved(at)]),
+                input_with(vec![press(true)]),
+                input_with(vec![egui::Event::PointerMoved(egui::pos2(560.0, 440.0))]),
+                input_with(vec![egui::Event::PointerMoved(egui::pos2(600.0, 480.0))]),
+            ],
+        );
+        assert!(
+            !out.commands().iter().any(navigating),
+            "{:?}",
+            out.commands()
+        );
+        assert!(
+            !r.unconsumed
+                .iter()
+                .any(|i| matches!(i, CanvasInput::PointerDragged { .. })),
+            "{:?}",
+            r.unconsumed
         );
     }
 
