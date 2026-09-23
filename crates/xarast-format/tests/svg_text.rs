@@ -270,6 +270,34 @@ fn a_story_reads_back_resolving_identically_and_saves_to_the_same_bytes() {
     assert!(svg.contains("xarast:panose=\"02040603050505020304\""));
 }
 
+#[test]
+fn the_model_s_default_size_is_the_original_s_16_pt_and_needs_no_attribute() {
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    b.node(NodeKind::TextStory(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(NodeKind::TextLine(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    chars(&mut b, "Hi");
+    b.pop_scope();
+    b.pop_scope();
+    let doc = b.finish().unwrap().0;
+    let bytes = save(&doc, SvgOptions::default());
+    let svg = svg_text(&bytes);
+    assert!(svg.contains("font-size=\"16\""), "{svg}");
+    let o = open_reader(Cursor::new(bytes), &OpenOptions::default()).unwrap();
+    // Nothing but the characters: the size is the default, not an attribute.
+    let line = o
+        .document
+        .tree
+        .preorder(o.document.tree.root())
+        .find(|n| matches!(o.document.tree.kind(*n), Some(NodeKind::TextLine(_))))
+        .unwrap();
+    assert!(o.document.tree.children(line).all(|c| !matches!(
+        o.document.tree.kind(c),
+        Some(NodeKind::Attr(a)) if matches!(a.value, AttrValue::FontSize(_))
+    )));
+}
+
 /// Places every character 10 pt right of the previous one, on a baseline
 /// that drops 20 pt per line item index.
 struct Grid;
