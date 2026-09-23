@@ -2,13 +2,15 @@
 id: XARA-T-0089
 type: task
 title: "Doc model: per-node foreign-baggage container (risk K1, prerequisite of W4)"
-status: todo
+status: done
 priority: high
 parent: XARA-US-0024
 author: mcp
 labels: [phase-6, xarast-doc]
 created: 2026-09-23T14:23:38Z
-updated: 2026-09-23T14:23:38Z
+updated: 2026-09-23T15:39:57Z
+started: 2026-09-23T15:05:03Z
+closed: 2026-09-23T15:39:57Z
 ---
 
 ## Description
