@@ -195,3 +195,61 @@ fn the_session_picks_through_its_index_and_rebuilds_after_an_edit() {
     }
     assert!(f.s.edit.is_selection_empty(), "the index followed the move");
 }
+
+/// The incrementally kept index must be the one a fresh build gives.
+fn assert_index_fresh(s: &Session, what: &str) {
+    let kept = s.picker().dump(&s.doc);
+    let fresh = Picker::new().dump(&s.doc);
+    assert_eq!(kept, fresh, "after {what}");
+}
+
+#[test]
+fn the_index_follows_edits_undo_and_redo_without_rebuilding() {
+    let mut f = fixture();
+    assert_index_fresh(&f.s, "the fixture");
+    let built = f.s.picker().rebuilds();
+    let c =
+        f.s.doc
+            .tree
+            .children(f.g)
+            .filter(|n| matches!(f.s.doc.tree.kind(*n), Some(NodeKind::Shape(_))))
+            .nth(1)
+            .unwrap();
+    let steps: Vec<(&str, xarast_app::EditCommand)> = vec![
+        (
+            "a leaf move",
+            xarast_app::EditCommand::translate(vec![c], Vector::raw(0, 7_000)),
+        ),
+        (
+            "a group move",
+            xarast_app::EditCommand::translate(vec![f.g], Vector::raw(3_000, 0)),
+        ),
+        (
+            "a delete",
+            xarast_app::EditCommand::DeleteNodes { nodes: vec![f.d] },
+        ),
+    ];
+    for (what, cmd) in steps {
+        f.s.apply_edit(cmd).unwrap();
+        assert_index_fresh(&f.s, what);
+    }
+    for i in 0..3 {
+        f.s.undo().unwrap();
+        assert_index_fresh(&f.s, &format!("undo {i}"));
+    }
+    for i in 0..3 {
+        f.s.redo().unwrap();
+        assert_index_fresh(&f.s, &format!("redo {i}"));
+    }
+    assert_eq!(f.s.picker().rebuilds(), built, "every step was incremental");
+    // Locking the layer is a rebuild, and still right.
+    let layer = f.s.edit.active_layer().unwrap();
+    f.s.apply(xarast_app::Intent::SetLayerLocked {
+        layer,
+        locked: true,
+    })
+    .unwrap();
+    assert_index_fresh(&f.s, "a lock");
+    assert!(f.s.picker().dump(&f.s.doc).is_empty());
+    let _ = (f.a, f.b);
+}

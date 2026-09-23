@@ -641,6 +641,12 @@ impl Session {
         &self.preview
     }
 
+    /// The pick index, kept up to date incrementally.
+    #[must_use]
+    pub const fn picker(&self) -> &crate::tool::Picker {
+        &self.picker
+    }
+
     /// The tools and the interaction machine, read-only.
     #[must_use]
     pub const fn tools(&self) -> &ToolMachine {
@@ -821,7 +827,9 @@ impl Session {
 
     fn after_mutation(&mut self) {
         self.modified = true;
-        self.picker.invalidate();
+        // Hand the picker what changed; it re-walks only those objects at
+        // the next pick (XARA-T-0168), never here on the undo path.
+        self.picker.note_changes(self.doc.tree.drain_changes());
         self.edit.prune(&self.doc);
         // The scroll bounds need the drawing's extent, which is a walk of
         // the whole document while the bounds cache is cold: 30 ms at
