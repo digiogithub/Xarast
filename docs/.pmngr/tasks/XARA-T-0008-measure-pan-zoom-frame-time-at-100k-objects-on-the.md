@@ -2,13 +2,14 @@
 id: XARA-T-0008
 type: task
 title: Measure pan/zoom frame time at 100k objects on the reference machine
-status: backlog
+status: done
 priority: high
 parent: XARA-US-0010
 author: mcp
 labels: [perf, hardware]
 created: 2026-09-23T10:00:29Z
-updated: 2026-09-23T10:00:29Z
+updated: 2026-09-23T13:24:30Z
+closed: 2026-09-23T13:24:30Z
 ---
 
 ## Description

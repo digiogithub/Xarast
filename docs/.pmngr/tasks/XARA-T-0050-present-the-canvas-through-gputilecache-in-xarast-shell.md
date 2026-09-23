@@ -2,12 +2,14 @@
 id: XARA-T-0050
 type: task
 title: Present the canvas through GpuTileCache in xarast-shell / xarast-app (pan and Draft zoom without full-frame uploads)
-status: todo
+status: done
 parent: XARA-US-0011
 author: mcp
 labels: [render, gpu, ui]
 created: 2026-09-23T12:24:47Z
-updated: 2026-09-23T12:24:47Z
+updated: 2026-09-23T13:24:30Z
+started: 2026-09-23T12:49:22Z
+closed: 2026-09-23T13:24:30Z
 ---
 
 ## Description
