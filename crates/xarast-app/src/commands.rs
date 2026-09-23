@@ -102,16 +102,15 @@ impl Command for RenameLayer {
 /// arena-level one (`document-model.md` decision 23): this transaction
 /// clears the flag on the previous holder itself, so undo puts it back.
 ///
-/// # Why this one uses `Tx::act` and the others use `Tx::set_kind`
+/// # Why this one uses `Tx::act`
 ///
-/// `Tx::set_kind` runs `keep_one_active_layer` after **every** call, and
-/// that repair fires whenever the number of active layers is not exactly
-/// one. Moving the flag necessarily passes through zero or two, so a
-/// `set_kind` pair can never move it: clearing the old one makes the
-/// repair re-elect it, and setting the new one first makes the repair
-/// clear it again. `Tx::act` applies one action and records its inverse
-/// without the repair, which is exactly what this command needs — and it
-/// is still correct by the invariant's own terms, because the invariant
+/// Moving the flag necessarily passes through a state with zero or two
+/// active layers. The model's repair, `keep_one_active_layer`, runs once
+/// at commit and only over the spreads the transaction touched, so that
+/// intermediate state is never seen; what matters is that the command
+/// leaves exactly one. `Tx::act` applies each action and records its
+/// inverse directly, which keeps undo exact — and it is correct by the
+/// invariant's own terms, because the invariant
 /// is "a transaction may not *leave* it broken" (`document-model.md`
 /// invariant 19), and this one does not.
 ///
