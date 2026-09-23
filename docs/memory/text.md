@@ -20,6 +20,7 @@ tool (W9.4) and text on a path (W9.5) are later rounds.
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4) and story invariants (T9.2.5) open | in review |
+| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. Typing, IME, clipboard, infobar, ruler (T9.4.6–T9.4.10) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
 
 Public API (`crates/xarast-text/src/lib.rs`):
@@ -152,6 +153,80 @@ Public API (`crates/xarast-text/src/lib.rs`):
 - **Coordinates are y up**, like the document: the first baseline is y = 0,
   later ones negative; x = 0 is the column's left edge (column mode) or the
   anchor (point mode). Glyph y offsets from parley (y down) are negated.
+
+## The text tool (W9.4, as built, XARA-US-0047)
+
+Code: `xarast-app/src/text_edit.rs` (`CaretMap`, pure, story space),
+`xarast-app/src/text_tool.rs` (`TextTool`, the state machine), `tools.md`
+decisions 45–48 and `ui.md` decision 40 for the tool and shell sides.
+
+- **A caret is a byte offset of the laid-out text plus an affinity**
+  (`Caret { byte, upstream }`), not a `TextPos`: layout, hit testing and
+  bidi all speak byte offsets, and a `TextPos` cannot say which side of a
+  soft line break or a direction boundary it means. `TextSelection::cursor`
+  derives the model's `TextCursor` (line, item) through
+  `StoryText::pos_of` when something needs it. The laid-out text is
+  `layout_text` (the story's last `'\n'` stripped), so the last caret
+  offset is before the final EOL item.
+- **Stops.** A line's caret stops are its clusters' two edges in x order:
+  an LTR cluster's left edge is its start (downstream) and its right edge
+  its end (upstream); an RTL cluster the other way round. Neighbouring
+  clusters share an x: the same offset in one-direction text, two
+  different offsets at a direction boundary. A cluster is never split, so
+  a ligature or a base with its marks is one stop (T9.3's rule).
+- **Visual movement** (the default; `TextTool::logical_arrows` is the
+  preference) walks stops by x: right = the first stop further right,
+  which is the trailing edge of the cluster crossed; left = the nearest
+  stop further left. Off a line's end it goes to the logical start of the
+  next line or the logical end of the previous one, by the line's base
+  direction (`LaidLine::base_rtl`, added for this). Logical movement,
+  word movement (UAX #29 via `xarast_text::word_segments`, dictionary
+  data with `complex-scripts`), Home/End (logical line start/end: the right
+  end of an RTL line is its start), Up/Down with a goal x kept across the
+  run, Page Up/Down (lines per view height) and Ctrl+Home/End are the
+  other motions. Up on the first line goes to the story start, Down on the
+  last to its end (the macOS behaviour; Windows stays put — pick again if
+  the maintainer prefers). Arrow keys pointing right in an RTL paragraph
+  mean logical *backward* for logical and word motion.
+- **Split caret.** The primary caret is the stop the caret sits on (its
+  offset *and* side), so repeated arrows move it steadily across the
+  screen; the secondary, drawn half height, is the other place the same
+  offset is drawn at a direction boundary. Not Pango's strong/weak rule
+  (strong = paragraph direction): with that one the drawn caret jumped
+  back across the Hebrew run while the user pressed Right (dead end).
+- **Soft line ends.** `line_of` shows an offset shared by two lines on the
+  upper one when upstream, the lower one otherwise. End on a wrapped line
+  gives an upstream caret at the line's end (trailing spaces included);
+  Right from there moves to the start of the next line *at the same
+  offset* (visual-only move) and Left comes back.
+- **Hit test**: nearest line by its band (descent below to ascent above
+  the baseline), then the nearest stop; between two stops at one x the
+  one on the pointer's side wins.
+- **Selection spans**: per line, the selected clusters' boxes merged left
+  to right (so mixed text gives several spans, in visual order), plus a
+  block a third of the line's size wide at the line's logical end when the
+  paragraph break after it is selected.
+- **No typing yet.** A click on empty canvas or a column drag makes a
+  *pending* caret, not a story; T9.4.6 creates the story at the first
+  character. Delete/Backspace/Enter are swallowed while a caret is up.
+- **Text on a path** (`OnPath`): the caret follows the straight layout the
+  walker draws until W9.5.
+
+Measured (`cargo bench -p xarast-app --bench text_caret`, 10 000
+characters, Latin + Hebrew, 300 pt column, pinned fonts; budget 1 ms per
+motion): visual right 0.72 µs, logical right 2.1 µs (122 µs before the
+move looked only at the caret's line and its neighbours), word right
+1.1 µs, line down 1.2 µs, line end 0.40 µs, hit 0.55 µs, selection spans
+of the whole story 54 µs.
+
+Tests: `xarast-app/tests/text_caret.rs` (15: every assertion on byte
+offsets — Latin, RTL, mixed walks, split caret, hit round trip, right n /
+left n, selection spans, the paragraph-break block, soft line ends, goal
+x, words, empty story, marks; plus the corpus walk over every line of
+`hebrew.xar`: visual order strictly rightwards, every stop visited),
+`tests/text_tool.rs` (10, through `Session` intents: document untouched),
+`xarast-shell` `a_text_caret_takes_the_navigation_and_character_keys`,
+`xarast-ui` `the_caret_blinks_from_on_then_stops_blinking`.
 
 ## Walker integration (as built, round 2)
 
@@ -536,7 +611,14 @@ first story of a process waits for enumeration when nothing prewarmed
   face registered in a shared `FontDb` is visible to every document.
 - W9.3: T9.3.8 centre/right/decimal tabs (only left stops now), T9.3.10
   features/variations are plumbed per run but untested beyond `kern`/`liga`/
-  `wght`, T9.3.11 layout cache, T9.4 caret/hit-test on `LaidCluster`.
+  `wght`, T9.3.11 layout cache (the text tool keeps its own per-epoch
+  cache of `CaretMap`s; the walker another).
+- W9.4 leftovers: typing and grapheme-aware deletion with undo per burst
+  (T9.4.6, creates the pending story), IME preedit and the IME caret area
+  from the text caret (T9.4.7), clipboard (T9.4.8), text infobar and
+  OpenType panel (T9.4.9), the interactive ruler (T9.4.10); Ctrl+Up/Down
+  by paragraph (they move by line now); the pending caret's height uses
+  0.8/0.2 of the current size, not the face's metrics.
 - Shaping across a soft line break is not redone: an Arabic word split by
   an emergency break keeps its joined forms. Reshape the two halves if it
   ever matters (only emergency breaks can split a word).

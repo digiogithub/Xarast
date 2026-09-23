@@ -782,6 +782,34 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     `process::exit`. Measured on COSMIC with a real window holding a
     `.xarast` lock: SIGTERM → orderly shutdown in 214 ms, lock file gone,
     exit status 143.
+40. **The text tool on screen** (XARA-US-0047, phase 9 W9.4). The state
+    machine is the core's (`text_tool.rs`, `tools.md` decision 45); the
+    shell and the interface only route keys and draw.
+    - **Keys.** While `Session::text_editing()` (a caret is up, in a
+      story or pending), a pressed key goes first to `Viewer::text_nav`:
+      arrows, Home, End, Page Up/Down become `Intent::TextNav { key,
+      word: Ctrl, extend: Shift }` (canvas focused or nothing focused,
+      the same gate as arrow panning), so they neither pan nor fit the
+      page. Plain character keys (no Ctrl, no Alt) are swallowed —
+      they are typing, T9.4.6 — so `l c s z b j d 0 1 3 # + -` and Space
+      (momentary selector) do nothing on the canvas while a caret is up.
+      Named keys (Delete, Esc, Enter, F-keys) and Ctrl chords still run
+      their commands; the tool takes Delete/Enter (ignored for now) so
+      they never delete the story, and Esc leaves the text.
+    - **Caret.** `OverlayShape::Caret { from, to, primary, moved }` →
+      `OverlayItem::Caret`: a black line with a white halo (1.5 hairline
+      for the primary caret, 1 for the secondary half of a split caret)
+      between the line's descent and ascent, turned with the story.
+      Blink: 0.53 s on / 0.53 s off from the moment `moved` changed
+      (tracked in egui temp memory), stopping — caret left on — after
+      10 s idle, so an idle window stops repainting; the painter asks
+      egui for the repaint at the next toggle (`caret_blink`).
+    - **Selection.** `OverlayShape::Highlight { corners }` →
+      `OverlayItem::Highlight`: accent at 35 % over the text, one
+      quadrilateral per visual span of a line (a rotated story's spans
+      are turned too).
+    - **Pointer.** `CursorKind::Text` → `CursorShape::Text` (I-beam) over
+      the whole canvas with the text tool.
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
@@ -977,3 +1005,11 @@ isolated GNOME session on a private bus:
   decision 18 (XARA-T-0001).
 - X11 pressure via `octotablet` remains deferred; X11 is a documented
   degradation (`PlatformCapabilities::X11`), not a target.
+- [ ] **The text caret has not been seen in a live window** (XARA-US-0047):
+  the key routing and the overlay are covered headlessly
+  (`a_text_caret_takes_the_navigation_and_character_keys`, the overlay
+  painting test). Manual check: F8, click a story of
+  `TextDesigns/hebrew.xar` → a blinking caret; Right walks the Hebrew
+  leftwards on screen through the bytes backwards; Shift+arrows
+  highlight; the caret stops blinking after 10 s; the IME caret area is
+  not yet fed from the text caret (T9.4.7).
