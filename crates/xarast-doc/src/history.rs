@@ -870,6 +870,16 @@ pub struct History {
     checkpoint_every: Option<usize>,
     checkpoints: Vec<(usize, Arc<crate::Snapshot>)>,
     committed: usize,
+    /// The state serial of each step in `past`, oldest first: the state the
+    /// document is in once that step has been applied.
+    past_serials: Vec<u64>,
+    /// The same for `future`, in `future`'s order.
+    future_serials: Vec<u64>,
+    /// The state serial with every step in `past` undone: 0 for a fresh
+    /// history, the evicted step's serial once eviction has dropped some.
+    base_serial: u64,
+    /// The last serial handed out.
+    last_serial: u64,
 }
 
 impl Default for History {
@@ -904,7 +914,29 @@ impl History {
             checkpoint_every: None,
             checkpoints: Vec::new(),
             committed: 0,
+            past_serials: Vec::new(),
+            future_serials: Vec::new(),
+            base_serial: 0,
+            last_serial: 0,
         }
+    }
+
+    /// Identifies the document state the history is at: equal serials mean
+    /// the same state, reached by undo or redo.
+    ///
+    /// Every commit makes a new serial, a merge into the last step included
+    /// (the step now leads somewhere else); undo and redo move between the
+    /// serials already handed out. A saved document records the serial it
+    /// was saved at, and is unmodified exactly when the history is back at
+    /// it. Serials are never reused, so a state the history can no longer
+    /// reach (its redo branch was dropped) is never mistaken for the
+    /// current one. Checkpoints and eviction do not change it.
+    #[must_use]
+    pub fn state_serial(&self) -> u64 {
+        self.past_serials
+            .last()
+            .copied()
+            .unwrap_or(self.base_serial)
     }
 
     /// Records a transaction, merging it into the last one when their coalesce
@@ -914,12 +946,18 @@ impl History {
         let mergeable = matches!((self.past.last(), tx.coalesce),
             (Some(last), Some(key)) if last.coalesce == Some(key));
         self.bytes += tx.bytes;
+        self.last_serial += 1;
+        let serial = self.last_serial;
         if mergeable && let Some(last) = self.past.last_mut() {
             last.inverses.append(&mut tx.inverses);
             last.retained.append(&mut tx.retained);
             last.bytes += tx.bytes;
+            if let Some(s) = self.past_serials.last_mut() {
+                *s = serial;
+            }
         } else {
             self.past.push(tx);
+            self.past_serials.push(serial);
         }
         self.committed += 1;
         if let Some(every) = self.checkpoint_every
@@ -935,6 +973,9 @@ impl History {
     /// Undoes the most recent transaction, returning its label.
     pub fn undo(&mut self, doc: &mut Document) -> Option<&'static str> {
         let tx = self.past.pop()?;
+        if let Some(serial) = self.past_serials.pop() {
+            self.future_serials.push(serial);
+        }
         self.bytes = self.bytes.saturating_sub(tx.bytes);
         let redo_inverses = apply_reversed(doc, &tx.inverses);
         let label = tx.label;
@@ -956,6 +997,9 @@ impl History {
     /// Redoes the most recently undone transaction, returning its label.
     pub fn redo(&mut self, doc: &mut Document) -> Option<&'static str> {
         let tx = self.future.pop()?;
+        if let Some(serial) = self.future_serials.pop() {
+            self.past_serials.push(serial);
+        }
         let undo_inverses = apply_reversed(doc, &tx.inverses);
         let label = tx.label;
         let mut retained = Vec::new();
@@ -1051,6 +1095,10 @@ impl History {
 
     /// Forgets everything, destroying the nodes the history was retaining.
     pub fn clear(&mut self, doc: &mut Document) {
+        // The document stays where it is; only the way back is forgotten.
+        self.base_serial = self.state_serial();
+        self.past_serials.clear();
+        self.future_serials.clear();
         let past = std::mem::take(&mut self.past);
         let future = std::mem::take(&mut self.future);
         for tx in past.into_iter().chain(future) {
@@ -1062,6 +1110,7 @@ impl History {
 
     fn drop_future(&mut self, doc: &mut Document) {
         let future = std::mem::take(&mut self.future);
+        self.future_serials.clear();
         for tx in future {
             reap(doc, &tx);
         }
@@ -1070,6 +1119,9 @@ impl History {
     fn evict_if_over_budget(&mut self, doc: &mut Document) {
         while self.bytes > self.budget && !self.past.is_empty() {
             let tx = self.past.remove(0);
+            if !self.past_serials.is_empty() {
+                self.base_serial = self.past_serials.remove(0);
+            }
             self.bytes = self.bytes.saturating_sub(tx.bytes);
             reap(doc, &tx);
             let depth = self.past.len();
