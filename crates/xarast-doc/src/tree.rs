@@ -196,6 +196,14 @@ pub struct Tree {
     /// Foreign baggage (`research/06 §8.2`), out of line: almost no node
     /// has any, and `NodeData` is gated at 64 bytes. See [`crate::foreign`].
     foreign: SecondaryMap<NodeId, Arc<ForeignBaggage>>,
+    /// Content revisions, out of line and lazy: a node that was never
+    /// edited has none and reads as revision 0. See [`Tree::content_rev`].
+    revs: SecondaryMap<NodeId, u64>,
+    /// The next content revision to hand out. Per tree, so that two
+    /// imports of the same file number their edits identically.
+    next_rev: u64,
+    /// Bumped whenever a resource (a bitmap's pixels) changes.
+    resources_rev: u64,
     /// Maximum depth accepted by [`Tree::attach`]. Mirrors
     /// [`BuildLimits::max_depth`](crate::BuildLimits).
     pub(crate) max_depth: usize,
@@ -226,6 +234,9 @@ impl Tree {
             next_tag: 1,
             bounds: SecondaryMap::new(),
             foreign: SecondaryMap::new(),
+            revs: SecondaryMap::new(),
+            next_rev: 1,
+            resources_rev: 0,
             max_depth: Tree::DEFAULT_MAX_DEPTH,
         }
     }
@@ -371,7 +382,58 @@ impl Tree {
         self.foreign.len()
     }
 
+    /// The content revision of a node's own payload and flags.
+    ///
+    /// `0` for a node that no action has changed since it was created;
+    /// otherwise a number unique within this tree, handed out afresh by every
+    /// action that changes the node's kind, geometry, attribute value or
+    /// flags — undo and redo included. Together with the node's [`Tag`] it
+    /// names one *version* of one node, which is what a per-node render
+    /// cache keys on (`docs/memory/document-model.md`). Structure is not
+    /// part of it: moving a node leaves its revision alone.
+    #[inline]
+    #[must_use]
+    pub fn content_rev(&self, id: NodeId) -> u64 {
+        self.revs.get(id).copied().unwrap_or(0)
+    }
+
+    /// The revision of the document's resources: bumped whenever a
+    /// bitmap's pixels are replaced.
+    #[inline]
+    #[must_use]
+    pub fn resources_rev(&self) -> u64 {
+        self.resources_rev
+    }
+
     // ── Mutation. `pub(crate)`: see the module documentation. ────────────────
+
+    /// Gives a node a fresh content revision.
+    pub(crate) fn touch(&mut self, id: NodeId) {
+        if self.nodes.contains_key(id) {
+            let rev = self.next_rev;
+            self.next_rev = self.next_rev.wrapping_add(1);
+            self.revs.insert(id, rev);
+        }
+    }
+
+    /// Continues `old`'s revision numbering and gives every node of this
+    /// tree, and its resources, a revision `old` never handed out. Used when
+    /// a tree replaces another under the same tags (snapshot restore).
+    pub(crate) fn continue_revisions_from(&mut self, old: &Tree) {
+        self.next_rev = self.next_rev.max(old.next_rev);
+        let ids: Vec<NodeId> = self.nodes.keys().collect();
+        for id in ids {
+            self.touch(id);
+        }
+        self.touch_resources();
+    }
+
+    /// Records that a resource changed.
+    pub(crate) fn touch_resources(&mut self) {
+        let rev = self.next_rev;
+        self.next_rev = self.next_rev.wrapping_add(1);
+        self.resources_rev = rev;
+    }
 
     /// Replaces a node's baggage, returning the old one. Empty baggage is
     /// stored as none. Only actions and the builder call this.
@@ -531,6 +593,7 @@ impl Tree {
             }
             self.bounds.remove(*v);
             self.foreign.remove(*v);
+            self.revs.remove(*v);
         }
         victims.len()
     }
