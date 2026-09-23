@@ -2,13 +2,15 @@
 id: XARA-T-0101
 type: task
 title: F3.9 passes 4–5 — attribute hoisting and CSS paint classes (SVG size and save time for vector-dense documents)
-status: todo
+status: done
 priority: medium
 parent: XARA-US-0023
 author: mcp
 labels: [phase-6, xarast-format, svg, perf]
 created: 2026-09-23T15:40:55Z
-updated: 2026-09-23T15:40:55Z
+updated: 2026-09-23T16:23:40Z
+started: 2026-09-23T15:52:06Z
+closed: 2026-09-23T16:23:40Z
 ---
 
 ## Description
