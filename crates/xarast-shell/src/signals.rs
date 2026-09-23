@@ -77,11 +77,11 @@ impl SignalWatch {
     /// What the handler thread does with one signal. The first asks for an
     /// orderly shutdown and arms the fallback; a second is the fallback.
     fn raise(&self, sig: i32) {
+        self.inner.signal.store(sig, Ordering::SeqCst);
         let first = !self.inner.requested.swap(true, Ordering::SeqCst);
         if !first {
             fallback(sig);
         }
-        self.inner.signal.store(sig, Ordering::SeqCst);
         tracing::info!(signal = sig, "shutting down on a signal");
         if let Ok(w) = self.inner.waker.lock()
             && let Some(w) = w.as_ref()
@@ -107,6 +107,14 @@ impl SignalWatch {
     #[must_use]
     pub fn requested(&self) -> bool {
         self.inner.requested.load(Ordering::SeqCst)
+    }
+
+    /// The signal that asked for shutdown, if one did (for the exit
+    /// status, `128 + signal`).
+    #[must_use]
+    pub fn signal(&self) -> Option<i32> {
+        let sig = self.inner.signal.load(Ordering::SeqCst);
+        (self.requested() && sig > 0).then_some(sig)
     }
 
     /// Marks a shutdown as asked for, as a signal would, without the

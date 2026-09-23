@@ -211,7 +211,8 @@ fn main() -> ExitCode {
     {
         viewer = viewer.with_autosave(dir);
     }
-    viewer = viewer.with_signals(xarast_shell::signals::SignalWatch::install());
+    let signals = xarast_shell::signals::SignalWatch::install();
+    viewer = viewer.with_signals(signals.clone());
     if let Some(nodes) = synthetic {
         viewer = viewer.with_synthetic(nodes);
     }
@@ -223,7 +224,10 @@ fn main() -> ExitCode {
         viewer = viewer.with_probe(Probe::new(kind, probe_samples));
     }
     match xarast_shell::run_app(config, viewer) {
-        Ok(()) => ExitCode::SUCCESS,
+        // Ended by a signal: say so the way a shell expects.
+        Ok(()) => signals.signal().map_or(ExitCode::SUCCESS, |sig| {
+            ExitCode::from(u8::try_from(128 + sig).unwrap_or(1))
+        }),
         Err(e) => {
             eprintln!("xarast: {e}");
             ExitCode::FAILURE
