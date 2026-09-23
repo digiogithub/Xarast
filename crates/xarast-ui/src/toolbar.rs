@@ -649,9 +649,7 @@ mod tests {
         assert_eq!(tool_tooltip(ToolId::Pen), "Pen (Shift+F5)");
         assert_eq!(tool_tooltip(ToolId::Freehand), "Freehand (F3)");
         assert_eq!(tool_tooltip(ToolId::Text), "Text (F8)");
-        assert_eq!(
-            tool_tooltip(ToolId::Transparency),
-            "Transparency — not available yet (phase 8)"
-        );
+        assert_eq!(tool_tooltip(ToolId::Fill), "Fill (F5)");
+        assert_eq!(tool_tooltip(ToolId::Transparency), "Transparency (F6)");
     }
 }
