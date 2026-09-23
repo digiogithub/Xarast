@@ -2,12 +2,13 @@
 id: XARA-US-0040
 type: story
 title: W8.5 — Ramp evaluation and live render feedback
-status: backlog
+status: in_review
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, render]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T09:42:03Z
+updated: 2026-09-23T21:25:16Z
+started: 2026-09-23T21:12:35Z
 ---
 
 ## Tasks (full table: phase-08 §W8.5)
