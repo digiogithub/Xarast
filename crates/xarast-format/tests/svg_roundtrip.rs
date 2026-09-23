@@ -7,10 +7,9 @@
 //!    one (`svg::normal_form`, XARA-T-0105) — with the writer's passes 4–5
 //!    on (the default) and off (XARA-T-0107).
 //! 2. **Bytes**: re-saving the reloaded document through `save_opened`
-//!    with deterministic options reaches a fixed point: the second re-save
-//!    equals the first re-save for every file, and the first re-save equals
-//!    the original save for all but the files whose baked data is resampled
-//!    from 8-bit key stops (counted, and bounded here).
+//!    with deterministic options is byte-identical to the original save
+//!    (every entry, the container included): read then write is a fixed
+//!    point from the first re-save.
 //! 3. **No warnings**: nothing the writer produced reads back with a
 //!    warning.
 //!
@@ -24,7 +23,9 @@ use std::path::PathBuf;
 
 use xarast_doc::Severity;
 use xarast_format::svg::{SvgOptions, normal_form};
-use xarast_format::{OpenOptions, SaveOptions, WriteOptions, open_reader, save_opened_to, save_to};
+use xarast_format::{
+    OpenOptions, SaveOptions, WriteOptions, XarastReader, open_reader, save_opened_to, save_to,
+};
 
 const LOCK: &str = include_str!("../../../tests/corpus/corpus.lock");
 
@@ -69,13 +70,34 @@ fn first_difference(a: &str, b: &str) -> String {
     format!("{} vs {} lines", a.lines().count(), b.lines().count())
 }
 
+/// The first package entry whose bytes differ, and where.
+fn first_entry_difference(a: &[u8], b: &[u8]) -> String {
+    let mut ra = XarastReader::open(Cursor::new(a)).unwrap();
+    let mut rb = XarastReader::open(Cursor::new(b)).unwrap();
+    let names: Vec<String> = ra.entries().iter().map(|e| e.name.clone()).collect();
+    let other: Vec<String> = rb.entries().iter().map(|e| e.name.clone()).collect();
+    if names != other {
+        return format!("entries {names:?} vs {other:?}");
+    }
+    // The manifest only repeats the other entries' digests: look at it last.
+    let mut names = names;
+    names.sort_by_key(|n| n == "META-INF/manifest.xml");
+    for n in names {
+        let (x, y) = (ra.entry(&n).unwrap(), rb.entry(&n).unwrap());
+        if x != y {
+            let (x, y) = (String::from_utf8_lossy(&x), String::from_utf8_lossy(&y));
+            return format!("{n}: {}", first_difference(&x, &y));
+        }
+    }
+    "the container differs".into()
+}
+
 #[test]
 fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_point() {
     let Some((root, files)) = corpus() else {
         return;
     };
-    let mut identical_first = 0usize;
-    let mut settled_second = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let (doc, _) = xarast_xar::import(&bytes, &xarast_xar::ImportOptions::default())
@@ -95,11 +117,12 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         assert!(warnings.is_empty(), "{rel}: {warnings:?}");
         assert!(opened.preservation.intact(), "{rel}");
         let got = normal_form(&opened.document);
-        assert!(
-            nf == got,
-            "{rel}: normal form differs at {}",
-            first_difference(&nf, &got)
-        );
+        if nf != got {
+            failures.push(format!(
+                "{rel}: normal form differs at {}",
+                first_difference(&nf, &got)
+            ));
+        }
 
         // Passes 4–5 off: the same model.
         let mut plain = Cursor::new(Vec::new());
@@ -115,10 +138,9 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         .unwrap();
         let reread = open_reader(Cursor::new(plain.into_inner()), &OpenOptions::default())
             .unwrap_or_else(|e| panic!("{rel}: open (passes off): {e}"));
-        assert!(
-            normal_form(&reread.document) == got,
-            "{rel}: passes 4-5 change the model read back"
-        );
+        if normal_form(&reread.document) != got {
+            failures.push(format!("{rel}: passes 4-5 change the model read back"));
+        }
 
         let mut second = Cursor::new(Vec::new());
         save_opened_to(
@@ -129,31 +151,12 @@ fn every_corpus_file_round_trips_on_the_normal_form_and_reaches_a_byte_fixed_poi
         )
         .unwrap();
         let second = second.into_inner();
-        if second == first {
-            identical_first += 1;
-            continue;
+        if second != first {
+            failures.push(format!(
+                "{rel}: the first re-save is not byte-identical: {}",
+                first_entry_difference(&first, &second)
+            ));
         }
-        let mut again = open_reader(Cursor::new(second.clone()), &OpenOptions::default()).unwrap();
-        let mut third = Cursor::new(Vec::new());
-        save_opened_to(
-            &again.document,
-            &mut again.package,
-            &mut third,
-            &opts(SvgOptions::default()),
-        )
-        .unwrap();
-        assert!(
-            third.into_inner() == second,
-            "{rel}: not a fixed point on the second re-save"
-        );
-        settled_second.push(rel.clone());
     }
-    eprintln!(
-        "{identical_first}/59 identical on the first re-save; settled on the second: {settled_second:?}"
-    );
-    // Known today: four files whose profiled or approximated fills are
-    // re-sampled from 8-bit key stops (Fill Types simple, Spitfire, WATCH2,
-    // Watch4), and one whose meta.xml counts an unreferenced bitmap (scope3
-    // simple); see docs/memory/xarast-format.md. More is a regression.
-    assert!(identical_first >= 54, "{identical_first}");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

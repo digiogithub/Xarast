@@ -24,7 +24,13 @@ fn is_ink_sidecar(c: &Elem) -> bool {
         || (&*c.ns == NS_XARAST
             && matches!(
                 &*c.local,
-                "name" | "user" | "quickshape" | "fill" | "stroke-fill" | "transparency"
+                "name"
+                    | "user"
+                    | "quickshape"
+                    | "fill"
+                    | "stroke-fill"
+                    | "transparency"
+                    | "stroke-transparency"
             ))
 }
 
@@ -37,6 +43,8 @@ fn ink_known(ns: &str, l: &str) -> bool {
             "fill-ref"
                 | "stroke-ref"
                 | "blend"
+                | "stroke-blend"
+                | "stroke-mask"
                 | "quality"
                 | "overprint-stroke"
                 | "overprint-fill"

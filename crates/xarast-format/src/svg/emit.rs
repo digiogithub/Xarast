@@ -29,7 +29,7 @@ use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Vector};
 
 use super::defs::Defs;
 use super::frame::Frame;
-use super::num::{f64s, mp};
+use super::num::{f32s, f64s, mp};
 use super::paint::{
     BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, transparency,
 };
@@ -1380,17 +1380,26 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 known.push(s.replacen("<xarast:fill", "<xarast:stroke-fill", 1));
             }
             if let Some(s) = st.sidecar {
-                known.push(s);
+                // Its own name, so that a lone stroke twin is never taken
+                // for the fill's (XARA-T-0111).
+                known.push(s.replacen("<xarast:transparency", "<xarast:stroke-transparency", 1));
+            }
+            if let Some(m) = &st.mask {
+                // SVG has no mask for the stroke alone: the browser draws
+                // the stroke without it, Xarast reads it back.
+                el.a("xarast:stroke-mask", format!("url(#{m})"));
             }
         }
 
         // Blend mode: the fill's transparency decides, or the stroke's when
-        // there is no fill (§6.5.2).
-        let mode = if ft.mode != TranspMode::None && ft.mode != TranspMode::Mix {
-            ft.mode
-        } else {
-            st.mode
-        };
+        // there is no fill (§6.5.2). SVG has one blend mode per element;
+        // when the fill is drawn and the stroke has a mode of its own, the
+        // stroke's is `xarast:stroke-blend` and `xarast:blend` is the
+        // fill's alone (XARA-T-0111).
+        let real = |m: TranspMode| m != TranspMode::None && m != TranspMode::Mix;
+        let fill_drawn = fill.value != "none" || is_image;
+        let mode = if real(ft.mode) { ft.mode } else { st.mode };
+        let stroke_own = fill_drawn && stroke.value != "none" && real(st.mode);
         if let Some((css, name)) = blend_of(mode) {
             self.stats.blend_modes += 1;
             if let Some(css) = css {
@@ -1398,7 +1407,12 @@ impl<'d, 'b> Emitter<'d, 'b> {
             } else {
                 self.stats.blend_modes_approximated += 1;
             }
-            el.a("xarast:blend", name);
+            if !stroke_own || real(ft.mode) {
+                el.a("xarast:blend", name);
+            }
+        }
+        if stroke_own && let Some((_, name)) = blend_of(st.mode) {
+            el.a("xarast:stroke-blend", name);
         }
 
         self.extras(el);
@@ -2096,16 +2110,12 @@ pub(crate) fn palette_xml(doc: &Document, ids: &HashMap<ColourId, String>) -> St
             ColourKind::Spot => attr(&mut s, "xarast:kind", "spot"),
             ColourKind::Tint { factor } => {
                 attr(&mut s, "xarast:kind", "tint");
-                attr(&mut s, "xarast:amount", &f64s(f64::from(factor), 6));
+                attr(&mut s, "xarast:amount", &f32s(factor));
             }
             ColourKind::Linked => attr(&mut s, "xarast:kind", "linked"),
             ColourKind::Shade { x, y } => {
                 attr(&mut s, "xarast:kind", "shade");
-                attr(
-                    &mut s,
-                    "xarast:shade",
-                    &format!("{} {}", f64s(f64::from(x), 6), f64s(f64::from(y), 6)),
-                );
+                attr(&mut s, "xarast:shade", &format!("{} {}", f32s(x), f32s(y)));
             }
         }
         if let Some(p) = def.parent.and_then(|p| ids.get(&p)) {
@@ -2114,7 +2124,7 @@ pub(crate) fn palette_xml(doc: &Document, ids: &HashMap<ColourId, String>) -> St
         let comps: Vec<String> = def
             .components
             .iter()
-            .map(|c| c.map_or_else(|| "-".to_owned(), |v| f64s(f64::from(v), 6)))
+            .map(|c| c.map_or_else(|| "-".to_owned(), f32s))
             .collect();
         attr(&mut s, "xarast:components", &comps.join(" "));
         attr(&mut s, "xarast:srgb", &hex(t.resolve_rgba8(id)));

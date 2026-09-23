@@ -2,17 +2,13 @@
 //! file is imported and rendered, saved as `.xarast`, opened again through
 //! the application's own open path (`Session::open_bytes`, the one
 //! `File › Open` and the command line use) and rendered again, with the
-//! CPU backend at the same size and frame. The two renders are compared
-//! pixel by pixel.
-//!
-//! The tolerance is stated, not hidden: a channel may differ by at most
-//! [`MAX_CHANNEL`] levels, and at most [`MAX_DIFFERING`] of a file's pixels
-//! (0.1 %) may differ at all. Both come from what the format quantises:
-//! colours are written as 8-bit sRGB (a CMYK or HSV palette colour
-//! resolved in `f32` and the same colour read back from its 8-bit spelling
-//! can blend one level apart at an anti-aliased edge), and ramp key stops
-//! are 8-bit. Geometry is exact (integer millipoints both ways). Files
-//! with a known writer gap are listed in [`KNOWN_RENDER_GAPS`].
+//! CPU backend at the same size and frame. The two renders must be
+//! **pixel-identical** for every file: geometry is exact (integer
+//! millipoints both ways), palette colours come back bit for bit (their
+//! components are written in the shortest round-trip form) and ramp,
+//! three/four-colour, fractal, noise and contone key colours name their
+//! palette colour (`xarast:stop-refs`, `xarast:colour-refs`,
+//! `xarast:contone-refs`, XARA-T-0110).
 //!
 //! The corpus is found through `XARAST_XAR_CORPUS`; nothing from it is
 //! written into the repository.
@@ -25,23 +21,6 @@ use xarast_app::{
 };
 
 const LOCK: &str = include_str!("../../../tests/corpus/corpus.lock");
-
-/// Largest per-channel difference allowed, in 8-bit levels.
-const MAX_CHANNEL: u8 = 2;
-/// Largest fraction of pixels allowed to differ at all.
-const MAX_DIFFERING: f64 = 0.001;
-
-/// Files that render differently for a known writer gap, not a reader
-/// fault: scope3 simple loses objects kept under an unknown record
-/// (XARA-T-0108) and a fractal fill's mapping, Watch4 a noise fill's
-/// mapping, Spitfire its bitmap fills' mapping (XARA-T-0109). They must
-/// still render, and the test demands the list shrink when the writer is
-/// fixed.
-const KNOWN_RENDER_GAPS: &[&str] = &[
-    "Designs/Spitfire.xar",
-    "Designs/Watch4.xar",
-    "Designs/scope3 simple.xar",
-];
 
 fn corpus() -> Option<(PathBuf, Vec<String>)> {
     let required = std::env::var("XARAST_CORPUS_REQUIRED").as_deref() == Ok("1");
@@ -88,10 +67,7 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
     let Some((root, files)) = corpus() else {
         return;
     };
-    let mut exact = 0usize;
-    let mut worst: Vec<(String, u8, f64)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    let mut gaps: Vec<String> = Vec::new();
     for rel in &files {
         let bytes = std::fs::read(root.join(rel)).unwrap();
         let original = Session::open_bytes(DocumentId(1), Path::new(rel), &bytes)
@@ -127,24 +103,13 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
                 max = max.max(d);
             }
         }
-        let fraction = differing as f64 / (a.len() / 4) as f64;
-        if differing == 0 {
-            exact += 1;
-        } else {
-            worst.push((rel.clone(), max, fraction));
-        }
-        if max > MAX_CHANNEL || fraction > MAX_DIFFERING {
-            if KNOWN_RENDER_GAPS.contains(&rel.as_str()) {
-                gaps.push(rel.clone());
-                continue;
-            }
+        if differing > 0 {
+            let fraction = differing as f64 / (a.len() / 4) as f64;
             failures.push(format!(
                 "{rel}: {differing} pixels differ ({:.4} %), by up to {max} levels",
                 fraction * 100.0
             ));
         }
     }
-    eprintln!("{exact}/59 pixel-identical; the others: {worst:?}");
     assert!(failures.is_empty(), "{failures:#?}");
-    assert_eq!(gaps, KNOWN_RENDER_GAPS, "update KNOWN_RENDER_GAPS");
 }

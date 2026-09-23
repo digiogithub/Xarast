@@ -94,11 +94,7 @@ impl<'d> Reader<'d, '_, '_> {
                 .collect();
             let mut components = [None; 4];
             for (slot, v) in components.iter_mut().zip(&texts) {
-                *slot = if *v == "-" {
-                    None
-                } else {
-                    parse::float(v).map(|x| x as f32)
-                };
+                *slot = if *v == "-" { None } else { parse::f32_exact(v) };
             }
             let kind = match xa(e, "kind") {
                 Some("spot") => ColourKind::Spot,
@@ -107,10 +103,15 @@ impl<'d> Reader<'d, '_, '_> {
                     factor: f32_of(xa(e, "amount")).unwrap_or(1.0),
                 },
                 Some("shade") => {
-                    let v = xa(e, "shade").and_then(parse::floats).unwrap_or_default();
+                    let v: Vec<f32> = xa(e, "shade")
+                        .unwrap_or("")
+                        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                        .filter(|t| !t.is_empty())
+                        .map(|t| parse::f32_exact(t).unwrap_or(1.0))
+                        .collect();
                     ColourKind::Shade {
-                        x: v.first().copied().unwrap_or(1.0) as f32,
-                        y: v.get(1).copied().unwrap_or(1.0) as f32,
+                        x: v.first().copied().unwrap_or(1.0),
+                        y: v.get(1).copied().unwrap_or(1.0),
                     }
                 }
                 _ => ColourKind::Normal,
@@ -148,7 +149,9 @@ impl<'d> Reader<'d, '_, '_> {
             })
             .collect();
         let mut defs: Vec<ColourDef> = entries.iter().map(|e| e.def.clone()).collect();
-        // Components are written with six decimals, which is not always
+        // Components are written in the shortest form that reads back as
+        // the same `f32` (`research/06 §6.14`), so they resolve exactly.
+        // Files written before that have six decimals, which is not always
         // enough for an `f32` to resolve to the same 8-bit colour. The file
         // says what each resolved to (`xarast:srgb`): where it differs, the
         // nearest `f32` that still prints the same six decimals and resolves

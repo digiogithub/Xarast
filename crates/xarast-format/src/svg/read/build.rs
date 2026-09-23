@@ -124,7 +124,7 @@ fn is_false(v: Option<&str>) -> bool {
 }
 
 fn f32_of(v: Option<&str>) -> Option<f32> {
-    v.and_then(parse::float).map(|x| x as f32)
+    v.and_then(parse::f32_exact)
 }
 
 fn profile_of(v: Option<&str>) -> Option<BiasGain> {

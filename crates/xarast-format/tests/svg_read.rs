@@ -543,9 +543,7 @@ fn key_stops_finer_than_8_bits_are_a_fixed_point_from_the_first_re_save() {
     let first = package(&doc, SvgOptions::default());
     let mut o = open(&first);
     assert_eq!(normal_form(&o.document), normal_form(&doc));
-    let second = resave(&mut o);
-    let mut o2 = open(&second);
-    assert_eq!(resave(&mut o2), second);
+    assert_eq!(resave(&mut o), first);
 }
 
 #[test]
@@ -973,4 +971,290 @@ fn unknown_entries_and_resources_named_only_by_foreign_data_survive_a_re_save() 
     assert_eq!(r2.entry("extensions/acme/state.json").unwrap(), b"{}");
     assert_eq!(r2.entry("NOTES.txt").unwrap(), b"hello");
     assert_eq!(r2.entry(&extra_path).unwrap(), b"only foreign");
+}
+
+/// The resolved values of the paint slots of the `n`th path.
+fn paint_slots(doc: &Document, n: usize) -> Vec<AttrValue> {
+    let id = doc
+        .tree
+        .preorder(doc.tree.root())
+        .filter(|i| matches!(doc.tree.kind(*i), Some(NodeKind::Path(_))))
+        .nth(n)
+        .expect("path");
+    let r = resolve_uncached(&doc.tree, id, &doc.defaults);
+    [
+        AttrSlot::FillGeometry,
+        AttrSlot::FillMapping,
+        AttrSlot::FillEffect,
+        AttrSlot::TranspFillGeometry,
+        AttrSlot::TranspFillMapping,
+        AttrSlot::StrokeColour,
+        AttrSlot::StrokeTransp,
+    ]
+    .into_iter()
+    .map(|s| r.get(s).clone())
+    .collect()
+}
+
+/// A triangle carrying `attrs`, the `n`th along a row.
+fn painted(b: &mut xarast_doc::builder::DocumentBuilder, n: i32, attrs: Vec<AttrValue>) {
+    b.node(triangle(50_000 + n * 150_000, 50_000)).unwrap();
+    b.push_scope().unwrap();
+    for a in attrs {
+        b.attribute(a).unwrap();
+    }
+    b.pop_scope();
+}
+
+#[test]
+fn what_svg_cannot_draw_reads_back_exactly() {
+    use xarast_color::FillEffect;
+    use xarast_doc::fill::{ProceduralParams, Tiling};
+    // XARA-T-0109/-0110/-0111: every twin carries what the model holds.
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    // CMYK palette colours resolve in `f32`: not 8-bit values.
+    let c1 = b.define_colour(ColourDef::normal(ColourValue::cmyk(0.13, 0.71, 0.05, 0.2)));
+    let c2 = b.define_colour(ColourDef::normal(ColourValue::cmyk(0.9, 0.07, 0.33, 0.01)));
+    let (p1, p2) = (
+        Colour::Indexed { id: c1, tint: None },
+        Colour::Indexed { id: c2, tint: None },
+    );
+    let png: Arc<[u8]> = Arc::from(&b"\x89PNG\r\n\x1a\nnot really a png"[..]);
+    let bitmap = b.define_bitmap(BitmapResource {
+        name: Arc::from(""),
+        info: BitmapInfo::default(),
+        pixels: Arc::new(BitmapData::default()),
+        original: Some(Arc::new(OriginalEncoded {
+            format: ImageFormat::Png,
+            bytes: png,
+        })),
+        procedural: None,
+        transparent_index: None,
+    });
+    let params = Box::new(ProceduralParams {
+        seed: 28_548_751,
+        graininess: 5.0,
+        gravity: 0.25,
+        squash: 0.1,
+        dpi: 70,
+        tileable: true,
+    });
+    let t = |level: u8, mode: TranspMode| Transparency { level, mode };
+    let stroke = AttrValue::StrokeColour(Paint::Flat { value: p2.clone() });
+    // 0: a circular radial fill whose axis is not horizontal, in palette
+    // colours, with an inner key finer than four decimals.
+    let mut ramp = Ramp::new();
+    ramp.insert(RampStop {
+        pos: 0.466_783_6,
+        value: p1.clone(),
+    });
+    painted(
+        &mut b,
+        0,
+        vec![AttrValue::Fill(FillGeometry::Radial {
+            centre: Point::raw(100_000, 100_000),
+            major: Point::raw(94_691, 100_504),
+            minor: Point::raw(94_691, 100_504),
+            aspect_locked: true,
+            persp: None,
+            from: p1.clone(),
+            to: p2.clone(),
+            ramp,
+        })],
+    );
+    // 1: a fractal transparency with its mapping; a stroke in its own mode.
+    painted(
+        &mut b,
+        1,
+        vec![
+            flat(p1.clone()),
+            stroke.clone(),
+            AttrValue::TranspFill(TranspPaint::Fractal {
+                params: params.clone(),
+                from: t(45, TranspMode::Mix),
+                to: t(255, TranspMode::Mix),
+                profile: BiasGain::new(0.25, -0.5),
+            }),
+            AttrValue::TranspFillMapping(Tiling::RepeatInverted),
+            AttrValue::StrokeTransp(TranspPaint::Flat {
+                value: t(100, TranspMode::Bleach),
+            }),
+        ],
+    );
+    // 2: a noise fill with its mapping; the stroke's mode differs from the
+    // fill's.
+    painted(
+        &mut b,
+        2,
+        vec![
+            AttrValue::Fill(FillGeometry::Noise {
+                params: params.clone(),
+                from: p1.clone(),
+                to: p2.clone(),
+                profile: BiasGain::IDENTITY,
+            }),
+            AttrValue::FillMapping(Tiling::Repeat),
+            stroke.clone(),
+            AttrValue::TranspFill(TranspPaint::Flat {
+                value: t(30, TranspMode::StainedGlass),
+            }),
+            AttrValue::StrokeTransp(TranspPaint::Flat {
+                value: t(0, TranspMode::Lighten),
+            }),
+        ],
+    );
+    // 3: a graduated stroke transparency and a three-point one on the fill.
+    painted(
+        &mut b,
+        3,
+        vec![
+            flat(p2.clone()),
+            stroke.clone(),
+            AttrValue::TranspFill(TranspPaint::ThreeColour {
+                origin: Point::raw(500_000, 60_000),
+                axis1: Point::raw(560_000, 60_000),
+                axis2: Point::raw(500_000, 120_000),
+                c0: t(74, TranspMode::Mix),
+                c1: t(218, TranspMode::Mix),
+                c2: t(3, TranspMode::Mix),
+            }),
+            AttrValue::StrokeTransp(TranspPaint::Linear {
+                start: Point::raw(500_000, 50_000),
+                end: Point::raw(600_000, 150_000),
+                persp: None,
+                from: t(0, TranspMode::Mix),
+                to: t(200, TranspMode::Mix),
+                ramp: Ramp::new(),
+            }),
+        ],
+    );
+    // 4: a conical transparency with a profile on a four-colour fill.
+    let mut tramp = Ramp::new();
+    tramp.profile = BiasGain::new(-0.48, 0.1);
+    painted(
+        &mut b,
+        4,
+        vec![
+            AttrValue::Fill(FillGeometry::FourColour {
+                origin: Point::raw(650_000, 60_000),
+                axis1: Point::raw(700_000, 60_000),
+                axis2: Point::raw(650_000, 110_000),
+                axis3: Point::raw(700_000, 110_000),
+                c0: p1.clone(),
+                c1: p2.clone(),
+                c2: rgb(0.1, 0.2, 0.3),
+                c3: p1.clone(),
+            }),
+            AttrValue::FillEffect(FillEffect::AltRainbow),
+            AttrValue::TranspFill(TranspPaint::Conical {
+                centre: Point::raw(670_000, 80_000),
+                zero_dir: Point::raw(700_000, 90_000),
+                from: t(98, TranspMode::Mix),
+                to: t(209, TranspMode::Mix),
+                ramp: tramp,
+            }),
+        ],
+    );
+    // 5: a diamond transparency.
+    painted(
+        &mut b,
+        5,
+        vec![
+            flat(p1.clone()),
+            AttrValue::TranspFill(TranspPaint::Diamond {
+                centre: Point::raw(800_000, 80_000),
+                corner1: Point::raw(830_000, 90_000),
+                corner2: Point::raw(790_000, 120_000),
+                persp: None,
+                from: t(0, TranspMode::Mix),
+                to: t(200, TranspMode::Mix),
+                ramp: Ramp::new(),
+            }),
+        ],
+    );
+    // 6: a bitmap fill with a mapping and an effect, a bitmap transparency.
+    let (o, ax, ay) = (
+        Point::raw(950_000, 50_000),
+        Point::raw(1_040_000, 50_000),
+        Point::raw(950_000, 140_000),
+    );
+    painted(
+        &mut b,
+        6,
+        vec![
+            AttrValue::Fill(FillGeometry::Bitmap {
+                image: bitmap,
+                origin: o,
+                axis_x: ax,
+                axis_y: ay,
+                persp: None,
+                tiling: Tiling::Repeat,
+                dpi: 96,
+                contone: Some((p1.clone(), p2.clone())),
+                profile: BiasGain::IDENTITY,
+            }),
+            AttrValue::FillMapping(Tiling::RepeatInverted),
+            AttrValue::FillEffect(FillEffect::Rainbow),
+            AttrValue::TranspFill(TranspPaint::Bitmap {
+                image: bitmap,
+                origin: o,
+                axis_x: ax,
+                axis_y: ay,
+                persp: None,
+                tiling: Tiling::Simple,
+                dpi: 72,
+                contone: Some((t(10, TranspMode::Mix), t(240, TranspMode::Mix))),
+                profile: BiasGain::new(0.5, 0.0),
+            }),
+            AttrValue::TranspFillMapping(Tiling::Simple),
+        ],
+    );
+    let doc = b.finish().unwrap().0;
+    let first = package(&doc, SvgOptions::default());
+    let mut o = open(&first);
+    assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);
+    for i in 0..7 {
+        let (a, b) = (paint_slots(&doc, i), paint_slots(&o.document, i));
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x, y, "path {i}");
+        }
+    }
+    assert_eq!(normal_form(&o.document), normal_form(&doc));
+    let second = resave(&mut o);
+    same_text(&svg_of(&first), &svg_of(&second));
+    assert_eq!(second, first, "the first re-save is a fixed point");
+}
+
+#[test]
+fn a_lone_stroke_transparency_twin_is_the_strokes() {
+    // Before the stroke's twin had its own name, a lone twin on an element
+    // with a fill was the fill's; `<xarast:stroke-transparency>` is always
+    // the stroke's, and `xarast:stroke-blend` its mode.
+    let svg = format!(
+        "{HEAD}<path d=\"M0 0h10v10z\" fill=\"#f00\" stroke=\"#00f\" \
+         xarast:stroke-blend=\"bleach\"><xarast:stroke-transparency \
+         xarast:type=\"noise\" xarast:values=\"20 200\" xarast:seed=\"7\"/></path></svg>"
+    );
+    let r = read(&svg);
+    let id = r
+        .document
+        .tree
+        .preorder(r.document.tree.root())
+        .find(|n| matches!(r.document.tree.kind(*n), Some(NodeKind::Path(_))))
+        .unwrap();
+    let res = resolve_uncached(&r.document.tree, id, &r.document.defaults);
+    match res.get(AttrSlot::StrokeTransp) {
+        AttrValue::StrokeTransp(TranspPaint::Noise {
+            params, from, to, ..
+        }) => {
+            assert_eq!(params.seed, 7);
+            assert_eq!((from.level, to.level), (20, 200));
+            assert_eq!(from.mode, TranspMode::Bleach);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(!matches!(
+        res.get(AttrSlot::TranspFillGeometry),
+        AttrValue::TranspFill(TranspPaint::Noise { .. })
+    ));
 }
