@@ -103,6 +103,7 @@ scale factor and calls `Intent::SetDpi`.
 | `headless` | `render`, `render_to_png`, `convert_to_png`, `HeadlessOptions` |
 | `prefs` | `Preferences`, `Unit`, `ThemePref`, `RendererPref` |
 | `app` | `AppState`, `DocumentSessions`, `DiagnosticLog` |
+| `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread |
 
 Tests: 11 viewport, 11 session/selection/command, 8 corpus (the 59 real
 `.xar` files, through `XARAST_XAR_CORPUS`, never copied into the
@@ -192,6 +193,33 @@ reason the walker *reports*, which is its own test.
 17. **Nothing is serialised in this crate.** Preferences have no on-disk
     form yet: Phase 6 owns that, and inventing one here would be a
     format to migrate later.
+18. **The render-thread channel is a latest-wins mailbox, not a queue**
+    (`render_thread`, XARA-T-0002). One slot each way: a submitted frame
+    replaces the waiting one (`RenderStats::superseded`), a finished frame
+    replaces an uncollected one (`dropped`). That *is* the backpressure —
+    at most one frame waits and one is in flight — and `submit` never
+    blocks. Built on `std::sync::{Mutex, Condvar}`; `crossbeam-channel`
+    (named in `phase-05 §U2.7`) was not needed and would have been a
+    queue to fight.
+19. **Generations are allocated by `RenderThread::submit`** from a
+    main-thread counter, strictly increasing. `RenderRequest::Cancel {
+    up_to_generation }` drops the waiting frame and makes the worker
+    discard an in-flight result instead of publishing it; a result is
+    never published over a newer one. A rasterisation in progress is not
+    interrupted (the CPU backend renders a frame as one call).
+20. **`FrameJob` carries the `Resolver`, which the §U5.5 sketch omits.**
+    `Arc<DisplayList>` + `Arc<Resolver>` + `ViewParams` + pasteboard and
+    page colours — invariant 6 applied across threads. `Resolver` and
+    `RampCache` derive `Clone` for this; `Session::resolver_snapshot`
+    clones once per scene rebuild and hands the same `Arc` to every frame
+    of a pan.
+21. **The page is a backdrop the render thread fills, not scene ink.**
+    `Session::frame_job(pasteboard, page)` derives the page's device
+    rectangle through the `Viewport`, so the Y flip still has one owner.
+22. **The renderer behind the thread is a trait (`FrameRenderer`).**
+    Production is `CpuFrameRenderer` (interactive config); the tests use a
+    gated renderer to hold a frame in flight deterministically, which is
+    the only way to test supersession without sleeps deciding the result.
 
 ---
 
@@ -307,10 +335,22 @@ be better run once at `Tx::commit` than after every call.
       exists so the selection plumbing is real and testable;
       `xarast_geom::hit_fill`/`hit_stroke` and the click path are
       Phase 7.
-- [ ] **No render-thread protocol yet.** `RenderRequest`, generations
-      and cancellation (`phase-05 §U5.5`) belong with the shell's thread
-      topology and were left for whoever lands `U2.7`, so that the
-      channel type is not invented twice.
+- [x] **Render-thread protocol** (XARA-T-0002): `render_thread`, see
+      decisions 18–22. The running binary uses it (XARA-T-0003).
+- [ ] **Draft/Final scheduling (U5.6) is not wired.** The viewer always
+      renders `Final`; `Intent::SetQuality` exists, the 120 ms idle timer
+      and `FrameRequest::RedrawAfter` are the pieces to join.
+- [ ] **No surface reuse on the render thread.** Every frame allocates a
+      fresh `Surface`; a return path (`recycle(surface)`) would save a
+      canvas-sized allocation per frame.
+- [ ] **The gradient-heavy corpus files stay slow interactively**
+      (XARA-T-0014): 4–5 s from open to first frame in the window for
+      `testfiles/*GradFilledShapes*.xar`. Supersession keeps the window
+      responsive while they render, but each pan costs a full render.
+- [ ] **`SimpleSphere.xar` renders its sphere black**, identically in the
+      window and through `examples/render_headless.rs`, so it is a
+      walker/renderer fidelity gap (gradient + transparency stack), not a
+      composition bug.
 - [x] **`xarast-cli` is wired** (XARA-T-0004). `xarast-cli render` and
       `xarast-cli smoke-open` use only the public API: `Session::open`,
       `Session::viewport`, `headless::render` and `Session::walk_stats`.
