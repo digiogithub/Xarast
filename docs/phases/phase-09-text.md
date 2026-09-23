@@ -70,8 +70,10 @@ this phase's acceptance fixture. A feature is not done until its file renders.
   `ExtraOnChars` / `ExtraOnSpaces` do.
 - **Line spacing**: absolute (millipoints) and proportional (ratio of the
   line's maximum font size).
-- **Tracking**: millipoints added to every advance, with the last character's
-  tracking excluded from the line width (`TextLine::GetLastCharTracking`).
+- **Tracking**: thousandths of the em width (not millipoints, despite the
+  original's declared type — `docs/memory/text.md`) added to every advance,
+  with the last character's tracking excluded from the line width
+  (`TextLine::GetLastCharTracking`).
 - **Kerning**: automatic pair kerning from the font (on/off per story), plus
   **manual kerning** as `TextItem::Kern` between two characters.
 - **Baseline shift**, and **super/subscript** as a baseline shift plus a size
@@ -407,7 +409,7 @@ pub struct StyleRange {
     pub range: Range<usize>,           // byte range in the story's logical text
     pub font: FontQuery,
     pub size: Millipoints,
-    pub tracking: Millipoints,
+    pub tracking: i32,                 // thousandths of an em (as stored)
     pub baseline_shift: Millipoints,
     pub script: TextScript,            // Normal | Super | Sub
     pub aspect: f32,                   // 1.0 = unstretched

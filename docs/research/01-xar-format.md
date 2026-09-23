@@ -2287,6 +2287,8 @@ Add, in order of return on effort:
 15. **Unit of `TAG_TEXT_TRACKING`.** The C++ type is `MILLIPOINT`
     (`Kernel/txtattr.h:413`) but the value is combined with the font size when rendering;
     it is worth calibrating against a reference render before fixing the conversion.
+    *Settled (phase 9):* thousandths of the em width, `MulDiv(tracking, FontEmWidth, 1000)`
+    (`Kernel/nodetext.cpp:1781-1792`); `TAG_TEXT_KERN` values likewise (`:1763-1767`).
 
 16. **Strings**: `TAG_TEXT_STRING` carries no terminator; the rest do. Mixing the two
     conventions causes desynchronisation within the record.

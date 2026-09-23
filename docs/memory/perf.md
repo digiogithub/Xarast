@@ -94,6 +94,10 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Re-save a 300 MB photo `.xarast` with unchanged resources | ≤ 1 s | ~~104~~ **91 ms** | passes: raw copies, no rehash, no recompression |
 | Open a 20 MB `.xarast`: signature + manifest + thumbnail | ≤ 15 ms | **0.046 ms** | passes (unchanged on zlib-rs) |
 | BLAKE3 throughput, one core | ≥ 1 GB/s | **5.4–5.9 GiB/s** | passes |
+| Shape + lay out a 1 000-glyph story, cold (no layout cache) | ≤ 8 ms | **0.22 ms** | passes (phase 9 round 1, pinned fonts); section "Text" |
+| Shape + lay out a 10 000-glyph story, cold | ≤ 60 ms | **2.28 ms** | passes |
+| Glyph outline extraction, cached | ≤ 500 ns | **24 ns** | passes |
+| System font enumeration (fontconfig, 2 202 families here) | ≤ 300 ms, off the main thread | **≈ 40 ms** | passes (opt-in `system_fonts` test) |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
 
@@ -350,6 +354,33 @@ walk); the package write is DEFLATE-bound (~150 MB/s at level 6).
 
 Criterion, synthetic 100 000-node document, pinned: `svg/write_100k`
 34.2 → **30.6 ms**, `svg/save_100k` 114.9 → **63.0 ms**.
+
+### Text (phase 9, round 1, 2026-09-23)
+
+`cargo bench -p xarast-text --bench layout`, pinned test fonts (never the
+host's), load ≈ 8. Details and the layout rules in `docs/memory/text.md`.
+
+| Bench | What | Median |
+|---|---|---|
+| `paragraph_1k` | 1 000 characters, one style, fully justified 400 pt column | 218.9 µs |
+| `story_10k` | 10 000 characters, 20 paragraphs, 130 lines, 9 921 glyphs, Latin + Hebrew fallback, regular/bold alternating every 500 bytes, justified | 2.28 ms |
+| `outline_cached` | one `FontDb::glyph_outline` hit | 24.1 ns |
+
+"Cold" means no layout cache (T9.3.11 does not exist yet): every iteration
+reshapes every character. Font data and harfrust's shaping plans are warm.
+Most of the time is parley's itemisation and shaping; our own breaking,
+justification and bidi reordering are a small share. The shaper holds the
+`FontDb` lock while it works, so one database serialises layout across
+threads.
+
+**Binary size.** Measured on a stripped release probe (`lto = "thin"`,
+`codegen-units = 1`) that enumerates, lays out and extracts outlines: the
+text stack adds **≈ 1.8 MB** without the ICU4X line-break dictionaries and
+**≈ 5.6 MB** with the default `complex-scripts` feature (≈ 3.8 MB of
+dictionaries for Thai, Lao, Khmer and Myanmar). `xarast` declares
+`xarast-text` through `xarast-app` but calls nothing yet, so today it grows by
+1.2 KB (23 170 560 → 23 171 752 bytes, unstripped); the real cost lands
+with the first call to `Shaper`.
 
 ## Phase 2 — document model (development container, historical)
 
