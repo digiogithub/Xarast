@@ -107,6 +107,34 @@ pub fn resolve_uncached(tree: &Tree, id: NodeId, defaults: &DefaultAttrs) -> Res
     stack.snapshot()
 }
 
+/// The attribute state in force just *before* `id`, at its position: the
+/// defaults, overridden by every attribute sibling preceding `id` or one of
+/// its ancestors — but not by `id`'s own attribute children.
+///
+/// This is what a node inherits, and so what has to be made explicit
+/// before the node moves somewhere else (grouping, ungrouping, copying to
+/// another document) if its appearance is to survive the move. The stack
+/// is returned open, so a caller can go on pushing the attribute siblings
+/// of a run of nodes under the same parent in one pass.
+#[must_use]
+pub fn resolve_inherited(tree: &Tree, id: NodeId, defaults: &DefaultAttrs) -> AttrStack {
+    let mut chain: smallvec::SmallVec<[NodeId; 16]> = smallvec::SmallVec::new();
+    chain.push(id);
+    chain.extend(tree.ancestors(id));
+    chain.reverse();
+    let mut stack = AttrStack::with_defaults(defaults);
+    for w in chain.windows(2) {
+        let (parent, child) = (w[0], w[1]);
+        for sib in tree.children(parent) {
+            if sib == child {
+                break;
+            }
+            push_if_attr(tree, &mut stack, sib);
+        }
+    }
+    stack
+}
+
 fn push_if_attr(tree: &Tree, stack: &mut AttrStack, node: NodeId) {
     if let Some(NodeKind::Attr(a)) = tree.kind(node) {
         stack.push(std::sync::Arc::new(a.value.clone()));

@@ -592,6 +592,65 @@ impl<S: Stop> FillGeometry<S> {
         }
     }
 
+    /// Visits every value the fill holds — end points, ramp stops, the
+    /// three- and four-colour corners, a contone pair — mutably. What a
+    /// move between documents uses to rewrite palette references.
+    pub fn for_each_value_mut(&mut self, f: &mut dyn FnMut(&mut S)) {
+        let ramp = |r: &mut Ramp<S>, f: &mut dyn FnMut(&mut S)| {
+            for s in &mut r.stops {
+                f(&mut s.value);
+            }
+        };
+        match self {
+            FillGeometry::Flat { value } => f(value),
+            FillGeometry::Linear {
+                from, to, ramp: r, ..
+            }
+            | FillGeometry::Radial {
+                from, to, ramp: r, ..
+            }
+            | FillGeometry::Conical {
+                from, to, ramp: r, ..
+            }
+            | FillGeometry::Diamond {
+                from, to, ramp: r, ..
+            } => {
+                f(from);
+                f(to);
+                ramp(r, f);
+            }
+            FillGeometry::ThreeColour { c0, c1, c2, .. } => {
+                f(c0);
+                f(c1);
+                f(c2);
+            }
+            FillGeometry::FourColour { c0, c1, c2, c3, .. } => {
+                f(c0);
+                f(c1);
+                f(c2);
+                f(c3);
+            }
+            FillGeometry::Bitmap { contone, .. } => {
+                if let Some((a, b)) = contone {
+                    f(a);
+                    f(b);
+                }
+            }
+            FillGeometry::Fractal { from, to, .. } | FillGeometry::Noise { from, to, .. } => {
+                f(from);
+                f(to);
+            }
+        }
+    }
+
+    /// The bitmap reference, mutably, when the fill has one.
+    pub fn bitmap_mut(&mut self) -> Option<&mut BitmapId> {
+        match self {
+            FillGeometry::Bitmap { image, .. } => Some(image),
+            _ => None,
+        }
+    }
+
     /// The bitmap resource the fill needs, when it needs one.
     #[must_use]
     pub fn bitmap(&self) -> Option<BitmapId> {

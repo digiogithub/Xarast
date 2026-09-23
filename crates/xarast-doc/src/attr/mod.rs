@@ -35,7 +35,7 @@ use crate::live::BevelType;
 use crate::resources::ResourceRef;
 use crate::text::{Justification, LineSpacing, Script, TabStop};
 
-pub use resolve::{AttrResolver, resolve_uncached};
+pub use resolve::{AttrResolver, resolve_inherited, resolve_uncached};
 pub use stack::{AttrStack, ResolvedAttrs};
 pub use tags::{SLOTS_WITHOUT_ATTRIBUTE_TAG, TagMapping, XAR_ATTRIBUTE_TAGS, mapping_for};
 
