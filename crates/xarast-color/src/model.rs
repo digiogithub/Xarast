@@ -364,14 +364,18 @@ impl ColourValue {
 
     /// Converts to CMYK.
     ///
-    /// The forward direction is the **exact inverse** of the naive
-    /// `to_rgbt` above — `C = 1 - R`, `K = 0` — rather than the usual
-    /// maximum-black extraction. That choice is forced: with the naive
-    /// reverse transform fixed for fidelity, any other forward transform
-    /// makes `RGB -> CMYK -> RGB` lose colour, and a round trip through the
-    /// colour dialog is something users do constantly. Under-colour removal
-    /// and black generation are a colour-management concern and belong with
-    /// the ICC path, not here.
+    /// The original's conversion (`research/02 §5.10.1`): invert, then
+    /// generate black only past a 50 % threshold, `K = max(min(C, M, Y) -
+    /// 0.5, 0)`, taking `K` out of the three inks; pure black becomes
+    /// `(0, 0, 0, 1)`, one plate rather than four.
+    ///
+    /// It is still the **exact inverse** of the naive [`to_rgbt`]:
+    /// `1 - min(1, (C - K) + K) = 1 - C = R`, because `C <= 1` never clips.
+    /// So matching the original costs no round-trip accuracy, which matters
+    /// because a round trip through the colour dialog is something users do
+    /// constantly. Real under-colour removal belongs with the ICC path.
+    ///
+    /// [`to_rgbt`]: ColourValue::to_rgbt
     #[must_use]
     pub fn to_cmyk(self) -> ColourValue {
         if let ColourValue::Cmyk { .. } = self {
@@ -380,11 +384,21 @@ impl ColourValue {
         let ColourValue::Rgbt { r, g, b, .. } = self.to_rgbt() else {
             unreachable!("to_rgbt always yields Rgbt")
         };
+        if r <= 0.0 && g <= 0.0 && b <= 0.0 {
+            return ColourValue::Cmyk {
+                c: 0.0,
+                m: 0.0,
+                y: 0.0,
+                k: 1.0,
+            };
+        }
+        let (cy, m, y) = (1.0 - r, 1.0 - g, 1.0 - b);
+        let k = (cy.min(m).min(y) - 0.5).max(0.0);
         ColourValue::Cmyk {
-            c: 1.0 - r,
-            m: 1.0 - g,
-            y: 1.0 - b,
-            k: 0.0,
+            c: c(cy - k),
+            m: c(m - k),
+            y: c(y - k),
+            k: c(k),
         }
     }
 
@@ -403,9 +417,9 @@ impl ColourValue {
 
     /// Converts to greyscale with transparency.
     ///
-    /// Uses the Rec. 601 luma weights, which are what a 1990s editor's
-    /// "convert to greyscale" produced and so what existing documents were
-    /// authored against.
+    /// Uses the colour model's own weights, [`GREY_MODEL_WEIGHTS`]
+    /// (`research/02 §5.10.1`), not Rec. 601. The renderer's blend modes
+    /// use a different luminance constant, owned by `xarast-render`.
     #[must_use]
     pub fn to_greyt(self) -> ColourValue {
         if let ColourValue::Greyt { .. } = self {
@@ -414,8 +428,9 @@ impl ColourValue {
         let ColourValue::Rgbt { r, g, b, t } = self.to_rgbt() else {
             unreachable!("to_rgbt always yields Rgbt")
         };
+        let [wr, wg, wb] = GREY_MODEL_WEIGHTS;
         ColourValue::Greyt {
-            v: c(0.299 * r + 0.587 * g + 0.114 * b),
+            v: c(wr * r + wg * g + wb * b),
             t,
         }
     }
@@ -478,6 +493,75 @@ impl ColourValue {
         }
     }
 
+    /// Tints the colour **in its own model** (`research/02 §5.10.1`): `f`
+    /// is the fraction of the colour that remains, so `f <= 0` is white and
+    /// `f >= 1` the colour itself.
+    ///
+    /// RGB and grey move each channel towards 1 (`1 - f (1 - c)`); CMYK
+    /// scales all four inks by `f`; HSV scales saturation by `f` and moves
+    /// value towards 1. Transparency is untouched. The web and CIE models
+    /// have no tint of their own and are tinted as RGB, returning in their
+    /// model.
+    #[must_use]
+    pub fn tinted(self, f: f32) -> ColourValue {
+        let f = if f.is_nan() { 0.0 } else { f };
+        if f >= 1.0 {
+            return self;
+        }
+        let f = f.max(0.0);
+        let up = |v: f32| 1.0 - f * (1.0 - v);
+        match self {
+            ColourValue::Rgbt { r, g, b, t } => ColourValue::rgbt(up(r), up(g), up(b), t),
+            ColourValue::Greyt { v, t } => ColourValue::greyt(up(v), t),
+            ColourValue::Cmyk { c: cy, m, y, k } => ColourValue::cmyk(cy * f, m * f, y * f, k * f),
+            ColourValue::Hsvt { h, s, v, t } => ColourValue::hsvt(h, s * f, up(v), t),
+            ColourValue::Ciet { .. } | ColourValue::WebRgb { .. } => {
+                self.to_rgbt().tinted(f).to_model(self.model())
+            }
+        }
+    }
+
+    /// Shades the colour (`research/02 §5.10.1`): `x` moves saturation and
+    /// `y` moves value, each in `[-1, 1]`, where 0 leaves the component,
+    /// −1 takes it all the way to 0 and +1 all the way to 1. Done in HSV and
+    /// returned in this value's model, as the original does for every model.
+    #[must_use]
+    pub fn shaded(self, x: f32, y: f32) -> ColourValue {
+        let ColourValue::Hsvt { h, s, v, t } = self.to_hsvt() else {
+            unreachable!("to_hsvt always yields Hsvt")
+        };
+        let towards = |c0: f32, d: f32| {
+            let d = if d.is_nan() { 0.0 } else { d.clamp(-1.0, 1.0) };
+            if d < 0.0 {
+                c0 * (1.0 + d)
+            } else if d > 0.0 {
+                d + c0 * (1.0 - d)
+            } else {
+                c0
+            }
+        };
+        if x == 0.0 && y == 0.0 {
+            return self;
+        }
+        ColourValue::hsvt(h, towards(s, x), towards(v, y), t).to_model(self.model())
+    }
+
+    /// Converts to 8-bit RGBA with the original's packing,
+    /// [`pack_component`], rather than round-to-nearest: the value a `.xar`
+    /// file's cached RGB holds.
+    #[must_use]
+    pub fn to_rgba8_packed(self) -> Rgba8 {
+        let ColourValue::Rgbt { r, g, b, t } = self.to_rgbt() else {
+            unreachable!("to_rgbt always yields Rgbt")
+        };
+        Rgba8 {
+            r: pack_component(r),
+            g: pack_component(g),
+            b: pack_component(b),
+            a: pack_component(1.0 - t),
+        }
+    }
+
     /// Builds from 8-bit RGBA.
     #[must_use]
     pub fn from_rgba8(v: Rgba8) -> ColourValue {
@@ -537,10 +621,12 @@ fn rgb_to_hsv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let min = r.min(g).min(b);
     let d = max - min;
     let v = max;
-    let s = if max <= 0.0 { 0.0 } else { d / max };
-    if d <= 0.0 {
-        return (0.0, s, v);
+    // A spread this small is grey: hue and saturation are both zero
+    // (`research/02 §5.10.1`).
+    if d <= 1e-6 {
+        return (0.0, 0.0, v);
     }
+    let s = if max <= 0.0 { 0.0 } else { d / max };
     let h = if max == r {
         ((g - b) / d).rem_euclid(6.0)
     } else if max == g {
@@ -586,6 +672,27 @@ fn xyz_to_srgb(x: f32, y: f32, z: f32) -> (f32, f32, f32) {
         }
     };
     (c(gam(r)), c(gam(g)), c(gam(b)))
+}
+
+/// The greyscale model's RGB weights (`research/02 §5.10.1`). They sum to
+/// 1.0, so white stays white.
+pub const GREY_MODEL_WEIGHTS: [f32; 3] = [0.305, 0.586, 0.109];
+
+/// Quantises one component to 8 bits the way the original packs a
+/// `FIXED24` value (`research/02 §5.10.1`): offset by half of 1/256 — not
+/// of 1/255 — clamp to `0..=1`, scale by 255 and truncate.
+///
+/// It differs from `round(v * 255)` only in a narrow band just above each
+/// `k + 0.5`, but a 90 % tint of black (`0.1 * 255 = 25.5`) lands in it,
+/// and a `.xar` file's cached RGB says 25 there, not 26. Anything that must
+/// agree with a file's cached RGB quantises with this.
+#[inline]
+#[must_use]
+pub fn pack_component(v: f32) -> u8 {
+    let v = if v.is_nan() { 0.0 } else { f64::from(v) };
+    let fixed = ((v * 16_777_216.0).round() as i64).saturating_add(0x8000);
+    let fixed = fixed.clamp(0, 0x0100_0000);
+    ((fixed * 255) >> 24) as u8
 }
 
 /// X of the D65 white point, the largest X an in-gamut sRGB colour can have.

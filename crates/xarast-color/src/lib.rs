@@ -24,13 +24,18 @@
 #![doc(html_no_source)]
 
 pub mod builtin;
+pub mod context;
 pub mod fixed24;
 pub mod interp;
 pub mod model;
 pub mod table;
 
 pub use builtin::BuiltinColour;
+pub use context::ColourContext;
 pub use fixed24::Fixed24;
 pub use interp::{FillEffect, Stop, TranspMode, Transparency, interpolate};
-pub use model::{ColourModel, ColourValue, Rgba8};
-pub use table::{Colour, ColourDef, ColourError, ColourId, ColourKind, ColourTable};
+pub use model::{ColourModel, ColourValue, GREY_MODEL_WEIGHTS, Rgba8, pack_component};
+pub use table::{
+    Colour, ColourDef, ColourEditError, ColourError, ColourId, ColourIds, ColourKind, ColourTable,
+    OnDelete, PaletteEpoch,
+};

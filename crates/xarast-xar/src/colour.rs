@@ -131,7 +131,8 @@ impl ColourRecord {
         ColourDef {
             name: self.name.as_deref().map(std::sync::Arc::from),
             model: self.model,
-            kind: ColourKind::from_byte(self.colour_type, comps),
+            // From the raw components: a shade's coordinates are signed.
+            kind: ColourKind::from_raw(self.colour_type, self.components),
             parent,
             components: comps,
             cached_rgb: self.rgb,
