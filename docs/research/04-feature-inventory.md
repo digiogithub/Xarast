@@ -686,6 +686,17 @@ Each one in the 4 directions (`↑ ↓ ← →`). There are three parallel famil
 6. **Drag and drop as a universal verb.** Palette colours onto objects and onto gradient stops; gallery items onto the canvas; files onto the canvas.
 7. **Everything is undoable and has a name.** The Undo menu describes the last action by its real name.
 
+### 4.10 Selector transforms and shape creation: observed behaviour
+
+Facts read from the original as behaviour (added 2026-09-23 for XARA-US-0032/0033), never as code:
+
+- **Fixed point of a transform drag.** Scale and shear drags fix the blob *opposite* the one grabbed (blobs are numbered 1–8 round the box, the opposite of `n` is `9 − n`: `tools/selector.cpp:3884`, `:3909`, `:3932`); a rotation turns about the rotation centre (`tools/selector.cpp:3856`). Holding **Adjust** during the drag switches the fixed point to the centre of the selection's bounds (`Kernel/transop.cpp:985-991`, `:1055-1061`).
+- **Rotate + Constrain.** The pointer's angle about the centre is constrained to the constrain angle before and during the drag, so the rotation is a whole number of steps (`tools/oprotate.cpp:250-300`); the default step is 45°.
+- **Shear.** The top and bottom edges shear horizontally, the side edges vertically, by the pointer's displacement over its distance from the fixed point; Constrain snaps the pointer's angle about the fixed point (`tools/opshear.cpp:174-190`, `:285-310`, `:333-370`, `:395-416`).
+- **Rectangle and ellipse tools create quick shapes in "bounds" mode** (`tools/oprshape.cpp:244-374`). The axes point from the box centre to the middle of the top edge (major) and of the right edge (minor); for a polygon they are lengthened by `1 / cos(π/n)` so its corners land on the box corners — `√2` for a rectangle — and an ellipse keeps them as they are (`tools/oprshape.cpp:526-560`).
+- **Constrain while drawing** puts the pointer on the nearest of the four diagonals from the start point, at its true distance (so the box is a square) (`tools/oprshape.cpp:253-283`).
+- **Adjust while drawing** re-centres: when Adjust goes down the centre becomes the midpoint of the start and the pointer, and the box is drawn symmetrically about it; when it comes up the start becomes the reflection of the pointer through that centre (`tools/oprshape.cpp:336-365`). Adjust together with Constrain switches to a "radius" mode that rotates the shape with the pointer (`tools/oprshape.cpp:247-250`, `:293-312`).
+
 ---
 
 ## 5. Import and export formats with priorities

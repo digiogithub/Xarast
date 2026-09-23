@@ -121,9 +121,12 @@ scale factor and calls `Intent::SetDpi`.
 | `app` | `AppState` (with `open_replacing`, `with_recent_store`, `take_requests`), `DocumentSessions`, `DiagnosticLog` |
 | `render_thread` | `RenderThread`, `RenderRequest`, `FrameJob`, `RenderedFrame`, `FrameReuse`, `RenderStats`, `FrameRenderer`, `CpuFrameRenderer` — the one channel to the render thread, and the worker that reuses pixels |
 | `reuse` (private) | the pixel-reuse policy: `plan`, scroll, nearest-neighbour rescale, the zoom-out ring, Final columns |
-| `ops` | `EditCommand`, `CommandSink` — the commands tools emit (phase 7) |
-| `tool` | `ToolMachine`, `Tool`, `ToolCtx`, `GestureEvent`, `Preview`, `Infobar`, `OverlayShape`, `pick` |
-| `tools` | the selector, push, zoom and pending tools |
+| `ops` | `EditCommand` (transform, delete, create shape, set shape params), `CommandSink`, `on_locked_layer` — the commands tools emit (phase 7) |
+| `tool` | `ToolMachine`, `Tool`, `ToolCtx`, `GestureEvent`, `Preview`, `Infobar`, `InfobarValue`, `Anchor`, `OverlayShape`, `pick` |
+| `picking` | `Picker`, `PickMode`, `HitResult`, `HitPart` — precise picking over `xarast_geom::HitIndex` |
+| `selector` | the unified selector: dual state, scale/rotate/skew, infobar |
+| `shapes` | the rectangle and ellipse tools and quick-shape helpers |
+| `tools` | `builtin()`, push, zoom and pending tools |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
 
 Tests: 13 viewport, 11 session/selection/command, 8 corpus (the 59 real
@@ -398,8 +401,11 @@ reason the walker *reports*, which is its own test.
 11. **Scroll bounds are refreshed at `rebuild_scene`**, never in
     `after_mutation` (34 ms per undo at 250 000 nodes; `tools.md`).
 12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
-    `InfobarEdit`, `AutoScroll`; pointer intents now drive the
-    `ToolMachine`, and `ChooseTool`/`MomentaryTool` switch its tool.
+    `InfobarEdit` (typed `InfobarValue`), `AutoScroll`,
+    `SetCurrentAttribute`; pointer intents now drive the `ToolMachine`,
+    and `ChooseTool`/`MomentaryTool` switch its tool. A tool may ask for a
+    tool change (`ToolRequests::tool`); a `CreateShape` selects what it
+    created. `Session` holds a `Picker` invalidated in `after_mutation`.
 10. **No two commands share a key chord** (`no_two_commands_share_a_key`),
     and the core never performs a platform action: it queues a
     `PlatformRequest`.
@@ -514,9 +520,10 @@ be better run once at `Tx::commit` than after every call.
       fold of the attribute scope's node versions + the resources'
       revision. An edit re-keys only what it touched and the siblings its
       attribute applies to (`tests/tools.rs`). See `tools.md`.
-- [ ] **Hit testing is a bounding-box test.** The click path now exists
-      (`tool::pick`, topmost selectable object by bbox); precise fill and
-      stroke picking is W3 (`tools.md`).
+- [x] **Hit testing is precise** (XARA-T-0152, `picking.rs`): painted
+      fill and stroke through `xarast_geom::HitIndex`; see `tools.md`
+      decision 25. The index is rebuilt lazily after a change (62 ms at
+      100k); incremental updates are open.
 - [x] **Render-thread protocol** (XARA-T-0002): `render_thread`, see
       decisions 18–22. The running binary uses it (XARA-T-0003).
 - [x] **Draft/Final scheduling (U5.6)** (XARA-US-0005): `schedule`,
