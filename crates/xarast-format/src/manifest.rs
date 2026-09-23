@@ -411,7 +411,11 @@ fn check_chars(s: &str) -> Result<(), ManifestError> {
 impl<'a> Parser<'a> {
     fn new(bytes: &'a [u8], limits: &Limits) -> Result<Self, ManifestError> {
         let input = utf8(bytes)?;
-        check_chars(input.strip_prefix('\u{feff}').unwrap_or(input))?;
+        // quick-xml skips a BOM without counting it in `buffer_position`, so
+        // the fragment offsets would be three bytes short. Strip it here and
+        // slice fragments from what the reader actually sees.
+        let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+        check_chars(input)?;
         let mut reader = quick_xml::Reader::from_reader(input.as_bytes());
         let cfg = reader.config_mut();
         cfg.check_end_names = true;
@@ -1369,6 +1373,22 @@ mod tests {
         assert!(matches!(parse(glued), Err(ManifestError::Xml(_))));
         let bad_attr = r#"<mf:manifest xmlns:mf="https://xarast.org/ns/manifest/1.0" mf:version="1.0" mf:min-reader="1.0" mf:profile="portable" a:b:c="1"/>"#;
         assert!(parse(bad_attr).is_err());
+    }
+
+    #[test]
+    fn a_bom_does_not_shift_fragments() {
+        // Found by fuzz_xarast_manifest: with a BOM, every captured fragment
+        // was cut three bytes early.
+        let src = "\u{feff}<mf:manifest xmlns:mf=\"https://xarast.org/ns/manifest/1.0\" mf:version=\"1.0\" mf:min-reader=\"1.0\" mf:profile=\"portable\">\n  <mf:unknown a=\"1\"/>\n</mf:manifest>";
+        let m = parse(src).unwrap();
+        assert_eq!(
+            m.foreign_children[0].xml,
+            "<mf:unknown xmlns:mf=\"https://xarast.org/ns/manifest/1.0\" a=\"1\"/>"
+        );
+        assert_eq!(
+            parse(&m.to_xml().unwrap()).unwrap().foreign_children,
+            m.foreign_children
+        );
     }
 
     #[test]
