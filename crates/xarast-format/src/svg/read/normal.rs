@@ -17,12 +17,13 @@
 //!    persistent id, its kind and every field the profile carries, in the
 //!    precision it carries them: geometry exactly (paths as their path data
 //!    in the spread's SVG frame — the writer's own canonical spelling, which
-//!    also drops a closing line `z` draws anyway), text matrices to 6
-//!    decimals, profiles to 6, ramp positions as written. Node flags
-//!    `LOCKED` and `MAGNETIC`. Character items are folded into their line's
-//!    styled runs; kerns and line breaks are not part of it (the profile
-//!    does not carry them before Phase 9). Non-attribute children of an ink
-//!    node appear before it, as the writer paints them.
+//!    also drops a closing line `z` draws anyway), text matrices exactly
+//!    (`xarast:matrix`), profiles to 6, ramp positions as written. Node flags
+//!    `LOCKED` and `MAGNETIC`. A text line lists its runs as the writer
+//!    groups them (`svg/text.rs`): each run's text attributes and twins,
+//!    its paint (point 4) and its items in order — characters, kerns, soft
+//!    and paragraph breaks. Non-attribute children of an ink node appear
+//!    before it, as the writer paints them.
 //! 4. **Per ink node, its resolved paint** — the attribute stack in force
 //!    at the node after its own attribute children, *localised*: whether an
 //!    attribute came from the node, a parent group or the document
@@ -34,8 +35,8 @@
 //!    definitions by their content-derived ids, twins as written, stroke
 //!    properties only when there is a stroke, a fill transparency only when
 //!    there is a fill, the blend mode as the writer chooses it. Slots the
-//!    profile does not carry (text tracking, baseline, margins, rulers,
-//!    bevel attributes, clip regions, arrowhead outlines) are not part of it.
+//!    profile does not carry (bevel attributes, clip regions, arrowhead
+//!    outlines) are not part of it.
 //! 5. **Foreign baggage** on each node: its marks, its attributes sorted
 //!    by namespace and name, its fragments with their position (clamped to
 //!    the node's number of children, which is where the writer puts them).
@@ -928,10 +929,10 @@ impl Nf<'_> {
         let line = format!(
             "{} text matrix={} {} {} {} {} {} layout={layout} kern={} shapes={}{}",
             node_id(self.doc, n),
-            f64s(m[0], 6),
-            f64s(m[1], 6),
-            f64s(m[2], 6),
-            f64s(m[3], 6),
+            story.transform.a + 0.0,
+            story.transform.b + 0.0,
+            story.transform.c + 0.0,
+            story.transform.d + 0.0,
             m[4] as i64,
             m[5] as i64,
             b(story.auto_kern),
@@ -942,8 +943,6 @@ impl Nf<'_> {
         self.baggage(depth, n, 0);
         self.attrs.push_scope();
         let kids: Vec<NodeId> = self.doc.tree.children(n).collect();
-        let mut y: i64 = 0;
-        let mut first = true;
         let mut others = Vec::new();
         for c in &kids {
             match self.doc.tree.kind(*c) {
@@ -951,10 +950,10 @@ impl Nf<'_> {
                     let v = Arc::new(a.value.clone());
                     self.attrs.push(v);
                 }
-                Some(NodeKind::TextLine(_)) => {
+                Some(NodeKind::TextLine(l)) => {
                     self.attrs.push_scope();
-                    self.text_line(*c, depth + 1, &mut y, first);
-                    first = false;
+                    let ruler = l.ruler.as_deref().map(crate::svg::text::ruler_text);
+                    self.text_line(*c, depth + 1, ruler);
                     self.attrs.pop_scope();
                 }
                 Some(NodeKind::TextItem(_)) | None => {}
@@ -967,105 +966,99 @@ impl Nf<'_> {
         self.attrs.pop_scope();
     }
 
-    fn text_line(&mut self, line: NodeId, depth: usize, y: &mut i64, first: bool) {
+    /// One line: its runs as the writer groups them (items whose resolved
+    /// attributes write the same), each with everything the profile
+    /// carries for it and its items.
+    fn text_line(&mut self, line: NodeId, depth: usize, ruler: Option<String>) {
+        // (what the run writes, its items)
         let mut runs: Vec<(String, String)> = Vec::new();
-        let mut max_size: i64 = 0;
+        let mut snap: Option<xarast_doc::ResolvedAttrs> = None;
+        let mut dirty = true;
         let kids: Vec<NodeId> = self.doc.tree.children(line).collect();
         for c in kids {
             match self.doc.tree.kind(c) {
                 Some(NodeKind::Attr(a)) => {
                     let v = Arc::new(a.value.clone());
                     self.attrs.push(v);
+                    dirty = true;
                 }
                 Some(NodeKind::TextItem(item)) => {
-                    let ch = match item {
-                        TextItem::Char(ch) => *ch,
-                        TextItem::Tab => '\t',
-                        TextItem::Kern(_) | TextItem::LineBreak(_) => continue,
-                    };
-                    let (style, size) = self.run_style();
-                    max_size = max_size.max(size);
-                    match runs.last_mut() {
-                        Some((s, text)) if *s == style => text.push(ch),
-                        _ => runs.push((style, ch.to_string())),
+                    let item = *item;
+                    let own = self.doc.tree.links(c).first_child.is_some();
+                    if own {
+                        self.attrs.push_scope();
+                        let sub: Vec<NodeId> = self.doc.tree.children(c).collect();
+                        for a in sub {
+                            if let Some(NodeKind::Attr(a)) = self.doc.tree.kind(a) {
+                                let v = Arc::new(a.value.clone());
+                                self.attrs.push(v);
+                            }
+                        }
+                        dirty = true;
+                    }
+                    if dirty || runs.is_empty() {
+                        let s = self.attrs.snapshot();
+                        if runs.is_empty() || snap.as_ref() != Some(&s) {
+                            let r = self.run_style();
+                            if runs.last().is_none_or(|(last, _)| *last != r) {
+                                runs.push((r, String::new()));
+                            }
+                        }
+                        snap = Some(s);
+                        dirty = false;
+                    }
+                    if let Some((_, items)) = runs.last_mut() {
+                        match item {
+                            TextItem::Char(ch) => items.push(ch),
+                            TextItem::Tab => items.push('\t'),
+                            TextItem::Kern(k) => {
+                                let _ = write!(items, "{{kern {}}}", k.raw());
+                            }
+                            TextItem::LineBreak(true) => items.push_str("{eol}"),
+                            TextItem::LineBreak(false) => items.push_str("{soft}"),
+                        }
+                    }
+                    if own {
+                        self.attrs.pop_scope();
+                        dirty = true;
                     }
                 }
                 _ => {}
             }
         }
-        if max_size == 0 {
-            max_size = self.run_style().1;
+        if runs.is_empty() {
+            // The story's state around the line, as the writer says it.
+            self.attrs.pop_scope();
+            let r = self.run_style();
+            self.attrs.push_scope();
+            runs.push((r, String::new()));
         }
-        if !first {
-            *y += match self.attrs.get(AttrSlot::TxtLineSpace) {
-                AttrValue::LineSpace(xarast_doc::LineSpacing::Absolute(v)) => i64::from(v.raw()),
-                AttrValue::LineSpace(xarast_doc::LineSpacing::Ratio(r)) => {
-                    (max_size as f64 * 1.2 * f64::from(*r)).round() as i64
-                }
-                _ => max_size * 6 / 5,
-            };
-        }
-        let just = match self.attrs.get(AttrSlot::TxtJustification) {
-            AttrValue::Justification(j) => *j,
-            _ => xarast_doc::Justification::Left,
-        };
         let head = format!(
-            "{} line y={} {:?}{}",
+            "{} line{}{}",
             node_id(self.doc, line),
-            *y,
-            just,
+            ruler.map(|r| format!(" ruler={r}")).unwrap_or_default(),
             self.flags(line, false)
         );
         self.line(depth, &head);
         self.baggage(depth, line, 0);
-        for (style, text) in runs {
-            let s = format!("run{style} {text:?}");
+        for (style, items) in runs {
+            let s = format!("run {style} {items:?}");
             self.line(depth + 1, &s);
         }
     }
 
-    fn run_style(&mut self) -> (String, i64) {
+    /// What a text run writes: its text attributes and twins, and its
+    /// paint projected as for any ink element.
+    fn run_style(&mut self) -> String {
         let mut s = String::new();
-        if let AttrValue::FontTypeface(f) = self.attrs.get(AttrSlot::TxtFontTypeface) {
-            let _ = write!(s, " family={:?}", f.family.replace('\'', ""));
+        for (k, v) in crate::svg::text::run_text_attrs(&self.attrs, &[]) {
+            let _ = write!(s, "{k}={v:?} ");
         }
-        let size = match self.attrs.get(AttrSlot::TxtFontSize) {
-            AttrValue::FontSize(v) => i64::from(v.raw()),
-            _ => 12_000,
-        };
-        let _ = write!(s, " size={size}");
-        if let AttrValue::Bold(true) = self.attrs.get(AttrSlot::TxtBold) {
-            s.push_str(" bold");
-        }
-        if let AttrValue::Italic(true) = self.attrs.get(AttrSlot::TxtItalic) {
-            s.push_str(" italic");
-        }
-        if let AttrValue::Underline(true) = self.attrs.get(AttrSlot::TxtUnderline) {
-            s.push_str(" underline");
-        }
-        if let AttrValue::Fill(p) = self.attrs.get(AttrSlot::FillGeometry) {
-            let p = p.clone();
-            let refs = self.bitmaps.clone();
-            let mut lookup = |id: BitmapId| refs.get(&id).cloned().flatten();
-            let mut ctx = PaintCtx {
-                colours: &self.doc.resources.colours,
-                defs: &mut self.defs,
-                frame: self.frame,
-                stats: &mut self.stats,
-                palette: &self.palette,
-                bitmap_href: &mut lookup,
-            };
-            let out = colour_paint(&mut ctx, &p, Tiling::None, xarast_color::FillEffect::Fade);
-            let v = self.canon(&out.value);
-            let _ = write!(s, " fill={v}");
-            if let Some(o) = out.opacity {
-                let _ = write!(s, " fill-opacity={}", f64s(o, 3));
-            }
-        }
-        (s, size)
+        let paint = self.paint(None, true, true, false);
+        s.push_str(&paint);
+        s
     }
 }
-
 /// A definition without its `<stop>` elements.
 fn strip_stops(text: &str) -> String {
     let mut out = String::with_capacity(text.len());

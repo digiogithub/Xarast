@@ -19,6 +19,7 @@
 //! | [`frame`] | §5.5: Y-up document space → Y-down SVG space, in integers |
 //! | [`xml`] | escaping and the well-formedness guarantees |
 //! | `style` | passes 4–5: paint hoisted onto `<g>`, CSS paint classes |
+//! | `text` | §6.7: text runs, their twins, and the [`TextPlacer`] hook |
 //!
 //! Passes 3 (default elision) and 8 (minimal indentation) are done inline.
 //! Passes 4 (attribute hoisting) and 5 (CSS classes) work on paint *slots*
@@ -41,9 +42,11 @@ mod paint;
 pub mod pathdata;
 pub mod read;
 mod style;
+mod text;
 pub mod xml;
 
 pub use read::{ReadOptions, SvgRead, SvgReadError, normal_form, read_svg};
+pub use text::{Placer, StoryPlacement, TextPlacer};
 
 use std::collections::HashMap;
 
@@ -93,6 +96,11 @@ pub struct SvgOptions {
     /// Pass 5: `class="cN"` for paint sets shared by ≥ 8 elements. On by
     /// default; off only to test the passes apart.
     pub classes: bool,
+    /// Where the application lays text out (`research/06 §6.7`): with it,
+    /// the base SVG places every character where Xarast draws it; without
+    /// it, lines start at the story's origin. The `xarast:` twin, and so
+    /// what a reader rebuilds, is the same either way.
+    pub text: Option<Placer>,
 }
 
 impl Default for SvgOptions {
@@ -101,6 +109,7 @@ impl Default for SvgOptions {
             pretty: false,
             hoist: true,
             classes: true,
+            text: None,
         }
     }
 }

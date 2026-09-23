@@ -112,6 +112,64 @@ fn svg_seeds(root: &Path) -> std::io::Result<()> {
             marks: ForeignMarks::DIRTY,
         },
     );
+    // A text story with the pieces of the exact twin (XARA-T-0172): text
+    // attributes, a kern, an item with its own attributes, an empty line,
+    // a soft and a paragraph break, a character XML cannot carry.
+    {
+        use xarast_doc::{LineSpacing, Script, TextItem, TextStoryNode};
+        b.node(NodeKind::TextStory(Box::new(TextStoryNode {
+            transform: xarast_geom::Matrix {
+                a: 0.8,
+                b: 0.6,
+                c: -0.6,
+                d: 0.8,
+                e: xarast_geom::Mp::new(20_000),
+                f: xarast_geom::Mp::new(70_000),
+            },
+            ..TextStoryNode::default()
+        })))
+        .expect("story");
+        b.push_scope().expect("scope");
+        b.attribute(AttrValue::FontSize(xarast_geom::Mp::new(12_000)))
+            .expect("size");
+        b.node(NodeKind::TextLine(Box::default())).expect("line");
+        b.push_scope().expect("scope");
+        b.attribute(AttrValue::Tracking(xarast_geom::Mp::new(30)))
+            .expect("tracking");
+        for (i, c) in "Ta\u{1}b".chars().enumerate() {
+            b.node(NodeKind::TextItem(TextItem::Char(c))).expect("char");
+            if i == 0 {
+                b.node(NodeKind::TextItem(TextItem::Kern(xarast_geom::Mp::new(
+                    -60,
+                ))))
+                .expect("kern");
+            }
+            if i == 1 {
+                b.push_scope().expect("scope");
+                b.attribute(AttrValue::Script(Script {
+                    on: true,
+                    offset: 0.33,
+                    size: 0.6,
+                }))
+                .expect("script");
+                b.pop_scope();
+            }
+        }
+        b.node(NodeKind::TextItem(TextItem::LineBreak(false)))
+            .expect("soft");
+        b.pop_scope();
+        b.node(NodeKind::TextLine(Box::default())).expect("line");
+        b.node(NodeKind::TextLine(Box::default())).expect("line");
+        b.push_scope().expect("scope");
+        b.attribute(AttrValue::LineSpace(LineSpacing::Ratio(1.5)))
+            .expect("spacing");
+        b.node(NodeKind::TextItem(TextItem::Char('z')))
+            .expect("char");
+        b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+            .expect("eol");
+        b.pop_scope();
+        b.pop_scope();
+    }
     let (doc, _) = b.finish().expect("document");
     for (name, opts) in [
         ("writer.svg", SvgOptions::default()),
