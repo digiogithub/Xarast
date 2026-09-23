@@ -218,12 +218,18 @@ impl IntentAdapter {
         }
     }
 
+    /// Milliseconds on the clock pointer samples are stamped with: typing
+    /// keys use it too, for the typing-burst window.
+    #[must_use]
+    pub fn now_ms(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     fn sample(&self, p: PhysicalPos) -> PointerSample {
-        let ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
         PointerSample {
             at: self.canvas.to_canvas(p),
             pressure: None,
-            time_ms: ms,
+            time_ms: self.now_ms(),
         }
     }
 
