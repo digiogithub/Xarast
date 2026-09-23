@@ -86,7 +86,8 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Pan, 100k objects, CPU, Draft through the scheduler, fit page | ≤ 16 ms | ~~5.3–6.6 ms~~ 1.58 ms | passes (after the render-perf merge, 2026-09-23, load ~5) |
 | Pan, 100k objects, CPU, Draft through the scheduler, zoomed 3× | ≤ 16 ms | ~~51–57 ms~~ **11.1 ms** | passes after XARA-T-0033/T-0034 (linear display list, document-space culling, column tiles); re-measured 2026-09-23 at load ~5 |
 | Zoom (wheel notch), 100k objects, CPU, Draft through the scheduler | ≤ 16 ms | 1.4 ms | passes; the zoom-out border is left to the Final |
-| Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | not yet | XARA-T-0008; there is no GPU render thread yet |
+| Pan/zoom, 100k objects, integrated GPU | ≤ 16 ms | GPU side: 0.5–2.2 ms at 1080p, 1.5–3.0 ms at 4K (tile composite, `benches/tiles.rs`) | the primitive passes; end to end waits on XARA-T-0050 (shell wiring) |
+| Present one CPU frame, 4K, integrated GPU (today's full `write_texture`) | — | **23–27 ms** (1080p: 0.54–1.6 ms) | over budget on its own; XARA-T-0050 removes it, XARA-T-0052 investigates the cliff |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
 
@@ -381,6 +382,34 @@ core, which is byte-safe because bands merge by index. After:
 three bands, because a 766 px wide image at 1 MiB per band is three bands
 tall. The next steps are row-wise (SIMD) paint and blend, and more bands
 for export; see XARA-T-0038.
+
+### GPU tile compositing (XARA-US-0011)
+
+`cargo bench -p xarast-render --features gpu --bench tiles`, 2026-09-23,
+four runs at load 5–25, medians of 50–300 frames; ranges span the runs.
+`WGPU_ADAPTER_NAME=<substring>` selects one adapter. GPU rows are wall
+clock to `poll(wait)`.
+
+| | Intel Arrow Lake iGPU | RTX 4000 SFF Ada |
+|---|---|---|
+| empty submit + wait | 0.05–0.37 ms | 0.05–0.19 ms |
+| upload a whole 1080p frame (today) | 0.54–1.6 ms | 0.61–0.89 ms |
+| pan, 40 resident tiles | 0.47–1.4 ms | 0.08–0.21 ms |
+| pan crossing a tile row (8 uploads + composite) | 0.71–2.2 ms | 0.27–0.51 ms |
+| Draft zoom 1.3× / 0.5× | 0.37–1.8 / 0.71–2.0 ms | 0.08–0.15 / 0.15–0.47 ms |
+| upload a whole 4K frame (today) | **23–27 ms** | 2.6–3.5 ms |
+| 4K pan, 144 resident tiles | 1.5–3.0 ms | 0.30–0.54 ms |
+| upload 64 MiB of A8 | 27–33 ms | 5.4–6.9 ms |
+
+CPU side of the same bench: `scroll_surface` 1080p 0.19–0.73 ms;
+`compose_cpu` 1080p 1.3–3.1 ms; one 256² tile of a 900k-op scene 5–10 ms
+and a 1920 × 256 row 12–18 ms, of which the culled `DisplayList::build`
+alone is 6.5–10 ms (linear in the scene's ops). The decision these feed
+is in `render.md`, "The GPU decision".
+
+**The iGPU's large-upload cliff.** 8 MB uploads in about 0.6 ms, 33 MB in
+24 ms: four times the bytes, fifteen to fifty times the time. The RTX scales
+linearly. Unexplained; XARA-T-0052.
 
 ## Things that were slow, and why
 
