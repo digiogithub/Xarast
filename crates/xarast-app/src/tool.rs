@@ -850,6 +850,10 @@ pub struct ToolMachine {
     press: Option<Press>,
     last: Option<DevicePoint>,
     last_click: Option<LastClick>,
+    /// The pointer positions seen while armed, below the drag threshold:
+    /// replayed as drag updates once the drag starts, so a tool that
+    /// wants every sample (freehand) loses none.
+    armed: Vec<DevicePoint>,
 }
 
 impl Default for ToolMachine {
@@ -881,6 +885,7 @@ impl ToolMachine {
             press: None,
             last: None,
             last_click: None,
+            armed: Vec::new(),
         }
     }
 
@@ -995,6 +1000,7 @@ impl ToolMachine {
                     hit,
                 });
                 self.last = Some(at);
+                self.armed.clear();
                 self.state = InteractionState::ArmedDrag;
                 true
             }
@@ -1012,6 +1018,7 @@ impl ToolMachine {
                         let Some(p) = self.press else { return false };
                         let (dx, dy) = (at.x - p.device.x, at.y - p.device.y);
                         if dx.hypot(dy) <= DRAG_THRESHOLD_PX {
+                            self.armed.push(at);
                             return true;
                         }
                         self.state = InteractionState::Dragging;
@@ -1022,6 +1029,17 @@ impl ToolMachine {
                             },
                             cx,
                         );
+                        for d in std::mem::take(&mut self.armed) {
+                            let to = Self::doc_point(cx.viewport, d);
+                            self.deliver(
+                                &GestureEvent::DragUpdate {
+                                    from: p.doc,
+                                    to,
+                                    to_device: d,
+                                },
+                                cx,
+                            );
+                        }
                         self.deliver(
                             &GestureEvent::DragUpdate {
                                 from: p.doc,

@@ -2358,7 +2358,7 @@ mod tests {
         activate(&mut v, "Freehand");
         assert_eq!(tool(&v), xarast_app::ToolId::Freehand);
         let infobar = v.ui_model(1.0).editing.unwrap().infobar;
-        assert!(format!("{infobar:?}").contains("coming soon"));
+        assert!(format!("{infobar:?}").contains("rub it out"));
         press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
         assert_eq!(tool(&v), xarast_app::ToolId::Selector);
         // A tool of a later phase is published, greyed out, and inert.

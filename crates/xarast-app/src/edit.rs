@@ -223,6 +223,7 @@ impl ToolId {
                 | ToolId::Ellipse
                 | ToolId::ShapeEditor
                 | ToolId::Pen
+                | ToolId::Freehand
         )
     }
 
@@ -236,8 +237,8 @@ impl ToolId {
             | ToolId::Rectangle
             | ToolId::Ellipse
             | ToolId::ShapeEditor
-            | ToolId::Pen => None,
-            ToolId::Freehand => Some(7),
+            | ToolId::Pen
+            | ToolId::Freehand => None,
             ToolId::Fill | ToolId::Transparency => Some(8),
             ToolId::Text => Some(9),
         }

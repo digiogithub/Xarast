@@ -66,6 +66,7 @@ pub mod app;
 pub mod command;
 pub mod commands;
 pub mod edit;
+pub mod freehand;
 pub mod geometry;
 pub mod headless;
 pub mod intent;

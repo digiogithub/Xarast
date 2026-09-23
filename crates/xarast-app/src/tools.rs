@@ -26,6 +26,7 @@ pub fn builtin() -> Vec<Box<dyn Tool>> {
         Box::new(ZoomTool::default()),
         Box::new(crate::node_edit::ShapeEditorTool::default()),
         Box::new(crate::pen::PenTool::default()),
+        Box::new(crate::freehand::FreehandTool::default()),
     ];
     for id in ToolId::ALL {
         if id.is_available() && !id.is_implemented() {
