@@ -2,14 +2,15 @@
 id: XARA-US-0030
 type: story
 title: W2 — Tool state machine and tool infrastructure
-status: in_review
+status: done
 priority: high
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, app-core]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T17:14:28Z
+updated: 2026-09-23T17:20:38Z
 started: 2026-09-23T16:43:14Z
+closed: 2026-09-23T17:20:38Z
 ---
 
 ## Tasks (full table: phase-07 §W2)

@@ -2,14 +2,15 @@
 id: XARA-US-0083
 type: story
 title: Tool palette, context infobar row and working selector in the viewer
-status: in_review
+status: done
 priority: high
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, ui]
 created: 2026-09-23T17:14:13Z
-updated: 2026-09-23T17:14:23Z
+updated: 2026-09-23T17:20:38Z
 started: 2026-09-23T17:14:19Z
+closed: 2026-09-23T17:20:38Z
 ---
 
 ## Description

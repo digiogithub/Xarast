@@ -2,14 +2,15 @@
 id: XARA-US-0029
 type: story
 title: W1 — Command bus with labelled, coalesced undo
-status: in_review
+status: done
 priority: high
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, app-core]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T17:14:28Z
+updated: 2026-09-23T17:20:38Z
 started: 2026-09-23T16:43:14Z
+closed: 2026-09-23T17:20:38Z
 ---
 
 ## Description
