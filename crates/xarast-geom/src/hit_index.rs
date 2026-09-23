@@ -132,6 +132,14 @@ enum Place {
     Large(u32),
 }
 
+/// One object's listing in one cell. The bounds are copied in so a scan
+/// reads one contiguous array instead of chasing the slot for each entry.
+#[derive(Copy, Clone, Debug)]
+struct Member {
+    slot: u32,
+    bounds: Rect,
+}
+
 fn cell_key(x: i32, y: i32) -> u64 {
     (u64::from(x as u32) << 32) | u64::from(y as u32)
 }
@@ -162,9 +170,13 @@ pub struct HitIndex<K> {
     bounds: Vec<Rect>,
     z: Vec<u64>,
     place: Vec<Place>,
+    /// For a slot listed in cells, its index in each cell's list, in
+    /// row-major order over its range, so removal and in-place updates are
+    /// O(1) per cell however crowded the cell is.
+    pos: Vec<[u32; MAX_CELLS_PER_ENTRY as usize]>,
     free: Vec<u32>,
     slot_of: FastMap<K, u32>,
-    cells: FastMap<u64, Vec<u32>>,
+    cells: FastMap<u64, Vec<Member>>,
     large: Vec<u32>,
     cell: i64,
     /// Live entries when `cell` was last chosen.
@@ -186,6 +198,7 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
             bounds: Vec::new(),
             z: Vec::new(),
             place: Vec::new(),
+            pos: Vec::new(),
             free: Vec::new(),
             slot_of: FastMap::default(),
             cells: FastMap::default(),
@@ -211,6 +224,7 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
                 idx.bounds.push(b);
                 idx.z.push(z);
                 idx.place.push(Place::Nowhere);
+                idx.pos.push([0; MAX_CELLS_PER_ENTRY as usize]);
                 idx.slot_of.insert(k, s);
             }
         }
@@ -272,6 +286,7 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
             self.bounds.push(bounds);
             self.z.push(z);
             self.place.push(Place::Nowhere);
+            self.pos.push([0; MAX_CELLS_PER_ENTRY as usize]);
             s
         };
         self.slot_of.insert(key, s);
@@ -361,6 +376,7 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         self.keys = keys;
         self.bounds = bounds;
         self.z = z;
+        self.pos = vec![[0; MAX_CELLS_PER_ENTRY as usize]; place.len()];
         self.place = place;
         self.free = Vec::new();
         for s in 0..self.keys.len() as u32 {
@@ -394,8 +410,8 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         let q = Rect::new(Point::new(p.x - r, p.y - r), Point::new(p.x + r, p.y + r));
         let r2 = r.to_f64() * r.to_f64();
         let mut found: Vec<(u64, u32)> = Vec::new();
-        self.visit(q, |s| {
-            if rect_distance_sq(p, self.bounds[s as usize]) <= r2 {
+        self.visit(q, |s, b| {
+            if rect_distance_sq(p, b) <= r2 {
                 found.push((self.z[s as usize], s));
             }
         });
@@ -419,8 +435,7 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         if rect.is_empty() {
             return;
         }
-        self.visit(rect, |s| {
-            let b = self.bounds[s as usize];
+        self.visit(rect, |s, b| {
             let hit = match mode {
                 RectMode::Touch => rect.intersects(b),
                 RectMode::Enclose => rect.contains_rect(b),
@@ -444,26 +459,31 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         CellRange { x0, y0, x1, y1 }
     }
 
-    /// Calls `f` once for every slot whose cells overlap `q`'s, plus every
-    /// large entry. `f` still has to test the bounds.
-    fn visit(&self, q: Rect, mut f: impl FnMut(u32)) {
+    /// Calls `f(slot, bounds)` once for every slot whose cells overlap
+    /// `q`'s, plus every large entry. `f` still has to test the bounds.
+    fn visit(&self, q: Rect, mut f: impl FnMut(u32, Rect)) {
         if q.is_empty() {
             return;
         }
         for &s in &self.large {
-            f(s);
+            f(s, self.bounds[s as usize]);
         }
         let qr = self.range_of(q);
+        let single = qr.x0 == qr.x1 && qr.y0 == qr.y1;
         // Report a slot only from the first cell where its range and the
         // query's overlap, so a multi-cell entry is seen once, with no
-        // per-query bookkeeping.
-        let mut emit = |cx: i32, cy: i32, list: &Vec<u32>| {
-            for &s in list {
-                if let Place::Cells(er) = self.place[s as usize]
-                    && cx == er.x0.max(qr.x0)
-                    && cy == er.y0.max(qr.y0)
+        // per-query bookkeeping. An entry listed in cell (cx, cy) starts at
+        // or before it, so "first" means: cx is the query's first column or
+        // the entry's own, and likewise for rows.
+        let cell = self.cell;
+        let first = |v: i32, lo: Mp| i64::from(lo.raw()).div_euclid(cell) == i64::from(v);
+        let mut emit = |cx: i32, cy: i32, list: &Vec<Member>| {
+            for m in list {
+                if single
+                    || ((cx == qr.x0 || first(cx, m.bounds.lo.x))
+                        && (cy == qr.y0 || first(cy, m.bounds.lo.y)))
                 {
-                    f(s);
+                    f(m.slot, m.bounds);
                 }
             }
         };
@@ -497,6 +517,14 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         if !same {
             self.unplace_slot(s);
             self.place_slot(s);
+        } else if let Place::Cells(r) = old_place {
+            // Same cells: refresh the copies of the bounds in place.
+            let pos = self.pos[s as usize];
+            for (k, (cx, cy)) in cells_of(r).enumerate() {
+                if let Some(list) = self.cells.get_mut(&cell_key(cx, cy)) {
+                    list[pos[k] as usize].bounds = bounds;
+                }
+            }
         }
     }
 
@@ -514,12 +542,13 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
     }
 
     fn place_slot(&mut self, s: u32) {
-        let p = match self.place_for(self.bounds[s as usize]) {
+        let bounds = self.bounds[s as usize];
+        let p = match self.place_for(bounds) {
             Place::Cells(r) => {
-                for cx in r.x0..=r.x1 {
-                    for cy in r.y0..=r.y1 {
-                        self.cells.entry(cell_key(cx, cy)).or_default().push(s);
-                    }
+                for (k, (cx, cy)) in cells_of(r).enumerate() {
+                    let list = self.cells.entry(cell_key(cx, cy)).or_default();
+                    self.pos[s as usize][k] = list.len() as u32;
+                    list.push(Member { slot: s, bounds });
                 }
                 Place::Cells(r)
             }
@@ -535,17 +564,27 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
     fn unplace_slot(&mut self, s: u32) {
         match self.place[s as usize] {
             Place::Cells(r) => {
-                for cx in r.x0..=r.x1 {
-                    for cy in r.y0..=r.y1 {
-                        let key = cell_key(cx, cy);
-                        if let Some(list) = self.cells.get_mut(&key) {
-                            if let Some(i) = list.iter().position(|&t| t == s) {
-                                list.swap_remove(i);
-                            }
-                            if list.is_empty() {
-                                self.cells.remove(&key);
-                            }
+                let pos = self.pos[s as usize];
+                for (k, (cx, cy)) in cells_of(r).enumerate() {
+                    let key = cell_key(cx, cy);
+                    let Some(list) = self.cells.get_mut(&key) else {
+                        continue;
+                    };
+                    let i = pos[k] as usize;
+                    list.swap_remove(i);
+                    if let Some(moved) = list.get(i).copied() {
+                        // The member now at `i` came from the end: record
+                        // its new index under this cell's position in its
+                        // own range.
+                        if let Place::Cells(mr) = self.place[moved.slot as usize] {
+                            let h = i64::from(mr.y1) - i64::from(mr.y0) + 1;
+                            let j = (i64::from(cx) - i64::from(mr.x0)) * h
+                                + (i64::from(cy) - i64::from(mr.y0));
+                            self.pos[moved.slot as usize][j as usize] = i as u32;
                         }
+                    }
+                    if list.is_empty() {
+                        self.cells.remove(&key);
                     }
                 }
             }
@@ -588,6 +627,12 @@ impl<K: Copy + Eq + Hash> HitIndex<K> {
         };
         (2 * median).max(spacing).clamp(MIN_CELL, MAX_CELL)
     }
+}
+
+/// The cells of a range in row-major order: x outer, y inner. The order
+/// `pos` is indexed in.
+fn cells_of(r: CellRange) -> impl Iterator<Item = (i32, i32)> {
+    (r.x0..=r.x1).flat_map(move |cx| (r.y0..=r.y1).map(move |cy| (cx, cy)))
 }
 
 /// Squared distance from a point to a rectangle, zero inside.

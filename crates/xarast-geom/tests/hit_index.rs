@@ -29,8 +29,8 @@ fn any_rect() -> impl Strategy<Value = Rect> {
     ]
 }
 
-fn any_op() -> impl Strategy<Value = Op> {
-    let key = 0u16..64;
+fn any_op(keys: u16) -> impl Strategy<Value = Op> {
+    let key = 0u16..keys;
     let pt =
         (-2_100_000i32..2_100_000, -2_100_000i32..2_100_000).prop_map(|(x, y)| Point::raw(x, y));
     prop_oneof![
@@ -55,7 +55,22 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(500))]
 
     #[test]
-    fn index_matches_brute_force(ops in prop::collection::vec(any_op(), 1..200)) {
+    fn index_matches_brute_force(ops in prop::collection::vec(any_op(64), 1..200)) {
+        run(ops)?;
+    }
+
+    /// Enough objects to cross the automatic retuning thresholds and to
+    /// crowd cells, so removals move other members around within lists.
+    #[test]
+    fn crowded_index_matches_brute_force(
+        ops in prop::collection::vec(any_op(1_000), 1..2_000)
+    ) {
+        run(ops)?;
+    }
+}
+
+fn run(ops: Vec<Op>) -> Result<(), TestCaseError> {
+    {
         let mut idx: HitIndex<u16> = HitIndex::new();
         let mut model: HashMap<u16, (Rect, u64)> = HashMap::new();
         for op in ops {
@@ -91,18 +106,24 @@ proptest! {
                     prop_assert_eq!(got_sorted, want);
                 }
                 Op::Marquee(q, enclose) => {
-                    let mode = if enclose { RectMode::Enclose } else { RectMode::Touch };
+                    let mode = if enclose {
+                        RectMode::Enclose
+                    } else {
+                        RectMode::Touch
+                    };
                     let mut got = Vec::new();
                     idx.query_rect(q, mode, &mut got);
                     got.sort_unstable();
                     let mut want: Vec<u16> = model
                         .iter()
                         .filter(|(_, (b, _))| {
-                            !q.is_empty() && !b.is_empty() && if enclose {
-                                q.contains_rect(*b)
-                            } else {
-                                q.intersects(*b)
-                            }
+                            !q.is_empty()
+                                && !b.is_empty()
+                                && if enclose {
+                                    q.contains_rect(*b)
+                                } else {
+                                    q.intersects(*b)
+                                }
                         })
                         .map(|(&k, _)| k)
                         .collect();
@@ -117,6 +138,7 @@ proptest! {
             prop_assert_eq!(idx.get(*k), Some(*v));
         }
     }
+    Ok(())
 }
 
 #[test]
