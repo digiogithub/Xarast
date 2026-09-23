@@ -7,12 +7,65 @@ macOS in phase 14). Specification in
 ## Current state
 
 - `packaging/linux/build-appimage.sh` produces a working AppImage.
-- First real build: **3.9 MB**, against a 35 MiB phase 0 budget. It runs
-  (`--version`, `--selftest`) and bundles **no libraries at all**.
+- First real build (phase 0): 3.9 MB. **Re-measured 2026-09-23 with the full
+  phase 5 stack** (wgpu, egui, winit, AccessKit, zbus portals, clipboard,
+  fonts), built exactly as CI does in `ubuntu:22.04`, x86_64: see the size
+  table below. It still bundles **no libraries at all**; the binary's only
+  `DT_NEEDED` entries are `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and the
+  loader, and its highest glibc symbol is `GLIBC_2.35`.
+- `packaging/linux/smoke-test.sh` boots a built image in a bare container
+  (no display, no FUSE) and is run by the `distro-smoke` CI job.
 - `cargo xtask icons` rasterises `assets/icons/xarast.svg` into the
   freedesktop theme sizes; CI fails if the committed PNGs are stale.
 - CI builds x86_64 and aarch64, smoke-tests both, and attaches them to
   releases with zsync metadata.
+
+## Size (2026-09-23, x86_64, commit 8646a5d)
+
+| Item | Bytes | Note |
+|---|---:|---|
+| **AppImage** | **8 047 096 (7.7 MiB)** | budget 80 MiB (phase 5); gate now 80 in the script and CI |
+| static runtime | 944 632 | `--appimage-offset` |
+| squashfs payload | 7 101 282 | zstd, 128 KiB blocks |
+| `usr/bin/xarast` in the AppDir | 17 999 033 | stripped by linuxdeploy |
+| `target/release/xarast` | 21 867 128 | not stripped (release profile has no `strip`) |
+| `xarast-cli` (not in the image) | 2 857 112 | unstripped |
+
+Section sizes of the stripped binary: `.text` 12.9 MB, `.rodata` 2.4 MB,
+`.eh_frame` 1.1 MB, `.rela.dyn` 0.6 MB, `.gcc_except_table` 0.5 MB,
+`.data.rel.ro` 0.4 MB. `cargo bloat --crates` (host build, same flags) of the
+12.3 MiB `.text`: std 2.3 MiB (generic code gets attributed to it), naga 1.3,
+zbus 0.9, wgpu_core 0.8, winit 0.67, egui 0.54, wgpu_hal 0.45, zvariant 0.45,
+accesskit_unix 0.38, wayland_client 0.27, vello_cpu 0.26; every `xarast_*`
+crate together is under 0.7 MiB. The GPU and desktop-integration stack is the
+image; our own code is a rounding error. There is ~10x headroom, so no size
+work is warranted now; if it ever is, the cheap levers are naga's unused
+front-ends (wgpu features) and zbus (via ashpd/accesskit).
+
+## Distro smoke matrix (W0.4.8), 2026-09-23
+
+Run locally with podman on the image above, `APPIMAGE_EXTRACT_AND_RUN=1`, plus
+a headless `xarast-cli render` of `Designs/amurdove.xar` (CLI built in the
+same container, mounted beside the image).
+
+| Distribution | glibc | --version/--help/--selftest | --selftest-window | loader (NEEDED) | CLI render |
+|---|---|---|---|---|---|
+| Debian 12 | 2.36 | pass | skipped, exit 0 | 3 libs, none missing | pass, 512x765 |
+| Fedora 44 | 2.43 | pass | skipped, exit 0 | 3 libs, none missing | pass |
+| openSUSE Tumbleweed | 2.44 | pass | skipped, exit 0 | 3 libs, none missing | pass |
+| openSUSE Leap 15.6 | 2.38 | pass | skipped, exit 0 | 3 libs, none missing | pass |
+| Arch (SteamOS-like) | 2.44 | pass | skipped, exit 0 | 3 libs, none missing | pass |
+| *Ubuntu 20.04 (negative control)* | 2.31 | **fails**: `GLIBC_2.32..2.34 not found` | — | — | — |
+
+Leap 15.6 ships glibc 2.38. Earlier Leap 15.x releases are believed to ship
+2.31 (not measured here), which would *not* start the image; the "openSUSE
+15.5+" line in phase 0's baseline rationale should be read as "Leap 15.6+".
+
+No compositor or GPU library (`libwayland*`, `libxkbcommon`, `libX11`,
+`libxcb`, `libvulkan`, `libGL`, `libEGL`) is linked: all are `dlopen`'d.
+On the live host session (Wayland, NVIDIA RTX 4000 Ada, Vulkan) the same image
+passed `--selftest-window` (cold start 395 ms) and `--screenshot` of
+`amurdove.xar` wrote a 974x1366 PNG and exited on its own.
 
 ## Decisions taken (and why)
 
@@ -42,6 +95,19 @@ macOS in phase 14). Specification in
 7. **`panic = "unwind"`, not `abort`.** `cargo-fuzz` needs to catch a panic as
    a finding rather than losing the process, and the `.xar` importer is fuzzed
    from day one.
+8. **Metadata validators run on `ubuntu-24.04`, not in the build container.**
+   `ubuntu:22.04` ships desktop-file-validate 0.26, which rejects the
+   entry's `Version=1.5`, and appstreamcli 0.15, which has no `--strict`.
+   The `metadata` job runs `desktop-file-validate` and
+   `appstreamcli validate --no-net --strict --explain`. `--no-net` so a
+   flaky homepage cannot fail a build. The only remaining finding is the
+   pedantic hint `cid-contains-uppercase-letter` for `es.digio.Xarast`; it
+   is informational and renaming a published component id is not free, so
+   it stays.
+9. **The distro smoke job is x86_64-only.** `archlinux` has no aarch64
+   image and the goal is loader/glibc coverage, which the architecture does
+   not change. Each container is capped with `timeout 300`, the job with
+   `timeout-minutes: 10`.
 
 ## Invariants that must not be broken
 
@@ -53,12 +119,27 @@ macOS in phase 14). Specification in
    by hope.
 3. No library from the exclusion list may appear in `usr/lib` of the AppDir.
 4. Committed icon PNGs must be reproducible from the SVG by `cargo xtask icons`.
+5. The binary's `DT_NEEDED` set is libc, libm, libgcc_s and the loader, and
+   nothing else. `smoke-test.sh` fails if a compositor or GPU library shows
+   up in the loader's list.
+6. `--selftest-window` with neither `WAYLAND_DISPLAY` nor `DISPLAY` prints
+   `selftest-window: skipped (...)` and exits 0. The smoke job depends on it.
 
 ## Dead ends (do not retry)
 
 - Building the release AppImage on the GitHub runner image directly: produces a
   GLIBC_2.39 binary. Measured, not theoretical.
 - Relying on FUSE being present anywhere in CI.
+- **Running AppImages on a host with AppImageLauncher.** It registers a
+  `binfmt_misc` handler (`/proc/sys/fs/binfmt_misc/appimage-type2`, magic
+  `AI\x02` at offset 8) whose interpreter is `/usr/bin/AppImageLauncher`.
+  `binfmt_misc` is kernel-global, so inside a podman/docker container every
+  AppImage (linuxdeploy included) fails with `No such file or directory`,
+  exit 127; on the host, running one *moves it into `/apps`*. Work around it
+  locally by zeroing bytes 8..10 of a copy
+  (`printf '\0\0\0' | dd of=COPY bs=1 seek=8 count=3 conv=notrunc`); the
+  type 2 runtime does not check its own magic. GitHub runners have no such
+  handler, so CI needs nothing.
 
 ## Runtime dependencies the shell introduces (phase 5)
 
@@ -74,17 +155,15 @@ two more entries belong under it.
 | `wl-clipboard-rs` / X11 clipboard | `arboard` with `wayland-data-control` | Pure Rust plus the already-excluded system libraries. |
 | Mesa / Vulkan ICDs | `wgpu` | Already excluded, and must stay so. |
 
-The AppImage size has **not** been re-measured since `winit`, `wgpu`,
-`rfd`, `ashpd`, `arboard` and the egui stack were linked in. The 3.9 MB
-figure above is stale; see the open TODO.
+The size with all of these linked in is recorded under **Size** above.
 
 ## Open TODOs
 
-- [ ] Distro smoke matrix (W0.4.8): actually boot the image on Debian 12,
-      Fedora, openSUSE and SteamOS containers.
-- [ ] AppStream validation in CI — `appstreamcli validate` is not yet wired up;
-      only `desktop-file-validate` runs.
+- [x] Distro smoke matrix (W0.4.8): done locally and wired into CI as
+      `distro-smoke` (2026-09-23).
+- [x] AppStream validation in CI (`metadata` job).
+- [ ] `xarast-cli` is not in the image, so CI's smoke job cannot do a
+      headless render (and has no corpus file to render anyway). Tracked as
+      XARA-T-0049.
 - [ ] GPG signing of the image and the zsync file (phase 12).
-- [ ] Re-measure the size budget now that wgpu, egui, winit, the portal and
-      clipboard stacks and the font stack are linked in; 3.9 MB has not
-      survived phase 5 and the 80 MB phase-5 budget is unverified.
+- [x] Re-measure the size budget with the phase 5 stack: 7.7 MiB (above).
