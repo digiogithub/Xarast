@@ -61,6 +61,7 @@ mod paint;
 pub mod portal;
 pub mod probe;
 pub mod scale;
+pub mod signals;
 pub mod tiles;
 pub mod viewer;
 #[cfg(all(
@@ -310,6 +311,14 @@ pub trait ShellApp: 'static {
     /// Called once, as the loop exits.
     fn on_exit(&mut self, ctx: &mut ShellCtx<'_>) {
         let _ = ctx;
+    }
+
+    /// Whether the application decides what the window's close button
+    /// does. By default it closes the window at once; an application that
+    /// returns `true` receives [`ShellEvent::CloseRequested`] and calls
+    /// [`ShellCtx::exit`] itself (after asking about unsaved work).
+    fn handles_close(&self) -> bool {
+        false
     }
 }
 

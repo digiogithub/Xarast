@@ -256,6 +256,11 @@ ashpd = { version = "0.13", default-features = false, features = [
     "file_chooser",
     "settings",
 ] }
+# SIGINT/SIGTERM/SIGHUP in the shell (XARA-T-0086): a safe iterator over
+# signals on its own thread, so the binary needs no `unsafe` of its own to
+# autosave and release document locks. Its registry crate is already in the
+# graph (through zbus). MIT OR Apache-2.0.
+signal-hook = { version = "0.3", default-features = false, features = ["iterator"] }
 # Wayland drag and drop. `winit` 0.30 implements no drag-and-drop at all on
 # Wayland (only X11 has `HoveredFile`/`DroppedFile`; measured on GNOME 46), so
 # the shell binds `wl_data_device` itself, on `winit`'s own connection. These

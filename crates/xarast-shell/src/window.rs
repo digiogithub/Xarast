@@ -1257,7 +1257,9 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
         self.translator.translate(&event, &mut self.events);
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            // The application sees the translated `CloseRequested` in
+            // `dispatch` and exits through `ShellCtx::exit` when it is done.
+            WindowEvent::CloseRequested if !self.app.handles_close() => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);

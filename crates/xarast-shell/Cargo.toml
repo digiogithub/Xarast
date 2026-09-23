@@ -44,6 +44,9 @@ futures-lite = { workspace = true, optional = true }
 arboard = { workspace = true, optional = true }
 accesskit_winit = { workspace = true, optional = true }
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
 # Wayland drag and drop (`wayland_dnd`), on the free desktops only.
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
 smithay-client-toolkit = { workspace = true }

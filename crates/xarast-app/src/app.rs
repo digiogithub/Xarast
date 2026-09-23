@@ -1085,8 +1085,14 @@ impl AppState {
     /// Blocks until every running save has finished and applies them. For
     /// tests and shutdown; the interface calls [`AppState::poll_saves`].
     pub fn wait_for_saves(&mut self) -> Changed {
-        self.saver.wait();
+        self.join_saves();
         self.poll_saves()
+    }
+
+    /// Blocks until every running save has finished, leaving the outcomes
+    /// for the next [`AppState::poll_saves`].
+    pub fn join_saves(&mut self) {
+        self.saver.wait();
     }
 
     // ── autosave and recovery ────────────────────────────────────────

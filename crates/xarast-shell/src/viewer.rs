@@ -58,7 +58,7 @@ use crate::input::event::{ColorScheme, DragEvent, PointerPhase, ShellEvent};
 use crate::input::keyboard::{Key, KeyEvent, KeyState, Modifiers, NamedKey, Shortcut, ShortcutMap};
 use crate::intents::{CanvasRegion, IntentAdapter};
 use crate::paint::UiFrame;
-use crate::portal::{FileFilter, OpenFileRequest, PortalEvent, PortalRequestId};
+use crate::portal::{FileFilter, OpenFileRequest, PortalEvent, PortalRequestId, SaveFileRequest};
 use crate::probe::Probe;
 use crate::scale::{PhysicalPos, PhysicalSize, ScaleFactor};
 use crate::tiles::{CanvasView, TiledFrame};
@@ -140,6 +140,16 @@ pub struct Viewer {
     open_dialog: Option<PortalRequestId>,
     /// The active document changed: the window title is owed.
     title_stale: bool,
+    /// The save chooser on screen, if one is.
+    save_dialog: Option<PortalRequestId>,
+    /// SIGINT/SIGTERM/SIGHUP, from the handler thread.
+    signals: crate::signals::SignalWatch,
+    /// The save thread and the signal handler can wake the loop.
+    wakers_set: bool,
+    /// The recovery question has been asked (or is not to be).
+    recovery_offered: bool,
+    /// When the next autosave is due.
+    autosave_due: Option<Instant>,
 }
 
 /// One interface frame, before it is handed to the shell.
@@ -202,6 +212,11 @@ impl Viewer {
             requests: Vec::new(),
             open_dialog: None,
             title_stale: false,
+            save_dialog: None,
+            signals: crate::signals::SignalWatch::inert(),
+            wakers_set: false,
+            recovery_offered: false,
+            autosave_due: None,
         }
         .with_external_navigation()
     }
@@ -219,6 +234,25 @@ impl Viewer {
     #[must_use]
     pub fn with_recent_store(mut self, file: PathBuf) -> Viewer {
         self.app = std::mem::take(&mut self.app).with_recent_store(file);
+        self
+    }
+
+    /// Autosaves modified documents into `dir` and offers, once the window
+    /// is up, to recover what an earlier session left there (the binary
+    /// passes `$XDG_STATE_HOME/xarast/autosave`). Tests and probes leave it
+    /// off.
+    #[must_use]
+    pub fn with_autosave(mut self, dir: PathBuf) -> Viewer {
+        self.app = std::mem::take(&mut self.app)
+            .with_autosave(dir, xarast_app::autosave::AutosavePolicy::default());
+        self
+    }
+
+    /// Shuts down in order (autosave, release locks) when `signals` says a
+    /// signal arrived.
+    #[must_use]
+    pub fn with_signals(mut self, signals: crate::signals::SignalWatch) -> Viewer {
+        self.signals = signals;
         self
     }
 
@@ -309,6 +343,9 @@ impl Viewer {
             self.settled_once = false;
         }
         self.requests.extend(self.app.take_requests());
+        if let Some(n) = self.app.take_notice() {
+            self.message = Some(n);
+        }
         self.scene_stale |= changed.needs_scene();
         self.render_stale |= changed.needs_redraw();
         if let Some(canvas) = self.render.as_mut() {
@@ -360,6 +397,21 @@ impl Viewer {
                         self.open_dialog = Some(id);
                     }
                 }
+                PlatformRequest::ShowSaveDialog {
+                    title,
+                    file_name,
+                    directory,
+                } => {
+                    if self.save_dialog.is_none() {
+                        let id = ctx.portal().save_file(save_request(
+                            title,
+                            file_name,
+                            directory,
+                            ctx.parent_window(),
+                        ));
+                        self.save_dialog = Some(id);
+                    }
+                }
                 PlatformRequest::Quit => ctx.exit(),
                 PlatformRequest::SetClipboardText(text) => {
                     // The SVG flavour of a copy. `arboard` offers text,
@@ -395,18 +447,93 @@ impl Viewer {
         }
     }
 
-    /// The window title for the active document.
+    /// The window title for the active document: `• name — Xarast` while
+    /// it has unsaved changes, `(read-only)` when another session holds it.
     fn window_title(&self) -> String {
         match self.app.active() {
             Some(s) => {
-                let name = s.path.as_ref().and_then(|p| p.file_name()).map_or_else(
-                    || "Untitled".to_owned(),
-                    |n| n.to_string_lossy().into_owned(),
-                );
-                format!("{name} — Xarast")
+                let marker = if s.is_modified() { "\u{2022} " } else { "" };
+                let ro = if s.read_only { " (read-only)" } else { "" };
+                format!("{marker}{}{ro} — Xarast", s.display_name())
             }
             None => "Xarast".to_owned(),
         }
+    }
+
+    /// Takes the answer to the save dialog. Returns false for an answer to
+    /// something else.
+    fn save_answer(&mut self, event: &PortalEvent) -> bool {
+        let request = match event {
+            PortalEvent::SaveChosen { request, .. }
+            | PortalEvent::Cancelled { request }
+            | PortalEvent::Failed { request, .. } => *request,
+            _ => return false,
+        };
+        if self.save_dialog != Some(request) {
+            return false;
+        }
+        self.save_dialog = None;
+        let intent = match event {
+            PortalEvent::SaveChosen { path, .. } => Intent::SaveTo(path.clone()),
+            PortalEvent::Failed { reason, .. } => {
+                let message = format!("Could not show the save dialog: {reason}");
+                tracing::warn!("{message}");
+                self.app.diagnostics.push(xarast_app::DiagnosticEntry {
+                    severity: xarast_app::Severity::Error,
+                    message: message.clone(),
+                    document: None,
+                });
+                self.message = Some(message);
+                Intent::SaveDialogClosed
+            }
+            _ => Intent::SaveDialogClosed,
+        };
+        self.apply(vec![intent]);
+        true
+    }
+
+    /// The core's own work between events: finished saves, due autosaves,
+    /// the recovery question, a signal. Runs at every event and frame.
+    fn housekeeping(&mut self, ctx: &mut ShellCtx<'_>) {
+        if !self.wakers_set {
+            self.wakers_set = true;
+            let waker = ctx.waker();
+            self.app.set_save_waker(Box::new(move || waker.wake()));
+            self.signals.set_waker(ctx.waker());
+        }
+        if self.signals.requested() {
+            let n = self.app.emergency_shutdown();
+            tracing::info!(autosaved = n, "signal: autosaved and released every lock");
+            ctx.exit();
+            return;
+        }
+        let changed = self.app.poll_saves();
+        if !changed.is_empty() {
+            self.requests.extend(self.app.take_requests());
+            if let Some(n) = self.app.take_notice() {
+                self.message = Some(n);
+            }
+            if changed.contains(Changed::ACTIVE) {
+                self.primed = false;
+                self.fit_pending = self.app.active().is_some();
+                self.shown = 0;
+                self.settled_once = false;
+            }
+            self.scene_stale |= changed.needs_scene();
+            self.render_stale |= changed.needs_redraw();
+            ctx.request_redraw();
+        }
+        self.autosave_due = self.app.tick(Instant::now());
+        if !self.recovery_offered {
+            self.recovery_offered = true;
+            if self.screenshot.is_none() && self.probe.is_none() {
+                let c = self.app.offer_recovery();
+                if !c.is_empty() {
+                    ctx.request_redraw();
+                }
+            }
+        }
+        self.perform_requests(ctx);
     }
 
     /// Takes the answer to the open dialog. Returns false for an answer to
@@ -469,6 +596,7 @@ impl Viewer {
                 ..StatusInfo::default()
             },
             recent: self.app.recent.paths().to_vec(),
+            prompt: self.app.prompt().cloned(),
             palette: vec![xarast_ui::model::PaletteEntry::none()],
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
@@ -638,6 +766,7 @@ impl Viewer {
             UiCommand::App(c) => c.intent(self.canvas_centre()),
             UiCommand::OpenRecent(path) => Intent::OpenFile(path),
             UiCommand::ClearRecent => Intent::ClearRecent,
+            UiCommand::AnswerPrompt(a) => Intent::AnswerPrompt(a),
             UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
             UiCommand::Align(spec) => Intent::Align(spec),
             UiCommand::AddGuide(g) => Intent::Guides(GuideOp::Add {
@@ -857,6 +986,22 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
 }
 
 /// File › Open…: `.xar` documents first, then anything.
+/// File › Save As…: `.xarast` only — nothing else is ever written.
+fn save_request(
+    title: String,
+    file_name: String,
+    directory: Option<PathBuf>,
+    parent: Option<String>,
+) -> SaveFileRequest {
+    SaveFileRequest {
+        title,
+        filters: vec![FileFilter::new("Xarast documents (*.xarast)", &["xarast"])],
+        file_name: Some(file_name),
+        directory,
+        parent,
+    }
+}
+
 fn open_request(parent: Option<String>) -> OpenFileRequest {
     OpenFileRequest {
         title: "Open".to_owned(),
@@ -916,6 +1061,13 @@ impl Viewer {
                 redraw = true;
             }
             ShellEvent::Portal(answer) if self.portal_answer(answer) => redraw = true,
+            ShellEvent::Portal(answer) if self.save_answer(answer) => redraw = true,
+            ShellEvent::CloseRequested => {
+                // The window's close button is File › Quit: it asks about
+                // unsaved changes first.
+                self.apply(vec![Intent::Quit]);
+                redraw = true;
+            }
             ShellEvent::ColorSchemeChanged(s)
             | ShellEvent::Portal(PortalEvent::ColorSchemeChanged(s)) => {
                 if self.scheme != *s {
@@ -1399,12 +1551,18 @@ impl ShellApp for Viewer {
             ctx.request_redraw();
         }
         self.perform_requests(ctx);
+        self.housekeeping(ctx);
+    }
+
+    fn handles_close(&self) -> bool {
+        true
     }
 
     fn on_frame(&mut self, ctx: &mut ShellCtx<'_>) -> FrameRequest {
         if !self.to_open.is_empty() {
             self.open_queued();
         }
+        self.housekeeping(ctx);
 
         self.drive_probe(ctx);
 
@@ -1419,8 +1577,11 @@ impl ShellApp for Viewer {
         self.platform_output(step.output, ctx);
         let repaint = step.repaint;
         self.perform_requests(ctx);
-        if std::mem::take(&mut self.title_stale) {
-            self.title = self.window_title();
+        // The title follows the modified marker too, which any edit, undo
+        // or save can change: compare rather than track.
+        let title = self.window_title();
+        if std::mem::take(&mut self.title_stale) || title != self.title {
+            self.title = title;
             ctx.set_title(&self.title);
         }
 
@@ -1503,9 +1664,12 @@ impl ShellApp for Viewer {
         }
 
         // Wake for the owed Final even when nothing else is animating.
-        let due = self
-            .final_due
-            .map(|t| t.saturating_duration_since(Instant::now()));
+        // The owed Final, or the next autosave, whichever is sooner.
+        let due = match (self.final_due, self.autosave_due) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+        .map(|t| t.saturating_duration_since(Instant::now()));
         let repaint = match (repaint, due) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -2676,5 +2840,149 @@ mod tests {
         assert!(!v.app.active().unwrap().doc.tree.is_reachable(n));
         press(&mut v, Key::char('z'), Modifiers::NONE.with_ctrl());
         assert!(v.app.active().unwrap().doc.tree.is_reachable(n));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("xarast-viewer-save-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn every_chord_of_the_command_table_reaches_its_command() {
+        use crate::input::keyboard::{KeyEvent, KeyLocation};
+        let map = command_shortcuts();
+        for command in AppCommand::ALL {
+            for chord in command.shortcuts() {
+                let key = match chord.key {
+                    ChordKey::Char(c) if chord.shift && c.is_ascii_alphabetic() => {
+                        Key::char(c.to_ascii_uppercase())
+                    }
+                    ChordKey::Char(c) => Key::char(c),
+                    ChordKey::Home => Key::Named(NamedKey::Home),
+                    ChordKey::Delete => Key::Named(NamedKey::Delete),
+                    ChordKey::Escape => Key::Named(NamedKey::Escape),
+                    ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
+                    ChordKey::Backspace => Key::Named(NamedKey::Backspace),
+                    ChordKey::Enter => Key::Named(NamedKey::Enter),
+                };
+                let mut modifiers = Modifiers::NONE;
+                if chord.ctrl {
+                    modifiers = modifiers.with_ctrl();
+                }
+                if chord.shift {
+                    modifiers = modifiers.with_shift();
+                }
+                let event = KeyEvent {
+                    key,
+                    location: KeyLocation::Standard,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                    text: None,
+                    modifiers,
+                };
+                assert_eq!(
+                    map.resolve(&event, false),
+                    Some(command),
+                    "{chord} does not run {command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ctrl_s_asks_for_a_xarast_name_then_saves_and_clears_the_marker() {
+        let dir = scratch("ctrl-s");
+        let (mut v, _) = viewer_with_square();
+        assert!(
+            v.window_title().starts_with('\u{2022}'),
+            "{}",
+            v.window_title()
+        );
+        press(&mut v, Key::char('s'), Modifiers::NONE.with_ctrl());
+        assert!(matches!(
+            v.requests.as_slice(),
+            [PlatformRequest::ShowSaveDialog { file_name, .. }] if file_name == "Untitled.xarast"
+        ));
+        // The offline portal fails at once: the status bar says so and
+        // nothing waits for a name any more.
+        let (exit, answers) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(!exit && v.save_dialog.is_some());
+        for a in answers {
+            v.handle(&ShellEvent::Portal(a));
+        }
+        assert!(v.save_dialog.is_none());
+        let message = v.message.clone().unwrap_or_default();
+        assert!(
+            message.starts_with("Could not show the save dialog"),
+            "{message}"
+        );
+
+        // A chosen name: saved off the interface thread, then applied.
+        press(
+            &mut v,
+            Key::char('S'),
+            Modifiers::NONE.with_ctrl().with_shift(),
+        );
+        assert!(matches!(
+            v.requests.as_slice(),
+            [PlatformRequest::ShowSaveDialog { .. }]
+        ));
+        v.requests.clear();
+        v.save_dialog = Some(PortalRequestId(42));
+        v.handle(&ShellEvent::Portal(PortalEvent::SaveChosen {
+            request: PortalRequestId(42),
+            path: dir.join("square"),
+        }));
+        assert!(v.app.is_saving());
+        v.app.join_saves();
+        let _ = with_ctx(|ctx| v.housekeeping(ctx));
+        let message = v.message.clone().unwrap_or_default();
+        assert!(message.starts_with("Saved square.xarast"), "{message}");
+        assert_eq!(v.window_title(), "square.xarast — Xarast");
+        assert!(dir.join("square.xarast").is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn closing_the_window_asks_first_and_quits_after_discard() {
+        let (mut v, _) = viewer_with_square();
+        v.handle(&ShellEvent::CloseRequested);
+        assert!(v.app.prompt().is_some());
+        assert!(v.ui_model(1.0).prompt.is_some(), "the interface shows it");
+        let (exit, _) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(!exit, "nothing quits while it asks");
+        let intent = v
+            .ui_intent(
+                UiCommand::AnswerPrompt(xarast_app::PromptAnswer::Discard),
+                1.0,
+            )
+            .unwrap();
+        v.apply(vec![intent]);
+        let (exit, _) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(exit);
+        assert!(v.handles_close());
+    }
+
+    #[test]
+    fn a_signal_autosaves_the_work_and_exits() {
+        let dir = scratch("signal");
+        let (v, _) = viewer_with_square();
+        let watch = crate::signals::SignalWatch::inert();
+        let mut v = v.with_signals(watch.clone());
+        v.app = std::mem::take(&mut v.app)
+            .with_autosave(dir.clone(), xarast_app::autosave::AutosavePolicy::default());
+        let (exit, _) = with_ctx(|ctx| v.housekeeping(ctx));
+        assert!(!exit);
+        watch.simulate();
+        let (exit, _) = with_ctx(|ctx| v.housekeeping(ctx));
+        assert!(exit);
+        assert!(v.app.docs.is_empty());
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "one autosave kept for recovery");
+        assert!(entries[0].path().join("snapshot.xarast").is_file());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
