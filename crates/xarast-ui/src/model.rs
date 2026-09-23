@@ -340,6 +340,9 @@ pub struct UiModel {
     pub fill: Option<ColourValue>,
     /// The current line colour, `None` for "no colour".
     pub line: Option<ColourValue>,
+    /// What the colour editor shows (phase 8, W8.6). `None` with no
+    /// document open.
+    pub colour_editor: Option<xarast_app::colour_editor::ColourEditorView>,
     /// The status bar.
     pub status: StatusInfo,
     /// The theme preference.
@@ -462,6 +465,9 @@ pub enum UiCommand {
     SetFill(Option<ColourValue>),
     /// Set the line colour, `None` for "no colour".
     SetLine(Option<ColourValue>),
+    /// An operation of the colour editor: a live change, a commit, a
+    /// cancel, a new target (phase 8, W8.6).
+    ColourEditor(xarast_app::colour_editor::ColourEditorOp),
     /// Change the theme preference.
     SetTheme(Theme),
     /// Open the problem list — the non-modal importer diagnostics.

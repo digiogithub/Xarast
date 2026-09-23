@@ -41,6 +41,7 @@
 
 pub mod a11y;
 pub mod canvas;
+pub mod colour_field;
 pub mod density;
 pub mod dialogs;
 pub mod grid;
