@@ -297,10 +297,31 @@ struct RampKey {
 
 /// Interns built ramps so that a gradient drawn a thousand times builds its
 /// table once.
+///
+/// # Eviction (least recently used)
+///
+/// A cache that only grows is fine for a document at rest, but a fill drag
+/// makes a new ramp every frame (a stop moved, a profile slid). The owner of
+/// the cache marks each scene build with [`RampCache::begin_frame`] and
+/// calls [`RampCache::evict`] after it; eviction drops the least recently
+/// used tables until the cache fits its budget, **never** one the frame
+/// just built uses, so every [`RampId`] of the current scene stays valid.
+/// An evicted id's slot is reused by a later intern: a snapshot taken
+/// before the eviction (the render thread's) keeps its own copy.
 #[derive(Debug, Clone, Default)]
 pub struct RampCache {
     keys: HashMap<RampKey, RampId>,
     tables: Vec<Vec<Rgba8>>,
+    /// The key of each live slot, `None` for a free one.
+    slot_keys: Vec<Option<RampKey>>,
+    /// The frame each slot was last interned in.
+    last_used: Vec<u64>,
+    /// Slots freed by eviction, reused first.
+    free: Vec<u32>,
+    /// The current frame.
+    frame: u64,
+    /// Bytes held by live tables.
+    bytes: usize,
 }
 
 impl RampCache {
@@ -334,13 +355,68 @@ impl RampCache {
             len,
         };
         if let Some(id) = self.keys.get(&key) {
+            self.last_used[id.0 as usize] = self.frame;
             return *id;
         }
         let table = build_ramp(stops, profile, space, len);
-        let id = RampId(u32::try_from(self.tables.len()).expect("ramp cache overflow"));
-        self.tables.push(table);
+        self.bytes += table.len() * 4;
+        let id = match self.free.pop() {
+            Some(slot) => {
+                let i = slot as usize;
+                self.tables[i] = table;
+                self.slot_keys[i] = Some(key.clone());
+                self.last_used[i] = self.frame;
+                RampId(slot)
+            }
+            None => {
+                let id = RampId(u32::try_from(self.tables.len()).expect("ramp cache overflow"));
+                self.tables.push(table);
+                self.slot_keys.push(Some(key.clone()));
+                self.last_used.push(self.frame);
+                id
+            }
+        };
         self.keys.insert(key, id);
         id
+    }
+
+    /// Starts a new frame: what is interned from now on counts as used by
+    /// it, and [`RampCache::evict`] will not drop it.
+    pub fn begin_frame(&mut self) {
+        self.frame += 1;
+    }
+
+    /// Drops least recently used tables not used in the current frame until
+    /// the live tables hold at most `budget` bytes (or only current-frame
+    /// tables remain). Returns the evicted ids, whose slots will be reused;
+    /// anything indexed by ramp id alongside the cache must forget them.
+    pub fn evict(&mut self, budget: usize) -> Vec<RampId> {
+        if self.bytes <= budget {
+            return Vec::new();
+        }
+        let mut old: Vec<(u64, u32)> = self
+            .last_used
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| **t < self.frame && self.slot_keys[*i].is_some())
+            .map(|(i, t)| (*t, u32::try_from(i).unwrap_or(u32::MAX)))
+            .collect();
+        old.sort_unstable();
+        let mut out = Vec::new();
+        for (_, slot) in old {
+            if self.bytes <= budget {
+                break;
+            }
+            let i = slot as usize;
+            if let Some(key) = self.slot_keys[i].take() {
+                self.keys.remove(&key);
+            }
+            self.bytes -= self.tables[i].len() * 4;
+            self.tables[i] = Vec::new();
+            self.free.push(slot);
+            out.push(RampId(slot));
+        }
+        out
     }
 
     /// The table behind an id.
@@ -353,28 +429,31 @@ impl RampCache {
         &self.tables[id.0 as usize]
     }
 
-    /// The table behind an id, or `None` for a foreign id.
+    /// The table behind an id, or `None` for a foreign or evicted id.
     #[must_use]
     pub fn try_get(&self, id: RampId) -> Option<&[Rgba8]> {
-        self.tables.get(id.0 as usize).map(Vec::as_slice)
+        self.tables
+            .get(id.0 as usize)
+            .filter(|t| !t.is_empty())
+            .map(Vec::as_slice)
     }
 
     /// How many distinct ramps are interned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.tables.len()
+        self.tables.len() - self.free.len()
     }
 
     /// Whether nothing is interned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tables.is_empty()
+        self.len() == 0
     }
 
     /// Total bytes held by the interned tables.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.tables.iter().map(|t| t.len() * 4).sum()
+        self.bytes
     }
 }
 
@@ -595,6 +674,76 @@ mod tests {
         assert_eq!(c.len(), 2);
         assert_eq!(c.get(a).len(), 256);
         assert_eq!(c.bytes(), (256 + 2048) * 4);
+    }
+
+    #[test]
+    fn eviction_drops_the_least_recently_used_and_spares_the_current_frame() {
+        let mut c = RampCache::new();
+        let ramp = |c: &mut RampCache, k: u8| {
+            c.intern(
+                &[Stop::new(0.0, rgb(k, 0, 0)), Stop::new(1.0, rgb(0, k, 0))],
+                Profile::IDENTITY,
+                EffectSpace::Rgb,
+                RampLength::Short,
+            )
+        };
+        c.begin_frame();
+        let a = ramp(&mut c, 1);
+        c.begin_frame();
+        let b = ramp(&mut c, 2);
+        c.begin_frame();
+        let _ = ramp(&mut c, 1); // a is used again: b is now the oldest
+        let d = ramp(&mut c, 3);
+        assert_eq!(c.len(), 3);
+        // Room for two tables: b goes, a and d (this frame) stay.
+        let gone = c.evict(2 * 256 * 4);
+        assert_eq!(gone, vec![b]);
+        assert_eq!(c.bytes(), 2 * 256 * 4);
+        assert!(c.try_get(b).is_none());
+        assert_eq!(c.get(a)[0], rgb(1, 0, 0));
+        assert_eq!(c.get(d)[0], rgb(3, 0, 0));
+        // A budget of nothing cannot evict this frame's tables.
+        assert!(c.evict(0).is_empty());
+        // The freed slot is reused, and the old key is really forgotten.
+        c.begin_frame();
+        let e = ramp(&mut c, 4);
+        assert_eq!(e, b, "the slot is reused");
+        assert_eq!(c.get(e)[0], rgb(4, 0, 0));
+        let b2 = ramp(&mut c, 2);
+        assert_ne!(b2, e);
+        assert_eq!(c.get(b2)[0], rgb(2, 0, 0));
+    }
+
+    #[test]
+    fn a_cache_that_never_starts_a_frame_never_evicts_what_it_holds() {
+        let mut c = RampCache::new();
+        let a = c.intern(
+            &[Stop::new(0.0, rgb(9, 9, 9))],
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Long,
+        );
+        assert!(c.evict(0).is_empty());
+        assert_eq!(c.get(a).len(), 2048);
+    }
+
+    #[test]
+    fn the_identity_profile_is_exactly_linear_over_2048_entries() {
+        let t = build_ramp(
+            &[
+                Stop::new(0.0, rgb(0, 0, 0)),
+                Stop::new(1.0, rgb(255, 255, 255)),
+            ],
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Long,
+        );
+        for (i, e) in t.iter().enumerate() {
+            let want = (i as f64 / 2047.0 * 255.0).round() as u8;
+            assert_eq!(e.r, want, "entry {i}");
+        }
+        assert_eq!(t[0].r, 0);
+        assert_eq!(t[2047].r, 255);
     }
 
     #[test]

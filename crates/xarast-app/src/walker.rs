@@ -117,6 +117,11 @@ impl WalkStats {
 #[derive(Debug, Default)]
 pub struct SceneWalker {
     resolver: Resolver,
+    /// Whether the node being painted is one a gesture previews: its
+    /// ramps are built at draft length (256 entries) whatever the quality,
+    /// since a new one is made every frame (`phase-08` T8.5.3). The frame
+    /// after the release walks it at the session's quality again.
+    draft_ramps: bool,
     images: HashMap<BitmapId, ImageId>,
     /// Bitmaps whose decode failed: the negative cache, so that a bad
     /// bitmap costs one decode per walker, not one per frame.
@@ -291,6 +296,7 @@ impl SceneWalker {
         // at their `LeaveScope` after the node's own frame.
         let mut preview_open: Vec<NodeId> = Vec::new();
         self.sync_caches(doc);
+        self.resolver.begin_frame();
         self.stats = WalkStats::default();
         self.text_ink = Rect::EMPTY;
 
@@ -393,7 +399,9 @@ impl SceneWalker {
                             attrs.push(Arc::clone(v));
                             self.scope = mix64(self.scope, *fp);
                         }
+                        self.draft_ramps = over.is_some();
                         self.paint(doc, edit, node, &attrs, quality, &mut b);
+                        self.draft_ramps = false;
                         if over.is_some() {
                             attrs.pop_scope();
                             if let Some(fp) = scopes.pop() {
@@ -418,7 +426,9 @@ impl SceneWalker {
                     frames.push(self.open(doc, parent, &attrs, &mut b));
                 }
                 WalkEvent::LeaveScope { parent } => {
+                    self.draft_ramps = overrides.contains_key(&parent);
                     self.paint(doc, edit, parent, &attrs, quality, &mut b);
+                    self.draft_ramps = false;
                     if let Some(f) = frames.pop() {
                         debug_assert_eq!(f.node, parent);
                         if f.clip {
@@ -442,6 +452,9 @@ impl SceneWalker {
 
         let stats = b.finish()?;
         self.scene_stats = stats;
+        // Ramps no scene of late has used go past the budget (a fill drag
+        // makes one per frame); this frame's are never evicted.
+        self.resolver.trim_ramps(RAMP_CACHE_BUDGET);
         Ok(stats)
     }
 
@@ -625,7 +638,11 @@ impl SceneWalker {
         self.check_transparency_image(attrs);
         let mut ctx = PaintCtx {
             colours: &doc.resources.colours,
-            ramp_length: quality.ramp_length(),
+            ramp_length: if self.draft_ramps {
+                xarast_render::RampLength::Short
+            } else {
+                quality.ramp_length()
+            },
             filter: quality.image_filter(),
             resolver: &mut self.resolver,
             images: &self.images,
@@ -1089,6 +1106,10 @@ fn node_version(doc: &Document, node: NodeId) -> u64 {
 /// Folds `v` into `h`: order-dependent, and well mixed (the SplitMix64
 /// finaliser), so that two scopes differing in one attribute's revision
 /// differ in about half their bits.
+/// The bytes of gradient tables the walker's ramp cache keeps between
+/// frames: 2048 final-quality tables, or 16 384 draft ones.
+pub const RAMP_CACHE_BUDGET: usize = 16 << 20;
+
 /// A fingerprint of a previewed attribute value. Only computed for the
 /// few nodes a gesture previews, once per scene rebuild.
 fn value_fingerprint(v: &AttrValue) -> u64 {

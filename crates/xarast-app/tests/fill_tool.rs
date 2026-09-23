@@ -127,6 +127,9 @@ fn drag(s: &mut Session, from: Point, to: Point, t: u64) {
     release(s, to, t + 10);
 }
 
+/// A headless render at draft quality: a previewed gradient's ramp is
+/// always a draft-length table (T8.5.3), so comparing the preview with the
+/// committed result is exact only at draft quality.
 fn pixels(s: &Session) -> Vec<u8> {
     let r = xarast_app::headless::render(
         s,
@@ -136,6 +139,7 @@ fn pixels(s: &Session) -> Vec<u8> {
                 Point::raw(120_000, 140_000),
                 Point::raw(280_000, 260_000),
             )),
+            quality: xarast_render::RenderQuality::Draft,
             ..xarast_app::HeadlessOptions::default()
         },
     )
@@ -215,6 +219,9 @@ fn a_handle_drag_previews_without_touching_the_document_and_commits_once() {
     let len = s.bus.history().len();
     let end = Point::raw(240_000, 200_000);
     let new_end = Point::raw(240_000, 230_000);
+    s.rebuild_scene(None).expect("the scene at rest builds");
+    let at_rest = s.resolver().ramps.bytes();
+    assert_eq!(at_rest, 2048 * 4, "at rest, one final-length ramp");
     drag_open(&mut s, end, new_end, 100);
     assert_eq!(
         s.doc.canonical_digest(),
@@ -233,10 +240,16 @@ fn a_handle_drag_previews_without_touching_the_document_and_commits_once() {
             .any(|(p, _)| p.distance_to(new_end) < 2_000.0)
     );
     s.rebuild_scene(None).expect("the previewed scene builds");
+    // The session walks at final quality, but the dragged fill's new ramp
+    // is a draft table: 256 entries, not 2048.
+    assert_eq!(s.resolver().ramps.bytes(), at_rest + 256 * 4);
     let previewed = pixels(&s);
-    assert_ne!(previewed, before_px, "the preview repaints the fill");
+    assert!(previewed != before_px, "the preview repaints the fill");
     release(&mut s, new_end, 200);
-    assert_eq!(pixels(&s), previewed, "what was previewed is what commits");
+    assert!(
+        pixels(&s) == previewed,
+        "what was previewed is what commits"
+    );
     assert!(s.preview().is_empty());
     assert_eq!(s.bus.history().len(), len + 1, "one step");
     assert_eq!(s.undo_label(), Some("Move Fill Handle"));
@@ -594,7 +607,7 @@ fn an_object_with_no_attribute_of_its_own_previews_as_it_commits() {
         0,
     );
     let previewed = pixels(&s);
-    assert_ne!(previewed, before, "{:?}", s.preview());
+    assert!(previewed != before, "{:?}", s.preview());
     release(&mut s, Point::raw(240_000, 200_000), 10);
-    assert_eq!(pixels(&s), previewed);
+    assert!(pixels(&s) == previewed);
 }

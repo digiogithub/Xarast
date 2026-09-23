@@ -152,6 +152,24 @@ impl Resolver {
     pub fn new() -> Resolver {
         Resolver::default()
     }
+
+    /// Starts a scene build: the ramps it interns are the ones
+    /// [`Resolver::trim_ramps`] keeps.
+    pub fn begin_frame(&mut self) {
+        self.ramps.begin_frame();
+    }
+
+    /// Evicts the least recently used ramps beyond `budget` bytes, and the
+    /// transparency tables indexed alongside them. Returns how many went.
+    pub fn trim_ramps(&mut self, budget: usize) -> usize {
+        let gone = self.ramps.evict(budget);
+        for id in &gone {
+            if let Some(t) = self.transparency_ramps.get_mut(id.index() as usize) {
+                *t = Vec::new();
+            }
+        }
+        gone.len()
+    }
 }
 
 /// The CPU backend.
@@ -1590,6 +1608,42 @@ pub const fn render_mode(q: RenderQuality) -> RenderMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_ramps_forgets_the_transparency_tables_indexed_with_them() {
+        use crate::ramp::{EffectSpace, Profile, RampLength, Stop};
+        let mut r = Resolver::new();
+        let grey = |v: u8| {
+            [Stop::new(
+                0.0,
+                Rgba8 {
+                    r: v,
+                    g: v,
+                    b: v,
+                    a: 255,
+                },
+            )]
+        };
+        r.begin_frame();
+        let old = r.ramps.intern(
+            &grey(1),
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
+        r.transparency_ramps.push(vec![7; 256]);
+        r.begin_frame();
+        let kept = r.ramps.intern(
+            &grey(2),
+            Profile::IDENTITY,
+            EffectSpace::Rgb,
+            RampLength::Short,
+        );
+        assert_eq!(r.trim_ramps(256 * 4), 1);
+        assert!(r.ramps.try_get(old).is_none());
+        assert!(r.transparency_ramps[old.index() as usize].is_empty());
+        assert!(r.ramps.try_get(kept).is_some());
+    }
 
     #[test]
     fn opaque_replace_matches_the_general_path() {
