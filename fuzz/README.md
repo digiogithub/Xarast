@@ -1,11 +1,12 @@
 # Fuzzing
 
-Thirteen `cargo-fuzz` targets, in their own workspace so that the main one
+Fourteen `cargo-fuzz` targets, in their own workspace so that the main one
 stays on stable. Six cover the `.xar` importer — a legacy binary format
 parser is attack surface, so fuzzing is part of Phase 3 rather than a
 follow-up (`docs/phases/phase-03-xar-importer.md` W3.11) — five cover
-the geometry, render and document-model layers the importer feeds, and two
-cover the native `.xarast` container (Phase 6).
+the geometry, render and document-model layers the importer feeds, two
+cover the native `.xarast` container (Phase 6), and one covers image
+decoding (Phase 10).
 
 | Target | Crate | What it drives |
 |---|---|---|
@@ -22,6 +23,7 @@ cover the native `.xarast` container (Phase 6).
 | `fuzz_doc_builder` | `xarast-doc` | arbitrary build scripts: "valid or nothing" |
 | `fuzz_xarast_open` | `xarast-format` | `XarastReader::open`, every read path, and a re-save of whatever opens |
 | `fuzz_xarast_manifest` | `xarast-format` | the manifest parser and its write–parse fixed point |
+| `fuzz_image_decode` | `xarast-image` | `probe` + `decode` over every format with `DecodeLimits::tight()`, and the `.xar` bitmap wrappings |
 
 The five structured targets take their input through `arbitrary`; the
 helpers they share are in `fuzz_targets/common.rs`.
@@ -43,7 +45,18 @@ anything else). Write them to a scratch directory first; CI writes them to
 cargo run -p xarast-format --example fuzz_seeds -- /tmp/xarast-seeds
 cargo +nightly fuzz run -O fuzz_xarast_open /tmp/grown /tmp/xarast-seeds/fuzz_xarast_open \
     -- -dict=dicts/xarast_open.dict
-``` A local run should pass a scratch
+```
+
+The image seeds are generated the same way, by
+`crates/xarast-image/examples/fuzz_seeds.rs`:
+
+```sh
+cargo run -p xarast-image --example fuzz_seeds -- /tmp/image-seeds
+cargo +nightly fuzz run -O fuzz_image_decode /tmp/grown /tmp/image-seeds/fuzz_image_decode \
+    -- -malloc_limit_mb=1024
+```
+
+A local run should pass a scratch
 directory as the *first* corpus argument, so that what the fuzzer
 discovers never lands in `corpus/`:
 
