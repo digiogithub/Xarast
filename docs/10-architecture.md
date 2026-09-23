@@ -52,7 +52,7 @@ validated, and how `.xar → .xarast → png` conversions are benchmarked.
 | `xarast-geom` | Points, rects, matrices, paths, flattening, stroke-to-path, boolean ops, millipoint fixed-point type | `kurbo`, `lyon_algorithms` |
 | `xarast-color` | Colour models (RGB/CMYK/HSV/grey), named and indexed colours, tints/shades/links, conversion | — |
 | `xarast-doc` | Node arena, attribute model, layers/pages/spreads, resource table, command/undo log | `xarast-geom`, `xarast-color` |
-| `xarast-text` | Font database, shaping, paragraph layout, text on a path | `parley`, `swash`/`skrifa`, `fontdb` |
+| `xarast-text` | Font database, shaping, paragraph layout, text on a path | `parley`, `fontique`, `skrifa`, ICU4X segmentation, `unicode-bidi` |
 | `xarast-image` | Image decode/encode, resampling, colour management, bitmap resources | `image`, `zune-*`, `jpeg-decoder` |
 | `xarast-render` | Scene, display list, tiling, CPU backend, compositor, blend modes, GPU tile compositing | `xarast-geom`, `vello_cpu`, `wgpu` (feature `gpu`) |
 | `xarast-xar` | `.xar` reader: record layer, decompression, tree builder, model mapping | `xarast-doc`, `flate2` |

@@ -141,6 +141,34 @@ proptest = "1.7"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tiny-skia = "0.12"
 
+# ── Text ─────────────────────────────────────────────────────────────────────
+# The Linebender text stack chosen in `research/05 §5`, used only inside
+# `xarast-text`: nothing else in the workspace may name one of these types.
+# `parley` shapes (through `harfrust`) and itemises; `fontique` enumerates the
+# system's fonts and supplies script fallback. Both `Apache-2.0 OR MIT`.
+# `fontconfig-dlopen` loads libfontconfig at run time instead of linking it,
+# like winit's `wayland-dlopen`: the build needs no fontconfig development
+# files, and the AppImage uses the host's fontconfig, which it must (a
+# bundled one cannot see the user's fonts, `research/05`).
+parley = { version = "0.11.1", default-features = false, features = ["std", "system"] }
+fontique = { version = "0.11.1", default-features = false, features = [
+    "std",
+    "system",
+    "fontconfig-dlopen",
+] }
+# Outlines, metrics, charmaps and `OS/2`. Pinned to the exact line `parley`
+# 0.11.1 depends on (0.44, not the 0.47 of `research/05`), so the graph holds
+# one `skrifa` — `vello` already uses the same one. `MIT OR Apache-2.0`.
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+# UAX #9 levels and per-line visual reordering. `parley` resolves bidi too but
+# does not expose the levels, and our own line breaker needs them. Already in
+# the graph (through `usvg`). `MIT OR Apache-2.0`.
+unicode-bidi = "0.3.18"
+# UAX #14 break opportunities and the Unicode Script property, from ICU4X, the
+# same versions `parley` already links. `Unicode-3.0`.
+icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
+icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
+
 # ── User interface ───────────────────────────────────────────────────────────
 # `egui` used as a *library*, never through `eframe` (`research/05 §2.4`): the
 # shell owns winit and wgpu, so the canvas and the panels share one surface.

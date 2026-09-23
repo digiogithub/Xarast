@@ -1772,7 +1772,7 @@ Apart from the kerning, they are all direct reads of the graphics state in force
 |---|---|---|
 | **Automatic kerning** | `TextStory::AutoKern` (`nodetxts.h:483`), `FormatRegion::GetCharsKerning(l, r)` (`nodetxtl.h:173`), `VisibleTextNode::GetAutoKernSize(FormatRegion*)` (`nodetext.h:184`) | Pairs from the font's table. |
 | **Manual kerning** | `KernCode` (`nodetext.h:349`) | A node inserted into the line. |
-| **Tracking** | `AttrTxtTracking` (`txtattr.h:1187`) / `TxtTrackingAttribute` (`txtattr.h:407`) | A `MILLIPOINT` added to every advance. `TextLine::GetLastCharTracking()` (`nodetxtl.h:345`) discounts it from the last character. |
+| **Tracking** | `AttrTxtTracking` (`txtattr.h:1187`) / `TxtTrackingAttribute` (`txtattr.h:407`) | Declared `MILLIPOINT`, but it is **thousandths of the em width**: the advance adds `MulDiv(tracking, FontEmWidth, 1000)` (`nodetext.cpp:1781-1792`). `TextLine::GetLastCharTracking()` (`nodetxtl.h:345`) discounts it from the last character. |
 | **Justification** | `AttrTxtJustification` (`txtattr.h:1128`), enum `Justification {JLEFT, JRIGHT, JCENTRE, JFULL}` (`txtattr.h:142`) | `JFULL` distributes the surplus with `ExtraOnChars` / `ExtraOnSpaces` of `FormatState`. |
 | **Line spacing** | `AttrTxtLineSpace` (`txtattr.h:1643`) | Absolute (`MILLIPOINT`) or proportional (`FIXED16 mLineSpaceRatio`). |
 | **Margins and indents** | `AttrTxtLeftMargin`, `AttrTxtRightMargin`, `AttrTxtFirstIndent` (`txtattr.h:1418`, `:1474`, `:1530`) | Line level. |

@@ -1,0 +1,385 @@
+# text
+
+Memory note for **text**: fonts, shaping, layout, glyph outlines, and the
+contract with the document model. Phase 9 (`docs/phases/phase-09-text.md`).
+
+## Current state
+
+Round 1 of phase 9 (2026-09-23) built `xarast-text` in isolation. Nothing
+outside the crate uses it yet; the renderer, the document layer and the text
+tool are later rounds.
+
+| Story | Tasks | State |
+|---|---|---|
+| XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
+| XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
+| XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
+
+Public API (`crates/xarast-text/src/lib.rs`):
+
+- **`FontDb`** (`font/mod.rs`) — `&self` everywhere, state behind one mutex,
+  `Arc`-shareable. `new_system()` (enumeration deferred) /
+  `load_system_fonts()`, `new_isolated()` (no system fonts; tests and golden
+  renders), `with_options()`. `families()`, `query()` /
+  `query_with_panose()` → `FontMatch { face, family, substitution, embedded,
+  synthesis }`, `fallback_for(c, base)`, `set_fallback_preference(script,
+  families)`, `set_generic_families()`, `register_embedded(name, bytes)`,
+  `face_data()` → `FaceData` (shared blob + face index), `face_info()`,
+  `embedding_denied()` (fsType), `substitutions()`, `glyph_outline()`,
+  `glyph_outline_normalized()`, `normalized_coords()`, `units_per_em()`.
+  `FaceId` is a dense `u32` index, stable for the database's life.
+- **`Shaper`** (`shape.rs`, `layout.rs`) — `Shaper::new(Arc<FontDb>)`,
+  `layout(&StoryInput) -> Layout`. Implements **`FontMetrics`**
+  (`char_metrics`, `kern_pair`), the `FormatRegion` replacement.
+- Input types (`style.rs`): `StoryInput { text, runs: &[StyleRange],
+  paragraphs: &[ParagraphStyle], kerns: &[ManualKern], mode: StoryMode }`,
+  `FontQuery`, `FontFeature`, `FontVariation`, `TextScript`, `Justification`,
+  `LineSpacing`, `TabStop`/`TabKind`, `Direction`.
+- Output (`layout.rs`): `Layout { lines, bounds, substitutions }`,
+  `LaidLine { logical_range, paragraph, ends_paragraph, baseline_y,
+  descent_line, ascent, descent, size, x, width, runs: Vec<GlyphRun>,
+  clusters: Vec<LaidCluster> }`, `GlyphRun { face, size, aspect, coords,
+  style, level, glyphs }` with `glyph_transform(g, upem) -> kurbo::Affine`,
+  `PlacedGlyph { id, x, y, advance, cluster }`.
+
+## Decisions taken (and why)
+
+- **Dependencies.** `parley 0.11.1` + `fontique 0.11.1` (Apache-2.0 OR MIT),
+  `skrifa 0.44` (MIT OR Apache-2.0; the version parley 0.11.1 links, not the
+  0.47 of `research/05` — one skrifa in the graph, shared with `vello`),
+  `unicode-bidi 0.3.18` (MIT OR Apache-2.0, already in the graph),
+  `icu_segmenter`/`icu_properties 2.3` (Unicode-3.0, already allowed).
+  `harfrust 0.12` arrives through parley. **No `rustybuzz`/`ttf-parser`**
+  (RUSTSEC-2026-0192/0206). No `deny.toml` exception was needed.
+- **`fontconfig-dlopen`** on fontique, like winit's `wayland-dlopen`: the
+  build needs no fontconfig headers and the AppImage uses the host's
+  libfontconfig, which it must (a bundled one cannot see the user's fonts).
+- **The parley font context lives inside `FontDb`'s lock**, and the shaper
+  locks the database while it shapes. So shaping sees exactly the faces the
+  database knows (embedded ones included) with no collection clones to keep
+  in sync. Cost: one `FontDb` serialises shaping across threads. Parallel
+  layout later wants one database per worker or a shared fontique
+  collection (`CollectionOptions::shared`), not a bigger lock.
+- **Shape at a nominal 1000 units per em, convert once per glyph,
+  accumulate in millipoints** (phase doc W9.3). Every run is shaped at
+  `NOMINAL_SIZE = 1000.0` regardless of its size; an `f32` advance `v`
+  becomes `round_half_away_from_zero(v × em / 1000)` mp, where `em` is the
+  run's size × aspect (vertical offsets use the size). Guarded by
+  `positions_accumulate_in_millipoints_without_drift`: a 500-character
+  line ends at exactly 500 × one rounded advance, at 10 pt and at 9.973 pt.
+- **We do our own line breaking, justification and line placement, not
+  parley's.** Parley breaks and aligns in `f32` with CSS rules. Xara's rules
+  (below) differ: width excluding the last character's tracking, spaces
+  hanging, full-justification slack split between spaces and letters. So
+  parley is asked for one unbroken line per paragraph and we use its
+  clusters. Break opportunities come from ICU4X `LineSegmenter` directly
+  (dictionary mode with the default `complex-scripts` feature): parley's
+  `Cluster::is_word_boundary()` conflates word and line boundaries.
+- **Bidi levels from `unicode-bidi`, not parley.** Parley resolves bidi but
+  does not expose levels (only `is_rtl()` per run), and per-line visual
+  reordering after our own line breaking needs them (UAX #9 L1-L2,
+  `ParagraphBidiInfo::visual_runs`). Parley always auto-detects the base
+  direction, so an explicit `Direction::Ltr/Rtl` is forced into it by
+  prefixing U+200E/U+200F to the shaped text (and subtracting its length
+  from every offset). Both sides therefore agree on the levels.
+- **A cluster is never split.** Parley reports a ligature or a base with its
+  marks as one "ligature start" cluster holding the glyphs plus
+  "continuation" clusters with no glyphs and an equal share of the advance.
+  `clusters()` walks text order, so continuations **follow** their start in
+  an LTR run and **precede** it in an RTL run (lam-alef: lam is the
+  continuation). We fold each group into one `ShapedCluster`, summing the
+  `f32` advances and converting once.
+- **Grapheme clusters are capped at 64 characters.** Parley 0.11.1 counts a
+  cluster's characters in a `u8` (`src/shape/mod.rs:270`); "a" + 2 000
+  combining marks overflowed it (a panic with overflow checks, silent wrap
+  in release). `guard_long_graphemes` overwrites every character past the
+  64th of a grapheme with U+0001 filler of the same byte length (offsets
+  stay valid) and the filler's clusters are folded into the grapheme's head
+  with no glyphs. Real text never gets close (stream-safe text allows 30
+  non-starters). Worth reporting upstream.
+- **Manual kerns and tracking are thousandths of an em**, not millipoints —
+  see the facts below. `StyleRange::tracking` is `i32` em/1000 and
+  `ManualKern::amount` too; both are converted with the em width of the
+  style in force (`em = effective size × aspect`, via `Mp::mul_ratio`,
+  rounding half away from zero).
+- **Full-justification remainder is distributed**, 1 mp at a time to the
+  first recipients, so a justified line is exactly its column's width
+  (acceptance criterion 6 then holds to 0 mp). The original truncates the
+  per-gap share and drops the remainder; the difference is < 1 mp per gap.
+- **The substitution ladder** (T9.1.5) as implemented in
+  `font/substitute.rs`: (1) exact name, case- and whitespace-insensitive
+  (fontique's own lookup is case-insensitive; we collapse whitespace);
+  (2) trailing style words stripped (`thin … black`, `italic`, `oblique`…;
+  **not** `roman`, which ends "Times New Roman"), their weight/italic applied
+  to the query; (3) metric-compatible aliases; (4) the generic family, from
+  PANOSE when the document has it (digit 1 = 2 Latin text; digit 4 = 9
+  monospaced; digit 2 = 11–13 sans, 2–10/14–15 serif) else from the name;
+  (5) `system-ui`, then `sans-serif`, then the first family in sorted order.
+  Every substitution is recorded (`FontDb::substitutions`,
+  `Layout::substitutions`) and never written back to the document.
+- **The alias table's contents and provenance**: groups {Arial, Helvetica,
+  Liberation Sans, Arimo, Nimbus Sans, Nimbus Sans L, TeX Gyre Heros,
+  FreeSans}, {Arial Narrow, Liberation Sans Narrow, Nimbus Sans Narrow},
+  {Times New Roman, Times, Liberation Serif, Tinos, Nimbus Roman, Nimbus Roman
+  No9 L, TeX Gyre Termes, FreeSerif}, {Courier New, Courier, Liberation Mono,
+  Cousine, Nimbus Mono PS, Nimbus Mono L, TeX Gyre Cursor, FreeMono},
+  {Calibri, Carlito}, {Cambria, Caladea}, {Georgia, Gelasio}. Written by us
+  from the public fact that these families were published as
+  metric-compatible replacements; not transcribed from Xara or from any
+  fontconfig configuration.
+- **Embedded faces shadow system faces.** `register_embedded` registers into
+  fontique's own ("ours") family map, which `family_id()` consults before
+  the system map. So once a document registers "Noto Sans", a query for any
+  Noto Sans weight gets the embedded face (synthesised bold if need be),
+  never the installed family. Asserted against real system fonts in the
+  opt-in test.
+- **Embedding denied** when `OS/2.fsType & 0xF == 2` (restricted licence)
+  or bit 9 (bitmap embedding only) is set; unreadable tables count as
+  installable, the OpenType default.
+- **Glyph outlines** are drawn unhinted at unit scale into `BezPath` and
+  cached per `(face, glyph, coords)` with trailing zero coordinates
+  stripped, so `[]` and `[0]` hit the same entry. The cache is cleared
+  wholesale at 65 536 entries rather than evicted. Drawing at a size is
+  `GlyphRun::glyph_transform` (scale `size/upem`, × aspect horizontally,
+  then translate), never a re-extraction.
+- **Coordinates are y up**, like the document: the first baseline is y = 0,
+  later ones negative; x = 0 is the column's left edge (column mode) or the
+  anchor (point mode). Glyph y offsets from parley (y down) are negated.
+
+## Facts about the original's formatter (read, not copied)
+
+Taken from the original to fix semantics; implemented from these notes.
+
+- **Tracking unit** (settles `research/01 §11` item 15 and
+  `xar-import.md` open question 1): `AttrTxtTracking` holds thousandths of
+  an em. The advance is `CharWidth + MulDiv(tracking, FontEmWidth, 1000)
+  (+ autokern)` (`Kernel/nodetext.cpp:1781-1792`); `FontEmWidth` is scaled by
+  the X scale, i.e. it includes the aspect ratio (`wxOil/textfuns.cpp:151-157`).
+- **Manual kerns** (`KernCode`) are thousandths of an em too:
+  `MulDiv(KernValue.x, FontEmWidth, 1000)` (`Kernel/nodetext.cpp:1763-1767`).
+  The importer stores `TextItem::Kern(Mp)` with that raw value — it is em/1000,
+  whatever the type says.
+- **Line width for alignment** is the sum of full advances up to the last
+  non-space character, plus that character's *width* (advance without
+  tracking or autokern); trailing spaces do not count
+  (`Kernel/nodetxtl.cpp:1438-1491`).
+- **Alignment** (`Kernel/nodetxtl.cpp:1530-1579`): left starts at the left
+  margin; right at `right − width`; centre at `(left + right − width) / 2`
+  (C integer division). Physical right = story width for a column, 0 for
+  point text, so point text aligns about its anchor.
+- **Full justification**: if the line wraps, is the last of its paragraph
+  and is short, it is left aligned. Otherwise `gap = (right − left) −
+  width`; if `gap > 0` and the line has spaces, every space gets
+  `gap / spaces`; if `gap > 0` without spaces (and the story wraps), or
+  `gap ≤ 0`, every character gets `gap / (chars − 1)` (letter spacing can
+  shrink). Counts stop at the last non-space character and **restart after
+  each tab**: only the last tab section stretches. "Characters" includes
+  spaces.
+- **First line of a paragraph uses the first-line indent *instead of* the
+  left margin** (`Kernel/nodetxtl.cpp:780-795`), not in addition.
+- **Line breaking** (`FindBreakChar`, `Kernel/nodetxtl.cpp:1262-1362`):
+  spaces never overflow and are break points; a break is allowed after a
+  hyphen and before a tab; a character fits if its width (no tracking) fits;
+  at least one character per line; an overlong word breaks before the
+  character that overflows. Our UAX #14 opportunities are a superset of the
+  original's (they add CJK and the like).
+- **Line spacing** (`CalcBaseAndDescentLine`, `Kernel/nodetxtl.cpp:1600-1640`):
+  with `h = ascent + descent` of the line; **absolute** `S`: each line box
+  is `S` tall and the baseline sits `S × descent / h` above the box bottom;
+  **ratio** `r`: the box is `h × r` tall and the baseline sits
+  `ascent × min(r, 1)` below the previous box's bottom. The first baseline
+  is 0. `LineSpacing::Absolute(0)` means "use the ratio".
+- **Default tab stops** every 36 000 mp (half an inch), strictly after the
+  current position (`Kernel/txtattr.cpp:3181-3205`).
+- **Ruler record** (`Kernel/rechtext.cpp:1546-1575`): per stop,
+  `type = flags & 3` (0 left, 1 right, 2 centre, 3 decimal), bit 2 "has a
+  filler character"; a decimal stop carries its decimal-point character.
+- Line ascent/descent/size are the maxima over the line's characters; an
+  empty line takes them from its end-of-line item.
+
+## The contract for W9.2 (`xarast-doc`, next round)
+
+What the document layer builds, and how `format_story` feeds `Shaper`. The
+existing model (`crates/xarast-doc/src/text.rs`, `attr/`) already has most
+of the structure; this is what to add and how to bridge.
+
+### Nodes (existing, keep)
+
+- `NodeKind::TextStory(Box<TextStoryNode { transform, layout: TextLayout,
+  auto_kern, print_as_shapes }>)`, `NodeKind::TextLine(Box<TextLineNode {
+  ruler }>)`, `NodeKind::TextItem(TextItem::{Char(char), Kern(Mp),
+  Tab, LineBreak(bool)})`. Invariant 11: items only under lines, lines only
+  under stories.
+- Lines are **formatted lines**; `LineBreak(true)` is the paragraph end,
+  word wrap produces lines without one. Lines are derived state: undo
+  restores the item list and reflows (phase doc W9.2). Proposed diff
+  threshold: 4 KiB of items per paragraph, above which the inverse stores a
+  diff; not implemented yet.
+
+### Add to the model
+
+- `TextPos { line: NodeId, item: u32 }` and the story's **logical text**:
+  the concatenation of the items in document order where `Char(c)` → `c`,
+  `Tab` → `'\t'`, `LineBreak(true)` → `'\n'`, `LineBreak(false)` → nothing
+  (it is not produced by the importer and should not survive reflow), and
+  `Kern` → nothing (it becomes a `ManualKern` at the byte offset of the
+  next character). Conversion `TextPos ↔ byte offset` walks this mapping;
+  keep a per-story `Vec<(NodeId, u32 /*first byte*/)>` index, rebuilt on
+  format, so it is O(log n).
+- `TextCursor { story, anchor: TextPos, head: TextPos }` in the tool's state
+  (not in the tree).
+- Derived per-line cache, outside the arena: the `LaidLine` of each
+  `TextLine` (baseline, ascent/descent, glyph runs) keyed by line node, plus
+  the story's `Layout`. The arena keeps no metrics.
+
+### Attribute bridge (`AttrValue` → `StyleRange` / `ParagraphStyle`)
+
+Resolve the attribute stack once per run of identical character attributes
+(Xara's `FormatRegion` role) and emit one `StyleRange` per run, byte ranges
+in the logical text:
+
+| Attribute | Goes to | Conversion |
+|---|---|---|
+| `FontTypeface(Arc<TypefaceRef { family, full_name, panose }>)` | `FontQuery.family` | `family` (not `full_name`); pass `panose` to `FontDb::query_with_panose` |
+| `Bold(b)` / `Italic(i)` | `FontQuery.weight` / `.style` | 700/400, `Italic`/`Normal`; stretch 100 |
+| `FontSize(Mp)` | `StyleRange.size` | as is |
+| `Tracking(Mp)` | `StyleRange.tracking: i32` | **raw value, it is em/1000** (the `Mp` type is historical) |
+| `AspectRatio(f32)` | `.aspect` | as is |
+| `Baseline(Mp)` | `.baseline_shift` | as is, positive up |
+| `Script(Script { on, offset, size })` | `.script: TextScript` | `on == false` → `TextScript::NONE`, else `{ offset, size }` |
+| `Underline(b)` | `.underline` | as is |
+| `Justification` | `ParagraphStyle.justification` | same four values |
+| `LineSpace(LineSpacing::{Ratio, Absolute})` | `.line_spacing` | same shape |
+| `LeftMargin` / `RightMargin` / `FirstIndent` | `.left_margin` / `.right_margin` / `.first_indent` | as is |
+| `Ruler(Arc<[TabStop { position, kind: u8 }]>)` | `.tabs` | `kind & 3`: 0 Left, 1 Right, 2 Centre, 3 Decimal. The decimal-point character is not in the model yet: add it before T9.3.8 |
+| `TextStoryNode.auto_kern` | every `ParagraphStyle.auto_kern` | story-wide |
+| `TextItem::Kern(Mp)` | `ManualKern { at, amount }` | `amount` = raw value (em/1000), `at` = byte offset of the following character |
+
+Line-level attributes live under `TextLine` nodes. A paragraph takes its
+`ParagraphStyle` from its **first** line (the lines of one paragraph carry
+the same line-level attributes); `StoryInput::paragraphs` has one entry per
+`'\n'`-separated paragraph.
+
+### Story mode bridge
+
+| `TextLayout` | `StoryMode` |
+|---|---|
+| `AtPoint` | `Point` |
+| `InColumn { width, word_wrap }` | `Column { width, wrap: word_wrap }` (a non-wrapping column still aligns to its width) |
+| `OnPath { .. }` | W9.5: lay out as `Point`, then fit to the path (spike A) |
+
+`TextStoryNode.transform` (the `.xar` story matrix) is applied by the
+renderer on top of the story-space layout; `Layout` never includes it.
+
+### What the `.xar` importer already keeps (W3.10, "structure only")
+
+From `crates/xarast-xar/src/import.rs`: stories (2100/2101/2110–2117 with
+the matrix and auto-kern), `TAG_TEXT_STORY_WORD_WRAP_INFO` → `InColumn`,
+indents, lines (2200), strings (2201) and chars (2202) → `Char`, EOL (2203)
+→ `LineBreak(true)`, tab → `Tab`, kern → `Kern(dx)`, and the 2900–2920 and
+4201–4204 attributes above. Font definitions (2000/2001) become
+`TypefaceRef` with PANOSE. `TAG_TEXT_LINE_INFO` (2206, the original's cached
+line metrics) is skipped — our layout recomputes it; it could serve as a
+cross-check oracle in W9.7. Two importer issues for W9.2.6:
+
+1. `TAG_TEXT_CHAR` is one UTF-16 code unit and is mapped with
+   `char::from_u32(u16)`, so a non-BMP character stored as two `TEXT_CHAR`
+   records becomes two U+FFFD. Pair surrogates across consecutive records.
+2. The `Tracking` and `Kern` values are em/1000 (above); the conversion
+   happens in `format_story`, so the import can stay raw, but the doc
+   comments that call the unit "unsettled" should be updated.
+
+### `format_story` sketch
+
+```text
+format_story(tree, story, shaper):
+    text, index, runs, paras, kerns = collect(story)   // attribute resolution
+    layout = shaper.layout(&StoryInput { text, runs, paras, kerns, mode })
+    restructure lines to match layout.lines (wrap = move items between
+        TextLine nodes; never touch LineBreak(true))
+    cache layout per line; return substitutions for the UI
+```
+
+## Invariants that must not be broken
+
+1. **Nothing outside `xarast-text` names a parley, fontique or skrifa type.**
+   The public API uses our own types (`FaceData` wraps the blob).
+2. **Positions are accumulated in millipoints**, never in `f32` across a
+   line. Only per-glyph values come from `f32`.
+3. **Tests never see system fonts** unless `XARAST_SYSTEM_FONT_TESTS=1`.
+   Deterministic tests use `FontDb::new_isolated()` and the pinned set in
+   `crates/xarast-text/tests/fonts/` (provenance and SHA-256 in
+   `PROVENANCE.md`). Golden renders in W9.7 must do the same: a render that
+   depends on the CI machine's fonts is not a test.
+4. **Byte offsets are story-global** in every input and output (`StyleRange`,
+   `ManualKern`, `PlacedGlyph::cluster`, `LaidCluster::range`,
+   `LaidLine::logical_range`), and every cluster boundary is a char
+   boundary.
+5. **A grapheme longer than 64 characters is truncated for shaping, never
+   passed to parley whole** (see above).
+6. **`LaidCluster`s are in logical order; glyph runs in visual order**, left
+   to right.
+
+## Test fonts (pinned set)
+
+`crates/xarast-text/tests/fonts/`, ~200 KB: Noto Sans Regular/Bold/Italic
+subsets, Noto Sans Hebrew, Noto Sans Arabic, Noto Sans CJK JP (CFF), all
+SIL OFL 1.1 from Debian `fonts-noto-core` 20201225-2 and `fonts-noto-cjk`
+1:20230817+repack1-3, no Reserved Font Name (checked in name IDs 0/13/14
+and the Debian copyright files), licence text in `OFL.txt`; plus
+`XarastTestVariable.ttf`, a synthetic `wght` font we drew
+(`make_variable.py`, MIT OR Apache-2.0). `make_subsets.sh` regenerates the
+subsets (fontTools 4.65.0). Golden glyph ids in `tests/shaping.rs` are
+pinned to these bytes.
+
+## Measurements
+
+Reference machine (`perf.md`), `cargo bench -p xarast-text --bench layout`,
+pinned fonts, load ≈ 8:
+
+| Budget | Target | Measured |
+|---|---|---|
+| Shape + lay out ~1 000 glyphs, justified column | ≤ 8 ms | **0.22 ms** |
+| Shape + lay out 10 000 characters (20 paragraphs, 130 lines, Latin + Hebrew, alternating weights) | ≤ 60 ms | **2.28 ms** |
+| Glyph outline, cached | ≤ 500 ns | **24 ns** |
+| System font enumeration (fontconfig, 2 202 families) | ≤ 300 ms | **40 ms** (opt-in test) |
+
+Binary size (release, `lto = "thin"`, stripped): the text stack costs
+**≈ 1.8 MB** without the ICU4X dictionaries and **≈ 5.6 MB** with
+`complex-scripts` (the Thai/Lao/Khmer/Myanmar dictionaries are ≈ 3.8 MB of
+it), measured on a probe binary that enumerates, lays out and extracts
+outlines. `xarast` itself declares `xarast-text` (through `xarast-app`) but
+uses none of it yet: +1.2 KB today. The cost arrives when the app first
+calls `Shaper`.
+
+## Dead ends (do not retry)
+
+- **Parley's line breaking and `Alignment::Justify`** for Xara-compatible
+  layout: CSS semantics, `f32` positions, justification on spaces only.
+- **`Cluster::is_word_boundary()` as a line-break opportunity**: it is true
+  for word boundaries too.
+- **Relying on `Cluster::is_ligature_start` order**: in RTL runs the start
+  comes *after* its continuations in `clusters()`.
+- **A `fontique` shared collection cloned into the shaper**: `System` fonts
+  loaded after the clone are invisible to it (the system handle is per
+  clone). Keeping the font context inside the database is simpler.
+- **"Roman" as a style suffix**: it strips "Times New Roman" to "Times New".
+
+## Open TODOs
+
+- W9.1: T9.1.6 background enumeration (the API is ready; the app must call
+  `load_system_fonts` on its I/O thread), T9.1.7 gallery, T9.1.8 Windows and
+  macOS smoke tests. A per-document embedded-font overlay: today an embedded
+  face registered in a shared `FontDb` is visible to every document.
+- W9.3: T9.3.8 centre/right/decimal tabs (only left stops now), T9.3.10
+  features/variations are plumbed per run but untested beyond `kern`/`liga`/
+  `wght`, T9.3.11 layout cache, T9.4 caret/hit-test on `LaidCluster`.
+- Shaping across a soft line break is not redone: an Arabic word split by
+  an emergency break keeps its joined forms. Reshape the two halves if it
+  ever matters (only emergency breaks can split a word).
+- Which vertical metrics the original used for `FontAscent`/`FontDescent`
+  (hhea, typo or win); we use skrifa's (typo when `USE_TYPO_METRICS`, else
+  hhea). Check against `TAG_TEXT_LINE_INFO` in the corpus.
+- Report the parley `u8` cluster-length overflow upstream.
+- `FontMetrics::kern_pair` shapes the pair twice; fine for measuring, not
+  for a hot loop.

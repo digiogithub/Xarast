@@ -596,10 +596,12 @@ dropping the analysis ~28 ms, and quick-shape outlines ~12 ms.
 
 ## Open questions this phase did not settle
 
-1. **`TAG_TEXT_TRACKING`'s unit.** The original's type is `MILLIPOINT`, but
-   the value is combined with the font size at render time. `TextAttr::
-   Tracking(i32)` carries the raw value unconverted. Settle it against a
-   reference rendering in Phase 9, not by guessing.
+1. ~~**`TAG_TEXT_TRACKING`'s unit.**~~ **Settled in phase 9** (2026-09-23)
+   from the original's formatter, not by guessing: thousandths of an em,
+   converted as `MulDiv(tracking, FontEmWidth, 1000)`
+   (`Kernel/nodetext.cpp:1781-1792`). Manual kerns (`TAG_TEXT_KERN`, our
+   `TextItem::Kern`) use the same unit (`:1763-1767`). The import keeps the
+   raw values; `format_story` converts. See `docs/memory/text.md`.
 2. **The inconsistent angle encodings.** `ANGLE` is `FIXED16` radians, but
    `TAG_SHADOWCONTROLLER` uses a bespoke integer encoding and `TAG_BEVEL`
    integer degrees. None of those three records has a decoder yet, so
