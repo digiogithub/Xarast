@@ -37,10 +37,21 @@
 //! * a result is never published over a newer one, so the main thread
 //!   cannot present frames out of order.
 //!
-//! A rasterisation already under way is not interrupted: the CPU backend
-//! renders a frame as one call. Superseding it costs at most that one
-//! frame, and its result is still better than nothing until the next one
-//! lands.
+//! A `Final` frame is rasterised in horizontal slabs of
+//! [`FINAL_SLAB_ROWS`] rows, and the worker checks between slabs whether
+//! it has been cancelled or superseded; if so it abandons the frame
+//! ([`RenderStats::aborted`]). That bounds how long new input waits
+//! behind an upgrade to one slab. A `Draft` frame is not abandoned for a
+//! newer one, or a continuous gesture could starve the screen; it is
+//! cheap anyway, because it reuses pixels.
+//!
+//! # Pixel reuse
+//!
+//! The worker keeps the last frame it published and draws the next one
+//! from it where it can — a pan scrolls it and rasterises only the exposed
+//! strips, a `Draft` zoom resamples it. That is why a [`FrameJob`] carries
+//! the scene rather than a display list: which list to build depends on
+//! what the worker holds. The policy is in `reuse.rs`.
 //!
 //! # Waking the main thread
 //!
@@ -50,12 +61,19 @@
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use xarast_render::{
-    BackendError, CpuBackend, CpuConfig, DisplayList, FrameTimings, Resolver, Surface, ViewParams,
+    BackendError, CpuBackend, CpuConfig, DeviceRect, DirtyRect, DisplayList, FrameTimings,
+    RenderQuality, Resolver, Scene, Surface, ViewParams,
 };
 
+use crate::reuse::{self, Kept, Plan};
 use crate::session::DocumentId;
+
+/// A `Final` frame is rasterised this many rows at a time, and abandoned
+/// between slabs when newer input has arrived.
+pub const FINAL_SLAB_ROWS: u32 = 192;
 
 /// One frame for the render thread to rasterise.
 ///
@@ -65,12 +83,17 @@ use crate::session::DocumentId;
 pub struct FrameJob {
     /// Which document it shows.
     pub doc: DocumentId,
-    /// The commands, already in device space.
-    pub list: Arc<DisplayList>,
-    /// What the list's ramp and image ids refer to. A display list is never
+    /// The scene, in document space. The worker builds the display list
+    /// for whatever part of the viewport it has to rasterise.
+    pub scene: Arc<Scene>,
+    /// [`crate::Session::scene_epoch`] when the scene was taken: equal
+    /// epochs mean equal scenes, which is what licenses reusing pixels.
+    pub scene_epoch: u64,
+    /// What the scene's ramp and image ids refer to. A scene is never
     /// sent without it (`app-core.md` invariant 6).
     pub resolver: Arc<Resolver>,
-    /// The view the list was built for; its `viewport` is the target size.
+    /// The view to draw; its `viewport` is the target size and its
+    /// `quality` decides how much reuse is allowed.
     pub view: ViewParams,
     /// Premultiplied colour the target is cleared to before drawing: the
     /// pasteboard.
@@ -78,7 +101,7 @@ pub struct FrameJob {
     /// The page, in device pixels, and the premultiplied colour it is
     /// filled with before the document is drawn over it. The scene has no
     /// page of its own: the page is the viewer's backdrop, not ink.
-    pub page: Option<(xarast_render::DeviceRect, [u8; 4])>,
+    pub page: Option<(DeviceRect, [u8; 4])>,
     /// Assigned by [`RenderThread::submit`]; whatever is here on the way in
     /// is overwritten.
     pub generation: u64,
@@ -99,6 +122,25 @@ pub enum RenderRequest {
     Shutdown,
 }
 
+/// How a frame's pixels were produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameReuse {
+    /// Rasterised whole.
+    Full,
+    /// The previous frame moved by whole pixels; only the exposed strips
+    /// were rasterised. `(0, 0)` means the previous frame already showed
+    /// this view.
+    Scrolled {
+        /// Pixels moved right.
+        dx: i32,
+        /// Pixels moved down.
+        dy: i32,
+    },
+    /// The previous frame resampled to a new zoom, plus the border a
+    /// zoom-out uncovered. `Draft` only.
+    Rescaled,
+}
+
 /// A finished frame.
 #[derive(Debug, Clone)]
 pub struct RenderedFrame {
@@ -106,13 +148,20 @@ pub struct RenderedFrame {
     pub doc: DocumentId,
     /// Which request it answers.
     pub generation: u64,
-    /// The view it was drawn for.
+    /// The view the pixels show. For a `Draft` pan by a fractional offset
+    /// this is the requested view snapped to whole pixels.
     pub view: ViewParams,
     /// The pixels: premultiplied RGBA8 in non-linear sRGB, the size of
     /// `view.viewport`.
     pub surface: Surface,
-    /// Where the time went.
+    /// Where the time went, summed over every rasteriser call the frame
+    /// took. `build_us` includes building the display lists.
     pub timings: FrameTimings,
+    /// How much of the previous frame was reused.
+    pub reuse: FrameReuse,
+    /// Whether every pixel is what a full `Final` rasterisation of `view`
+    /// would give. A settled window shows an exact frame.
+    pub exact: bool,
     /// Set when the backend refused the frame; the surface then holds only
     /// the background.
     pub error: Option<BackendError>,
@@ -127,18 +176,26 @@ pub struct RenderStats {
     pub superseded: u64,
     /// Frames dropped by a [`RenderRequest::Cancel`], waiting or in flight.
     pub cancelled: u64,
-    /// Frames rasterised.
+    /// Frames rasterised, including abandoned ones.
     pub rendered: u64,
     /// Finished frames replaced before the main thread collected them.
     pub dropped: u64,
+    /// `Final` frames abandoned between slabs for newer input.
+    pub aborted: u64,
+    /// Frames drawn by scrolling the previous one.
+    pub scrolled: u64,
+    /// Frames drawn by resampling the previous one.
+    pub rescaled: u64,
 }
 
-/// What rasterises a [`FrameJob`]. The CPU backend in production; a
+/// What rasterises a display list. The CPU backend in production; a
 /// scripted one in the tests, which is how supersession is tested
 /// deterministically.
 pub trait FrameRenderer: Send + 'static {
-    /// Draws `job` into `target`, which is already the right size and
-    /// cleared to the background.
+    /// Draws `list`, built by the worker for part or all of `job`'s view,
+    /// into `target`. The target is the whole frame and already holds the
+    /// background under `list.bounds()`; nothing outside those bounds may
+    /// be touched. A frame may take several calls.
     ///
     /// # Errors
     ///
@@ -146,6 +203,7 @@ pub trait FrameRenderer: Send + 'static {
     fn render(
         &mut self,
         job: &FrameJob,
+        list: &DisplayList,
         target: &mut Surface,
     ) -> Result<FrameTimings, BackendError>;
 }
@@ -177,9 +235,10 @@ impl FrameRenderer for CpuFrameRenderer {
     fn render(
         &mut self,
         job: &FrameJob,
+        list: &DisplayList,
         target: &mut Surface,
     ) -> Result<FrameTimings, BackendError> {
-        self.backend.render(&job.list, &job.resolver, target)
+        self.backend.render(list, &job.resolver, target)
     }
 }
 
@@ -368,27 +427,207 @@ impl Drop for RenderThread {
     }
 }
 
-/// Fills a device rectangle, clipped to the surface.
-fn fill_rect(s: &mut Surface, r: xarast_render::DeviceRect, colour: [u8; 4]) {
-    let r = r.intersection(s.bounds());
-    if r.is_empty() {
-        return;
+/// Why a frame was not finished: it was cancelled, superseded (a `Final`
+/// only) or the thread is shutting down.
+#[derive(Debug)]
+struct Abandoned;
+
+/// What [`Worker::produce`] made.
+struct Produced {
+    surface: Surface,
+    view: ViewParams,
+    timings: FrameTimings,
+    reuse: FrameReuse,
+    exact: bool,
+    error: Option<BackendError>,
+}
+
+/// The worker's side: the renderer, the kept frame and a way to ask
+/// whether the frame in hand is still wanted.
+struct Worker<'a, R> {
+    shared: &'a Shared,
+    renderer: R,
+    kept: Option<Kept>,
+}
+
+impl<R: FrameRenderer> Worker<'_, R> {
+    /// Whether the frame in hand should be abandoned. A `Final` yields to
+    /// any newer frame; a `Draft` only to a cancel.
+    fn stale(&self, job: &FrameJob) -> bool {
+        let st = self.shared.lock();
+        st.shutdown
+            || st.is_cancelled(job.generation)
+            || (job.view.quality == RenderQuality::Final && st.pending.is_some())
     }
-    let stride = s.width() as usize * 4;
-    let (x0, x1) = (r.x0 as usize * 4, r.x1 as usize * 4);
-    for row in s
-        .data_mut()
-        .chunks_mut(stride)
-        .skip(r.y0 as usize)
-        .take(r.height() as usize)
-    {
-        for px in row[x0..x1].as_chunks_mut::<4>().0 {
-            *px = colour;
+
+    /// Paints the backdrop into `rect` and rasterises `list` over it.
+    fn draw(
+        &mut self,
+        job: &FrameJob,
+        list: &DisplayList,
+        rect: DeviceRect,
+        target: &mut Surface,
+        timings: &mut FrameTimings,
+    ) -> Option<BackendError> {
+        reuse::fill_rect(target, rect, job.background);
+        if let Some((page, colour)) = job.page {
+            reuse::fill_rect(target, page.intersection(rect), colour);
         }
+        match self.renderer.render(job, list, target) {
+            Ok(t) => {
+                add_timings(timings, &t);
+                None
+            }
+            Err(e) => Some(e),
+        }
+    }
+
+    /// Builds the list for `rect` of `view` and draws it.
+    fn draw_rect(
+        &mut self,
+        job: &FrameJob,
+        view: &ViewParams,
+        rect: DeviceRect,
+        target: &mut Surface,
+        timings: &mut FrameTimings,
+    ) -> Option<BackendError> {
+        let t = Instant::now();
+        let list = DisplayList::build(&job.scene, view, &DirtyRect::of(rect));
+        timings.build_us = timings.build_us.saturating_add(elapsed_us(t));
+        self.draw(job, &list, rect, target, timings)
+    }
+
+    /// A whole frame. A `Final` goes slab by slab and may be abandoned.
+    fn full(
+        &mut self,
+        job: &FrameJob,
+        timings: &mut FrameTimings,
+    ) -> Result<(Surface, Option<BackendError>), Abandoned> {
+        let vp = job.view.viewport;
+        let mut surface = Surface::new(vp.width().max(1), vp.height().max(1));
+        if job.view.quality == RenderQuality::Draft {
+            let err = self.draw_rect(job, &job.view, vp, &mut surface, timings);
+            return Ok((surface, err));
+        }
+        // One list for the whole view, then a cheap per-slab subset of it:
+        // building from the scene per slab would re-derive every command's
+        // bounds once per slab.
+        let t = Instant::now();
+        let list = DisplayList::build(&job.scene, &job.view, &DirtyRect::of(vp));
+        timings.build_us = timings.build_us.saturating_add(elapsed_us(t));
+        for slab in reuse::slabs(vp, FINAL_SLAB_ROWS) {
+            if self.stale(job) {
+                return Err(Abandoned);
+            }
+            let sub = restrict(&list, slab);
+            if let Some(e) = self.draw(job, &sub, slab, &mut surface, timings) {
+                return Ok((surface, Some(e)));
+            }
+        }
+        Ok((surface, None))
+    }
+
+    /// Produces the frame for `job`: its pixels, the view they show, how
+    /// they were made and whether they are exact.
+    fn produce(&mut self, job: &FrameJob) -> Result<Produced, Abandoned> {
+        let mut timings = FrameTimings::default();
+        match reuse::plan(self.kept.as_ref(), job) {
+            Plan::Scroll { dx, dy, view } => {
+                let Some(kept) = self.kept.take() else {
+                    return self.produce_full(job, timings);
+                };
+                let mut surface = kept.surface;
+                let mut error = None;
+                for strip in reuse::scroll(&mut surface, dx, dy) {
+                    let e = self.draw_rect(job, &view, strip, &mut surface, &mut timings);
+                    error = error.or(e);
+                }
+                Ok(Produced {
+                    surface,
+                    view,
+                    timings,
+                    reuse: FrameReuse::Scrolled { dx, dy },
+                    exact: kept.final_exact
+                        && job.view.quality == RenderQuality::Final
+                        && error.is_none(),
+                    error,
+                })
+            }
+            Plan::Rescale => {
+                let rescaled = self
+                    .kept
+                    .as_ref()
+                    .and_then(|k| reuse::rescale(&k.surface, &k.view, &job.view));
+                let Some((mut surface, covered)) = rescaled else {
+                    return self.produce_full(job, timings);
+                };
+                let mut error = None;
+                for strip in reuse::ring(job.view.viewport, covered) {
+                    let e = self.draw_rect(job, &job.view, strip, &mut surface, &mut timings);
+                    error = error.or(e);
+                }
+                Ok(Produced {
+                    surface,
+                    view: job.view,
+                    timings,
+                    reuse: FrameReuse::Rescaled,
+                    exact: false,
+                    error,
+                })
+            }
+            Plan::Full => self.produce_full(job, timings),
+        }
+    }
+
+    fn produce_full(
+        &mut self,
+        job: &FrameJob,
+        mut timings: FrameTimings,
+    ) -> Result<Produced, Abandoned> {
+        let (surface, error) = self.full(job, &mut timings)?;
+        Ok(Produced {
+            surface,
+            view: job.view,
+            timings,
+            reuse: FrameReuse::Full,
+            exact: job.view.quality == RenderQuality::Final && error.is_none(),
+            error,
+        })
     }
 }
 
-fn worker_loop<R: FrameRenderer>(shared: &Shared, mut renderer: R, waker: &Waker) {
+/// The commands of `list` that touch `clip`, as a list clipped to it.
+/// Structural commands are always kept, so the stream stays balanced.
+fn restrict(list: &DisplayList, clip: DeviceRect) -> Arc<DisplayList> {
+    let cmds = list
+        .commands()
+        .iter()
+        .filter(|c| c.bounds().is_none_or(|b| b.intersects(clip)))
+        .cloned()
+        .collect();
+    DisplayList::from_commands(cmds, clip.intersection(list.bounds()), *list.view())
+}
+
+fn add_timings(a: &mut FrameTimings, b: &FrameTimings) {
+    a.build_us = a.build_us.saturating_add(b.build_us);
+    a.raster_us = a.raster_us.saturating_add(b.raster_us);
+    a.composite_us = a.composite_us.saturating_add(b.composite_us);
+    a.tiles = a.tiles.saturating_add(b.tiles);
+    a.cache_hits = a.cache_hits.saturating_add(b.cache_hits);
+    a.cache_misses = a.cache_misses.saturating_add(b.cache_misses);
+    a.rasterised_pixels = a.rasterised_pixels.saturating_add(b.rasterised_pixels);
+}
+
+fn elapsed_us(t: Instant) -> u32 {
+    u32::try_from(t.elapsed().as_micros()).unwrap_or(u32::MAX)
+}
+
+fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
+    let mut w = Worker {
+        shared,
+        renderer,
+        kept: None,
+    };
     loop {
         let job = {
             let mut st = shared.lock();
@@ -403,18 +642,34 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, mut renderer: R, waker: &Waker
             }
         };
 
-        let (w, h) = (job.view.viewport.width(), job.view.viewport.height());
-        let mut surface = Surface::filled(w.max(1), h.max(1), job.background);
-        if let Some((rect, colour)) = job.page {
-            fill_rect(&mut surface, rect, colour);
-        }
-        let (timings, error) = match renderer.render(&job, &mut surface) {
-            Ok(t) => (t, None),
-            Err(e) => (FrameTimings::default(), Some(e)),
-        };
+        let produced = w.produce(&job);
 
         let mut st = shared.lock();
         st.stats.rendered += 1;
+        let Ok(p) = produced else {
+            st.stats.aborted += 1;
+            if st.is_cancelled(job.generation) {
+                st.stats.cancelled += 1;
+            }
+            continue;
+        };
+        match p.reuse {
+            FrameReuse::Scrolled { .. } => st.stats.scrolled += 1,
+            FrameReuse::Rescaled => st.stats.rescaled += 1,
+            FrameReuse::Full => {}
+        }
+        // The pixels are kept whatever happens to the frame: they are a
+        // correct picture of `p.view` either way.
+        let published = p.surface.clone();
+        w.kept = Some(Kept {
+            doc: job.doc,
+            scene_epoch: job.scene_epoch,
+            background: job.background,
+            page_colour: job.page.map(|(_, c)| c),
+            view: p.view,
+            final_exact: p.exact,
+            surface: p.surface,
+        });
         if st.is_cancelled(job.generation) {
             st.stats.cancelled += 1;
             continue;
@@ -429,10 +684,12 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, mut renderer: R, waker: &Waker
         st.result = Some(RenderedFrame {
             doc: job.doc,
             generation: job.generation,
-            view: job.view,
-            surface,
-            timings,
-            error,
+            view: p.view,
+            surface: published,
+            timings: p.timings,
+            reuse: p.reuse,
+            exact: p.exact,
+            error: p.error,
         });
         drop(st);
         waker();
@@ -445,16 +702,21 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
-    use xarast_render::{DeviceRect, DirtyRect, Scene};
+    use xarast_render::{DeviceRect, Scene};
 
+    /// A frame of an empty scene. Every call has a new scene epoch, so the
+    /// worker never reuses one for another and each one reaches the
+    /// renderer.
     fn job(w: u32, h: u32) -> FrameJob {
+        static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let view = ViewParams {
             viewport: DeviceRect::from_size(w, h),
             ..ViewParams::default()
         };
         FrameJob {
             doc: DocumentId(7),
-            list: DisplayList::build(&Scene::new(), &view, &DirtyRect::of(view.viewport)),
+            scene: Arc::new(Scene::new()),
+            scene_epoch: EPOCH.fetch_add(1, Ordering::SeqCst),
             resolver: Arc::new(Resolver::new()),
             view,
             background: [10, 20, 30, 255],
@@ -475,6 +737,7 @@ mod tests {
         fn render(
             &mut self,
             job: &FrameJob,
+            _list: &DisplayList,
             _t: &mut Surface,
         ) -> Result<FrameTimings, BackendError> {
             self.started.send(job.generation).unwrap();
@@ -685,5 +948,180 @@ mod tests {
         assert_send::<RenderThread>();
         assert_send::<FrameJob>();
         assert_send::<RenderedFrame>();
+    }
+
+    #[test]
+    fn a_final_is_abandoned_between_slabs_when_a_newer_frame_arrives() {
+        let (mut rt, started, release, _) = gated();
+        // Three slabs tall.
+        let tall = FINAL_SLAB_ROWS * 2 + 8;
+        let a = rt.submit(job(8, tall));
+        assert_eq!(started.recv_timeout(T).unwrap(), a);
+        let b = rt.submit(job(8, 8));
+        release.send(()).unwrap();
+        // The second slab of `a` is never started: `b` is.
+        assert_eq!(started.recv_timeout(T).unwrap(), b);
+        release.send(()).unwrap();
+        rt.shutdown();
+        let s = rt.stats();
+        assert_eq!(s.aborted, 1);
+    }
+
+    #[test]
+    fn a_draft_is_not_abandoned_for_a_newer_frame() {
+        let (mut rt, started, release, _) = gated();
+        let mut j = job(8, FINAL_SLAB_ROWS * 2 + 8);
+        j.view.quality = RenderQuality::Draft;
+        let a = rt.submit(j);
+        assert_eq!(started.recv_timeout(T).unwrap(), a);
+        let b = rt.submit(job(8, 8));
+        release.send(()).unwrap();
+        // A Draft is one call, and it finishes.
+        assert_eq!(started.recv_timeout(T).unwrap(), b);
+        release.send(()).unwrap();
+        rt.shutdown();
+        assert_eq!(rt.stats().aborted, 0);
+    }
+
+    // ── Pixel reuse, end to end through the CPU backend ──────────────────
+
+    /// A render thread on the deterministic CPU configuration whose waker
+    /// feeds a channel, so a test waits for a frame without sleeping.
+    fn cpu_thread() -> (RenderThread, mpsc::Receiver<()>) {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let rt = RenderThread::spawn_with(
+            CpuFrameRenderer::new(CpuConfig::deterministic()),
+            Box::new(move || {
+                let _ = tx.lock().map(|t| t.send(()));
+            }),
+        )
+        .unwrap();
+        (rt, rx)
+    }
+
+    fn next_frame(rt: &RenderThread, woken: &mpsc::Receiver<()>) -> RenderedFrame {
+        woken.recv_timeout(T).expect("a frame");
+        rt.take_latest().expect("published before the wake")
+    }
+
+    /// A small synthetic drawing, framed and walked.
+    fn drawing() -> crate::Session {
+        let doc = xarast_doc::synthetic_document(xarast_doc::SynthSpec {
+            nodes: 3_000,
+            ..xarast_doc::SynthSpec::default()
+        });
+        let mut s = crate::Session::adopt(DocumentId(9), doc, None);
+        s.apply(crate::Intent::Resize(crate::DeviceSize::new(240, 180)))
+            .unwrap();
+        s.apply(crate::Intent::ZoomTo(crate::ZoomTarget::Page))
+            .unwrap();
+        s.apply(crate::Intent::Zoom {
+            factor: 2.0,
+            anchor: crate::DevicePoint::new(120.0, 90.0),
+        })
+        .unwrap();
+        s.rebuild_scene(None).unwrap();
+        s
+    }
+
+    const BG: [u8; 4] = [128, 128, 132, 255];
+    const PAGE: [u8; 4] = [255, 255, 255, 255];
+
+    fn max_diff(a: &Surface, b: &Surface) -> u8 {
+        a.data()
+            .iter()
+            .zip(b.data())
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_whole_pixel_pan_scrolls_and_matches_a_full_render() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        let first = next_frame(&rt, &woken);
+        assert_eq!(first.reuse, FrameReuse::Full);
+        assert!(first.exact);
+
+        s.apply(crate::Intent::Pan {
+            dx: 17.0,
+            dy: -11.0,
+        })
+        .unwrap();
+        let panned = s.frame_job(BG, PAGE);
+        rt.submit(panned.clone());
+        let scrolled = next_frame(&rt, &woken);
+        assert_eq!(scrolled.reuse, FrameReuse::Scrolled { dx: 17, dy: -11 });
+        assert!(scrolled.exact, "Final strips over Final pixels stay exact");
+        // Only the strips were rasterised.
+        let strips = 17 * 180 + 11 * (240 - 17);
+        assert!(scrolled.timings.rasterised_pixels <= strips);
+
+        let (mut fresh, fresh_woken) = cpu_thread();
+        fresh.submit(panned);
+        let full = next_frame(&fresh, &fresh_woken);
+        assert_eq!(full.reuse, FrameReuse::Full);
+        assert_ne!(full.surface, first.surface, "the pan moved something");
+        assert!(
+            max_diff(&scrolled.surface, &full.surface) <= 1,
+            "scrolled and full renders differ by {}",
+            max_diff(&scrolled.surface, &full.surface)
+        );
+    }
+
+    #[test]
+    fn a_draft_zoom_rescales_and_the_following_final_is_exact() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        next_frame(&rt, &woken);
+
+        s.apply(crate::Intent::Zoom {
+            factor: 0.8,
+            anchor: crate::DevicePoint::new(100.0, 70.0),
+        })
+        .unwrap();
+        let mut draft = s.frame_job(BG, PAGE);
+        draft.view.quality = RenderQuality::Draft;
+        rt.submit(draft);
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Rescaled);
+        assert!(!f.exact);
+        // A zoom-out uncovers a border, and only the border is rasterised.
+        assert!(f.timings.rasterised_pixels < 240 * 180 / 2);
+
+        let fin = s.frame_job(BG, PAGE);
+        rt.submit(fin.clone());
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Full, "a Final never reuses a Draft");
+        assert!(f.exact);
+        let (mut fresh, fresh_woken) = cpu_thread();
+        fresh.submit(fin);
+        assert_eq!(next_frame(&fresh, &fresh_woken).surface, f.surface);
+    }
+
+    #[test]
+    fn a_fractional_draft_pan_is_snapped_then_made_exact_by_the_final() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        next_frame(&rt, &woken);
+
+        s.apply(crate::Intent::Pan { dx: 4.4, dy: 2.6 }).unwrap();
+        let mut draft = s.frame_job(BG, PAGE);
+        draft.view.quality = RenderQuality::Draft;
+        rt.submit(draft);
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Scrolled { dx: 4, dy: 3 });
+        assert!(!f.exact);
+
+        rt.submit(s.frame_job(BG, PAGE));
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Full);
+        assert!(f.exact);
+        assert_eq!(f.view, s.view_params());
     }
 }

@@ -174,7 +174,12 @@ pub struct Session {
     pub bus: CommandBus,
     /// How hard the next render should work.
     pub quality: RenderQuality,
-    scene: Scene,
+    /// Shared with the render thread, which builds its display lists from
+    /// it. Rebuilt in place while nobody else holds it.
+    scene: Arc<Scene>,
+    /// Bumped by every rebuild, so the render thread can tell whether the
+    /// pixels it kept were drawn from the scene it is now given.
+    scene_epoch: u64,
     walker: SceneWalker,
     /// The resolver as of the last walk, shared with the render thread.
     /// Taken lazily and dropped by every rebuild, so a pan (which does not
@@ -212,7 +217,8 @@ impl Session {
             path,
             bus: CommandBus::new(),
             quality: RenderQuality::Final,
-            scene: Scene::new(),
+            scene: Arc::new(Scene::new()),
+            scene_epoch: 0,
             walker: SceneWalker::new(),
             resolver_snapshot: None,
             dirty: Dirty::everything(size),
@@ -326,7 +332,7 @@ impl Session {
 
     /// The scene as last built.
     #[must_use]
-    pub const fn scene(&self) -> &Scene {
+    pub fn scene(&self) -> &Scene {
         &self.scene
     }
 
@@ -364,17 +370,45 @@ impl Session {
     /// [`SessionError::Scene`] if the recording came out unbalanced,
     /// which would be a bug in the walker.
     pub fn rebuild_scene(&mut self, dirty: Option<DeviceRect>) -> Result<SceneStats, SessionError> {
+        // The render thread may still hold the previous scene. Cloning it
+        // only to clear it would be waste, so start from an empty one.
+        if Arc::get_mut(&mut self.scene).is_none() {
+            self.scene = Arc::new(Scene::new());
+        }
+        // Unique now, so this never clones.
+        let scene = Arc::make_mut(&mut self.scene);
         let stats = self.walker.rebuild(
             &self.doc,
             &self.edit,
             &self.viewport,
             self.quality,
             dirty,
-            &mut self.scene,
+            scene,
         )?;
         self.dirty.scene = false;
+        self.scene_epoch += 1;
         self.resolver_snapshot = None;
         Ok(stats)
+    }
+
+    /// Whether the scene is stale: the document, the quality or the walker
+    /// changed since the last [`Session::rebuild_scene`].
+    #[must_use]
+    pub const fn needs_scene(&self) -> bool {
+        self.dirty.scene
+    }
+
+    /// The scene as last built, as a snapshot another thread can hold.
+    #[must_use]
+    pub fn scene_snapshot(&self) -> Arc<Scene> {
+        Arc::clone(&self.scene)
+    }
+
+    /// Counts scene rebuilds. Two frames with the same epoch were drawn
+    /// from the same scene.
+    #[must_use]
+    pub const fn scene_epoch(&self) -> u64 {
+        self.scene_epoch
     }
 
     /// The resolver as of the last walk, as a snapshot another thread can
@@ -387,8 +421,9 @@ impl Session {
     }
 
     /// Packages the current scene and view as a frame for the render
-    /// thread: the display list for the whole viewport, the resolver it
-    /// needs and the view it was built for. Never a node.
+    /// thread: the scene, the resolver it needs and the view to draw it
+    /// for. Never a node. The render thread builds the display list, which
+    /// is what lets it draw only the strips a pan exposed.
     ///
     /// Rebuild the scene first when [`Session::dirty`] says it is stale;
     /// this only re-projects the scene that exists.
@@ -401,11 +436,10 @@ impl Session {
         page: [u8; 4],
     ) -> crate::render_thread::FrameJob {
         let view = self.view_params();
-        let list =
-            xarast_render::DisplayList::build(&self.scene, &view, &DirtyRect::of(view.viewport));
         crate::render_thread::FrameJob {
             doc: self.id,
-            list,
+            scene: self.scene_snapshot(),
+            scene_epoch: self.scene_epoch,
             resolver: self.resolver_snapshot(),
             view,
             background,

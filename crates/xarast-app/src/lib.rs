@@ -69,6 +69,8 @@ pub mod intent;
 mod paint;
 pub mod prefs;
 pub mod render_thread;
+mod reuse;
+pub mod schedule;
 pub mod session;
 pub mod viewport;
 pub mod walker;
@@ -80,7 +82,8 @@ pub use headless::{HeadlessError, HeadlessOptions, HeadlessResult, render_to_png
 pub use intent::{Changed, Intent, PointerButton, PointerSample};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
 pub use render_thread::{
-    FrameJob, FrameRenderer, RenderRequest, RenderStats, RenderThread, RenderedFrame,
+    FINAL_SLAB_ROWS, FrameJob, FrameRenderer, FrameReuse, RenderRequest, RenderStats, RenderThread,
+    RenderedFrame,
 };
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};
