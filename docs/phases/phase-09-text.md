@@ -304,6 +304,12 @@ Note that architecture §7 lists this question as decided by "Phase 7". That was
 written before the roadmap settled text into phase 9; the substance is
 unchanged, only the phase number. Fix the table when you close this phase.
 
+**Outcome (2026-09-24, XARA-US-0048): spike A won on all five fixtures**
+(worst p95 0.0021 of an advance; spike B up to 5.8 advances off), and the
+architecture table says so. T9.5.1–T9.5.4 are done; spike B lives only as the
+measurement's comparator. T9.5.5 and T9.5.6 remain. Details in
+`docs/memory/text.md`, "Text on a path".
+
 ### W9.6 — Convert to shapes
 
 | ID | Task | Crate | Size | Depends on |
