@@ -1,13 +1,26 @@
-//! Persistent checkpoints over the arena.
+//! Checkpoints over the arena.
 //!
-//! A [`Snapshot`] is an `imbl::HashMap<NodeId, Arc<NodeData>>` **built from**
-//! the arena. It is never the live store — that distinction is the whole of
-//! `docs/10-architecture.md` §3.1. The HAMT's structural sharing is what makes
-//! taking one every N transactions cheap enough to be the autosave source and,
-//! from Phase 6, the persistent-history source.
+//! A [`Snapshot`] is a dense, immutable copy of the reachable nodes, keyed by
+//! the same [`NodeId`]s as the arena, and **built from** it. It is never the
+//! live store — that distinction is the whole of `docs/10-architecture.md`
+//! §3.1.
+//!
+//! # Why not a HAMT
+//!
+//! It used to be an `imbl::HashMap<NodeId, Arc<NodeData>>`, chosen for the
+//! structural sharing an incremental checkpoint could exploit. Nothing
+//! exploits it: every checkpoint is rebuilt from the arena, and a rebuild
+//! paid for a HAMT insert and an `Arc` allocation per node on top of the
+//! payload clone — 3–4× the cost of this layout, and over the 25 ms budget
+//! at 100 000 nodes. A `SecondaryMap` is one allocation plus the clones, and
+//! the `Arc` around it keeps [`Snapshot`] itself cheap to clone. If Phase 6
+//! makes checkpoints incremental it will need dirty tracking in the tree
+//! first; the representation can be revisited then.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use slotmap::SecondaryMap;
 
 use crate::Document;
 use crate::attr::DefaultAttrs;
@@ -19,7 +32,7 @@ use crate::tree::{Attach, NodeData, NodeFlags, NodeId, Tree};
 /// A cheap photograph of a document.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
-    nodes: imbl::HashMap<NodeId, Arc<NodeData>>,
+    nodes: Arc<SecondaryMap<NodeId, NodeData>>,
     root: NodeId,
     resources: Arc<DocumentResources>,
     defaults: DefaultAttrs,
@@ -47,8 +60,8 @@ impl Snapshot {
 
     /// A node, as it was.
     #[must_use]
-    pub fn node(&self, id: NodeId) -> Option<&Arc<NodeData>> {
-        self.nodes.get(&id)
+    pub fn node(&self, id: NodeId) -> Option<&NodeData> {
+        self.nodes.get(id)
     }
 }
 
@@ -60,14 +73,14 @@ impl Document {
     /// instant.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
-        let mut nodes = imbl::HashMap::new();
+        let mut nodes = SecondaryMap::with_capacity(self.tree.node_count());
         for id in self.tree.preorder(self.tree.root()) {
             if let Some(d) = self.tree.get(id) {
-                nodes.insert(id, Arc::new(d.clone()));
+                nodes.insert(id, d.clone());
             }
         }
         Snapshot {
-            nodes,
+            nodes: Arc::new(nodes),
             root: self.tree.root(),
             resources: Arc::new(self.resources.clone()),
             defaults: self.defaults.clone(),
@@ -87,11 +100,11 @@ impl Document {
     pub fn restore(&mut self, s: &Snapshot) {
         let root_kind = s
             .nodes
-            .get(&s.root)
+            .get(s.root)
             .map_or(NodeKind::Chapter, |d| d.kind.clone());
         let mut tree = Tree::with_root(root_kind);
         let new_root = tree.root();
-        if let Some(d) = s.nodes.get(&s.root) {
+        if let Some(d) = s.nodes.get(s.root) {
             tree.set_tag(new_root, d.tag);
             if let Some(n) = tree.get_mut(new_root) {
                 n.flags = d.flags & !NodeFlags::DETACHED;
@@ -105,12 +118,12 @@ impl Document {
             let Some(parent_new) = map.get(&old).copied() else {
                 continue;
             };
-            let Some(old_data) = s.nodes.get(&old) else {
+            let Some(old_data) = s.nodes.get(old) else {
                 continue;
             };
             let mut child = old_data.links.first_child;
             while let Some(oc) = child {
-                let Some(cd) = s.nodes.get(&oc) else { break };
+                let Some(cd) = s.nodes.get(oc) else { break };
                 let n = tree.create(cd.kind.clone());
                 tree.set_tag(n, cd.tag);
                 let _ = tree.attach(n, parent_new, Attach::LastChild);

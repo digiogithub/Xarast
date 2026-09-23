@@ -96,8 +96,13 @@ is what actually scales on real documents.
 
 - Live store: `SlotMap<NodeId, NodeData>`, `NodeData { parent, first_child, next_sibling, prev_sibling, flags, kind: NodeKind, .. }`.
 - Heavy payloads (`long paths, bitmaps, gradient ramps, font data`) behind `Arc<T>`, copy-on-write.
-- Checkpoints: `imbl::HashMap<NodeId, Arc<NodeData>>` snapshots for autosave and
-  session-persistent history, built *over* the arena.
+- Checkpoints: immutable snapshots for autosave and session-persistent
+  history, built *over* the arena. They were first an
+  `imbl::HashMap<NodeId, Arc<NodeData>>`. Since 2026-09-23 they are an
+  `Arc<SecondaryMap<NodeId, NodeData>>`, because every checkpoint is rebuilt
+  in full, so the HAMT's structural sharing was never used. Building one
+  cost 3–4× as much and broke the 25 ms budget. Incremental checkpoints
+  would first need dirty tracking in the tree (see `memory/document-model.md`).
 
 **Measured in Phase 2, and the arena stands.** The benchmark walks a
 100,000-node synthetic document in both representations
