@@ -2,12 +2,13 @@
 id: XARA-US-0050
 type: story
 title: "W9.7 — TextDesigns corpus: golden images and round-trip"
-status: backlog
+status: in_progress
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, acceptance]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T18:48:52Z
+started: 2026-09-23T18:48:52Z
 ---
 
 ## Tasks (full table: phase-09 §W9.7)

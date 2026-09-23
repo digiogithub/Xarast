@@ -8,7 +8,7 @@ parent: XARA-US-0050
 author: mcp
 labels: [phase-9, text, format]
 created: 2026-09-23T18:36:06Z
-updated: 2026-09-23T18:36:06Z
+updated: 2026-09-23T18:48:20Z
 ---
 
 ## Description
@@ -19,9 +19,9 @@ What W9 now makes available to the writer (owner: the phase-6 writer agent; noth
 
 - `xarast_doc::StoryText::collect` — the story's logical text, attribute runs (`CharRun { range, attrs: ResolvedAttrs }`), lines with their line-level attributes, manual kerns at byte offsets. The writer can emit runs from it instead of re-resolving attributes itself.
 - `xarast-app`'s layout path (`text::build_story`, `Shaper::layout`) gives exact line baselines, x positions per glyph (millipoints) and substitutions; the writer could emit `x`/`y` per `<tspan>` (or per glyph with `x="…"` lists) so browsers/Inkscape place lines where Xarast does, while `xarast:` attributes keep the model (tracking em/1000, kerns em/1000 of 'M', baseline shift, script, aspect, justification, line spacing ratio/absolute, margins, ruler).
-- Attributes are now scoped per string on import (`xar:` commit "scope text record attributes"): the writer's `text_line` still applies an `Attr` sibling to the characters after it, which is now correct, but round-trip must preserve the reset attributes the importer inserts.
+- Attributes are now scoped per string on import (`xar:` commit "scope text record attributes"): each string's attributes come before its characters and the importer inserts "restore" attributes after them. The writer's sibling-scoped reading is correct for that; the round trip must keep the restores.
 - Kerns (`TextItem::Kern`) and tracking are currently dropped by the writer.
-- The default font size is now 16 pt (`default_for(TxtFontSize)`); the writer/reader fallbacks of 12 000 mp in `emit.rs:1820`, `read/normal.rs:1015`, `read/build/ink.rs:728` should follow.
+- The original's default text size is 16 pt (`Kernel/txtattr.cpp:449-452`) but the model's `default_for(TxtFontSize)` stays 12 pt, because the writer/reader elide defaults with their own 12 000 mp fallbacks (`emit.rs:1820`, `read/normal.rs:1015`, `read/build/ink.rs:728`); changing the model default broke the normal-form round trip. The importer writes 16 pt explicitly on stories that rely on it. Aligning the writer/reader fallbacks with `default_for` would let the model default become 16 pt.
 
 ## Acceptance Criteria
 
