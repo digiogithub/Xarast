@@ -234,16 +234,31 @@ fn a_xarast_package_opens_like_a_xar_file() {
 }
 
 #[test]
-fn saving_fails_honestly_until_phase_six() {
+fn saving_writes_xarast_and_never_xar() {
+    let dir = std::env::temp_dir().join(format!("xarast-session-save-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch");
     let mut s = Session::new_empty(DocumentId(1));
+    let target = dir.join("drawing.xarast");
+    let summary = s.save_as(&target).expect("a .xarast saves");
+    assert!(summary.bytes > 0 && summary.thumbnail);
+    assert_eq!(s.path.as_deref(), Some(target.as_path()));
+    assert!(!s.is_modified());
     let err = s
-        .save_as(std::path::Path::new("/tmp/nope.xarast"))
-        .expect_err("saving is not implemented");
-    assert!(matches!(err, xarast_app::SessionError::Unsupported { .. }));
-    let err = s
-        .save_as(std::path::Path::new("/tmp/nope.xar"))
+        .save_as(&dir.join("nope.xar"))
         .expect_err("writing .xar is a non-goal");
     assert!(format!("{err}").contains("non-goal"));
+    assert!(matches!(err, xarast_app::SessionError::Unsupported { .. }));
+    let err = s
+        .save_as(&dir.join("missing-dir").join("x.xarast"))
+        .expect_err("an unwritable target fails");
+    assert!(matches!(err, xarast_app::SessionError::Save { .. }));
+    assert_eq!(
+        s.path.as_deref(),
+        Some(target.as_path()),
+        "a failure keeps the path"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

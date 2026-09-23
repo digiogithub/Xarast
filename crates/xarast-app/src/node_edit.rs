@@ -23,7 +23,7 @@
 //!
 //! Paths only. Rectangles, ellipses and quick shapes are live parametric
 //! shapes: the shape editor draws their bounds and offers **Convert to
-//! editable shapes** (`Ctrl+Shift+S`) in its infobar, and never converts
+//! editable shapes** (`Ctrl+Shift+C`) in its infobar, and never converts
 //! one silently. The original's Bézier tool does not edit them either
 //! (`research/04 §4.11`).
 //!

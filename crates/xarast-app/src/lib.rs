@@ -63,6 +63,7 @@
 #![doc(html_no_source)]
 
 pub mod app;
+pub mod autosave;
 pub mod command;
 pub mod commands;
 pub mod edit;
@@ -71,15 +72,18 @@ pub mod freehand;
 pub mod geometry;
 pub mod headless;
 pub mod intent;
+pub mod locks;
 pub mod node_edit;
 pub mod ops;
 mod paint;
 pub mod pen;
 pub mod picking;
 pub mod prefs;
+pub mod prompt;
 pub mod recent;
 pub mod render_thread;
 mod reuse;
+pub mod save;
 pub mod schedule;
 pub mod selector;
 pub mod session;
@@ -87,13 +91,15 @@ pub mod shapes;
 pub mod snap;
 pub mod structure;
 mod text;
+pub mod thumbnail;
 pub mod tool;
 pub mod tools;
 pub mod viewport;
 pub mod walker;
 
 pub use app::{
-    AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, InternalClipboard, Severity,
+    AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, InternalClipboard, PendingAction,
+    Severity, xarast_path,
 };
 pub use command::{AppCommand, ChordKey, KeyChord};
 pub use edit::{
@@ -104,6 +110,7 @@ pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult
 pub use intent::{Changed, Dialog, Intent, PlatformRequest, PointerButton, PointerSample};
 pub use ops::{CommandSink, EditCommand};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
+pub use prompt::{ChoiceRole, Prompt, PromptAnswer, PromptChoice};
 pub use recent::RecentFiles;
 pub use render_thread::{
     FINAL_COLUMNS, FrameJob, FrameRenderer, FrameReuse, MIN_COLUMN_WIDTH, RenderRequest,

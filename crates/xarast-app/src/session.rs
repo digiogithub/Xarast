@@ -10,9 +10,17 @@
 //! # The Phase 6 seam
 //!
 //! Opening and saving go through [`FileKind`]. `.xar` import and `.xarast`
-//! open (`xarast_format::open_reader`) are wired; saving is not yet, and
-//! [`Session::save`] returns [`SessionError::Unsupported`] rather than
-//! pretending. Writing `.xar` is a permanent non-goal (architecture §3.5).
+//! open (`xarast_format::open_reader`) and save are wired. A save is a
+//! [`SaveJob`](crate::save::SaveJob) made here from a snapshot and run
+//! anywhere ([`Session::save_job`]); [`Session::save_as`] is the same thing
+//! run inline. Writing `.xar` is a permanent non-goal (architecture §3.5).
+//!
+//! # Modified or not
+//!
+//! The session records the undo history's state serial at its last save
+//! (`xarast_doc::History::state_serial`); it is unmodified exactly when the
+//! history is back at that state, so undoing every edit since a save clears
+//! the title's marker again and redoing one sets it.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -68,11 +76,11 @@ impl FileKind {
         }
     }
 
-    /// Whether Xarast can write this kind today.
+    /// Whether Xarast can write this kind. Only `.xarast`: `.xar` never
+    /// will be.
     #[must_use]
     pub const fn is_writable(self) -> bool {
-        // `.xarast` becomes writable in Phase 6; `.xar` never does.
-        false
+        matches!(self, FileKind::Xarast)
     }
 }
 
@@ -114,6 +122,14 @@ pub enum SessionError {
         what: &'static str,
         /// The path involved.
         path: PathBuf,
+    },
+    /// Writing the file failed. The document in memory is untouched.
+    #[error("could not save {path}: {message}")]
+    Save {
+        /// The target.
+        path: PathBuf,
+        /// What went wrong.
+        message: String,
     },
     /// The walker produced an unbalanced scene, which is a bug here.
     #[error("the scene walker produced an unbalanced scene: {0}")]
@@ -216,7 +232,18 @@ pub struct Session {
     /// rebuild) sends the same `Arc` frame after frame.
     resolver_snapshot: Option<Arc<xarast_render::Resolver>>,
     dirty: Dirty,
-    modified: bool,
+    /// The history's state serial at the last save or open; `None` when no
+    /// state of the history is saved (a recovered document).
+    clean_serial: Option<u64>,
+    /// Opened read-only (someone else holds its lock): File › Save asks
+    /// for a new name.
+    pub read_only: bool,
+    /// The name shown for a document with no path ("drawing (copy)").
+    pub name_hint: Option<String>,
+    /// The package it was opened from, for raw copies on the next save.
+    source: Option<Arc<[u8]>>,
+    /// The lock this session holds on its file, if any. Dropped with it.
+    pub(crate) lock: Option<crate::locks::HeldLock>,
     diagnostics: Vec<String>,
     /// How many of the walker's font substitutions were already handed
     /// out by [`Session::take_font_substitutions`].
@@ -262,7 +289,11 @@ impl Session {
             scroll_bounds_stale: false,
             resolver_snapshot: None,
             dirty: Dirty::everything(size),
-            modified: false,
+            clean_serial: Some(0),
+            read_only: false,
+            name_hint: None,
+            source: None,
+            lock: None,
             diagnostics: Vec::new(),
             substitutions_reported: 0,
         }
@@ -322,6 +353,7 @@ impl Session {
                 diagnostics.extend(opened.diagnostics.iter().map(|d| format!("{d:?}")));
                 let mut s = Session::adopt(id, opened.document, Some(path.to_path_buf()));
                 s.diagnostics = diagnostics;
+                s.source = Some(Arc::from(bytes));
                 Ok(s)
             }
             // Phase 11 replaces this arm with the `xarast-io` filters.
@@ -332,36 +364,125 @@ impl Session {
         }
     }
 
-    /// Saves to the session's own path.
+    /// Saves to the session's own path, inline. The application saves off
+    /// the interface thread instead ([`crate::AppState`]); this is for
+    /// tools and tests.
     ///
     /// # Errors
     ///
-    /// [`SessionError::Unsupported`] until Phase 6 lands the `.xarast`
-    /// writer. Writing `.xar` is a permanent non-goal.
-    pub fn save(&mut self) -> Result<(), SessionError> {
+    /// As [`Session::save_as`]; a session with no path, or whose path is
+    /// not a `.xarast`, is [`SessionError::Unsupported`].
+    pub fn save(&mut self) -> Result<crate::save::SaveSummary, SessionError> {
         let path = self.path.clone().unwrap_or_default();
         self.save_as(&path)
     }
 
-    /// Saves to a given path.
+    /// Saves to `path`, inline, and makes it the session's path.
     ///
     /// # Errors
     ///
-    /// As [`Session::save`].
-    pub fn save_as(&mut self, path: &Path) -> Result<(), SessionError> {
-        Err(SessionError::Unsupported {
-            what: match FileKind::of(path) {
-                FileKind::Xar => "writing .xar (a permanent non-goal)",
-                _ => "saving",
-            },
-            path: path.to_path_buf(),
-        })
+    /// [`SessionError::Unsupported`] for anything but a `.xarast` (writing
+    /// `.xar` is a permanent non-goal), and [`SessionError::Save`] when
+    /// writing fails — the document is untouched either way.
+    pub fn save_as(&mut self, path: &Path) -> Result<crate::save::SaveSummary, SessionError> {
+        let job = self.save_job(crate::save::SaveKind::Document, path)?;
+        let out = job.run();
+        match out.result {
+            Ok(summary) => {
+                self.mark_saved(out.serial, &out.path);
+                Ok(summary)
+            }
+            Err(message) => Err(SessionError::Save {
+                path: out.path,
+                message,
+            }),
+        }
+    }
+
+    /// Prepares a save of the document as it is now, to run on any thread.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::Unsupported`] when `path` is not a `.xarast`.
+    pub fn save_job(
+        &self,
+        kind: crate::save::SaveKind,
+        path: &Path,
+    ) -> Result<crate::save::SaveJob, SessionError> {
+        if kind == crate::save::SaveKind::Document && !FileKind::of(path).is_writable() {
+            return Err(SessionError::Unsupported {
+                what: match FileKind::of(path) {
+                    FileKind::Xar => "writing .xar (a permanent non-goal)",
+                    _ => "saving anything but .xarast",
+                },
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(crate::save::SaveJob::new(
+            kind,
+            self.id,
+            path.to_path_buf(),
+            self.state_serial(),
+            self.doc.snapshot(),
+            self.source.clone(),
+        ))
+    }
+
+    /// Records a finished save: the document is clean if the history is
+    /// still at `serial` (edits made while the save ran keep it
+    /// modified), and `path` is its file from now on.
+    pub fn mark_saved(&mut self, serial: u64, path: &Path) {
+        self.clean_serial = Some(serial);
+        self.path = Some(path.to_path_buf());
+        self.read_only = false;
+        self.name_hint = None;
+    }
+
+    /// Marks the document modified whatever its history says: a recovered
+    /// snapshot is not what is on disk.
+    pub fn mark_unsaved(&mut self) {
+        self.clean_serial = None;
+    }
+
+    /// The undo history's state serial now.
+    #[must_use]
+    pub fn state_serial(&self) -> u64 {
+        self.bus.history().state_serial()
     }
 
     /// Whether the document has changed since it was opened or saved.
     #[must_use]
-    pub const fn is_modified(&self) -> bool {
-        self.modified
+    pub fn is_modified(&self) -> bool {
+        self.clean_serial != Some(self.state_serial())
+    }
+
+    /// The name a title bar or a prompt shows: the file name, the hint of a
+    /// copy, or "Untitled".
+    #[must_use]
+    pub fn display_name(&self) -> String {
+        if let Some(n) = self.path.as_deref().and_then(Path::file_name) {
+            return n.to_string_lossy().into_owned();
+        }
+        self.name_hint
+            .clone()
+            .unwrap_or_else(|| "Untitled".to_owned())
+    }
+
+    /// Whether File › Save can write to the session's own path without
+    /// asking: it has one, it is a `.xarast`, and it is not read-only.
+    #[must_use]
+    pub fn can_save_in_place(&self) -> bool {
+        !self.read_only
+            && self
+                .path
+                .as_deref()
+                .is_some_and(|p| FileKind::of(p).is_writable())
+    }
+
+    /// The package the document was opened from, if it came from one.
+    #[must_use]
+    pub fn source_package(&self) -> Option<&Arc<[u8]>> {
+        self.source.as_ref()
     }
 
     /// What the importer said about the file, as lines for a non-modal
@@ -846,7 +967,6 @@ impl Session {
     }
 
     fn after_mutation(&mut self) {
-        self.modified = true;
         // Hand the picker what changed; it re-walks only those objects at
         // the next pick (XARA-T-0168), never here on the undo path.
         self.picker.note_changes(self.doc.tree.drain_changes());
@@ -1136,7 +1256,12 @@ impl Session {
             | Intent::Paste { .. }
             | Intent::PasteText { .. }
             | Intent::ShowDialog(_)
-            | Intent::Quit => {}
+            | Intent::Quit
+            | Intent::Save
+            | Intent::SaveAs
+            | Intent::SaveTo(_)
+            | Intent::SaveDialogClosed
+            | Intent::AnswerPrompt(_) => {}
         }
         Ok(self.finish_apply(changed))
     }

@@ -188,7 +188,7 @@ pub fn store_path_from(state_home: Option<PathBuf>, home: Option<PathBuf>) -> Op
     Some(base.join("xarast").join("recent"))
 }
 
-fn absolute(path: &Path) -> PathBuf {
+pub(crate) fn absolute(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
@@ -200,24 +200,24 @@ fn trim_cr(line: &[u8]) -> &[u8] {
 }
 
 #[cfg(unix)]
-fn path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn path_bytes(path: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt as _;
     path.as_os_str().as_bytes().to_vec()
 }
 
 #[cfg(unix)]
-fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+pub(crate) fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt as _;
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
 
 #[cfg(not(unix))]
-fn path_bytes(path: &Path) -> Vec<u8> {
+pub(crate) fn path_bytes(path: &Path) -> Vec<u8> {
     path.to_string_lossy().into_owned().into_bytes()
 }
 
 #[cfg(not(unix))]
-fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+pub(crate) fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(bytes).ok().map(PathBuf::from)
 }
 
