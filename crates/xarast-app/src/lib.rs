@@ -97,6 +97,8 @@ pub mod structure;
 pub mod svg_text;
 mod text;
 pub mod text_edit;
+#[cfg(test)]
+mod text_path_fidelity;
 pub mod text_tool;
 pub mod thumbnail;
 pub mod tool;
