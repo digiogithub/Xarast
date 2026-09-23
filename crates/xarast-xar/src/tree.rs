@@ -71,6 +71,10 @@ pub struct RecordTree {
     pub skipped: u32,
     /// Records dropped as part of an atomic subtree.
     pub stripped: u32,
+    /// Definitions (colours, bitmaps, fonts) found inside a dropped atomic
+    /// subtree and kept, in place of the subtree: they are document-wide,
+    /// and records outside the subtree may refer to them.
+    pub rescued: u32,
     /// How many nodes are in the tree.
     pub nodes: usize,
 }
@@ -166,6 +170,13 @@ pub fn build_record_tree(
     Ok((a.tree, a.diagnostics))
 }
 
+/// Whether a record inside a dropped atomic subtree is kept: a definition
+/// the importer understands.
+fn is_rescued_definition(tag: u32) -> bool {
+    crate::decode::has_decoder(tag)
+        && crate::tags::class_of(tag) == Some(crate::tags::TagClass::Definition)
+}
+
 /// Where the stripping state machine is.
 enum Strip {
     /// Nothing is being stripped.
@@ -202,6 +213,20 @@ fn build(mut reader: RecordReader<'_>, limits: ReaderLimits) -> Result<FileAnaly
                     continue;
                 }
                 strip = Strip::No;
+            }
+            Strip::Active(_) if is_rescued_definition(tag) => {
+                // A definition inside a dropped subtree is still the
+                // document's: `Designs/Groucho2.xar` defines a bitmap
+                // inside a shadow controller that three later contone
+                // fills use. It takes the dropped subtree's place.
+                tree.rescued = tree.rescued.saturating_add(1);
+                tree.handled = tree.handled.saturating_add(1);
+                tree.nodes = tree.nodes.saturating_add(1);
+                cur.push(RecordNode {
+                    record: rec,
+                    children: Vec::new(),
+                });
+                continue;
             }
             Strip::Active(open) => {
                 tree.stripped = tree.stripped.saturating_add(1);
