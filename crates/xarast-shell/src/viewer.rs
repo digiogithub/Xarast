@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 use xarast_app::schedule::{Backdrop, Canvas};
 use xarast_app::{AppCommand, AppState, Changed, ChordKey, Intent, PlatformRequest, Session};
 use xarast_ui::model::{
-    DocumentView, LayerInfo, LayerKey, StatusInfo, UiCommand, UiModel, ViewTransform,
+    DocumentView, EditingView, LayerInfo, LayerKey, StatusInfo, UiCommand, UiModel, ViewTransform,
 };
 use xarast_ui::{Scale, Workspace};
 
@@ -111,6 +111,9 @@ pub struct Viewer {
     text_input: bool,
     /// The canvas had keyboard focus in the last interface frame.
     canvas_focused: bool,
+    /// The pointer was over the canvas in the last interface frame, so the
+    /// tool's cursor applies.
+    canvas_hovered: bool,
     ime_allowed: bool,
     ime_area: Option<[i32; 4]>,
     cursor: CursorShape,
@@ -179,6 +182,7 @@ impl Viewer {
             ppp: 1.0,
             text_input: false,
             canvas_focused: false,
+            canvas_hovered: false,
             ime_allowed: false,
             ime_area: None,
             cursor: CursorShape::Default,
@@ -405,8 +409,16 @@ impl Viewer {
             .app
             .active()
             .map(|s| document_view(s, scale, &mut self.layer_keys));
+        let editing = self.app.active().map(|s| EditingView {
+            tool: s.tools().current(),
+            undo: s.undo_label().map(str::to_owned),
+            redo: s.redo_label().map(str::to_owned),
+            selected: s.edit.selection_len(),
+            infobar: s.infobar(),
+        });
         UiModel {
             document,
+            editing,
             status: StatusInfo {
                 quality: xarast_ui::model::RenderQuality::Final,
                 renderer: self.renderer_label.clone(),
@@ -437,9 +449,10 @@ impl Viewer {
             egui::vec2(size.width as f32 / ppp, size.height as f32 / ppp),
         ));
         let mut out = None;
+        let overlay = self.app.active().map(overlay_items).unwrap_or_default();
         let workspace = &mut self.workspace;
         let full = self.egui.run(raw, |c| {
-            out = Some(workspace.ui(c, &model, Scale::new(f64::from(ppp)), &[]));
+            out = Some(workspace.ui(c, &model, Scale::new(f64::from(ppp)), &overlay));
         });
         let primitives = self.egui.tessellate(full.shapes, full.pixels_per_point);
         let frame = UiFrame {
@@ -458,6 +471,7 @@ impl Viewer {
         let mut region = None;
         if let Some(out) = out {
             self.canvas_focused = out.canvas.as_ref().is_some_and(|c| c.focused);
+            self.canvas_hovered = out.canvas.as_ref().is_some_and(|c| c.hovered);
             let intents: Vec<Intent> = out
                 .commands
                 .into_iter()
@@ -507,7 +521,14 @@ impl Viewer {
                 ctx.set_ime_cursor_area(x, y, w, h);
             }
         }
-        let shape = cursor_shape(output.cursor_icon);
+        // Over the canvas, where egui asks for nothing in particular, the
+        // tool in force chooses the pointer.
+        let shape = match self.app.active() {
+            Some(s) if self.canvas_hovered && output.cursor_icon == egui::CursorIcon::Default => {
+                tool_cursor(s.cursor())
+            }
+            _ => cursor_shape(output.cursor_icon),
+        };
         if shape != self.cursor {
             self.cursor = shape;
             ctx.set_cursor(shape);
@@ -575,6 +596,7 @@ impl Viewer {
             UiCommand::App(c) => c.intent(self.canvas_centre()),
             UiCommand::OpenRecent(path) => Intent::OpenFile(path),
             UiCommand::ClearRecent => Intent::ClearRecent,
+            UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
             // Guides, grid, unit, colours, layer order and the theme have
             // no intent yet; they are phase 7/8 commands.
             _ => return None,
@@ -662,6 +684,12 @@ impl Viewer {
         };
         probe.record(ctx.last_present());
         if probe.done() {
+            if let Some(release) = probe.finish() {
+                self.apply(vec![release]);
+            }
+            let Some(probe) = self.probe.as_mut() else {
+                return;
+            };
             let vp = self
                 .app
                 .active()
@@ -681,7 +709,21 @@ impl Viewer {
             return;
         }
         let c = self.adapter.canvas();
-        let intent = probe.next((f64::from(c.width) / 2.0, f64::from(c.height) / 2.0));
+        let mut anchor = (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0);
+        if probe.kind() == crate::probe::ProbeKind::Drag
+            && !probe.has_anchor()
+            && let Some(s) = self.app.active()
+        {
+            // Press on the topmost object nearest the canvas centre, so the
+            // drag moves something rather than drawing a marquee.
+            if let Some(p) = drag_target(s) {
+                anchor = p;
+            }
+        }
+        let Some(probe) = self.probe.as_mut() else {
+            return;
+        };
+        let intent = probe.next(anchor);
         self.apply(vec![intent]);
     }
 }
@@ -699,6 +741,9 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
             let key = match chord.key {
                 ChordKey::Char(c) => Key::char(c),
                 ChordKey::Home => Key::Named(NamedKey::Home),
+                ChordKey::Delete => Key::Named(NamedKey::Delete),
+                ChordKey::Escape => Key::Named(NamedKey::Escape),
+                ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
             };
             let mut modifiers = Modifiers::NONE;
             if chord.ctrl {
@@ -707,11 +752,26 @@ fn command_shortcuts() -> ShortcutMap<AppCommand> {
             if chord.shift {
                 modifiers = modifiers.with_shift();
             }
-            if let Some(clash) = map.bind(Shortcut::new(key.clone(), modifiers), command) {
+            let mut shortcut = Shortcut::new(key.clone(), modifiers);
+            if command.works_in_drag() {
+                shortcut = shortcut.works_in_drag();
+            }
+            if let Some(clash) = map.bind(shortcut, command) {
                 tracing::warn!(%chord, ?clash, ?command, "shortcut bound twice");
             }
             if chord.shift_is_layout_dependent() && !chord.shift {
                 map.bind(Shortcut::new(key, modifiers.with_shift()), command);
+            }
+            // Shift makes a letter a capital: the layout reports Ctrl+Shift+Z
+            // as "Z", so a shifted letter is bound in both cases.
+            if let ChordKey::Char(c) = chord.key
+                && chord.shift
+                && c.is_ascii_alphabetic()
+            {
+                map.bind(
+                    Shortcut::new(Key::char(c.to_ascii_uppercase()), modifiers),
+                    command,
+                );
             }
         }
     }
@@ -872,6 +932,71 @@ fn name_the_tree(update: &mut egui::accesskit::TreeUpdate, title: &str) {
     }
 }
 
+/// Where the drag probe presses: the centre of the visible selectable
+/// object nearest the canvas centre, in canvas pixels.
+fn drag_target(s: &Session) -> Option<(f64, f64)> {
+    let size = s.viewport.size();
+    let (cx, cy) = (f64::from(size.width) / 2.0, f64::from(size.height) / 2.0);
+    xarast_app::edit::selectable_objects(&s.doc)
+        .filter_map(|n| {
+            let b = xarast_app::viewport::nodes_rect(&s.doc, [n]);
+            if b.is_empty() {
+                return None;
+            }
+            let d = s.viewport.doc_to_device(b.centre());
+            let inside = d.x > 0.0
+                && d.y > 0.0
+                && d.x < f64::from(size.width)
+                && d.y < f64::from(size.height);
+            inside.then_some((d.x, d.y))
+        })
+        .min_by(|a, b| {
+            let da = (a.0 - cx).hypot(a.1 - cy);
+            let db = (b.0 - cx).hypot(b.1 - cy);
+            da.total_cmp(&db)
+        })
+}
+
+/// The tool's overlay as the interface draws it.
+fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
+    use xarast_app::{HandleShape, OverlayShape};
+    use xarast_ui::{HandleKind, OverlayItem};
+    s.overlay()
+        .into_iter()
+        .map(|o| match o {
+            OverlayShape::Handle { at, shape } => OverlayItem::Handle {
+                x: at.x,
+                y: at.y,
+                kind: match shape {
+                    HandleShape::Bounds => HandleKind::Bounds,
+                    HandleShape::Rotate => HandleKind::Rotate,
+                    HandleShape::Centre => HandleKind::Centre,
+                    HandleShape::Node => HandleKind::Node,
+                },
+                active: false,
+            },
+            OverlayShape::Rect { rect, dashed } => OverlayItem::Rect {
+                bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),
+                dashed,
+            },
+        })
+        .collect()
+}
+
+/// The pointer shape for a tool's request.
+const fn tool_cursor(c: xarast_app::CursorKind) -> CursorShape {
+    use xarast_app::CursorKind as K;
+    match c {
+        K::Default => CursorShape::Default,
+        K::Move => CursorShape::Move,
+        K::Crosshair => CursorShape::Crosshair,
+        K::Grab => CursorShape::Grab,
+        K::Grabbing => CursorShape::Grabbing,
+        K::ZoomIn => CursorShape::ZoomIn,
+        K::NotAllowed => CursorShape::NotAllowed,
+    }
+}
+
 fn points(p: PhysicalPos, ppp: f32) -> egui::Pos2 {
     egui::pos2(p.x as f32 / ppp, p.y as f32 / ppp)
 }
@@ -950,6 +1075,12 @@ impl ShellApp for Viewer {
         }
 
         self.drive_probe(ctx);
+
+        // A drag held at the canvas edge scrolls one step per frame.
+        let autoscroll = self.app.active().is_some_and(Session::wants_autoscroll);
+        if autoscroll {
+            self.apply(vec![Intent::AutoScroll]);
+        }
 
         let step = self.ui_step(ctx.scale(), ctx.surface_size());
         ctx.show_ui(step.frame);
@@ -1049,6 +1180,9 @@ impl ShellApp for Viewer {
         };
         if self.probe.is_some() && self.settled_once {
             return FrameRequest::Redraw;
+        }
+        if autoscroll {
+            return FrameRequest::RedrawAfter(Duration::from_millis(16));
         }
         match repaint {
             Some(d) if d.is_zero() => FrameRequest::Redraw,
@@ -1965,5 +2099,180 @@ mod tests {
         ui_frames(&mut v, 2);
         let layers = v.ui_model(1.0).document.unwrap().layers;
         assert!(layers.iter().any(|l| !l.visible), "{layers:?}");
+    }
+
+    // ---- Tools and undo, end to end (XARA-US-0029, XARA-US-0030) --------
+
+    /// Adds one 100 pt square at (100 pt, 100 pt) to the active layer.
+    #[derive(Debug)]
+    struct AddSquare;
+
+    impl xarast_doc::Command for AddSquare {
+        fn label(&self) -> &'static str {
+            "Fixture"
+        }
+        fn run(&self, tx: &mut xarast_doc::Tx<'_>) -> Result<(), xarast_doc::EditError> {
+            let spread = tx.doc().active_spread();
+            let layer = tx.doc().active_layer(spread).expect("a layer");
+            let n = tx.create(xarast_doc::NodeKind::Shape(Box::new(
+                xarast_doc::ShapeNode {
+                    shape: xarast_doc::ShapeKind::Rect,
+                    origin: xarast_geom::Point::raw(100_000, 100_000),
+                    major: xarast_geom::Vector::raw(100_000, 0),
+                    minor: xarast_geom::Vector::raw(0, 100_000),
+                },
+            )))?;
+            tx.attach(n, layer, xarast_doc::Attach::LastChild)
+        }
+    }
+
+    /// A live viewer whose document holds one square, the history empty.
+    fn viewer_with_square() -> (Viewer, xarast_doc::NodeId) {
+        let mut v = live_viewer();
+        let s = v.app.active_mut().unwrap();
+        s.dispatch(&AddSquare).expect("fixture");
+        s.bus.history_mut().clear(&mut s.doc);
+        let n = xarast_app::edit::selectable_objects(&s.doc).next().unwrap();
+        ui_frames(&mut v, 1);
+        (v, n)
+    }
+
+    /// A document point in window pixels.
+    fn window_at(v: &Viewer, x: i32, y: i32) -> (f64, f64) {
+        let s = v.app.active().unwrap();
+        let d = s.viewport.doc_to_device(xarast_geom::Point::raw(x, y));
+        let c = v.adapter.canvas();
+        (f64::from(c.x) + d.x, f64::from(c.y) + d.y)
+    }
+
+    fn square_origin(v: &Viewer, n: xarast_doc::NodeId) -> xarast_geom::Point {
+        match v.app.active().unwrap().doc.tree.kind(n) {
+            Some(xarast_doc::NodeKind::Shape(s)) => s.origin,
+            _ => panic!("not a shape"),
+        }
+    }
+
+    fn tool(v: &Viewer) -> xarast_app::ToolId {
+        v.app.active().unwrap().tools().current()
+    }
+
+    #[test]
+    fn the_palette_and_the_tool_keys_choose_the_same_tools() {
+        let (mut v, _) = viewer_with_square();
+        assert_eq!(tool(&v), xarast_app::ToolId::Selector);
+        // Shift+F8: the push tool, by key.
+        press(
+            &mut v,
+            Key::Named(NamedKey::Function(8)),
+            Modifiers::NONE.with_shift(),
+        );
+        assert_eq!(tool(&v), xarast_app::ToolId::Pan);
+        // The palette button, as a screen reader clicks it.
+        activate(&mut v, "Rectangle");
+        assert_eq!(tool(&v), xarast_app::ToolId::Rectangle);
+        let infobar = v.ui_model(1.0).editing.unwrap().infobar;
+        assert!(format!("{infobar:?}").contains("coming soon"));
+        press(&mut v, Key::Named(NamedKey::Function(2)), Modifiers::NONE);
+        assert_eq!(tool(&v), xarast_app::ToolId::Selector);
+        // A tool of a later phase is published, greyed out, and inert.
+        activate(&mut v, "Text");
+        assert_eq!(tool(&v), xarast_app::ToolId::Selector);
+    }
+
+    #[test]
+    fn select_drag_undo_and_redo_in_the_whole_viewer() {
+        use crate::input::event::{PointerButton, PointerPhase};
+        let (mut v, n) = viewer_with_square();
+        let before = square_origin(&v, n);
+
+        let (x, y) = window_at(&v, 150_000, 150_000);
+        click(&mut v, x, y);
+        assert_eq!(
+            v.app.active().unwrap().edit.selection().collect::<Vec<_>>(),
+            vec![n]
+        );
+        // The selection's box and handles are drawn over the canvas.
+        assert!(overlay_items(v.app.active().unwrap()).len() >= 9);
+
+        // Drag it 60 px right, 30 px down, in small steps.
+        send(
+            &mut v,
+            &[pointer(PointerPhase::Pressed(PointerButton::Primary), x, y)],
+        );
+        for i in 1..=30 {
+            let t = f64::from(i);
+            send(&mut v, &[pointer(PointerPhase::Moved, x + 2.0 * t, y + t)]);
+        }
+        ui_frames(&mut v, 1);
+        assert_eq!(square_origin(&v, n), before, "nothing commits mid-drag");
+        assert!(v.scene_stale, "the preview owes a scene");
+        send(
+            &mut v,
+            &[pointer(
+                PointerPhase::Released(PointerButton::Primary),
+                x + 60.0,
+                y + 30.0,
+            )],
+        );
+        ui_frames(&mut v, 1);
+        let moved = square_origin(&v, n);
+        assert!(moved.x > before.x && moved.y < before.y, "{moved:?}");
+        let editing = v.ui_model(1.0).editing.unwrap();
+        assert_eq!(editing.undo.as_deref(), Some("Move"));
+
+        // Edit › Undo Move, through the menu.
+        activate(&mut v, "Edit");
+        activate(&mut v, "Undo Move");
+        assert_eq!(square_origin(&v, n), before);
+        // Ctrl+Shift+Z redoes (the layout reports the capital).
+        press(
+            &mut v,
+            Key::char('Z'),
+            Modifiers::NONE.with_ctrl().with_shift(),
+        );
+        assert_eq!(square_origin(&v, n), moved);
+        // Ctrl+Z undoes, Ctrl+Y redoes.
+        press(&mut v, Key::char('z'), Modifiers::NONE.with_ctrl());
+        assert_eq!(square_origin(&v, n), before);
+        press(&mut v, Key::char('y'), Modifiers::NONE.with_ctrl());
+        assert_eq!(square_origin(&v, n), moved);
+    }
+
+    #[test]
+    fn escape_mid_drag_cancels_even_though_shortcuts_are_off_in_a_drag() {
+        use crate::input::event::{PointerButton, PointerPhase};
+        let (mut v, n) = viewer_with_square();
+        let before = square_origin(&v, n);
+        let (x, y) = window_at(&v, 150_000, 150_000);
+        send(&mut v, &[pointer(PointerPhase::Moved, x, y)]);
+        send(
+            &mut v,
+            &[pointer(PointerPhase::Pressed(PointerButton::Primary), x, y)],
+        );
+        send(&mut v, &[pointer(PointerPhase::Moved, x + 80.0, y)]);
+        assert!(!v.app.active().unwrap().preview().is_empty());
+        press(&mut v, Key::Named(NamedKey::Escape), Modifiers::NONE);
+        assert!(v.app.active().unwrap().preview().is_empty());
+        send(
+            &mut v,
+            &[pointer(
+                PointerPhase::Released(PointerButton::Primary),
+                x + 80.0,
+                y,
+            )],
+        );
+        assert_eq!(square_origin(&v, n), before);
+        assert_eq!(v.app.active().unwrap().bus.history().len(), 0);
+    }
+
+    #[test]
+    fn delete_removes_the_selection_and_undo_brings_it_back() {
+        let (mut v, n) = viewer_with_square();
+        let (x, y) = window_at(&v, 150_000, 150_000);
+        click(&mut v, x, y);
+        press(&mut v, Key::Named(NamedKey::Delete), Modifiers::NONE);
+        assert!(!v.app.active().unwrap().doc.tree.is_reachable(n));
+        press(&mut v, Key::char('z'), Modifiers::NONE.with_ctrl());
+        assert!(v.app.active().unwrap().doc.tree.is_reachable(n));
     }
 }
