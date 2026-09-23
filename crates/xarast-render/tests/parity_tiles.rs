@@ -3,8 +3,9 @@
 //!
 //! The tiles are real CPU renders of the 120-scene feature corpus, cut
 //! into 32 × 32 tiles through [`TileGrid::tile_view`]. Each case is then
-//! composited under six view changes (identity, whole-pixel pan,
-//! fractional pan, zoom in, zoom out, a missing tile) by
+//! composited eight ways (identity, whole-pixel pan, fractional pan, zoom
+//! in ×1.5 and ×3.7, zoom out ×0.6, a missing tile, and a partial tile at
+//! a texel offset next to a tile uploaded in two halves) by
 //! [`compose_cpu`] and by [`GpuTileCache`], and the two must agree **byte
 //! for byte**: the texel rule is one subtraction and one multiplication in
 //! `f32` on both sides and the shader reads with `textureLoad`, so there
@@ -26,7 +27,7 @@ use xarast_render::corpus::all_cases;
 use xarast_render::golden::compare;
 use xarast_render::{
     CpuBackend, CpuConfig, DeviceRect, DirtyRect, DisplayList, GpuTileCache, GpuTileCacheConfig,
-    Surface, TileGrid, TileKey, TilePlacement, Transform2D, compose_cpu,
+    Surface, TileGrid, TileKey, TilePlacement, Transform2D, compose_cpu, whole_tile,
 };
 
 const TILE: u32 = 32;
@@ -151,10 +152,28 @@ fn the_gpu_tile_composite_equals_the_cpu_reference_byte_for_byte() {
         for (name, t) in &cases {
             cache.clear();
             for (key, s) in &t.tiles {
-                cache.upload(*key, s, s.bounds()).expect("a tile uploads");
+                cache
+                    .upload(*key, s, s.bounds(), [0, 0])
+                    .expect("a tile uploads");
             }
             let mut maps = mappings();
             maps.push(("missing_tile", Transform2D::IDENTITY));
+            maps.push((
+                "partial_and_split",
+                Transform2D::scale(1.5).then(Transform2D::translate(-20.25, -11.5)),
+            ));
+            let hole = TileKey {
+                level: 0,
+                tx: 1,
+                ty: 1,
+            };
+            let corner = TileKey {
+                level: 0,
+                tx: 0,
+                ty: 0,
+            };
+            // A partial tile, valid on no edge of the tile.
+            let piece = [5, 3, 25, 20];
             for (what, m) in maps {
                 let view = t.level.then(m);
                 let mut keys: Vec<TileKey> = t.tiles.keys().copied().collect();
@@ -162,17 +181,39 @@ fn the_gpu_tile_composite_equals_the_cpu_reference_byte_for_byte() {
                 let placements: Vec<TilePlacement> = keys
                     .iter()
                     .map(|k| {
-                        grid.placement(*k, t.level, view, [TILE, TILE])
+                        let valid = if what == "partial_and_split" && *k == hole {
+                            piece
+                        } else {
+                            whole_tile(TILE)
+                        };
+                        grid.placement(*k, t.level, view, valid)
                             .expect("axis-aligned")
                     })
                     .collect();
-                let hole = TileKey {
-                    level: 0,
-                    tx: 1,
-                    ty: 1,
-                };
                 if what == "missing_tile" {
                     cache.invalidate(&hole);
+                }
+                if what == "partial_and_split" {
+                    // The hole comes back as a piece at a texel offset; the
+                    // corner tile is uploaded afresh in two halves.
+                    let src = &t.tiles[&hole];
+                    let r = DeviceRect::new(5, 3, 25, 20);
+                    cache.upload(hole, src, r, [5, 3]).expect("a piece");
+                    let src = &t.tiles[&corner];
+                    let half = (TILE / 2).cast_signed();
+                    let full = TILE.cast_signed();
+                    cache.invalidate(&corner);
+                    cache
+                        .upload(corner, src, DeviceRect::new(0, 0, full, half), [0, 0])
+                        .expect("top half");
+                    cache
+                        .upload(
+                            corner,
+                            src,
+                            DeviceRect::new(0, half, full, full),
+                            [0, TILE / 2],
+                        )
+                        .expect("bottom half");
                 }
                 let mut cpu = Surface::new(tw, th);
                 compose_cpu(&mut cpu, BACKDROP, &placements, |k| {
@@ -225,7 +266,7 @@ fn a_frame_assembled_from_tiles_differs_from_the_whole_frame_in_few_pixels() {
             .tiles
             .keys()
             .map(|k| {
-                grid.placement(*k, t.level, t.level, [TILE, TILE])
+                grid.placement(*k, t.level, t.level, whole_tile(TILE))
                     .expect("identity")
             })
             .collect();
@@ -264,5 +305,52 @@ fn a_frame_assembled_from_tiles_differs_from_the_whole_frame_in_few_pixels() {
         worst.0,
         worst.1,
         worst.2
+    );
+}
+
+#[test]
+fn a_full_cache_evicts_the_least_recently_used_tile() {
+    let Some((_, device, queue)) = devices().into_iter().next() else {
+        eprintln!("skipping: no adapter");
+        return;
+    };
+    let mut cache = GpuTileCache::new(
+        device.clone(),
+        queue,
+        GpuTileCacheConfig {
+            tile_size: TILE,
+            capacity: 2,
+        },
+    )
+    .expect("a tile cache");
+    let s = Surface::filled(TILE, TILE, [1, 2, 3, 255]);
+    let key = |tx| TileKey {
+        level: 0,
+        tx,
+        ty: 0,
+    };
+    cache.upload(key(0), &s, s.bounds(), [0, 0]).expect("0");
+    cache.upload(key(1), &s, s.bounds(), [0, 0]).expect("1");
+    // Drawing tile 0 makes tile 1 the least recently used.
+    let target = create_target(&device, TILE, TILE);
+    let p = TileGrid { tile_size: TILE }
+        .placement(
+            key(0),
+            Transform2D::IDENTITY,
+            Transform2D::IDENTITY,
+            whole_tile(TILE),
+        )
+        .expect("identity");
+    let stats = cache.compose(&target, &[p], [0; 4]).expect("composes");
+    assert_eq!((stats.drawn, stats.missing), (1, 0));
+    cache.upload(key(2), &s, s.bounds(), [0, 0]).expect("2");
+    assert!(cache.contains(&key(0)) && cache.contains(&key(2)));
+    assert!(!cache.contains(&key(1)));
+    assert_eq!(cache.len(), 2);
+    // A piece that does not fit at its offset is refused, not clipped.
+    assert!(
+        cache
+            .upload(key(3), &s, DeviceRect::new(0, 0, 8, 8), [TILE - 4, 0])
+            .is_err()
     );
 }

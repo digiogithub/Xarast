@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::BackendError;
-use crate::compose::{TileKey, TilePlacement};
+use crate::compose::{TexelRect, TileKey, TilePlacement, texel_intersection, texel_rect_is_empty};
 use crate::surface::{DeviceRect, Surface};
 use crate::tiling::GPU_TILE_SIZE;
 
@@ -61,13 +61,14 @@ pub struct ComposeStats {
 #[derive(Debug, Clone, Copy)]
 struct Slot {
     layer: u32,
-    valid: [u32; 2],
+    valid: TexelRect,
     used: u64,
 }
 
 /// Bytes per instance: origin, inverse scale, rectangle (8 × f32), then
-/// layer and valid size (4 × u32).
-const INSTANCE_BYTES: u64 = 48;
+/// the layer (4 × u32, three unused) and the valid texel rectangle
+/// (4 × u32).
+const INSTANCE_BYTES: u64 = 64;
 
 const SHADER: &str = r"
 struct Globals { size: vec2<f32>, pad: vec2<f32> };
@@ -79,6 +80,7 @@ struct Inst {
     @location(1) inv_scale: vec2<f32>,
     @location(2) rect: vec4<f32>,
     @location(3) info: vec4<u32>,
+    @location(4) valid: vec4<u32>,
 };
 
 struct VOut {
@@ -86,6 +88,7 @@ struct VOut {
     @location(0) @interpolate(flat) origin: vec2<f32>,
     @location(1) @interpolate(flat) inv_scale: vec2<f32>,
     @location(2) @interpolate(flat) info: vec4<u32>,
+    @location(3) @interpolate(flat) valid: vec4<u32>,
 };
 
 @vertex
@@ -101,6 +104,7 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VOut {
     out.origin = inst.origin;
     out.inv_scale = inst.inv_scale;
     out.info = inst.info;
+    out.valid = inst.valid;
     return out;
 }
 
@@ -110,8 +114,9 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VOut {
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let s = floor((in.pos.xy - in.origin) * in.inv_scale);
-    let n = vec2<f32>(f32(in.info.y), f32(in.info.z));
-    if (any(s < vec2<f32>(0.0)) || any(s >= n)) {
+    let lo = vec2<f32>(f32(in.valid.x), f32(in.valid.y));
+    let hi = vec2<f32>(f32(in.valid.z), f32(in.valid.w));
+    if (any(s < lo) || any(s >= hi)) {
         discard;
     }
     return textureLoad(atlas, vec2<i32>(s), i32(in.info.x), 0);
@@ -236,7 +241,7 @@ impl GpuTileCache {
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32x4
+            0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Uint32x4, 4 => Uint32x4
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("xarast tiles"),
@@ -330,27 +335,36 @@ impl GpuTileCache {
         self.free = (0..self.cfg.capacity).rev().collect();
     }
 
-    /// Uploads `rect` of `src` as the pixels of tile `key`, replacing any
-    /// it had. The rectangle becomes the tile's valid area, anchored at its
-    /// top-left texel. When the cache is full the least recently used tile
-    /// is evicted, so a caller must not upload more tiles between two
-    /// composites than [`GpuTileCacheConfig::capacity`].
+    /// Uploads `rect` of `src` into tile `key` with its top-left pixel at
+    /// texel `at`.
+    ///
+    /// A tile new to the cache gets exactly that rectangle as its valid
+    /// area. A resident tile's valid area grows to the bounding box of the
+    /// old one and the new one, so pieces of one tile must be uploaded so
+    /// that their bounding box is covered: a pan's strip completing a
+    /// partial tile is, two disjoint corners are not. To start a tile
+    /// afresh, [`GpuTileCache::invalidate`] it first.
+    ///
+    /// When the cache is full the least recently used tile is evicted, so
+    /// a caller must not upload more tiles between two composites than
+    /// [`GpuTileCacheConfig::capacity`].
     ///
     /// # Errors
     ///
-    /// [`BackendError::SurfaceTooLarge`] when `rect` is larger than a tile
-    /// or not inside `src`.
+    /// [`BackendError::SurfaceTooLarge`] when `rect` is empty, not inside
+    /// `src`, or does not fit in the tile at `at`.
     pub fn upload(
         &mut self,
         key: TileKey,
         src: &Surface,
         rect: DeviceRect,
+        at: [u32; 2],
     ) -> Result<(), BackendError> {
         let ts = self.cfg.tile_size;
         if rect.is_empty()
             || rect.intersection(src.bounds()) != rect
-            || rect.width() > ts
-            || rect.height() > ts
+            || u64::from(at[0]) + u64::from(rect.width()) > u64::from(ts)
+            || u64::from(at[1]) + u64::from(rect.height()) > u64::from(ts)
         {
             return Err(BackendError::SurfaceTooLarge {
                 width: rect.width(),
@@ -358,11 +372,20 @@ impl GpuTileCache {
                 max: ts,
             });
         }
-        let layer = match self.slots.get(&key) {
-            Some(s) => s.layer,
+        let piece = [at[0], at[1], at[0] + rect.width(), at[1] + rect.height()];
+        let (layer, valid) = match self.slots.get(&key) {
+            Some(s) => (
+                s.layer,
+                [
+                    s.valid[0].min(piece[0]),
+                    s.valid[1].min(piece[1]),
+                    s.valid[2].max(piece[2]),
+                    s.valid[3].max(piece[3]),
+                ],
+            ),
             None => match self.free.pop() {
-                Some(l) => l,
-                None => self.evict_lru(),
+                Some(l) => (l, piece),
+                None => (self.evict_lru(), piece),
             },
         };
         let stride = src.width() as usize * 4;
@@ -373,8 +396,8 @@ impl GpuTileCache {
                 texture: &self.atlas,
                 mip_level: 0,
                 origin: wgpu::Origin3d {
-                    x: 0,
-                    y: 0,
+                    x: at[0],
+                    y: at[1],
                     z: layer,
                 },
                 aspect: wgpu::TextureAspect::All,
@@ -396,7 +419,7 @@ impl GpuTileCache {
             key,
             Slot {
                 layer,
-                valid: [rect.width(), rect.height()],
+                valid,
                 used: self.clock,
             },
         );
@@ -464,11 +487,11 @@ impl GpuTileCache {
                 continue;
             };
             slot.used = self.clock;
-            let valid = [p.valid[0].min(slot.valid[0]), p.valid[1].min(slot.valid[1])];
+            let valid = texel_intersection(p.valid, slot.valid);
             let r = TilePlacement { valid, ..*p }
                 .target_rect()
                 .intersection(bounds);
-            if r.is_empty() || valid[0] == 0 || valid[1] == 0 {
+            if r.is_empty() || texel_rect_is_empty(valid) {
                 continue;
             }
             stats.drawn += 1;
@@ -479,7 +502,10 @@ impl GpuTileCache {
                 // f32-ok: target-local pixel bounds, at most the texture limit.
                 bytes.extend_from_slice(&(v as f32).to_le_bytes());
             }
-            for v in [slot.layer, valid[0], valid[1], 0] {
+            for v in [slot.layer, 0, 0, 0] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in valid {
                 bytes.extend_from_slice(&v.to_le_bytes());
             }
         }
@@ -546,8 +572,9 @@ impl GpuTileCache {
     }
 }
 
-/// Creates an `Rgba8Unorm` texture the tile cache can composite into and
-/// that can be read back or sampled.
+/// Creates an `Rgba8Unorm` texture the tile cache can composite into, that
+/// can be read back or sampled, and that whole frames can be written into
+/// (the path the software tier and the benches' baseline take).
 #[must_use]
 pub fn create_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
@@ -563,7 +590,8 @@ pub fn create_target(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         format: TARGET_FORMAT,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC,
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
 }

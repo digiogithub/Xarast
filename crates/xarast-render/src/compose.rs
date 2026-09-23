@@ -42,6 +42,33 @@ pub struct TileKey {
     pub ty: i32,
 }
 
+/// A rectangle of texels inside a tile, `[x0, y0, x1, y1]`, half open.
+pub type TexelRect = [u32; 4];
+
+/// The texel rectangle of a whole tile.
+#[must_use]
+pub const fn whole_tile(tile_size: u32) -> TexelRect {
+    [0, 0, tile_size, tile_size]
+}
+
+/// The intersection of two texel rectangles, empty (`x1 <= x0` or
+/// `y1 <= y0`) when they do not meet.
+#[must_use]
+pub fn texel_intersection(a: TexelRect, b: TexelRect) -> TexelRect {
+    [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ]
+}
+
+/// Whether a texel rectangle holds no texel.
+#[must_use]
+pub const fn texel_rect_is_empty(r: TexelRect) -> bool {
+    r[2] <= r[0] || r[3] <= r[1]
+}
+
 /// Where one tile's texels land in a target.
 ///
 /// Texel `(u, v)` of the tile covers the target region starting at
@@ -57,9 +84,10 @@ pub struct TilePlacement {
     /// Texels per target pixel, per axis: 1 at the level the tile was
     /// rasterised at, below 1 when zoomed in, above 1 when zoomed out.
     pub inv_scale: [f32; 2],
-    /// How many texels of the tile hold pixels. Tiles at the edge of a
-    /// rasterised area are partial; the rest of the tile is never read.
-    pub valid: [u32; 2],
+    /// The texels of the tile that hold pixels. A tile at the edge of a
+    /// rasterised area is partial, on any side; the rest of it is never
+    /// read, and the target shows whatever is under it.
+    pub valid: TexelRect,
 }
 
 impl TilePlacement {
@@ -70,13 +98,14 @@ impl TilePlacement {
     /// large enough, never exact.
     #[must_use]
     pub fn target_rect(&self) -> DeviceRect {
-        let axis = |o: f32, inv: f32, n: u32| -> (i32, i32) {
-            if !(o.is_finite() && inv.is_finite() && inv > 0.0) {
+        let axis = |o: f32, inv: f32, t0: u32, t1: u32| -> (i32, i32) {
+            if !(o.is_finite() && inv.is_finite() && inv > 0.0) || t1 <= t0 {
                 return (0, 0);
             }
             let o = f64::from(o);
-            let end = o + f64::from(n) / f64::from(inv);
-            let lo = (o - 1.0)
+            let start = o + f64::from(t0) / f64::from(inv);
+            let end = o + f64::from(t1) / f64::from(inv);
+            let lo = (start - 1.0)
                 .floor()
                 .clamp(f64::from(i32::MIN), f64::from(i32::MAX));
             let hi = (end + 1.0)
@@ -86,8 +115,9 @@ impl TilePlacement {
             #[allow(clippy::cast_possible_truncation, reason = "clamped and integral")]
             (lo as i32, hi as i32)
         };
-        let (x0, x1) = axis(self.origin[0], self.inv_scale[0], self.valid[0]);
-        let (y0, y1) = axis(self.origin[1], self.inv_scale[1], self.valid[1]);
+        let v = self.valid;
+        let (x0, x1) = axis(self.origin[0], self.inv_scale[0], v[0], v[2]);
+        let (y0, y1) = axis(self.origin[1], self.inv_scale[1], v[1], v[3]);
         DeviceRect::new(x0, y0, x1, y1)
     }
 }
@@ -112,8 +142,9 @@ pub fn source_texel(p: i32, origin: f32, inv_scale: f32) -> f32 {
 ///
 /// The target is first filled with `backdrop`, then every placement whose
 /// tile `fetch` returns is drawn in order, later placements over earlier
-/// ones. A tile surface must be at least `valid` in size; a smaller one is
-/// read only where it has pixels. Returns how many placements were drawn.
+/// ones. A tile surface is indexed by texel, so it is normally
+/// `tile_size`² ; texels outside it are treated as not valid. Returns how
+/// many placements were drawn.
 pub fn compose_cpu<'a>(
     target: &mut Surface,
     backdrop: [u8; 4],
@@ -126,30 +157,31 @@ pub fn compose_cpu<'a>(
     let mut drawn = 0;
     for p in placements {
         let Some(tile) = fetch(&p.key) else { continue };
-        let vw = p.valid[0].min(tile.width());
-        let vh = p.valid[1].min(tile.height());
+        let v = texel_intersection(p.valid, [0, 0, tile.width(), tile.height()]);
         let r = p.target_rect().intersection(bounds);
-        if r.is_empty() || vw == 0 || vh == 0 {
+        if r.is_empty() || texel_rect_is_empty(v) {
             continue;
         }
         drawn += 1;
-        let pick = |t: f32, n: u32| -> Option<usize> {
+        let pick = |t: f32, lo: u32, hi: u32| -> Option<usize> {
+            // f32-ok: texel bounds, at most a tile edge.
+            let (lo, hi) = (lo as f32, hi as f32);
             // `t` is integral; the comparison keeps the cast in range.
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                reason = "0 <= t < n"
+                reason = "lo <= t < hi"
             )]
-            (t >= 0.0 && t < n as f32).then_some(t as usize)
+            (t >= lo && t < hi).then_some(t as usize)
         };
         let cols: Vec<Option<usize>> = (r.x0..r.x1)
-            .map(|x| pick(source_texel(x, p.origin[0], p.inv_scale[0]), vw))
+            .map(|x| pick(source_texel(x, p.origin[0], p.inv_scale[0]), v[0], v[2]))
             .collect();
         let tstride = tile.width() as usize * 4;
         let src = tile.data();
         let dst = target.data_mut();
         for y in r.y0..r.y1 {
-            let Some(sy) = pick(source_texel(y, p.origin[1], p.inv_scale[1]), vh) else {
+            let Some(sy) = pick(source_texel(y, p.origin[1], p.inv_scale[1]), v[1], v[3]) else {
                 continue;
             };
             let srow = &src[sy * tstride..(sy + 1) * tstride];
@@ -241,7 +273,7 @@ impl TileGrid {
         key: TileKey,
         level: Transform2D,
         view: Transform2D,
-        valid: [u32; 2],
+        valid: TexelRect,
     ) -> Option<TilePlacement> {
         let m = level.invert()?.then(view).to_affine();
         let [sx, b, c, sy, tx, ty] = m.as_coeffs();
@@ -288,7 +320,7 @@ mod tests {
             key: TileKey::default_key(),
             origin: [0.0, 0.0],
             inv_scale: [1.0, 1.0],
-            valid: [16, 16],
+            valid: [0, 0, 16, 16],
         };
         let mut out = Surface::new(16, 16);
         assert_eq!(compose_cpu(&mut out, [0; 4], &[p], |_| Some(&t)), 1);
@@ -302,7 +334,7 @@ mod tests {
             key: TileKey::default_key(),
             origin: [3.0, -2.0],
             inv_scale: [1.0, 1.0],
-            valid: [8, 8],
+            valid: [0, 0, 8, 8],
         };
         let mut out = Surface::new(12, 12);
         compose_cpu(&mut out, [9, 9, 9, 255], &[p], |_| Some(&t));
@@ -319,13 +351,16 @@ mod tests {
             key: TileKey::default_key(),
             origin: [0.0, 0.0],
             inv_scale: [1.0, 1.0],
-            valid: [5, 3],
+            valid: [2, 1, 5, 3],
         };
         let mut out = Surface::new(8, 8);
         compose_cpu(&mut out, [0, 0, 0, 255], &[p], |_| Some(&t));
         assert_eq!(out.pixel(4, 2), t.pixel(4, 2));
+        assert_eq!(out.pixel(2, 1), t.pixel(2, 1));
         assert_eq!(out.pixel(5, 2), Some([0, 0, 0, 255]));
         assert_eq!(out.pixel(4, 3), Some([0, 0, 0, 255]));
+        assert_eq!(out.pixel(1, 2), Some([0, 0, 0, 255]));
+        assert_eq!(out.pixel(3, 0), Some([0, 0, 0, 255]));
     }
 
     #[test]
@@ -347,17 +382,21 @@ mod tests {
             ty: -1,
         };
         let pan = level.then(Transform2D::translate(-100.0, 40.0));
-        let p = g.placement(key, level, pan, [256, 256]).expect("a pan");
+        let p = g
+            .placement(key, level, pan, whole_tile(256))
+            .expect("a pan");
         assert_eq!(p.origin, [156.0, -216.0]);
         assert_eq!(p.inv_scale, [1.0, 1.0]);
 
         let zoom = level.then(Transform2D::scale(2.0));
-        let z = g.placement(key, level, zoom, [256, 256]).expect("a zoom");
+        let z = g
+            .placement(key, level, zoom, whole_tile(256))
+            .expect("a zoom");
         assert_eq!(z.origin, [512.0, -512.0]);
         assert_eq!(z.inv_scale, [0.5, 0.5]);
 
         let rot = level.then(Transform2D::rotate(0.1));
-        assert!(g.placement(key, level, rot, [256, 256]).is_none());
+        assert!(g.placement(key, level, rot, whole_tile(256)).is_none());
     }
 
     #[test]

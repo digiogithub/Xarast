@@ -50,3 +50,9 @@ harness = false
 [[bench]]
 name = "spike"
 harness = false
+
+# XARA-US-0011: pan and Draft zoom through the GPU tile cache, per adapter.
+[[bench]]
+name = "tiles"
+harness = false
+required-features = ["gpu"]

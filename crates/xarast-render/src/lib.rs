@@ -84,7 +84,10 @@ pub use blend::{
 pub use cache::{
     AdmissionPolicy, CacheKey, CacheStats, CachedSurface, RenderCache, scale_step, step_scale,
 };
-pub use compose::{TileGrid, TileKey, TilePlacement, compose_cpu, source_texel};
+pub use compose::{
+    TexelRect, TileGrid, TileKey, TilePlacement, compose_cpu, source_texel, texel_intersection,
+    texel_rect_is_empty, whole_tile,
+};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
