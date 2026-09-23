@@ -10,6 +10,7 @@
 #   OUTPUT_DIR    where the .AppImage lands (default: <repo>/dist)
 #   SKIP_BUILD    set to 1 to package an already-built binary
 #   UPDATE_INFO   zsync update information embedded in the image
+#   SIZE_LIMIT_MIB  fail above this many MiB (default: 80)
 #
 set -euo pipefail
 
@@ -139,8 +140,10 @@ chmod +x "$image"
 size_mib=$(( $(stat -c%s "$image") / 1024 / 1024 ))
 log "Built $image (${size_mib} MiB)"
 
-# Phase 0 gate. An AppImage that quietly grows is an AppImage nobody downloads.
-limit="${SIZE_LIMIT_MIB:-35}"
+# Size gate. An AppImage that quietly grows is an AppImage nobody downloads.
+# 35 MiB was the phase 0 budget; 80 MiB is the phase 5 one, with the whole UI
+# stack linked. Measured at 7.7 MiB on 2026-09-23 (docs/memory/packaging.md).
+limit="${SIZE_LIMIT_MIB:-80}"
 if (( size_mib > limit )); then
   echo "AppImage is ${size_mib} MiB, over the ${limit} MiB budget" >&2
   exit 1
