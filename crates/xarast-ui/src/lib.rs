@@ -42,6 +42,7 @@
 pub mod a11y;
 pub mod canvas;
 pub mod density;
+pub mod dialogs;
 pub mod grid;
 pub mod guides;
 pub mod menus;

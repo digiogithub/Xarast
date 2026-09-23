@@ -192,6 +192,9 @@ impl Workspace {
 
         self.menu.windows(ctx, &tokens);
         self.menu.align_window(ctx, model, &mut out);
+        if let Some(p) = &model.prompt {
+            crate::dialogs::prompt(ctx, p, &tokens, &mut out);
+        }
 
         WorkspaceOutput {
             commands: out.drain(),
