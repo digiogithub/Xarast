@@ -163,12 +163,15 @@ pub fn render_with_fonts(
         None => crate::walker::SceneWalker::new(),
     };
     let mut scene = xarast_render::Scene::new();
-    let scene_stats = walker.rebuild(
+    // The live preview too: a render mid-gesture shows what the window
+    // shows. With no gesture in flight it is empty and changes nothing.
+    let scene_stats = walker.rebuild_previewed(
         &session.doc,
         &session.edit,
         &view,
         opts.quality,
         None,
+        session.preview(),
         &mut scene,
     )?;
 

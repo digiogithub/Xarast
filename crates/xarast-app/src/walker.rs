@@ -276,6 +276,13 @@ impl SceneWalker {
         let dirty = if preview.is_empty() { dirty } else { None };
         let moved = preview.transformed_set();
         let hidden: std::collections::HashSet<NodeId> = preview.hidden.iter().copied().collect();
+        // Attribute overrides: the value and a fingerprint of it, so a
+        // previewed node's content hash changes with every drag frame.
+        let overrides: HashMap<NodeId, (Arc<AttrValue>, u64)> = preview
+            .attrs
+            .iter()
+            .map(|(n, v)| (*n, (Arc::new(v.clone()), value_fingerprint(v))))
+            .collect();
         let preview_xf = preview
             .transform
             .as_ref()
@@ -315,8 +322,27 @@ impl SceneWalker {
                     };
                     match kind {
                         NodeKind::Attr(a) => {
-                            attrs.push(self.attr_value(node, a));
-                            self.scope = mix64(self.scope, node_version(doc, node));
+                            // A previewed node's own attribute of the
+                            // overridden slot gives way to the preview.
+                            let over = if overrides.is_empty() {
+                                None
+                            } else {
+                                doc.tree
+                                    .links(node)
+                                    .parent
+                                    .and_then(|p| overrides.get(&p))
+                                    .filter(|(v, _)| v.slot() == a.value.slot())
+                            };
+                            match over {
+                                Some((v, fp)) => {
+                                    attrs.push(Arc::clone(v));
+                                    self.scope = mix64(self.scope, *fp);
+                                }
+                                None => {
+                                    attrs.push(self.attr_value(node, a));
+                                    self.scope = mix64(self.scope, node_version(doc, node));
+                                }
+                            }
                             continue;
                         }
                         NodeKind::Opaque(_) | NodeKind::Guideline(_) => {
@@ -360,7 +386,20 @@ impl SceneWalker {
                             b.pop_group();
                         }
                     } else if leaf {
+                        let over = overrides.get(&node);
+                        if let Some((v, fp)) = over {
+                            attrs.push_scope();
+                            scopes.push(self.scope);
+                            attrs.push(Arc::clone(v));
+                            self.scope = mix64(self.scope, *fp);
+                        }
                         self.paint(doc, edit, node, &attrs, quality, &mut b);
+                        if over.is_some() {
+                            attrs.pop_scope();
+                            if let Some(fp) = scopes.pop() {
+                                self.scope = fp;
+                            }
+                        }
                         if previewed && preview_xf.is_some() {
                             b.pop_group();
                         }
@@ -369,6 +408,13 @@ impl SceneWalker {
                 WalkEvent::EnterScope { parent } => {
                     attrs.push_scope();
                     scopes.push(self.scope);
+                    // The override stands first, where the command would
+                    // add the attribute; an own attribute of the slot is
+                    // replaced at its visit.
+                    if let Some((v, fp)) = overrides.get(&parent) {
+                        attrs.push(Arc::clone(v));
+                        self.scope = mix64(self.scope, *fp);
+                    }
                     frames.push(self.open(doc, parent, &attrs, &mut b));
                 }
                 WalkEvent::LeaveScope { parent } => {
@@ -1043,6 +1089,15 @@ fn node_version(doc: &Document, node: NodeId) -> u64 {
 /// Folds `v` into `h`: order-dependent, and well mixed (the SplitMix64
 /// finaliser), so that two scopes differing in one attribute's revision
 /// differ in about half their bits.
+/// A fingerprint of a previewed attribute value. Only computed for the
+/// few nodes a gesture previews, once per scene rebuild.
+fn value_fingerprint(v: &AttrValue) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    format!("{v:?}").hash(&mut h);
+    mix64(0x5052_4556_4945_5721, h.finish())
+}
+
 fn mix64(h: u64, v: u64) -> u64 {
     let mut z = h.rotate_left(5) ^ v.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

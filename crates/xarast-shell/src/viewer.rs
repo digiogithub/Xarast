@@ -1413,8 +1413,19 @@ fn overlay_items(s: &Session) -> Vec<xarast_ui::OverlayItem> {
                     HandleShape::Control => HandleKind::Control,
                     HandleShape::Radius => HandleKind::Radius,
                     HandleShape::Snap => HandleKind::Snap,
+                    HandleShape::FillBlob | HandleShape::FillBlobSelected => HandleKind::FillBlob,
+                    HandleShape::FillStop | HandleShape::FillStopSelected => HandleKind::Fill,
                 },
-                active: shape == HandleShape::NodeSelected,
+                active: matches!(
+                    shape,
+                    HandleShape::NodeSelected
+                        | HandleShape::FillBlobSelected
+                        | HandleShape::FillStopSelected
+                ),
+            }),
+            OverlayShape::Arrow { from, to } => out.push(OverlayItem::Arrow {
+                from: (from.x, from.y),
+                to: (to.x, to.y),
             }),
             OverlayShape::Rect { rect, dashed } => out.push(OverlayItem::Rect {
                 bounds: (rect.lo.x, rect.hi.y, rect.hi.x, rect.lo.y),

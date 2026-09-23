@@ -357,6 +357,17 @@ impl InfobarRow {
                             });
                         }
                     }
+                    InfobarItem::Choice {
+                        field,
+                        options,
+                        selected,
+                    } => choice(ui, *field, options, *selected, out),
+                    InfobarItem::Real {
+                        field,
+                        value,
+                        min,
+                        max,
+                    } => real_slider(ui, *field, *value, *min, *max, out),
                     InfobarItem::Note(text) => {
                         ui.label(egui::RichText::new(text).color(tokens.text_muted));
                     }
@@ -487,6 +498,69 @@ pub fn parse_angle(text: &str) -> Option<f64> {
 
 /// A button of the infobar that runs a named command, with the command's
 /// key in its tooltip and its accessible name.
+/// A drop-down list: one option among several.
+fn choice(
+    ui: &mut egui::Ui,
+    field: InfobarField,
+    options: &[&'static str],
+    selected: Option<usize>,
+    out: &mut CommandSink,
+) {
+    ui.label(field.label());
+    let shown = selected
+        .and_then(|i| options.get(i))
+        .copied()
+        .unwrap_or("—");
+    let mut picked = None;
+    let r = egui::ComboBox::from_id_salt(("xarast_infobar", field))
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for (i, o) in options.iter().enumerate() {
+                if ui.selectable_label(selected == Some(i), *o).clicked() {
+                    picked = Some(i);
+                }
+            }
+        });
+    crate::a11y::set_label(
+        ui.ctx(),
+        r.response.id,
+        format!("{}: {shown}", field.description()),
+    );
+    if let Some(i) = picked
+        && Some(i) != selected
+    {
+        out.push(UiCommand::InfobarEdit {
+            field,
+            value: InfobarValue::Choice(i),
+        });
+    }
+}
+
+/// A slider over a real range; disabled when there is no value.
+fn real_slider(
+    ui: &mut egui::Ui,
+    field: InfobarField,
+    value: Option<f64>,
+    min: f64,
+    max: f64,
+    out: &mut CommandSink,
+) {
+    ui.label(field.label());
+    let mut v = value.unwrap_or(min);
+    let r = ui
+        .add_enabled(value.is_some(), egui::Slider::new(&mut v, min..=max))
+        .on_hover_text(field.description());
+    crate::a11y::set_label(ui.ctx(), r.id, format!("{}: {v:.2}", field.description()));
+    if let Some(old) = value
+        && (v - old).abs() > 1e-9
+    {
+        out.push(UiCommand::InfobarEdit {
+            field,
+            value: InfobarValue::Real(v),
+        });
+    }
+}
+
 fn command_button(ui: &mut egui::Ui, command: AppCommand, enabled: bool, out: &mut CommandSink) {
     let label = command.label();
     let tip = match command.primary_shortcut() {
