@@ -159,6 +159,17 @@ invent them.
   clean-room rule: no icon of another program is copied, and any icon
   this crate ever needs is drawn with the painter.
 
+27. **Wayland drops through our own `wl_data_device`** (XARA-T-0042).
+    `winit` 0.30 has no Wayland drag-and-drop. `wayland_dnd` wraps
+    `winit`'s `wl_display` as a foreign display (sctk 0.19 and
+    wayland-client 0.31, the versions `winit` links, `client_system`, so
+    libwayland stays dlopen'ed), binds one data device per seat and runs
+    its queue on a thread of its own blocked in libwayland's read. Only
+    `text/uri-list` is accepted, with action `copy`; the payload is read on
+    a throw-away thread (the source writes when it likes); the main thread
+    turns protocol messages into `DragEvent`s with the scale in force. X11
+    drops still come from `winit`.
+
 ### Invariants that must not be broken
 
 - `egui` appears at `xarast-ui` and above, never below. This crate does
@@ -182,6 +193,23 @@ invent them.
   takes the keyboard in the same frame, or there is nowhere to type.
 
 ### Dead ends (do not retry)
+
+- **`rfd`'s portal backend on Linux.** Every portal failure becomes
+  "cancelled", then it spawns `zenity`; `Failed` was unreachable. Use
+  `ashpd`'s FileChooser (decision 9).
+- **Dispatching the Wayland drag-and-drop queue from `about_to_wait`.**
+  During a drag the compositor holds the pointer, `winit` gets nothing,
+  the loop stays parked, the offer is accepted too late and every drop
+  arrives as a cancelled drag. The queue needs its own thread.
+- **`gsettings` inside `dbus-run-session` without a private
+  `DCONF_PROFILE` and `XDG_CONFIG_HOME` exported *before* the bus
+  starts.** The bus activates `dconf-service` with the caller's
+  environment, and the writes land in the maintainer's real dconf database
+  (it happened once this round; see the XARA-US-0012 comment).
+- **Synthetic input with one mutter RemoteDesktop session per step.** Each
+  session is a new virtual device: the pointer vanishes between steps
+  (cursor changes never show), the first key of each session is swallowed,
+  and keyboard focus follows the device. Keep one session alive.
 
 - **`egui::Checkbox` with an empty label as a compact toggle.** It is
   invisible to AT-SPI. Set the name explicitly.
@@ -250,26 +278,26 @@ invent them.
 be re-opened before v0.1, because a drawing application without stylus
 pressure is not finishable.
 
-The phase document's decision rule is "pass E1–E7 → pin". **E1–E7 are all
-runtime criteria and not one of them can be executed in this
-environment**: there is no Wayland socket, no X11 socket, no GPU adapter,
-no tablet and no `uinput`. Pinning a beta on the strength of evidence that
-does not include running it would be exactly the claim this phase is not
-allowed to make. What *could* be checked was checked, and is recorded
-below so the next attempt starts from facts rather than from the
-changelog.
+The phase document's decision rule is "pass E1–E7 → pin". Phase 5 could
+not run any of them (no compositor, no bus, no GPU). **XARA-US-0012 ran
+them** on the pinned `winit 0.30.13`, on a machine with a GPU, a live COSMIC
+desktop and a tablet, inside an **isolated GNOME 46 session** (recipe
+below) so that nothing touched the maintainer's desktop. They measure what
+0.30 gives us and what the shell had to add; the 0.31 beta itself was still
+not run, so the verdict stands: nothing measured argues for pinning a beta,
+and the one thing that would (stylus axes, E2) belongs to XARA-US-0013.
 
-**E1–E7: what was and was not measured.**
+**E1–E7, measured (XARA-US-0012, 2026-09-23).**
 
-| ID | Criterion | Result |
+| ID | Criterion | Result on `winit` 0.30.13 |
 |---|---|---|
-| E1 | Build and run on GNOME/mutter, KDE/kwin, sway | **Builds**: `winit 0.31.0-beta.3` with `wgpu 30.0.1` on rustc 1.94.1, clean, 55 s, in a throwaway probe crate. **Running on any compositor: unmeasured.** |
-| E2 | Pressure, tilt, twist on all three, real device or `uinput` | **Unmeasured.** The API and the Wayland implementation are present (see below); no device, no `uinput`, no compositor here. |
-| E3 | Fractional scaling at 1.25 / 1.5 / 2.0 | **Unmeasured.** |
-| E4 | CSD on GNOME via SCTK + `sctk-adwaita` | **Unmeasured.** The `wayland-csd-adwaita` feature still exists in 0.31 and compiles. |
-| E5 | Redesigned `DragEntered`/`DragMoved`/`DragDropped`/`DragLeft` with `SendData::Uris` | **Unmeasured.** The events exist in `winit-core` 0.31. |
-| E6 | `PinchGesture`, `PanGesture`, `RotationGesture` reach the viewport | **Unmeasured**, but the Wayland implementation exists: `winit-wayland-0.31.0-beta.3/src/seat/pointer/pointer_gesture.rs`. |
-| E7 | Eight-hour soak, no leak, no protocol error | **Unmeasured.** |
+| E1 | Build and run on GNOME/mutter, KDE/kwin, sway | **GNOME 46 / mutter 46.2: pass** (Vulkan on the RTX 4000; app, probe, dialogs, input, resize, minimise). **COSMIC: pass** (XARA-US-0001, 59/59 corpus; not re-run, it is the live desktop). **KDE and sway: not installed here — unmeasured.** |
+| E2 | Pressure, tilt, twist | **Not available on 0.30 by construction** (no tablet API). Hardware exists: `Wacom USB Bamboo PAD Pen` (`/dev/input/event21`, ABS X/Y/PRESSURE — pressure, no tilt). No `uinput` tablet was created: libinput on the live session would pick it up. Owned by XARA-US-0013. |
+| E3 | Fractional scaling 1.25 / 1.5 / 2.0 | **Pass.** `wp_fractional_scale_v1` `preferred_scale` 150/180/240 → `ScaleChanged` then `Resized` with physical = round(logical × scale); screenshots crisp. GNOME's "1.5" is 1.5038 (so logical sizes stay integral) while the protocol carries 1.5: mutter resamples by 0.25 %, inherent to the protocol. IME candidate window lands under the caret at 1× and 1.25×. |
+| E4 | CSD on GNOME via sctk-adwaita | **Pass.** Title bar and close button drawn; the button layout follows the settings portal (close only under GNOME defaults; minimise/maximise/close when no portal answers). Live border-drag resize: 60 resizes, no validation error. |
+| E5 | Drag and drop with file URIs | **0.30 fails on Wayland: no drag-and-drop code at all** (X11 only). A GTK drag of two files produced no event. **Fixed in the shell** (`wayland_dnd`, decision 27): Entered/Moved/Dropped with device-pixel positions and all files in one event; the app opens both dropped files. Drag *out* of Xarast: impossible on 0.30, not implemented. |
+| E6 | Pinch/pan/rotate reach the viewport | **Not on 0.30 on Linux**: mutter advertises `zwp_pointer_gestures_v1` v3, but `winit` 0.30's Linux backends contain no gesture code (grep: nothing). No way to inject touchpad gestures into the nested session either. Pinch-zoom stays Ctrl+wheel. |
+| E7 | Eight-hour soak | **Shortened, not eight hours:** 30 minutes on GNOME 46 with BLUECAR.xar, 1,663 rounds of synthetic input (wheel pan, middle-drag pan, Ctrl+wheel zoom, `+`/`-`/`0` keys, pointer sweeps). RSS 199–247 MB over 60 samples, peaking in the first minute and flat at 202.6 MB for the last ten; 40 threads and 77 fds constant throughout; no error, no panic, no protocol error in the log. No leak visible at this length; the eight-hour run is still owed. |
 
 **What the source says, which is the part that could be checked.**
 
@@ -333,7 +361,7 @@ changelog.
 |---|---|---|
 | No tablet axes at all | `StrokeSample::pressure` is always `None`; tools draw at full width through `pressure_or_full()` | A backend swap. The whole pipeline — `ToolAxes` → `normalise` → `SampleQueue` — is written and unit-tested against axes that no backend yet supplies |
 | No trackpad gestures on Linux | `winit 0.30`'s `PinchGesture`/`PanGesture`/`RotationGesture` are documented **macOS and iOS only**; on Wayland they never fire. Pinch-zoom degrades to the scroll wheel | Same swap; `GestureEvent` already exists and the translator already routes them |
-| No drop position, no multi-file grouping | `winit 0.30` emits one `HoveredFile`/`DroppedFile` **per file, with no coordinates** | `DragEvent` already carries `paths: Vec<PathBuf>` and `at: Option<PhysicalPos2>`; the newer backends simply fill them |
+| No drag and drop at all on Wayland; on X11 no drop position and no multi-file grouping | `winit 0.30` emits `HoveredFile`/`DroppedFile` on X11 only, **per file, with no coordinates**; on Wayland nothing (measured) | **Paid on Wayland** by `wayland_dnd` (decision 27): position and all files. X11 keeps `winit`'s per-file, position-less events |
 | No `file:` URI payloads | Nothing today; the decoder exists and is tested | `input::translate::parse_uri_list` is already written and covered, because X11 XDND and `winit` 0.31 both hand over `text/uri-list` |
 
 **The fallback that was *not* taken, and why.** `winit 0.30 + vendored
@@ -373,8 +401,9 @@ instrumentation), which was extended rather than replaced.
 | `input::tablet` | `ToolAxes`, `StrokeSample`, `normalise`, `TabletSource`, `MouseOnlySource`, `ScriptedSource` | Done; no backend supplies real axes yet (see the verdict above) |
 | `input::coalesce` | `SampleQueue` | Done; never drops a sample |
 | `input::translate` | `winit` 0.30 → `ShellEvent`, `parse_uri_list` | Done; **the only module phase 14 rewrites** |
-| `portal` | `PortalService` on a services thread, `PortalHandle`, `rfd`+`ashpd` | Done; **the dialogs themselves are unmeasured** — no D-Bus session bus here |
-| `clipboard` | `Clipboard` trait, `SystemClipboard` (`arboard`), `NullClipboard` | Done; **unmeasured** — no display server here |
+| `portal` | `PortalService` on a services thread, `PortalHandle`, `ashpd` FileChooser + Settings | Done; **measured on GNOME 46** (open, save, cancel, missing bus, quit with a dialog open) |
+| `clipboard` | `Clipboard` trait, `SystemClipboard` (`arboard`), `NullClipboard` | Done; **measured on GNOME 46**: text and RGBA image both ways with Wayland and X11 peers (through XWayland); **no clipboard on GNOME without XWayland** (XARA-T-0047) |
+| `wayland_dnd` (private) | `wl_data_device` drop target on `winit`'s `wl_display`, own thread; `DropTracker` | Done (XARA-T-0042); measured on GNOME 46 |
 | `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest`, `ShellWaker`, `--screenshot` read-back | Done; **runs on real hardware** (NVIDIA RTX 4000 SFF Ada, Vulkan, COSMIC/Wayland) |
 | `intents` | `IntentAdapter`, `semantic_modifiers`, `semantic_button`, `CanvasRegion` — physical `ShellEvent` → semantic `xarast_app::Intent` | Done (XARA-T-0001) |
 | `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame` | Done (XARA-T-0003) |
@@ -383,7 +412,7 @@ instrumentation), which was extended rather than replaced.
 | `gpu_errors` | `GpuErrorSink` (the uncaptured-error and device-lost handler), `GpuRecovery` (the escalation policy) | Done (XARA-T-0027) |
 | `window` (AccessKit) | `A11y`: `accesskit_winit` adapter, handlers → `ShellEvent::Accessibility*` | Done (XARA-US-0003), behind the default `accessibility` feature |
 
-149 unit tests (shell), all passing with no compositor; the one that needs
+161 unit tests (shell), all passing with no compositor; the one that needs
 a GPU (`a_validation_error_on_a_real_device_is_counted_not_fatal`) skips
 without an adapter.
 
@@ -447,10 +476,15 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
 8. **The shortcut *table* is not the shell's.** `ShortcutMap<C>` is
    generic over the command type. The command vocabulary belongs to
    `xarast-app`; the shell owns only the matching rule.
-9. **Portals on a services thread, and no `async` above it.** `rfd` with
-   `xdg-portal` only — its `gtk3` and `wayland` backends are off, so the
-   portal path is the one taken inside an AppImage or a Flatpak, and no C
-   toolkit reaches the image. `ashpd` with `async-io`, not `tokio`:
+9. **Portals on a services thread, and no `async` above it.** File
+   dialogs call `org.freedesktop.portal.FileChooser` through `ashpd`
+   directly (XARA-T-0041) — the portal path is the one taken inside an
+   AppImage or a Flatpak, and no toolkit reaches the image. A dismissal
+   is `Cancelled` (response 1, **and 2**: that is what
+   xdg-desktop-portal-gtk answers for Escape); anything else is `Failed`
+   with a reason. Dropping the service discards queued requests and does
+   not wait for a thread still inside a dialog. `ashpd` with `async-io`,
+   not `tokio`:
    nothing needs a full runtime and `research/05 §10.1` says no async in
    the core. The main thread posts a `PortalRequestId` and later receives
    a `PortalEvent`; a dialog can never wedge the frame loop.
@@ -458,12 +492,14 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     `DBUS_SESSION_BUS_ADDRESS` is unset and `$XDG_RUNTIME_DIR/bus` is
     absent, every request answers `Failed` with that reason immediately,
     instead of a forty-second D-Bus timeout.
-11. **The clipboard's Wayland caveat is modelled, not hidden.**
-    `Clipboard::persists_after_focus_loss()` is `false` on Wayland and
-    `true` on X11, and the status bar is meant to say so. A copy followed
-    by a quit loses the data unless a data-control manager is present;
-    `arboard`'s `wayland-data-control` feature is on so that the cases
-    where it *can* persist do.
+11. **The clipboard's caveat is survival after exit, not focus loss.**
+    Measured on GNOME 46: a copy survives the window losing focus, and
+    even the process exiting, because mutter adopts the selection.
+    `Clipboard::persists_after_exit()` is `true` on X11 and GNOME and
+    `false` on other Wayland compositors until measured, and the status
+    bar is meant to say so (XARA-T-0043). `arboard` uses
+    `ext`/`wlr-data-control` where offered (COSMIC, KDE, wlroots) and X11
+    otherwise, which on GNOME means XWayland.
 12. **Nothing fails for want of a display.** `run` returns
     `ShellError::NoDisplay` with a reason and `is_missing_display()` says
     so; `--selftest-window` prints "skipped" and exits **0**;
@@ -474,9 +510,10 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     cold-start measurement implement nothing, and the default
     `FrameRequest` is `Idle`, so an application with no opinion parks the
     loop rather than spinning it.
-14. **No `unsafe` anywhere in the crate.** None was needed: `winit` and
-    `wgpu` are safe interfaces and the platform-specific setters are
-    behind `cfg`, not behind pointers.
+14. **One `unsafe` call in the crate, at a documented FFI boundary:**
+    `wayland_backend::Backend::from_foreign_display` on `winit`'s
+    `wl_display` (decision 27). Everything else — `winit`, `wgpu`, the
+    platform setters — is safe interfaces behind `cfg`.
 15. **The composition root lives in `xarast-shell` (`viewer.rs`), and the
     shell depends on `xarast-ui`.** Architecture §1 draws the shell under
     the UI and phase-05 criterion 16 allows `egui` in exactly those two
@@ -581,7 +618,10 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
    itself.
 7. **A surface is never configured at zero size.** `PhysicalSize::new`
    clamps to 1×1 and `PhysicalSize::is_degenerate` is what the resize path
-   checks; a minimised window reports 0×0 on Wayland.
+   checks. (Measured on GNOME 46: minimising does *not* produce 0×0 on
+   Wayland — xdg-shell has no minimised state — the size stays, frame
+   callbacks stop, the loop keeps answering at ~0 % CPU and restores
+   cleanly. The 0×0 case is Windows' and X11's.)
 8. **A surface is never reconfigured while a `SurfaceTexture` is held.**
    `Suboptimal` presents first, then reconfigures. `wgpu` treats the
    violation as a fatal validation error (it killed the window on
@@ -600,6 +640,13 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
 13. **The AccessKit adapter exists before the window is first shown**,
     and its handlers never touch interface state: they only queue and
     wake.
+14. **`WaylandDrops` is dropped in `exiting`, before the event loop.** It
+    borrows `winit`'s `wl_display`; its `Drop` wakes its thread with a
+    `wl_display.sync` on its own queue and joins it (measured: clean quit
+    in 146 ms).
+15. **No test posts a request to a live portal.** Tests use
+    `PortalService::offline`; a real service on a developer's desktop
+    would open dialogs on their screen and wait for them.
 
 ### Dead ends (do not retry)
 
@@ -638,16 +685,47 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
   small fake `org.freedesktop.portal.Settings` (python `Gio`: `ReadOne`,
   `Read`, `ReadAll`, `version = 2`, `SettingChanged`).
 
+### How the compositor experiments are run (no human, no live desktop)
+
+The maintainer's COSMIC session is never touched. Everything runs in an
+isolated GNOME session on a private bus:
+
+1. Export *first* a private `XDG_RUNTIME_DIR` (0700), `XDG_CONFIG_HOME`,
+   `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and a private
+   `DCONF_PROFILE` (`user-db:xarasttest`), then `dbus-run-session`.
+2. Inside: `gsettings set org.gnome.mutter experimental-features
+   "['scale-monitor-framebuffer']"`, hot corners off, then
+   `gnome-shell --headless --wayland [--no-x11] --wayland-display
+   wayland-xa --virtual-monitor 1600x1000`, then
+   `/usr/libexec/xdg-desktop-portal-gtk -r` and `xdg-desktop-portal -r`.
+   With XWayland, clients need `DISPLAY` (from "Using public X11 display"
+   in the log) and `XAUTHORITY=$XDG_RUNTIME_DIR/.mutter-Xwaylandauth.*`.
+3. Input: one long-lived `org.gnome.Mutter.RemoteDesktop` session
+   (`NotifyPointerMotionRelative` from a clamp at (0,0) is exact at 1×,
+   `NotifyPointerButton` with evdev codes, `NotifyKeyboardKeysym`).
+4. Screenshots of the nested desktop: own the bus name
+   `org.gnome.Screenshot` (gnome-shell's allow-list), then call
+   `org.gnome.Shell.Screenshot.Screenshot`. Our own window:
+   `xarast --screenshot`.
+5. Scale: `org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig` (method 1,
+   temporary) with a scale from the mode's supported list.
+6. Harness: `cargo run -p xarast-shell --example platform_probe`
+   (stdin commands, every `ShellEvent` on stdout); a GTK3 python window as
+   drag source and clipboard peer. Unmount `$XDG_RUNTIME_DIR/{doc,gvfs}`
+   (FUSE) when done.
+
 ### Open TODOs
 
-- **Run E1–E7 for real.** The whole verdict above is provisional on a
-  machine with a compositor. Nothing in this phase measured a compositor
-  behaviour, and nothing here should be quoted as if it had.
+- [x] **Run E1–E7 for real** — done on GNOME 46 (table above,
+  XARA-US-0012). Still open: KDE/kwin and sway (not installed here), an
+  eight-hour soak, and the 0.31 beta itself.
 - **Hardware tablet validation is outstanding** (phase risk K6), and so is
   the `uinput` virtual tablet: neither exists in this environment.
   `ScriptedSource` covers the pipeline; it does not cover the driver.
-- Portal dialogs, clipboard round-trips and drag-and-drop are **written
-  and unmeasured**. They need a session bus and a compositor.
+- [x] Portal dialogs, clipboard round-trips and drag-and-drop — measured
+  and fixed (XARA-T-0041/42/43). Open: clipboard on GNOME without
+  XWayland (XARA-T-0047), dialogs without a parent window (XARA-T-0048),
+  drag *out* of Xarast (no API in `winit` 0.30).
 - `wgpu` adapter selection, the four-level capability ladder (S4/U2.5) and
   frame pacing beyond `Wait`/`WaitUntil` are still the walking skeleton's:
   one adapter request. The canvas is CPU-rendered and uploaded; the GPU
@@ -670,9 +748,9 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
   (Orca is installed, but running it speaks on the desktop and writes
   its settings).
 - [x] The `egui` shim (S9/U4.1) — `egui_input`, on `ShellEvent`.
-- Cursor shapes and the IME caret area are wired but unmeasured on
-  COSMIC; the first text tool (phase 9) should check the candidate window
-  position at 1.25×.
+- [x] Cursor shapes and the IME caret area — measured on GNOME 46 (12
+  shapes; ibus candidate window under the caret at 1× and 1.25×). Not
+  measured on COSMIC.
 - [x] **Bridge `ShellEvent` to `xarast_app::Intent`** — `intents.rs`,
   decision 18 (XARA-T-0001).
 - X11 pressure via `octotablet` remains deferred; X11 is a documented

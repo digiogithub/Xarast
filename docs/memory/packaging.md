@@ -70,12 +70,13 @@ two more entries belong under it.
 |---|---|---|
 | `libwayland-client` | `winit` with `wayland-dlopen` | **Never bundled**, already excluded. The `dlopen` feature is what lets the binary start on a host with no Wayland library at all, which is why it is not optional. `octotablet 0.1.0` has no equivalent and was rejected partly for that. |
 | `libxkbcommon`, `libX11`/`libxcb` | `winit` X11 backend | Already excluded. |
-| XDG portals over D-Bus | `rfd` (`xdg-portal` only) and `ashpd` | No library to bundle: it is a D-Bus call. The `gtk3` and `wayland` backends of `rfd` are **off**, so no C toolkit and no non-`dlopen` Wayland client enters the image. A machine with no session bus is handled: every request answers with a reason. |
+| XDG portals over D-Bus | `ashpd` (FileChooser, Settings) | No library to bundle: it is a D-Bus call through `zbus`, pure Rust. `rfd` is no longer linked on Linux (it spawned `zenity` when the portal failed). A machine with no session bus is handled: every request answers with a reason. |
+| Wayland drag and drop | `smithay-client-toolkit` 0.19 / `wayland-client` 0.31 (`client_system`) | The same crates `winit` links; the connection is `winit`'s own `wl_display`, so libwayland-client stays `dlopen`'ed by `winit`'s `wayland-dlopen`. Nothing to bundle. |
 | `wl-clipboard-rs` / X11 clipboard | `arboard` with `wayland-data-control` | Pure Rust plus the already-excluded system libraries. |
 | Mesa / Vulkan ICDs | `wgpu` | Already excluded, and must stay so. |
 
 The AppImage size has **not** been re-measured since `winit`, `wgpu`,
-`rfd`, `ashpd`, `arboard` and the egui stack were linked in. The 3.9 MB
+`ashpd`, `arboard` and the egui stack were linked in. The 3.9 MB
 figure above is stale; see the open TODO.
 
 ## Open TODOs
