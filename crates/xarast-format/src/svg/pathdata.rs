@@ -17,7 +17,7 @@
 
 use xarast_geom::{Path, Verb};
 
-use super::num::{mp, push_separated};
+use super::num::Num;
 
 /// A point in SVG user space, in millipoints.
 pub type SvgPt = (i64, i64);
@@ -48,33 +48,80 @@ impl Cmd {
     }
 }
 
+/// Up to six numbers (a cubic), formatted on the stack.
+#[derive(Clone, Copy)]
+struct Nums {
+    v: [Num; 6],
+    n: usize,
+}
+
+impl Nums {
+    fn of(values: &[i64]) -> Nums {
+        let mut s = Nums {
+            v: [Num::mp(0); 6],
+            n: 0,
+        };
+        for (slot, &x) in s.v.iter_mut().zip(values) {
+            *slot = Num::mp(x);
+            s.n += 1;
+        }
+        s
+    }
+
+    fn points(points: &[SvgPt]) -> Nums {
+        let mut flat = [0i64; 6];
+        let mut k = 0usize;
+        for (p, [x, y]) in points.iter().zip(flat.as_chunks_mut::<2>().0) {
+            *x = p.0;
+            *y = p.1;
+            k += 2;
+        }
+        Nums::of(flat.get(..k).unwrap_or(&[]))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Num> {
+        self.v.iter().take(self.n)
+    }
+
+    /// The written length, separators included (upper bound: one
+    /// separator between each pair).
+    fn cost(&self) -> usize {
+        self.iter().map(Num::len).sum::<usize>() + self.n.saturating_sub(1)
+    }
+}
+
 struct Writer {
     out: String,
     last: Option<(Cmd, bool)>,
     sep: bool,
+    /// Whether the last number written has a fractional part.
+    last_dot: bool,
 }
 
 impl Writer {
     /// Emits one command, omitting the letter when it repeats (except `M`,
     /// whose repetition means a line).
-    fn cmd(&mut self, cmd: Cmd, rel: bool, nums: &[String]) {
+    fn cmd(&mut self, cmd: Cmd, rel: bool, nums: &Nums) {
         // After a moveto, further coordinate pairs are linetos of the same
         // relativity, so an `L` straight after an `M` needs no letter.
         if self.needs_letter(cmd, rel) {
             self.out.push(cmd.letter(rel));
             self.sep = false;
         }
-        for n in nums {
-            push_separated(&mut self.out, &mut self.sep, n);
+        for n in nums.iter() {
+            // The fewest separators a number parser accepts: none before a
+            // `-`, none before a leading `.` when the previous number
+            // already has a fraction, a space otherwise.
+            let s = n.as_str();
+            if self.sep && !(s.starts_with('-') || (s.starts_with('.') && self.last_dot)) {
+                self.out.push(' ');
+            }
+            self.out.push_str(s);
+            self.sep = true;
+            self.last_dot = n.has_dot();
         }
         self.last = Some((cmd, rel));
     }
-}
-
-/// The written length of a list of numbers, separators included (upper
-/// bound: one separator between each pair).
-fn cost(nums: &[String]) -> usize {
-    nums.iter().map(String::len).sum::<usize>() + nums.len().saturating_sub(1)
 }
 
 impl Writer {
@@ -86,9 +133,9 @@ impl Writer {
 
     /// Picks the shorter spelling, counting the command letter it would
     /// need. A tie keeps the current relativity, then prefers absolute.
-    fn pick(&self, cmd: Cmd, abs: Vec<String>, rel: Vec<String>) -> (bool, Vec<String>) {
-        let ca = cost(&abs) + usize::from(self.needs_letter(cmd, false));
-        let cr = cost(&rel) + usize::from(self.needs_letter(cmd, true));
+    fn pick(&self, cmd: Cmd, abs: Nums, rel: Nums) -> (bool, Nums) {
+        let ca = abs.cost() + usize::from(self.needs_letter(cmd, false));
+        let cr = rel.cost() + usize::from(self.needs_letter(cmd, true));
         if cr < ca || (cr == ca && self.last.is_some_and(|(_, r)| r)) {
             (true, rel)
         } else {
@@ -97,12 +144,8 @@ impl Writer {
     }
 }
 
-fn pair(p: SvgPt) -> [String; 2] {
-    [mp(p.0), mp(p.1)]
-}
-
-fn nums(points: &[SvgPt]) -> Vec<String> {
-    points.iter().flat_map(|p| pair(*p)).collect()
+fn nums(points: &[SvgPt]) -> Nums {
+    Nums::points(points)
 }
 
 fn delta(p: SvgPt, from: SvgPt) -> SvgPt {
@@ -113,9 +156,10 @@ fn delta(p: SvgPt, from: SvgPt) -> SvgPt {
 #[must_use]
 pub fn path_data(path: &Path, map: impl Fn(xarast_geom::Point) -> SvgPt) -> String {
     let mut w = Writer {
-        out: String::new(),
+        out: String::with_capacity(16 + path.points().len() * 12),
         last: None,
         sep: false,
+        last_dot: false,
     };
     let points = path.points();
     let mut pi = 0usize;
@@ -156,10 +200,10 @@ pub fn path_data(path: &Path, map: impl Fn(xarast_geom::Point) -> SvgPt) -> Stri
                 // subpath's start, which is also what SVG does after `z`.
                 open = true;
                 if p.1 == cur.1 && p.0 != cur.0 {
-                    let (rel, n) = w.pick(Cmd::H, vec![mp(p.0)], vec![mp(p.0 - cur.0)]);
+                    let (rel, n) = w.pick(Cmd::H, Nums::of(&[p.0]), Nums::of(&[p.0 - cur.0]));
                     w.cmd(Cmd::H, rel, &n);
                 } else if p.0 == cur.0 && p.1 != cur.1 {
-                    let (rel, n) = w.pick(Cmd::V, vec![mp(p.1)], vec![mp(p.1 - cur.1)]);
+                    let (rel, n) = w.pick(Cmd::V, Nums::of(&[p.1]), Nums::of(&[p.1 - cur.1]));
                     w.cmd(Cmd::V, rel, &n);
                 } else {
                     let (rel, n) = w.pick(Cmd::L, nums(&[p]), nums(&[delta(p, cur)]));
@@ -199,7 +243,7 @@ pub fn path_data(path: &Path, map: impl Fn(xarast_geom::Point) -> SvgPt) -> Stri
                 if !open {
                     continue;
                 }
-                w.cmd(Cmd::Z, true, &[]);
+                w.cmd(Cmd::Z, true, &Nums::of(&[]));
                 cur = start;
                 prev_c2 = None;
                 open = false;
@@ -261,6 +305,19 @@ mod tests {
         b.move_to(Point::raw(500, -250))
             .line_to(Point::raw(-500, 750));
         assert_eq!(path_data(&b.build(), id), "M.5-.25l-1 1");
+    }
+
+    #[test]
+    fn a_fraction_after_a_signed_integer_keeps_its_space() {
+        // `1.5-5.5` would read as 1.5, -5.5: the dot that allows dropping
+        // the separator must be the previous number's own.
+        let mut b = Path::builder();
+        b.move_to(Point::raw(0, 0)).cubic_to(
+            Point::raw(1_500, -5_000),
+            Point::raw(500, 2_000),
+            Point::raw(3_000, 3_000),
+        );
+        assert_eq!(path_data(&b.build(), id), "M0 0C1.5-5 .5 2 3 3");
     }
 
     #[test]
