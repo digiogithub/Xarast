@@ -203,7 +203,7 @@ pub fn stroke_to_path(
         if let Some(d) = &style.dash {
             let elements = d.resolved(style.width);
             if !elements.is_empty() {
-                s = s.with_dashes(d.offset.to_f64(), elements);
+                s = s.with_dashes(reduced_dash_offset(d.offset.to_f64(), &elements), elements);
             }
         }
         s
@@ -218,6 +218,26 @@ pub fn stroke_to_path(
     Ok(Path::from_bez_path(&out).0)
 }
 
+/// Reduces a dash offset modulo the pattern's period.
+///
+/// kurbo walks the offset through the pattern one element at a time, so an
+/// offset many periods long costs time proportional to its size; the
+/// result is the same phase either way. Elements alternate on and off, so an
+/// odd-length pattern only repeats after two passes.
+fn reduced_dash_offset(offset: f64, elements: &[f64]) -> f64 {
+    let pass: f64 = elements.iter().sum();
+    let period = if elements.len() % 2 == 0 {
+        pass
+    } else {
+        2.0 * pass
+    };
+    if period > 0.0 && period.is_finite() && offset.is_finite() {
+        offset.rem_euclid(period)
+    } else {
+        offset
+    }
+}
+
 /// Splits a path into its dashes, returning an open path per dash.
 ///
 /// The result is not a stroke outline: it is the same centreline cut into
@@ -230,7 +250,12 @@ pub fn dash(path: &Path, pattern: &DashPattern, line_width: Mp, tol: Tolerance) 
     }
     let _ = tol;
     let bez = path.to_bez_path();
-    let out: kurbo::BezPath = kurbo::dash(bez.iter(), pattern.offset.to_f64(), &elements).collect();
+    let out: kurbo::BezPath = kurbo::dash(
+        bez.iter(),
+        reduced_dash_offset(pattern.offset.to_f64(), &elements),
+        &elements,
+    )
+    .collect();
     Path::from_bez_path(&out).0
 }
 
@@ -416,5 +441,29 @@ const fn to_kurbo_join(j: Join) -> kurbo::Join {
         Join::Mitre => kurbo::Join::Miter,
         Join::Round => kurbo::Join::Round,
         Join::Bevel => kurbo::Join::Bevel,
+    }
+}
+
+#[cfg(test)]
+mod dash_offset_tests {
+    use super::reduced_dash_offset;
+
+    #[test]
+    fn an_even_pattern_reduces_by_one_pass() {
+        assert_eq!(reduced_dash_offset(35.0, &[10.0, 5.0]), 5.0);
+        assert_eq!(reduced_dash_offset(-5.0, &[10.0, 5.0]), 10.0);
+    }
+
+    #[test]
+    fn an_odd_pattern_reduces_by_two_passes() {
+        // [10 on, 5 off, 5 on] then [10 off, 5 on, 5 off]: period 40.
+        assert_eq!(reduced_dash_offset(45.0, &[10.0, 5.0, 5.0]), 5.0);
+        assert_eq!(reduced_dash_offset(25.0, &[10.0, 5.0, 5.0]), 25.0);
+    }
+
+    #[test]
+    fn a_huge_offset_is_cheap_and_finite() {
+        let r = reduced_dash_offset(1.0e15, &[3.0, 4.0]);
+        assert!((0.0..7.0).contains(&r));
     }
 }
