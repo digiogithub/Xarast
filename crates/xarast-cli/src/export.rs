@@ -559,6 +559,29 @@ pub fn run(a: &ExportArgs) -> Exit {
             return Exit::Import;
         }
     };
+    let docs: Vec<Input<'_>> = files
+        .into_iter()
+        .map(|path| {
+            let open: Opener<'_> =
+                Box::new(|p: &Path| Session::open(DocumentId(1), p).map_err(|e| e.to_string()));
+            (path, open)
+        })
+        .collect();
+    run_on(a, docs)
+}
+
+/// One document to export: the name it is reported and written under,
+/// and how to open it.
+pub type Input<'a> = (PathBuf, Opener<'a>);
+
+/// Opens one input into a session.
+pub type Opener<'a> = Box<dyn Fn(&Path) -> Result<Session, String> + 'a>;
+
+/// Exports documents that need not be files (`fixtures` builds them in
+/// memory): each input's path names it in the output and the report, and
+/// its closure opens it.
+#[must_use]
+pub fn run_on(a: &ExportArgs, files: Vec<Input<'_>>) -> Exit {
     if let Some(d) = &a.out_dir
         && let Err(e) = std::fs::create_dir_all(d)
     {
@@ -572,7 +595,7 @@ pub fn run(a: &ExportArgs) -> Exit {
     let (mut done, mut failed) = (0usize, 0usize);
     let (mut open_ms, mut scene_ms, mut render_ms, mut encode_ms) = (0.0, 0.0, 0.0, 0.0);
     let mut bytes = 0u64;
-    for input in &files {
+    for (input, open) in &files {
         let mut req = a.request.clone();
         req.destination = match (&a.output, &a.out_dir) {
             (Some(o), _) => o.clone(),
@@ -580,7 +603,7 @@ pub fn run(a: &ExportArgs) -> Exit {
             (None, None) => unreachable!("parse requires an output"),
         };
         let t0 = Instant::now();
-        let session = match Session::open(DocumentId(1), input) {
+        let session = match open(input) {
             Ok(s) => s,
             Err(e) => {
                 failed += 1;
