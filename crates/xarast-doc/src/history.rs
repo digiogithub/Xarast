@@ -1147,6 +1147,15 @@ impl History {
         self.checkpoints.clear();
     }
 
+    /// Forgets every redo step, destroying the nodes only they retained.
+    ///
+    /// For a gesture that is abandoned after it has already been applied
+    /// (a colour-editor drag cancelled with `Esc`): undo it, then drop it
+    /// here, and the history is exactly as it was before the gesture.
+    pub fn discard_redo(&mut self, doc: &mut Document) {
+        self.drop_future(doc);
+    }
+
     fn drop_future(&mut self, doc: &mut Document) {
         let future = std::mem::take(&mut self.future);
         self.future_serials.clear();
