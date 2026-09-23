@@ -457,10 +457,15 @@ impl CaretMap {
         }
     }
 
-    /// Every caret offset of the story, in order.
-    fn boundaries(&self) -> Vec<usize> {
+    /// Every caret offset of a line and its neighbours, in order: all a
+    /// one-cluster logical move can reach.
+    fn boundaries(&self, line: usize) -> Vec<usize> {
         let mut v = Vec::new();
-        for l in &self.layout.lines {
+        let lines = &self.layout.lines;
+        let near = lines
+            .get(line.saturating_sub(1)..(line + 2).min(lines.len()))
+            .unwrap_or(&[]);
+        for l in near {
             v.push(l.logical_range.start);
             v.push(l.logical_range.end);
             for c in &l.clusters {
@@ -477,7 +482,7 @@ impl CaretMap {
     }
 
     fn move_logical(&self, c: Caret, forward: bool) -> Caret {
-        let b = self.boundaries();
+        let b = self.boundaries(self.line_of(c));
         if forward {
             match b.iter().find(|&&x| x > c.byte) {
                 Some(&x) => Caret::after(x),

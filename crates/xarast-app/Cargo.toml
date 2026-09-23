@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "structure"
 harness = false
+
+[[bench]]
+name = "text_caret"
+harness = false
