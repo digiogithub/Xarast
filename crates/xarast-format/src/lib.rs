@@ -20,8 +20,9 @@
 //! | [`reader`] | [`XarastReader`]: open without parsing `document.svg` | §3, §10.5 |
 //! | [`writer`] | [`PackageWriter`]: normative order, `mimetype` first, raw copies | §3.2, §13.4 |
 //! | [`durability`] | [`write_atomic`] and [`DocumentLock`] | §10.1, §10.4 |
-//! | [`svg`] | The SVG profile, writing side: [`svg::write_svg`] | §5, §6 |
+//! | [`svg`] | The SVG profile: [`svg::write_svg`], and [`svg::read_svg`] with [`svg::normal_form`] | §5, §6, §8 |
 //! | [`save`] | [`save()`]: SVG + resources + `meta.xml` + container, atomically | §10.1, §13.3 |
+//! | [`open`] | [`open()`]: container, `meta.xml` and SVG into a document; [`save_opened`] re-saves with raw copies | §3, §8.3, §10.1 |
 //!
 //! The container, the manifest, the resource index and the durability layer
 //! move bytes and know nothing about the document model. The SVG profile
@@ -64,6 +65,7 @@ pub mod error;
 pub mod limits;
 pub mod manifest;
 pub mod name;
+pub mod open;
 pub mod policy;
 pub mod reader;
 pub mod resource;
@@ -81,6 +83,10 @@ pub use durability::{DocumentLock, LockError, LockHolder, write_atomic};
 pub use error::{Diagnostic, ReadError, WriteError};
 pub use limits::Limits;
 pub use manifest::{FileEntry, Manifest, Role};
+pub use open::{
+    OpenError, OpenOptions, OpenedDocument, open, open_reader, open_with, save_opened,
+    save_opened_to,
+};
 pub use reader::{EntryInfo, XarastReader};
 pub use resource::{ResourceId, ResourceIndex, ResourceKind};
 pub use save::{SaveOptions, SaveReport, meta_xml, save, save_to};
