@@ -919,6 +919,9 @@ pub struct History {
     base_serial: u64,
     /// The last serial handed out.
     last_serial: u64,
+    /// A redo branch set aside by [`History::hold_redo`]: the steps and
+    /// their serials, in `future`'s order.
+    held_redo: Option<(Vec<Transaction>, Vec<u64>)>,
 }
 
 impl Default for History {
@@ -957,6 +960,7 @@ impl History {
             future_serials: Vec::new(),
             base_serial: 0,
             last_serial: 0,
+            held_redo: None,
         }
     }
 
@@ -1140,7 +1144,8 @@ impl History {
         self.future_serials.clear();
         let past = std::mem::take(&mut self.past);
         let future = std::mem::take(&mut self.future);
-        for tx in past.into_iter().chain(future) {
+        let held = self.held_redo.take().map(|(h, _)| h).unwrap_or_default();
+        for tx in past.into_iter().chain(future).chain(held) {
             reap(doc, &tx);
         }
         self.bytes = 0;
@@ -1154,6 +1159,42 @@ impl History {
     /// here, and the history is exactly as it was before the gesture.
     pub fn discard_redo(&mut self, doc: &mut Document) {
         self.drop_future(doc);
+    }
+
+    /// Sets the redo branch aside, so that the commits of a gesture that
+    /// may still be abandoned do not destroy it.
+    ///
+    /// Redo has nothing to redo until [`History::restore_held_redo`] puts
+    /// the branch back or [`History::release_held_redo`] forgets it. A
+    /// branch already held is forgotten first.
+    pub fn hold_redo(&mut self, doc: &mut Document) {
+        self.release_held_redo(doc);
+        let future = std::mem::take(&mut self.future);
+        let serials = std::mem::take(&mut self.future_serials);
+        if !future.is_empty() {
+            self.held_redo = Some((future, serials));
+        }
+    }
+
+    /// Puts back the redo branch [`History::hold_redo`] set aside, dropping
+    /// whatever redo steps exist now. Only meaningful when the history is
+    /// back at the state serial it had when the branch was held.
+    pub fn restore_held_redo(&mut self, doc: &mut Document) {
+        self.drop_future(doc);
+        if let Some((future, serials)) = self.held_redo.take() {
+            self.future = future;
+            self.future_serials = serials;
+        }
+    }
+
+    /// Forgets the redo branch [`History::hold_redo`] set aside, destroying
+    /// the nodes only it retained: what a commit would have done to it.
+    pub fn release_held_redo(&mut self, doc: &mut Document) {
+        if let Some((held, _)) = self.held_redo.take() {
+            for tx in held {
+                reap(doc, &tx);
+            }
+        }
     }
 
     fn drop_future(&mut self, doc: &mut Document) {
