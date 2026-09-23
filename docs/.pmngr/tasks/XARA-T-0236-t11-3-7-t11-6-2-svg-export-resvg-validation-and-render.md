@@ -2,12 +2,13 @@
 id: XARA-T-0236
 type: task
 title: "T11.3.7/T11.6.2 — SVG export: resvg validation and render comparison in CI"
-status: backlog
+status: in_progress
 parent: XARA-US-0058
 author: mcp
 labels: [phase-11, io, svg, ci]
 created: 2026-09-23T22:10:40Z
-updated: 2026-09-23T22:10:40Z
+updated: 2026-09-23T22:28:11Z
+started: 2026-09-23T22:28:11Z
 ---
 
 ## Description

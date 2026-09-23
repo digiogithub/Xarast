@@ -2,12 +2,13 @@
 id: XARA-US-0060
 type: story
 title: W11.5/W11.6 — Colour fidelity and export corpus regression
-status: backlog
+status: in_progress
 parent: XARA-EP-0012
 author: mcp
 labels: [phase-11, io, acceptance]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T22:28:11Z
+started: 2026-09-23T22:28:11Z
 ---
 
 ## Tasks (full tables: phase-11 §W11.5, §W11.6)
