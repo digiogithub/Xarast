@@ -1,17 +1,17 @@
 //! `xarast-cli render`: documents to PNG on the deterministic CPU backend.
 //!
-//! The CLI decides only *what to frame and at what size*; the pixels come
-//! from `xarast_app::headless::render`, the same path the corpus tests
-//! use. Framing is done by setting the session's own viewport and turning
-//! the headless fit off, so a render at 100 % is exactly what the app
-//! shows at 100 %.
+//! The CLI decides only *what to frame and at what size*; the pixels, the
+//! zoom and the walk's findings come from `xarast_app::headless::render`,
+//! the same path the corpus tests use, through the same `Viewport`, so a
+//! render at 100 % is exactly what the app shows at 100 %.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use xarast_app::viewport::{nodes_rect, page_rect};
-use xarast_app::{DeviceSize, DocRect, DocumentId, HeadlessOptions, Session, WalkStats, headless};
-use xarast_doc::{Document, NodeKind};
+use xarast_app::viewport::{drawing_or_page_rect, page_rect};
+use xarast_app::{
+    DeviceSize, DocRect, DocumentId, HeadlessFrame, HeadlessOptions, Session, WalkStats, headless,
+};
 use xarast_geom::Mp;
 use xarast_render::RenderQuality;
 
@@ -241,37 +241,14 @@ pub fn plan(
     Ok(Plan { size, zoom: z })
 }
 
-/// The bounding box of what the active spread's visible, non-guide
-/// layers hold — the drawing, without the pages.
-///
-/// `xarast_app::viewport::drawing_rect` is the root's bounds, which
-/// include every page node, so a small drawing on an A4 page frames the
-/// whole page. This is the rectangle "the drawing" means here.
-#[must_use]
-pub fn ink_rect(doc: &Document) -> DocRect {
-    let tree = &doc.tree;
-    let content = tree
-        .children(doc.active_spread())
-        .filter(|&id| matches!(tree.kind(id), Some(NodeKind::Layer(l)) if l.visible && !l.guide))
-        .flat_map(|layer| tree.children(layer));
-    nodes_rect(doc, content)
-}
-
 /// The rectangle a document is framed on.
 #[must_use]
 pub fn frame_rect(session: &Session, frame: Frame) -> DocRect {
     match frame {
         Frame::Page => page_rect(&session.doc),
-        Frame::Drawing => {
-            let d = ink_rect(&session.doc);
-            // A quick shape with no cached path has point-like bounds: an
-            // area of zero frames nothing, so fall back to the page.
-            if d.is_empty() || d.width() <= Mp::ZERO || d.height() <= Mp::ZERO {
-                page_rect(&session.doc)
-            } else {
-                d
-            }
-        }
+        // A quick shape with no cached path has point-like bounds: an
+        // area of zero frames nothing, so this falls back to the page.
+        Frame::Drawing => drawing_or_page_rect(&session.doc),
     }
 }
 
@@ -305,32 +282,23 @@ pub struct Rendered {
 /// The exit code class and a message.
 pub fn render_one(input: &Path, output: &Path, a: &RenderArgs) -> Result<Rendered, (Exit, String)> {
     let t0 = Instant::now();
-    let mut session =
-        Session::open(DocumentId(1), input).map_err(|e| (Exit::Import, e.to_string()))?;
+    let session = Session::open(DocumentId(1), input).map_err(|e| (Exit::Import, e.to_string()))?;
     let open_ms = ms(t0.elapsed());
 
     let frame = frame_rect(&session, a.frame);
     let fail = |e: String| (Exit::Render, format!("{}: {e}", input.display()));
     let p = plan(frame, a.zoom, a.dpi, a.width, a.height).map_err(fail)?;
-    session.quality = a.quality;
-    let vp = &mut session.viewport;
-    vp.set_dpi(a.dpi);
-    vp.resize(p.size);
-    match p.zoom {
-        Some(z) => {
-            vp.set_zoom(z);
-            if !frame.is_empty() {
-                vp.set_centre(frame.to_kurbo().center());
-            }
-        }
-        None => vp.fit_rect(frame),
-    }
-    let zoom = vp.zoom();
-
     let opts = HeadlessOptions {
         size: p.size,
         quality: a.quality,
-        fit_drawing: false,
+        frame: match p.zoom {
+            Some(zoom) => HeadlessFrame::Fixed {
+                zoom,
+                centre_on: frame,
+            },
+            None => HeadlessFrame::Fit(frame),
+        },
+        dpi: Some(a.dpi),
         ..HeadlessOptions::default()
     };
     let t1 = Instant::now();
@@ -353,20 +321,13 @@ pub fn render_one(input: &Path, output: &Path, a: &RenderArgs) -> Result<Rendere
         .filter(|px| **px != bg)
         .count() as u64;
 
-    // `headless::render` keeps its walker to itself, so the walk is
-    // repeated here — outside the timed region — to learn what it skipped.
-    let walk = match session.rebuild_scene(None) {
-        Ok(_) => session.walk_stats(),
-        Err(_) => WalkStats::default(),
-    };
-
     Ok(Rendered {
         output: output.to_path_buf(),
         size: p.size,
-        zoom,
+        zoom: out.zoom,
         commands: out.commands,
         ink_pixels,
-        walk,
+        walk: out.walk,
         open_ms,
         render_ms,
         png_ms,
