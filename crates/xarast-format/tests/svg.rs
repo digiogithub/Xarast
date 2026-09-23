@@ -375,6 +375,54 @@ fn a_saved_package_opens_and_holds_the_svg() {
     assert!(r.verify_all().is_empty());
 }
 
+#[test]
+fn a_thumbnail_given_to_save_is_written_and_never_carried_from_the_source() {
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend_from_slice(&256u32.to_be_bytes());
+    png.extend_from_slice(&180u32.to_be_bytes());
+    png.extend_from_slice(&[8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let doc = fixture();
+    let with = SaveOptions {
+        write: WriteOptions::deterministic(),
+        thumbnail: Some(Arc::from(png.clone())),
+        ..SaveOptions::default()
+    };
+    let mut buf = Cursor::new(Vec::new());
+    save_to(&doc, &mut buf, &with).unwrap();
+    let bytes = buf.into_inner();
+    let mut r = XarastReader::open(Cursor::new(bytes.clone())).unwrap();
+    assert_eq!(
+        r.thumbnail().unwrap(),
+        Some(png.clone()),
+        "the thumbnail is stored as given"
+    );
+
+    // Re-saving the opened package without a thumbnail drops the old one:
+    // it would show a drawing the file no longer holds.
+    let mut opened =
+        xarast_format::open_reader(Cursor::new(bytes), &xarast_format::OpenOptions::default())
+            .unwrap();
+    let mut out = Cursor::new(Vec::new());
+    xarast_format::save_opened_to(
+        &opened.document,
+        &mut opened.package,
+        &mut out,
+        &SaveOptions::default(),
+    )
+    .unwrap();
+    let r = XarastReader::open(Cursor::new(out.into_inner())).unwrap();
+    assert!(r.entry_info(xarast_format::THUMBNAIL_ENTRY).is_none());
+
+    // A thumbnail over the cap is refused rather than written.
+    let mut big = png;
+    big[16..20].copy_from_slice(&600u32.to_be_bytes());
+    let bad = SaveOptions {
+        thumbnail: Some(Arc::from(big)),
+        ..SaveOptions::default()
+    };
+    assert!(save_to(&doc, Cursor::new(Vec::new()), &bad).is_err());
+}
+
 /// Two groups of ten rectangles with the same red fill and blue 2 pt
 /// stroke; the second also holds a rectangle with no stroke.
 fn groups_fixture() -> Document {

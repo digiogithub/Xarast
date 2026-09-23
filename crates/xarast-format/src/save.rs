@@ -28,6 +28,11 @@ pub struct SaveOptions {
     pub svg: SvgOptions,
     /// The atomic-write sequence.
     pub atomic: AtomicOptions,
+    /// `thumbnail.png`, already rendered (the application's
+    /// [`ThumbnailProvider`](crate::ThumbnailProvider)): RGBA8, longer side
+    /// at most 512 px. `None` writes no thumbnail; a re-save never carries
+    /// the source package's, which would show the old drawing.
+    pub thumbnail: Option<std::sync::Arc<[u8]>>,
 }
 
 /// What a save did and how long each part took.
@@ -89,6 +94,9 @@ fn prepare(doc: &Document, opts: &SaveOptions) -> Result<(PackageWriter, SaveRep
     w.set_document(svg.svg.into_bytes());
     w.set_meta(meta.into_bytes());
     w.add_resources(&resources);
+    if let Some(png) = &opts.thumbnail {
+        w.set_thumbnail(png.clone())?;
+    }
     Ok((
         w,
         SaveReport {

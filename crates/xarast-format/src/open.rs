@@ -219,7 +219,7 @@ pub fn save_opened<R: Read + Seek>(
     path: &Path,
     opts: &SaveOptions,
 ) -> Result<SaveReport, WriteError> {
-    let (writer, mut partial) = prepare_from(doc, source, opts);
+    let (writer, mut partial) = prepare_from(doc, source, opts)?;
     let t = Instant::now();
     let package = write_atomic_with(path, opts.atomic, |f| {
         writer.finish_with_source(f, Some(&mut *source))
@@ -239,7 +239,7 @@ pub fn save_opened_to<W: Write + Seek, R: Read + Seek>(
     out: W,
     opts: &SaveOptions,
 ) -> Result<SaveReport, WriteError> {
-    let (writer, mut partial) = prepare_from(doc, source, opts);
+    let (writer, mut partial) = prepare_from(doc, source, opts)?;
     let t = Instant::now();
     let package = writer.finish_with_source(out, Some(source))?;
     partial.package_time = t.elapsed();
@@ -250,7 +250,7 @@ fn prepare_from<R: Read + Seek>(
     doc: &Document,
     source: &XarastReader<R>,
     opts: &SaveOptions,
-) -> (PackageWriter, SaveReport) {
+) -> Result<(PackageWriter, SaveReport), WriteError> {
     let t = Instant::now();
     let mut resources = ResourceIndex::from_package(source);
     resources.begin_recount();
@@ -270,8 +270,11 @@ fn prepare_from<R: Read + Seek>(
     w.set_document(svg.svg.into_bytes());
     w.set_meta(meta.into_bytes());
     w.add_resources(&resources);
+    if let Some(png) = &opts.thumbnail {
+        w.set_thumbnail(png.clone())?;
+    }
     w.carry_from(source);
-    (
+    Ok((
         w,
         SaveReport {
             package: crate::writer::WriteReport::default(),
@@ -280,5 +283,5 @@ fn prepare_from<R: Read + Seek>(
             serialise,
             package_time: Duration::ZERO,
         },
-    )
+    ))
 }
