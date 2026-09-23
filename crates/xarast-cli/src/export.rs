@@ -415,8 +415,11 @@ impl ExportSource for SessionSource<'_> {
             .map_err(|e| ExportError::Scene(e.to_string()))?;
         let w = walker.stats();
         let mut compromises: Vec<Compromise> = [
-            ("text", w.text_pending),
-            ("text-on-path (drawn straight)", w.text_on_path_pending),
+            (
+                "text on a path (drawn on a straight baseline)",
+                w.text_on_path_pending,
+            ),
+            ("text (no font)", w.text_pending),
             ("quick shapes", w.shapes_pending),
             ("images (no pixels)", w.images_pending),
             ("images (failed to decode)", w.images_failed),

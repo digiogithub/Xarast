@@ -71,7 +71,7 @@ impl std::fmt::Display for Compromise {
                 "transparency flattened onto #{:02x}{:02x}{:02x}",
                 onto.r, onto.g, onto.b
             ),
-            Compromise::NotRendered { what, count } => write!(f, "{count} {what} not drawn"),
+            Compromise::NotRendered { what, count } => write!(f, "{what}: {count} not reproduced"),
             Compromise::FontSubstituted { requested, used } => {
                 write!(f, "font {requested} replaced by {used}")
             }
