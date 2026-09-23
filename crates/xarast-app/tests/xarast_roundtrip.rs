@@ -8,7 +8,9 @@
 //! components are written in the shortest round-trip form) and ramp,
 //! three/four-colour, fractal, noise and contone key colours name their
 //! palette colour (`xarast:stop-refs`, `xarast:colour-refs`,
-//! `xarast:contone-refs`, XARA-T-0110).
+//! `xarast:contone-refs`, XARA-T-0110) and bitmaps keep their encoded
+//! bytes and, for a `.xar` JPEG8BPP bitmap, the palette its colours are
+//! snapped to (`xarast:palette`, XARA-T-0154).
 //!
 //! The corpus is found through `XARAST_XAR_CORPUS`; nothing from it is
 //! written into the repository.
@@ -21,18 +23,6 @@ use xarast_app::{
 };
 
 const LOCK: &str = include_str!("../../../tests/corpus/corpus.lock");
-
-/// Files that still render differently after a round trip, each for a known
-/// writer gap that decoded bitmaps exposed (XARA-T-0129 landed after the
-/// writer's exact-twins work): Groucho2 and leafgirl lose their JPEG8BPP
-/// palette (XARA-T-0154); scope3 simple has a bitmap-related gap under
-/// investigation (XARA-T-0157). The test fails if a listed file starts
-/// passing, so the list can only shrink.
-const KNOWN_RENDER_GAPS: &[&str] = &[
-    "Designs/Groucho2.xar",
-    "Designs/leafgirl.xar",
-    "Designs/scope3 simple.xar",
-];
 
 fn corpus() -> Option<(PathBuf, Vec<String>)> {
     let required = std::env::var("XARAST_CORPUS_REQUIRED").as_deref() == Ok("1");
@@ -114,15 +104,6 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
                 differing += 1;
                 max = max.max(d);
             }
-        }
-        let known = KNOWN_RENDER_GAPS.contains(&rel.as_str());
-        if known {
-            if differing == 0 {
-                failures.push(format!(
-                    "{rel}: renders identically now; drop it from KNOWN_RENDER_GAPS"
-                ));
-            }
-            continue;
         }
         if differing > 0 {
             let fraction = differing as f64 / (a.len() / 4) as f64;

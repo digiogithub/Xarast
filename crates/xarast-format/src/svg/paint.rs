@@ -42,6 +42,21 @@ pub(crate) struct BitmapRef {
     pub href: String,
     pub width: u32,
     pub height: u32,
+    /// The package path of the bitmap's reconstruction palette
+    /// (`xarast:palette`), when it has one.
+    pub palette: Option<String>,
+}
+
+impl BitmapRef {
+    /// `href`, `xlink:href` and, when there is a palette,
+    /// `xarast:palette`.
+    pub fn attrs(&self, s: &mut String) {
+        attr(s, "href", &self.href);
+        attr(s, "xlink:href", &self.href);
+        if let Some(p) = &self.palette {
+            attr(s, "xarast:palette", p);
+        }
+    }
 }
 
 /// The SVG for one paint (a fill or a stroke).
@@ -778,8 +793,7 @@ pub(crate) fn colour_paint(
             attr(&mut body, "width", "1");
             attr(&mut body, "height", "1");
             attr(&mut body, "preserveAspectRatio", "none");
-            attr(&mut body, "href", &bm.href);
-            attr(&mut body, "xlink:href", &bm.href);
+            bm.attrs(&mut body);
             body.push_str("/></pattern>");
             let id = ctx.defs.add('p', "pattern", &body);
             PaintOut {
@@ -1101,8 +1115,7 @@ fn transparency_twin(ctx: &mut PaintCtx<'_>, t: &TranspPaint, tiling: Tiling) ->
             ..
         } => {
             if let Some(bm) = (ctx.bitmap_href)(*image) {
-                attr(&mut s, "href", &bm.href);
-                attr(&mut s, "xlink:href", &bm.href);
+                bm.attrs(&mut s);
             }
             if *own != Tiling::None {
                 attr(&mut s, "xarast:tile-mode", repeat_name(*own));

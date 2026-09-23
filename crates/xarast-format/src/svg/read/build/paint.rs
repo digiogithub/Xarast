@@ -720,7 +720,7 @@ impl<'d> Reader<'d, '_, '_> {
                 };
                 let href = attr(t, "", "href").or_else(|| attr(t, NS_XLINK, "href"));
                 let image = if href.is_some() {
-                    self.bitmap_for(href, None, t.start)
+                    self.bitmap_for(href, xa(t, "palette"), None, t.start)
                 } else {
                     // Written before the twin named its image.
                     self.placeholder_bitmap()
@@ -1042,7 +1042,7 @@ impl<'d> Reader<'d, '_, '_> {
         let axis_x = self.pt(ctx, round(ox + ux), round(oy + uy));
         let axis_y = self.pt(ctx, round(ox + vx), round(oy + vy));
         let href = attr(image, "", "href").or_else(|| attr(image, NS_XLINK, "href"));
-        let bitmap = self.bitmap_for(href, None, p.start);
+        let bitmap = self.bitmap_for(href, xa(image, "palette"), None, p.start);
         let refs = self.key_refs(xa(p, "contone-refs"));
         let r = |i: usize| refs.get(i).copied().flatten();
         let contone = xa(p, "contone").and_then(|v| {

@@ -1258,3 +1258,122 @@ fn a_lone_stroke_transparency_twin_is_the_strokes() {
         AttrValue::TranspFill(TranspPaint::Noise { .. })
     ));
 }
+
+/// The reconstruction palettes of the bitmaps `doc` holds, sorted.
+fn bitmap_palettes(doc: &Document) -> Vec<Vec<Rgba8>> {
+    let mut v: Vec<Vec<Rgba8>> = doc
+        .resources
+        .bitmaps()
+        .map(|(_, r)| r.pixels.palette.to_vec())
+        .collect();
+    v.sort_by_key(|p| p.iter().map(|c| [c.r, c.g, c.b, c.a]).collect::<Vec<_>>());
+    v
+}
+
+#[test]
+fn a_jpeg8bpp_palette_survives_as_a_blob_beside_the_jpeg() {
+    use xarast_doc::fill::Tiling;
+    // XARA-T-0154: a `.xar` JPEG8BPP bitmap snaps its decoded colours to a
+    // palette. The JPEG stays browser-readable; the palette is a blob named
+    // by `xarast:palette` on every element that names the image.
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    let jpeg: Arc<[u8]> = Arc::from(&b"\xff\xd8\xff\xe0not really a jpeg"[..]);
+    let jpeg8 = |palette: Vec<Rgba8>| BitmapResource {
+        name: Arc::from(""),
+        info: BitmapInfo::default(),
+        pixels: Arc::new(BitmapData {
+            palette: Arc::from(palette),
+            ..BitmapData::default()
+        }),
+        original: Some(Arc::new(OriginalEncoded {
+            format: ImageFormat::Jpeg,
+            bytes: Arc::clone(&jpeg),
+        })),
+        procedural: None,
+        transparent_index: None,
+    };
+    let warm = b.define_bitmap(jpeg8(vec![rgb8(200, 40, 0), rgb8(255, 220, 10)]));
+    let cold = b.define_bitmap(jpeg8((0..=255u8).map(|i| rgb8(0, i, 255 - i)).collect()));
+    let plain = b.define_bitmap(jpeg8(Vec::new()));
+    b.node(NodeKind::Bitmap(Box::new(BitmapNode {
+        image: warm,
+        origin: Point::raw(50_000, 500_000),
+        major: Vector::raw(100_000, 0),
+        minor: Vector::raw(0, -80_000),
+    })))
+    .unwrap();
+    let (o, ax, ay) = (
+        Point::raw(200_000, 50_000),
+        Point::raw(260_000, 50_000),
+        Point::raw(200_000, 110_000),
+    );
+    let fill = |image| {
+        AttrValue::Fill(FillGeometry::Bitmap {
+            image,
+            origin: o,
+            axis_x: ax,
+            axis_y: ay,
+            persp: None,
+            tiling: Tiling::Repeat,
+            dpi: 0,
+            contone: None,
+            profile: BiasGain::IDENTITY,
+        })
+    };
+    painted(
+        &mut b,
+        1,
+        vec![
+            fill(cold),
+            AttrValue::TranspFill(TranspPaint::Bitmap {
+                image: warm,
+                origin: o,
+                axis_x: ax,
+                axis_y: ay,
+                persp: None,
+                tiling: Tiling::Simple,
+                dpi: 0,
+                contone: None,
+                profile: BiasGain::IDENTITY,
+            }),
+        ],
+    );
+    painted(&mut b, 2, vec![fill(plain)]);
+    let doc = b.finish().unwrap().0;
+    let first = package(&doc, SvgOptions::default());
+    let svg = svg_of(&first);
+    // One JPEG, two palette blobs; every image a browser loads is the JPEG.
+    let names: Vec<String> = XarastReader::open(Cursor::new(first.clone()))
+        .unwrap()
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .filter(|n| n.starts_with("resources/"))
+        .collect();
+    let jpegs = names.iter().filter(|n| n.ends_with(".jpg")).count();
+    assert_eq!(jpegs, 1, "{names:?}");
+    let blobs: Vec<&String> = names
+        .iter()
+        .filter(|n| n.starts_with("resources/blobs/"))
+        .collect();
+    assert_eq!(blobs.len(), 2, "{names:?}");
+    // The bitmap node, the fill pattern and the transparency twin.
+    let named = svg.matches("xarast:palette=\"resources/blobs/").count();
+    assert_eq!(named, 3, "{svg}");
+
+    let mut o = open(&first);
+    assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);
+    assert_eq!(bitmap_palettes(&o.document), bitmap_palettes(&doc));
+    assert_eq!(normal_form(&o.document), normal_form(&doc));
+    let second = resave(&mut o);
+    assert_eq!(second, first, "the first re-save is a fixed point");
+
+    // A dangling palette is a warning and no palette.
+    let broken = repack(
+        &first,
+        &svg.replace(blobs[0].as_str(), "resources/blobs/missing.bin"),
+    );
+    let o = open(&broken);
+    assert!(!o.diagnostics.is_empty());
+    assert!(bitmap_palettes(&o.document).iter().any(Vec::is_empty));
+}
