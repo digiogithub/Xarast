@@ -49,6 +49,7 @@ pub mod path;
 pub mod point;
 pub mod profile;
 pub mod rect;
+pub mod regular;
 pub mod stroke;
 
 pub use boolean::{BoolOp, boolean, self_union};
@@ -65,6 +66,7 @@ pub use path::{Path, PathBuilder, PathError, PointFlags, Segment, SubPathRef, Ve
 pub use point::{Point, Vector};
 pub use profile::BiasGain;
 pub use rect::Rect;
+pub use regular::{MAX_REGULAR_SIDES, RegularShapeSpec, regular_shape_outline};
 pub use stroke::{
     Cap, DashPattern, FillRule, Join, StrokeError, StrokeStyle, dash, offset, stroke_to_path,
 };

@@ -1460,19 +1460,49 @@ fn image_format(f: crate::decode::BitmapFormat) -> ImageFormat {
     }
 }
 
+/// The record's two paths are edge *templates*, not the outline
+/// (`research/01 §4.7.1`). The outline is generated here, in the shape's own
+/// untransformed space where the record's parameters are exact, and only then
+/// carried through the matrix.
 fn quick_shape(s: &RegularShape) -> QuickShape {
+    use crate::decode::ShapeFlags as F;
     let m = s.matrix;
-    QuickShape {
+    // A two-point template is a straight edge, which is also the default, so
+    // only a curved template is worth keeping.
+    let template = |p: &xarast_geom::Path| (p.points().len() > 2).then(|| Arc::new(p.clone()));
+    let spec = xarast_geom::RegularShapeSpec {
         sides: u32::from(s.sides),
-        stellated: s.flags.contains(crate::decode::ShapeFlags::STELLATED),
-        curved: s
-            .flags
-            .contains(crate::decode::ShapeFlags::PRIMARY_CURVATURE),
+        circular: s.flags.contains(F::CIRCULAR),
+        stellated: s.flags.contains(F::STELLATED),
+        primary_curved: s.flags.contains(F::PRIMARY_CURVATURE),
+        stellation_curved: s.flags.contains(F::STELLATION_CURVATURE),
+        centre: Point::ORIGIN,
+        major: s.major_axis,
+        minor: s.minor_axis,
+        stellation_radius: s.stellation_radius,
+        stellation_offset: s.stellation_offset,
+        primary_curvature: s.primary_curvature,
+        stellation_curvature: s.secondary_curvature,
+        primary_edge: Some(&s.primary_edge),
+        secondary_edge: Some(&s.secondary_edge),
+    };
+    let path = xarast_geom::regular_shape_outline(&spec).map(|p| Arc::new(p.transformed(m)));
+    QuickShape {
+        sides: spec.sides,
+        circular: spec.circular,
+        stellated: spec.stellated,
+        curved: spec.primary_curved,
+        stellation_curved: spec.stellation_curved,
         centre: m.transform_point(Point::ORIGIN),
         major: m.transform_vector(s.major_axis),
         minor: m.transform_vector(s.minor_axis),
-        stellation_radius: s.stellation_radius as f32,
-        path: (!s.primary_edge.is_empty()).then(|| Arc::new(s.primary_edge.clone())),
+        stellation_radius: s.stellation_radius,
+        stellation_offset: s.stellation_offset,
+        primary_curvature: s.primary_curvature,
+        stellation_curvature: s.secondary_curvature,
+        primary_edge: template(&s.primary_edge),
+        secondary_edge: template(&s.secondary_edge),
+        path,
     }
 }
 
@@ -1914,5 +1944,96 @@ mod tests {
                 assert_eq!(doc.validate().errors, Vec::new(), "truncated at {n}");
             }
         }
+    }
+
+    /// XARA-T-0013: the record's edge paths are edge templates, not the
+    /// outline. Storing one as the shape's path gave every quick shape a
+    /// sliver of bounds far from where it sits, so the renderer culled it.
+    /// Synthetic parameters shaped like a stellated six-pointed star, placed
+    /// by a translation.
+    #[test]
+    fn a_quick_shape_gets_its_generated_outline_not_its_edge_template() {
+        use crate::decode::ShapeFlags;
+        let mut edge = xarast_geom::Path::builder();
+        edge.move_to(Point::raw(-576_000, -576_000))
+            .line_to(Point::raw(-504_000, -576_000));
+        let edge = edge.build();
+        let at = Point::raw(115_000, 301_000);
+        let s = RegularShape {
+            flags: ShapeFlags::STELLATED,
+            sides: 6,
+            major_axis: Vector::new(Mp::new(-27_750), Mp::new(47_250)),
+            minor_axis: Vector::new(Mp::new(47_250), Mp::new(27_750)),
+            matrix: xarast_geom::Matrix {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: at.x,
+                f: at.y,
+            },
+            stellation_radius: 0.5,
+            stellation_offset: 0.0,
+            primary_curvature: 0.2,
+            secondary_curvature: 0.2,
+            primary_edge: edge.clone(),
+            secondary_edge: edge,
+        };
+        let q = quick_shape(&s);
+        let path = q.path.as_deref().expect("an outline is generated");
+        assert_eq!(path.points().len(), 13, "move, then twelve edges");
+        let b = path.bounds();
+        // The primary radius is |major| = 54 797 mp; nothing is culled.
+        assert!(
+            b.width().raw() > 90_000 && b.height().raw() > 90_000,
+            "{b:?}"
+        );
+        assert!(
+            b.contains(at),
+            "the outline sits around the matrix translation"
+        );
+        for p in path.points() {
+            let d = p.distance_to(at);
+            assert!(
+                (d - 54_797.0).abs() < 3.0 || (d - 27_398.0).abs() < 3.0,
+                "every point is a primary or a stellation point: {d}"
+            );
+        }
+        // Straight templates are the default and are not kept.
+        assert!(q.primary_edge.is_none() && q.secondary_edge.is_none());
+        // Regenerating from the stored parameters gives the same outline.
+        assert_eq!(q.outline().as_ref(), Some(path));
+    }
+
+    /// Every quick shape is an ellipse when the circular flag is set,
+    /// whatever its side count says.
+    #[test]
+    fn a_circular_quick_shape_is_an_ellipse_spanning_its_axes() {
+        use crate::decode::ShapeFlags;
+        let s = RegularShape {
+            flags: ShapeFlags::CIRCULAR,
+            sides: 4,
+            major_axis: Vector::new(Mp::new(0), Mp::new(30_000)),
+            minor_axis: Vector::new(Mp::new(20_000), Mp::new(0)),
+            matrix: xarast_geom::Matrix {
+                a: 2.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: Mp::new(500_000),
+                f: Mp::new(0),
+            },
+            stellation_radius: 0.0,
+            stellation_offset: 0.0,
+            primary_curvature: 0.0,
+            secondary_curvature: 0.0,
+            primary_edge: xarast_geom::Path::new(),
+            secondary_edge: xarast_geom::Path::new(),
+        };
+        let q = quick_shape(&s);
+        let b = q.path.as_deref().expect("an ellipse").tight_bounds();
+        assert!((b.width().raw() - 80_000).abs() <= 4, "{b:?}");
+        assert!((b.height().raw() - 60_000).abs() <= 4, "{b:?}");
+        assert!(b.contains(Point::raw(500_000, 0)));
     }
 }

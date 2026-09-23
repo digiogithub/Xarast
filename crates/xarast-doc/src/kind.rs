@@ -266,28 +266,78 @@ pub struct ShapeNode {
     pub minor: Vector,
 }
 
-/// A regular polygon or star, held as its parameters.
+/// A regular polygon, star or ellipse, held as its parameters.
 ///
-/// Turning the parameters into a path is Phase 7's job; the node only stores
-/// them, plus an optional cached path the importer may supply.
+/// The parameters are the source of truth, and [`QuickShape::outline`]
+/// generates the drawable path from them (`research/01 §4.7.1`). `path` caches
+/// that outline in document coordinates. Bounds, the walker and the renderer
+/// all use it, so it must never hold anything else, such as an edge template.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuickShape {
     /// Number of sides or points.
     pub sides: u32,
+    /// An ellipse through the ends of both axes, rather than a polygon.
+    pub circular: bool,
     /// Whether it is a star rather than a polygon.
     pub stellated: bool,
-    /// Whether the edges are curved.
+    /// Whether the corners at the primary points are rounded.
     pub curved: bool,
+    /// Whether the corners at the stellation points are rounded.
+    pub stellation_curved: bool,
     /// Centre of the shape.
     pub centre: Point,
     /// The major axis.
     pub major: Vector,
     /// The minor axis.
     pub minor: Vector,
-    /// How far the star's points are stellated, as a fraction.
-    pub stellation_radius: f32,
-    /// A path the importer already had. Regenerated when absent.
+    /// The stellation points' distance from the centre, as a ratio of the
+    /// primary points'.
+    pub stellation_radius: f64,
+    /// The stellation points' angular offset, in units of one side's angle.
+    pub stellation_offset: f64,
+    /// The primary corners' rounding, as a ratio of the major axis length.
+    pub primary_curvature: f64,
+    /// The stellation corners' rounding, as a ratio of the major axis length.
+    pub stellation_curvature: f64,
+    /// The template for edges that leave a primary point, in the shape's own
+    /// untransformed space. `None` means a straight edge.
+    pub primary_edge: Option<Arc<Path>>,
+    /// The template for edges that leave a stellation point.
+    pub secondary_edge: Option<Arc<Path>>,
+    /// The outline in document coordinates, generated from the parameters.
+    /// `None` only when there is nothing to generate (see
+    /// [`xarast_geom::MAX_REGULAR_SIDES`]).
     pub path: Option<Arc<Path>>,
+}
+
+impl QuickShape {
+    /// Generates the outline from the parameters, in document coordinates.
+    ///
+    /// Exact for straight edges and for rounded corners under any transform
+    /// that preserves ratios along lines, which is every affine one. Edge
+    /// templates are fitted by a similarity, which is exact only when the
+    /// shape's transform is itself a similarity. The importer avoids that
+    /// approximation by generating in the shape's own space, before its
+    /// matrix applies.
+    #[must_use]
+    pub fn outline(&self) -> Option<Path> {
+        xarast_geom::regular_shape_outline(&xarast_geom::RegularShapeSpec {
+            sides: self.sides,
+            circular: self.circular,
+            stellated: self.stellated,
+            primary_curved: self.curved,
+            stellation_curved: self.stellation_curved,
+            centre: self.centre,
+            major: self.major,
+            minor: self.minor,
+            stellation_radius: self.stellation_radius,
+            stellation_offset: self.stellation_offset,
+            primary_curvature: self.primary_curvature,
+            stellation_curvature: self.stellation_curvature,
+            primary_edge: self.primary_edge.as_deref(),
+            secondary_edge: self.secondary_edge.as_deref(),
+        })
+    }
 }
 
 /// A placed bitmap: a parallelogram plus the resource it shows.
