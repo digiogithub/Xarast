@@ -28,6 +28,7 @@
 
 use std::sync::Arc;
 
+use xarast_doc::fill_edit::set_own_attr;
 use xarast_doc::{
     Attach, AttrNode, AttrSlot, AttrValue, Document, EditError, NodeId, NodeKind, PathNode,
     QuickShape, Tx,
@@ -177,6 +178,12 @@ pub enum EditCommand {
         /// The rule.
         rule: FillRule,
     },
+    /// Fill and transparency edits (phase 8), applied together as one
+    /// step: the same edit of every object sharing a handle set.
+    Fill {
+        /// The edits, in order. The first names the step.
+        edits: Vec<crate::fill_tool::FillCommand>,
+    },
 }
 
 /// What the linear part of a matrix does, as the Edit menu names it.
@@ -237,6 +244,7 @@ impl EditCommand {
             },
             EditCommand::ConvertToPaths { .. } => "Convert to Editable Shapes",
             EditCommand::SetWindingRule { .. } => "Winding Rule",
+            EditCommand::Fill { edits } => edits.first().map_or("Fill", |e| e.command().label()),
         }
     }
 
@@ -268,6 +276,12 @@ impl EditCommand {
                     ..
                 },
             ) => a == b,
+            // Nudges of a fill handle, a profile slider held: one step.
+            (EditCommand::Fill { edits: a }, EditCommand::Fill { edits: b }) => {
+                self.label() == prev.label()
+                    && a.len() == b.len()
+                    && a.iter().zip(b).all(|(x, y)| x.node() == y.node())
+            }
             _ => false,
         }
     }
@@ -281,6 +295,7 @@ impl EditCommand {
             EditCommand::DeleteNodes { nodes }
             | EditCommand::ConvertToPaths { nodes }
             | EditCommand::SetWindingRule { nodes, .. } => nodes.is_empty(),
+            EditCommand::Fill { edits } => edits.is_empty(),
             EditCommand::CreateShape { .. }
             | EditCommand::SetShapeParams { .. }
             | EditCommand::SetPath { .. }
@@ -443,24 +458,17 @@ impl xarast_doc::Command for EditCommand {
             | EditCommand::CreatePath { .. }
             | EditCommand::ConvertToPaths { .. }
             | EditCommand::SetWindingRule { .. } => run_path_commands(self, tx),
-        }
-    }
-}
-
-/// Sets `node`'s own attribute of `value`'s slot: replaces the one among
-/// its attribute children, or adds one as its first child.
-fn set_own_attr(tx: &mut Tx<'_>, node: NodeId, value: AttrValue) -> Result<(), EditError> {
-    let slot = value.slot();
-    let doc = tx.doc();
-    let own = doc.tree.children(node).find(|c| match doc.tree.kind(*c) {
-        Some(NodeKind::Attr(a)) => a.value.slot() == slot,
-        _ => false,
-    });
-    match own {
-        Some(a) => tx.set_attr(a, value),
-        None => {
-            let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(value))))?;
-            tx.attach(attr, node, Attach::FirstChild)
+            EditCommand::Fill { edits } => {
+                let nodes: Vec<NodeId> = edits
+                    .iter()
+                    .map(crate::fill_tool::FillCommand::node)
+                    .collect();
+                check_layers(tx, &nodes)?;
+                for e in edits {
+                    e.command().run(tx)?;
+                }
+                Ok(())
+            }
         }
     }
 }

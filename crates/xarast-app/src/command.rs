@@ -378,6 +378,9 @@ impl AppCommand {
         const PEN: &[KeyChord] = &[KeyChord::shift_f(5)];
         const ZOOM_TOOL: &[KeyChord] = &[KeyChord::shift_f(7)];
         const PUSH: &[KeyChord] = &[KeyChord::shift_f(8)];
+        // `research/04 §4.4`: F5 graduated fill, F6 transparency.
+        const FILL_TOOL: &[KeyChord] = &[KeyChord::f(5)];
+        const TRANSP_TOOL: &[KeyChord] = &[KeyChord::f(6)];
         // The shape editor's keys (`research/04 §4.11`).
         const FINISH: &[KeyChord] = &[KeyChord::plain(ChordKey::Enter)];
         const MAKE_LINE: &[KeyChord] = &[KeyChord::char('l')];
@@ -437,7 +440,9 @@ impl AppCommand {
                 ToolId::Pen => PEN,
                 ToolId::Zoom => ZOOM_TOOL,
                 ToolId::Pan => PUSH,
-                ToolId::Fill | ToolId::Transparency | ToolId::Text => NONE,
+                ToolId::Fill => FILL_TOOL,
+                ToolId::Transparency => TRANSP_TOOL,
+                ToolId::Text => NONE,
             },
             AppCommand::Action(a) => match a {
                 ToolAction::Finish => FINISH,
@@ -585,6 +590,8 @@ mod tests {
             (ToolId::Pen, "Shift+F5"),
             (ToolId::Zoom, "Shift+F7"),
             (ToolId::Pan, "Shift+F8"),
+            (ToolId::Fill, "F5"),
+            (ToolId::Transparency, "F6"),
         ] {
             assert_eq!(key(AppCommand::Tool(tool)), k, "{tool:?}");
             assert_eq!(

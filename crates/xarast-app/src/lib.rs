@@ -67,6 +67,8 @@ pub mod autosave;
 pub mod command;
 pub mod commands;
 pub mod edit;
+pub mod fill_handles;
+pub mod fill_tool;
 pub mod fonts;
 pub mod freehand;
 pub mod geometry;
