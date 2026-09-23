@@ -19,7 +19,11 @@ Round 5 (2026-09-23, after bitmaps started decoding — T-0129): the
 JPEG8BPP palette (XARA-T-0154, also the cause of T-0157's scope3 gap),
 bitmap transparencies as luminance masks and contone fills as duotone
 filters for browsers; the render round trip is exact again for 59/59 and
-`KNOWN_RENDER_GAPS` is deleted.
+`KNOWN_RENDER_GAPS` is deleted. Round 6 (2026-09-23, after text started
+rendering from the real layout — XARA-T-0172): stories are written as
+exact runs (`research/06 §6.7.1`), placed for browsers by the
+application's layout; the render round trip is exact for 59/59 again and
+`KNOWN_TEXT_GAPS` is deleted; the model's default text size is 16 pt.
 
 | Workstream | State | Where |
 |---|---|---|
@@ -177,12 +181,31 @@ stats, foreign_count, foreign_digest }`.
   parametric element first; generated children in `<g
   xarast:generated=… xarast:generated-by=… xarast:base-authoritative="true">`
   — nothing regenerates them before Phase 13, so a reader must keep them.
-- **Text** (until Phase 9): `<text transform>` with the story matrix
-  conjugated by the flip (`Frame::local_matrix`), one `<tspan>` per line
-  (line advance = ratio × 1.2 × largest size, or the absolute spacing),
-  runs split where font, size, weight, style, underline or fill change.
-  Kerns are dropped; stories on a path are laid out as lines. Fill only,
-  no stroke.
+- **Text** (round 6, XARA-T-0172; normative in `research/06 §6.7.1`,
+  shared code in `svg/text.rs`): `<text xarast:exact="true" transform>`
+  (story matrix conjugated by the flip; `xarast:matrix` with the exact
+  `a b c d` when six decimals do not pin them), one `<tspan>` per
+  `TextLine` (its node ruler as `xarast:ruler`), and inside it one
+  `<tspan>` per **run**: consecutive items whose *written* attributes are
+  identical. Grouping: a snapshot of the `AttrStack` at each item whose
+  state changed (dirty flag); an equal snapshot continues the run, a
+  different one builds the candidate run's start tag and merges when it
+  writes the same (so restore attributes and slots the profile does not
+  carry never split runs, which keeps the first re-save a fixed point).
+  Each run: text attributes + twins (`run_text_attrs`), then paint through
+  the ink `paint()` (strokes, transparencies, twins as child elements),
+  registered as a styler slot inside a `GroupKind::Block` frame opened on
+  the `<text>`. Content: characters, `<xarast:kern xarast:em>`,
+  `<xarast:eol [xarast:soft]>`, `<xarast:char xarast:code>` for non-XML
+  characters; nothing between elements (`xml:space="preserve"`). An
+  item-less line writes one empty run from the state **outside** the line
+  scope (what `StoryText` resolves for it). Placement: with
+  `SvgOptions::text` (a `Placer` over a `TextPlacer`; `xarast-app`'s
+  `svg_text::placer()`, used by `xarast-cli convert`) every run gets `x`
+  / `y` lists from the real layout and substituted families join the
+  `font-family` chain (+ `xarast:font-substitute`, informative); without
+  it the old line-per-baseline fallback (`x=0`, `y` += line height,
+  `text-anchor`). Stories on a path are still laid out as lines.
 
 ### Passes 4–5: hoisted paint and CSS classes (XARA-T-0101) — the reader contract
 
@@ -374,6 +397,19 @@ diagnostics, stats, preservation }`; `open` wraps it with the container,
   `javascript:` values are stripped with a warning, and so is any foreign
   fragment that contains them.
 
+### The text reader (round 6)
+
+`read/build/ink.rs::exact_line`: per line a `TextLine` (ruler from
+`xarast:ruler`), then per run the **full state** (`full_state`: every
+slot from the run's twins, text properties and `ink_paint`, defaults for
+the rest) diffed against the running state, which starts at the
+story-level state; one attribute node per differing slot, in slot order,
+then the run's items. A line whose only run has no content pushes its
+differences **before the line, at story level**, and updates the
+story-level state. Without `xarast:exact` the legacy path reads (other
+programs' `<text>`, pre-round-6 files), its size fallback now
+`default_for` (16 pt).
+
 ### The normal form (XARA-T-0105)
 
 `normal_form(doc)` is text, one fact per line: metadata; the palette
@@ -396,6 +432,33 @@ normal forms are equal. It is independent of where attributes sit, of
 hoisting and classes, and of def ids.
 
 ### Round trip numbers (2026-09-23, corpus of 59)
+
+Round 6 (XARA-T-0172): model **59/59**, bytes **59/59**, render **59/59
+pixel-identical** with the pinned test fonts; the 20 files of
+`KNOWN_TEXT_GAPS` (all 14 `TextDesigns`, GardenPlan, Spitfire, TextCurve,
+ProbeX16, ScaleTest, ScaleTest2) pass and the list and its "update the
+list" assertion are deleted. Before the matrix twin, Rotated, AngledText,
+TextCurve and hebrew still differed by 1–11 levels on ≤ 69 pixels: six
+decimals of a rotation's `cos`/`sin` moved glyph outlines by a fraction
+of a pixel. `tests/svg_text.rs` covers what the corpus does not: an
+empty line, an item's own attributes, `\r`, U+0001, U+FFFE, soft breaks,
+families SVG cannot spell, a mock placer. Fuzz (`fuzz_xarast_svg_read`,
+seeds with a text story added to `fuzz_seeds`): 5 min, 379 577 runs,
+15 995 edges, no finding. ProbeX16 save with the placer: 0.93–0.97 s
+under load avg 18–50, best of 4 interleaved 0.95 s vs 0.92 s for the
+previous build in the same conditions (+≈ 30 ms: system font enumeration
+and 48 layouts); `save_to` without a placer adds nothing.
+
+Text conformance, resvg vs the CPU reference (`render --frame page`,
+8 × 8 grey SSIM, system fonts both sides), 20 text files, before → after:
+mean **0.934 → 0.988**; every `TextDesigns` file 0.999–1.000 (were
+0.911–0.997: hebrew 0.911, Rotated 0.930, embeddedFonts 0.933, TextJust
+0.936), GardenPlan 0.795 → 0.982, TextCurve 0.651 → 0.969 (on-path text
+is straight in both); Spitfire, Watch4, ScaleTest(2) unchanged (their
+differences are not text). Inkscape 1.2.2 on Rotated / TextJust /
+SuperSub: 0.944 / 0.942 / 0.975 → **0.998 / 0.999 / 1.000**. Checked by
+eye: rotated columns, Hebrew (RTL, marks) and GardenPlan's labels sit on
+the reference.
 
 Round 5, with bitmaps decoded (the walker renders tag-68/-71 images,
 T-0129): model **59/59**, bytes **59/59**, render **59/59
@@ -618,6 +681,17 @@ the file means", not crashes; each input is now a unit test in
 
 ## Dead ends (do not retry)
 
+- Text runs split on snapshot inequality alone: a restore attribute or a
+  slot the profile does not write splits a run in the original and not in
+  the reload, so the first re-save differs. Split on what is *written*.
+- An item-less line's run taken inside the line's scope: `StoryText`
+  resolves such a line from the state after its scope closes, and a
+  reader that pushes the run inside the line loses it. The run is the
+  outer state and the reader puts it at story level.
+- `text-anchor` with per-character `x` lists: every character is its own
+  text chunk, so a centred anchor centres each glyph on its x.
+- Six decimals for a rotated story's matrix (1-level pixel differences).
+
 - Headless Chrome rendering the SVG through an `<img>`: SVG-as-image runs
   in secure static mode and loads **no** external resources, so every
   bitmap vanishes. Navigate to the `.svg` itself.
@@ -704,6 +778,15 @@ the file means", not crashes; each input is now a unit test in
 - `meta.xml` model (F2.6) and the full `<metadata>` mirror (F2.7):
   `save::meta_xml` writes only title, dates, generator, origin,
   statistics, page setup and comment.
+- Text leftovers (XARA-T-0172): the builder's Info diagnostic "an
+  attribute follows an ink node" fires on every multi-run line (text items
+  count as ink in `validate`); run-level foreign attributes and elements
+  are dropped (runs are not nodes); text on a path is still a straight
+  line in the base SVG (`<textPath>`, W9.5); a gradient or bitmap fill on
+  text is written in the spread frame, so browsers misplace it under the
+  story's transform (the twin is exact); fonts are not embedded
+  (`@font-face`/WOFF2, §6.7 rule 2) and no generic family is guessed from
+  a name without PANOSE.
 - ~~Doc model has no per-node foreign-baggage container~~ — done,
   XARA-T-0089 (`docs/memory/document-model.md` decision 32).
 - F6.4 lock UX + `SIGINT`/`SIGTERM` cleanup (app), F6.5 autosave, F6.6
