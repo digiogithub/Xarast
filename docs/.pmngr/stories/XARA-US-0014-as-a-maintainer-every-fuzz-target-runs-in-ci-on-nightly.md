@@ -2,15 +2,16 @@
 id: XARA-US-0014
 type: story
 title: As a maintainer, every fuzz target runs in CI on nightly
-status: in_progress
+status: done
 priority: high
 parent: XARA-EP-0018
 author: mcp
 labels: [fuzz, xar, geometry, render]
 estimate: 5
 created: 2026-09-23T09:40:52Z
-updated: 2026-09-23T09:50:43Z
+updated: 2026-09-23T10:36:14Z
 started: 2026-09-23T09:50:43Z
+closed: 2026-09-23T10:36:14Z
 ---
 
 ## Description

@@ -4,11 +4,11 @@ type: task
 title: Gradient-heavy corpus files take ~10 s each to render at 100 % on the CPU backend
 status: backlog
 priority: medium
-parent: XARA-US-0001
+parent: XARA-US-0016
 author: mcp
 labels: [render, perf]
 created: 2026-09-23T10:04:32Z
-updated: 2026-09-23T10:04:32Z
+updated: 2026-09-23T10:36:14Z
 ---
 
 ## Description

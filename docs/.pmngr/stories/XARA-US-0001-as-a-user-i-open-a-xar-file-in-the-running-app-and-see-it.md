@@ -2,15 +2,16 @@
 id: XARA-US-0001
 type: story
 title: As a user, I open a .xar file in the running app and see it on the canvas
-status: in_review
+status: done
 priority: critical
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, app-core, shell]
 estimate: 8
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T10:31:53Z
+updated: 2026-09-23T10:36:14Z
 started: 2026-09-23T09:52:52Z
+closed: 2026-09-23T10:36:14Z
 ---
 
 ## Description

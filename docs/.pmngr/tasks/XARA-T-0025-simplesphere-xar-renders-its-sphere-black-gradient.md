@@ -4,11 +4,11 @@ type: task
 title: SimpleSphere.xar renders its sphere black (gradient + transparency stack)
 status: backlog
 priority: medium
-parent: XARA-US-0001
+parent: XARA-US-0081
 author: mcp
 labels: [render, app-core]
 created: 2026-09-23T10:31:45Z
-updated: 2026-09-23T10:31:45Z
+updated: 2026-09-23T10:36:14Z
 ---
 
 ## Description

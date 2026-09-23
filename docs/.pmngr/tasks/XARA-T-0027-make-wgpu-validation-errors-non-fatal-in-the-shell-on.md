@@ -4,11 +4,11 @@ type: task
 title: Make wgpu validation errors non-fatal in the shell (on_uncaptured_error)
 status: backlog
 priority: high
-parent: XARA-US-0001
+parent: XARA-US-0081
 author: mcp
 labels: [shell]
 created: 2026-09-23T10:31:45Z
-updated: 2026-09-23T10:31:45Z
+updated: 2026-09-23T10:36:14Z
 ---
 
 ## Description

@@ -4,11 +4,11 @@ type: task
 title: Quick shapes with a cached path have zero-area bounds and are culled from the render
 status: backlog
 priority: medium
-parent: XARA-US-0001
+parent: XARA-US-0081
 author: mcp
 labels: [doc, render, bug]
 created: 2026-09-23T10:04:32Z
-updated: 2026-09-23T10:04:32Z
+updated: 2026-09-23T10:36:14Z
 ---
 
 ## Description

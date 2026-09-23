@@ -4,11 +4,11 @@ type: task
 title: "Headless API: return WalkStats, take a fixed zoom/dpi, and make drawing_rect exclude pages"
 status: backlog
 priority: medium
-parent: XARA-US-0001
+parent: XARA-US-0081
 author: mcp
 labels: [app, headless, api]
 created: 2026-09-23T10:04:32Z
-updated: 2026-09-23T10:04:32Z
+updated: 2026-09-23T10:36:14Z
 ---
 
 ## Description
