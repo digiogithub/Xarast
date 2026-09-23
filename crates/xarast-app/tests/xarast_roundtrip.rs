@@ -34,12 +34,22 @@ const MAX_DIFFERING: f64 = 0.001;
 /// Files that render differently for a known writer gap, not a reader
 /// fault: scope3 simple loses objects kept under an unknown record
 /// (XARA-T-0108) and a fractal fill's mapping, Watch4 a noise fill's
-/// mapping, Spitfire its bitmap fills' mapping (XARA-T-0109). They must
-/// still render, and the test demands the list shrink when the writer is
-/// fixed.
+/// mapping, Spitfire and WATCH their bitmap fills' mapping (XARA-T-0109).
+/// Since bitmaps decode (XARA-T-0129) four more show writer gaps that
+/// undecoded bitmaps used to hide: leafgirl and Groucho2 lose their
+/// JPEG8BPP palette (XARA-T-0154), Fill Types simple a duotone bitmap
+/// fill and a mirrored mapping (XARA-T-0155, XARA-T-0109), and JagSS100
+/// simple the image of its bitmap-transparency shadow (XARA-T-0111). They
+/// must still render, and the test demands the list shrink when the writer
+/// is fixed.
 const KNOWN_RENDER_GAPS: &[&str] = &[
+    "Designs/Fill Types simple.xar",
+    "Designs/Groucho2.xar",
+    "Designs/JagSS100 simple.xar",
     "Designs/Spitfire.xar",
+    "Designs/WATCH.xar",
     "Designs/Watch4.xar",
+    "Designs/leafgirl.xar",
     "Designs/scope3 simple.xar",
 ];
 

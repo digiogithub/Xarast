@@ -196,13 +196,35 @@ fn a_blank_file_is_blank_for_a_reason_the_walker_reports() {
             .preorder(s.doc.tree.root())
             .any(|id| s.doc.tree.kind(id).is_some_and(|k| k.is_ink()));
         assert!(
-            !has_ink_nodes || w.text_pending > 0 || w.shapes_pending > 0 || w.images_pending > 0,
+            !has_ink_nodes
+                || w.text_pending > 0
+                || w.shapes_pending > 0
+                || w.images_pending > 0
+                || w.images_failed > 0,
             "{}: drew nothing and reported no reason: {w:?}",
             f.rel
         );
         blank.push(f.rel.clone());
     }
     println!("{} blank files, all explained: {blank:?}", blank.len());
+}
+
+/// Every bitmap in the corpus decodes and registers: no object is left
+/// out for want of pixels, and no decode fails.
+#[test]
+fn every_corpus_bitmap_decodes_and_is_drawn() {
+    let c = corpus_or_skip!();
+    let mut with_bitmaps = 0usize;
+    for f in &c.files {
+        let mut s = open(&c.path(f));
+        s.rebuild_scene(None).expect("scene");
+        let w = s.walk_stats();
+        assert_eq!(w.images_pending, 0, "{}: undecoded bitmaps: {w:?}", f.rel);
+        assert_eq!(w.images_failed, 0, "{}: failed bitmaps: {w:?}", f.rel);
+        with_bitmaps += usize::from(s.doc.resources.bitmaps().next().is_some());
+    }
+    assert!(with_bitmaps > 0);
+    println!("{with_bitmaps} files with bitmaps, every one drawn");
 }
 
 /// The same inputs produce the same scene, every time.

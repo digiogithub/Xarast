@@ -20,6 +20,7 @@ xarast-xar = { path = "../xarast-xar" }
 xarast-format = { path = "../xarast-format" }
 xarast-io = { path = "../xarast-io" }
 xarast-text = { path = "../xarast-text" }
+xarast-image = { path = "../xarast-image" }
 
 indexmap = { workspace = true }
 bitflags = { workspace = true }
