@@ -120,9 +120,13 @@ impl Action {
         match self {
             Action::Attach { node, anchor, how } => {
                 doc.tree.attach(*node, *anchor, *how)?;
+                let parent = doc.tree.links(*node).parent;
+                doc.tree.note_change(*node, parent);
             }
             Action::Detach { node, .. } => {
+                let parent = doc.tree.get(*node).and_then(|n| n.links.parent);
                 doc.tree.detach(*node)?;
+                doc.tree.note_change(*node, parent);
             }
             Action::SetKind { node, new } => {
                 let n = doc
@@ -132,6 +136,7 @@ impl Action {
                 n.kind = (**new).clone();
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetFlags { node, new } => {
                 let detached = doc
@@ -151,6 +156,7 @@ impl Action {
                         NodeFlags::empty()
                     };
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::Transform { node, matrix } => {
                 let n = doc
@@ -160,6 +166,7 @@ impl Action {
                 transform_kind(&mut n.kind, *matrix);
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetAttr { node, new } => {
                 let n = doc
@@ -172,6 +179,7 @@ impl Action {
                 }
                 doc.tree.invalidate_bounds(*node);
                 doc.tree.touch(*node);
+                doc.tree.note_change(*node, doc.tree.links(*node).parent);
             }
             Action::SetResource { id, new } => {
                 let ResourceRef::Bitmap(b) = id else {
@@ -181,6 +189,7 @@ impl Action {
                     .replace_bitmap_pixels(*b, new.clone())
                     .ok_or(EditError::MissingResource(*id))?;
                 doc.tree.touch_resources();
+                doc.tree.note_everything_changed();
             }
             Action::SetForeign { node, new } => {
                 if !doc.tree.contains(*node) {
