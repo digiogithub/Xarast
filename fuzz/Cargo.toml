@@ -20,6 +20,7 @@ xarast-geom = { path = "../crates/xarast-geom" }
 xarast-doc = { path = "../crates/xarast-doc" }
 xarast-render = { path = "../crates/xarast-render" }
 xarast-color = { path = "../crates/xarast-color" }
+xarast-format = { path = "../crates/xarast-format" }
 arbitrary = { version = "1", features = ["derive"] }
 # Only to forge dangling resource keys for `fuzz_doc_builder`.
 slotmap = "1.0"
@@ -116,6 +117,24 @@ bench = false
 [[bin]]
 name = "fuzz_doc_builder"
 path = "fuzz_targets/fuzz_doc_builder.rs"
+test = false
+doc = false
+bench = false
+
+# The `.xarast` container: signature, end record, central directory, names,
+# limits, the manifest, every read path, and a full re-save of whatever opens.
+[[bin]]
+name = "fuzz_xarast_open"
+path = "fuzz_targets/fuzz_xarast_open.rs"
+test = false
+doc = false
+bench = false
+
+# `META-INF/manifest.xml`: hostile XML, namespaces, foreign-data carry, and
+# the write–parse fixed point.
+[[bin]]
+name = "fuzz_xarast_manifest"
+path = "fuzz_targets/fuzz_xarast_manifest.rs"
 test = false
 doc = false
 bench = false
