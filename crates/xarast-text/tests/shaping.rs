@@ -275,6 +275,16 @@ fn an_explicit_base_direction_places_neutrals() {
     );
     let ltr = lay(&s, text, &r, ParagraphStyle::default(), StoryMode::Point);
     assert_eq!(visual_clusters(&ltr), [0, 1, 2, 3]);
+    assert!(rtl.lines[0].base_rtl && !ltr.lines[0].base_rtl);
+}
+
+#[test]
+fn a_line_knows_its_paragraph_direction() {
+    // First strong character decides (UAX #9 P2): per paragraph, not per
+    // story.
+    let l = point("שלום abc\nabc שלום", "Noto Sans");
+    let dirs: Vec<bool> = l.lines.iter().map(|l| l.base_rtl).collect();
+    assert_eq!(dirs, [true, false]);
 }
 
 #[test]
