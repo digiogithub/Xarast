@@ -547,6 +547,20 @@ impl DocumentBuilder {
         self.repair_live();
         self.repair_active_layers();
         self.repair_missing_resources();
+        // A palette loop is broken, never rejected (phase 8, W8.1): the
+        // youngest entry on it becomes a normal colour holding its cached
+        // value, so the document looks the same and editing is safe.
+        let demoted = self.doc.resources.colours.repair_cycles();
+        if !demoted.is_empty() {
+            self.diagnostic(Diagnostic::new(
+                Severity::Warning,
+                DiagCode::Repaired,
+                format!(
+                    "{} palette colour(s) on a derivation loop made independent",
+                    demoted.len()
+                ),
+            ));
+        }
 
         let report = self.doc.validate();
         if !report.errors.is_empty() {
