@@ -749,6 +749,39 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     before capturing. On Wayland the fractional scale arrives after the
     first frame: at 1.25 the first frame was laid out at 1.0 in a 1.25
     surface.
+35. **Saving in the shell** (XARA-US-0084; the flow is `app-core.md`
+    "Saving"). File › Save (Ctrl+S) and Save As… (Ctrl+Shift+S) are
+    `AppCommand`s; `PlatformRequest::ShowSaveDialog` becomes one parented
+    `PortalHandle::save_file` at a time, filtered to "Xarast documents
+    (*.xarast)" only and pre-filled with `name.xarast` in the document's
+    directory. `SaveChosen` → `Intent::SaveTo`; Cancelled/Failed →
+    `SaveDialogClosed` (a failure also goes to the status bar and the
+    problem list). `Viewer::housekeeping` runs at every event and frame:
+    `poll_saves` (the save thread wakes the loop through `ShellWaker`),
+    the core's notice into the status bar, `tick` for autosave (its due
+    time joins the Final's in the `RedrawAfter`), the recovery question
+    once (not with `--screenshot`/`--probe`), and the signal flag.
+36. **The title shows unsaved work**: `• name — Xarast`, and
+    `name (read-only) — Xarast` for a document another session holds.
+    It is compared every frame rather than tracked, because any edit,
+    undo, redo or save can change it.
+37. **The window's close button is Quit.** `ShellApp::handles_close()`
+    (default false) keeps `window.rs` from exiting on `CloseRequested`;
+    the viewer applies `Intent::Quit`, which asks about unsaved changes
+    and queues `PlatformRequest::Quit` → `ctx.exit()` only when done.
+38. **Questions are egui modals** (`xarast-ui::dialogs`, from
+    `UiModel::prompt`): the core's `Prompt` choices as buttons, the
+    default focused, Escape/click outside = the cancel answer, Enter = the
+    default. There is no portal for a question dialog.
+39. **Signals** (`signals.rs`, `signal-hook`'s safe iterator on its own
+    thread): SIGINT/SIGTERM/SIGHUP set a flag and wake the loop; the
+    viewer calls `AppState::emergency_shutdown` (autosave modified
+    documents, drop every session → locks released) and exits; `main`
+    returns `128 + signal`. If that has not happened 5 s later, or a
+    second signal arrives, the thread calls `locks::release_all()` and
+    `process::exit`. Measured on COSMIC with a real window holding a
+    `.xarast` lock: SIGTERM → orderly shutdown in 214 ms, lock file gone,
+    exit status 143.
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
@@ -919,6 +952,18 @@ isolated GNOME session on a private bus:
 - [x] Cursor shapes and the IME caret area — measured on GNOME 46 (12
   shapes; ibus candidate window under the caret at 1× and 1.25×). Not
   measured on COSMIC.
+- [ ] **The live Save As dialog has not been driven end to end**
+  (XARA-US-0084): tests use `PortalService::offline` and synthetic
+  `SaveChosen`. Manual check: open a `.xar`, draw a rectangle → title
+  `• name.xar — Xarast`; Ctrl+S → a chooser titled "Save As" attached to
+  the window, filter "Xarast documents (*.xarast)", name `name.xarast`
+  in the file's folder; Save → status "Saved name.xarast (…)", the
+  marker goes, the `.xar` is untouched; Ctrl+Z → marker back, Ctrl+Shift+Z
+  → gone; Ctrl+W after an edit → "Unsaved changes" dialog, Cancel keeps
+  it, Discard closes; the window's close button asks the same; open the
+  same `.xarast` in a second `xarast` → "Document in use" with read-only /
+  copy / force; `kill -TERM` a session with unsaved work → next start
+  offers "Recover unsaved work".
 - [ ] **The live File › Open dialog has not been driven end to end**
   (XARA-US-0082): tests use `PortalService::offline` and synthetic
   `PortalEvent`s; opening a real dialog needs a click or Ctrl+O on a

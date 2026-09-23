@@ -28,7 +28,7 @@ filters for browsers; the render round trip is exact again for 59/59 and
 | W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `style`, `emit`), `save.rs` |
 | W4 SVG read + preservation | F4.1–F4.6, F4.8–F4.10 done; F4.7 marking done, deletion accounting open (XARA-T-0113); XARA-T-0105 (localise + normal form) and T-0107 (passes 4–5) done | `svg/read/` (`dom`, `parse`, `style`, `build/{ink,paint,root}`, `normal`), `open.rs` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
-| W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4–F6.9 open | `durability/` |
+| W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4 lock UX + signals, F6.5 autosave and F6.7 recovery done **in the app** (`xarast-app` `locks`/`autosave`, XARA-US-0084); F6.6 journal, F6.8, F6.9 open | `durability/` |
 
 Public entry points: `XarastReader::{open, open_with}`, `PackageWriter`,
 `ResourceIndex`, `Manifest`, `sniff`/`sniff_bytes`, `write_atomic[_with]`,
@@ -706,9 +706,16 @@ the file means", not crashes; each input is now a unit test in
   statistics, page setup and comment.
 - ~~Doc model has no per-node foreign-baggage container~~ — done,
   XARA-T-0089 (`docs/memory/document-model.md` decision 32).
-- F6.4 lock UX + `SIGINT`/`SIGTERM` cleanup (app), F6.5 autosave, F6.6
-  journal, F6.7 recovery scan, F6.8 `xarast repair`, F6.9 partial XML
-  recovery.
+- ~~F6.4 lock UX + signals, F6.5 autosave, F6.7 recovery scan~~ — done in
+  `xarast-app` (XARA-US-0084, `app-core.md` "Saving"). Open: F6.6 journal
+  (needs a serialisable command form), F6.8 `xarast repair`, F6.9 partial
+  XML recovery.
+- **Thumbnails (F5.8) are written** (XARA-T-0082): `SaveOptions::thumbnail`
+  carries the PNG; the application renders it (`xarast_app::thumbnail`)
+  on a scoped thread while `prepare_save`/`prepare_resave` serialise the
+  SVG, then finishes with `PackageWriter::finish[_with_source]` inside
+  `write_atomic_with`. A re-save never carries the source's thumbnail.
+  Previews (F5.9) are not written yet.
 - F5.5 master/derived (`set_derivation` and the manifest fields exist; the
   `--no-derived` regeneration path does not), F5.7 geometry dedup, F5.9
   previews from a provider, F5.10 `data:` policy — all need W3.

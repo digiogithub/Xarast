@@ -24,7 +24,7 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Pen (Shift+F5): click corner, drag smooth, continue an end, close, Enter/Esc | `pen.rs` | done (T6.8) |
 | Freehand (F3): every sample, chunked incremental fit, smoothing slider, Shift rub-out, closed = filled | `freehand.rs` | done (T6.9, T6.10) |
 | `SetPath`/`CreatePath`/`ConvertToPaths`/`SetWindingRule`, `PathEdit` labels | `ops.rs` | done |
-| `Tool::action` + `ToolAction`; `AppCommand::Action` (L C S Z B J Enter), `ConvertToShapes` (Ctrl+Shift+S), Backspace = Delete | `tool.rs`, `command.rs` | done |
+| `Tool::action` + `ToolAction`; `AppCommand::Action` (L C S Z B J Enter), `ConvertToShapes` (Ctrl+Shift+C, see decision 30), Backspace = Delete | `tool.rs`, `command.rs` | done |
 | Current attributes | `edit.rs` `CurrentAttributes`, `Intent::SetCurrentAttribute` | done (no UI to set them yet) |
 | Keys | `AppCommand` + shell | as before, plus `3` = Zoom to selection; momentary Space / Alt+S (selector), Alt+Z (zoom), Alt+X (push) |
 | `--probe drag|scale|rotate|rect|ellipse|nodes|pen|freehand` | `xarast-shell` | done |
@@ -206,8 +206,14 @@ undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
     edits paths only (the original's Bézier tool ignores rectangles,
     ellipses and quick shapes too); with one selected it draws its bounds
     dashed and its infobar offers *Convert to editable shapes*
-    (`Ctrl+Shift+S`, `EditCommand::ConvertToPaths`: same `NodeId`, same
+    (`Ctrl+Shift+C`, `EditCommand::ConvertToPaths`: same `NodeId`, same
     attribute children, `NodeKind::Path` of `picking::geometry_of`).
+    **Key (XARA-US-0084):** the original binds it to Ctrl+Shift+S
+    (`research/04 §4.11`, line 599), but Ctrl+Shift+S is Save As in every
+    other desktop program and Xarast keeps that convention; Convert takes
+    Ctrl+Shift+C, which is Inkscape's "Object to Path" and was free.
+    `command.rs::no_two_commands_share_a_key` and the shell's
+    `every_chord_of_the_command_table_reaches_its_command` guard clashes.
 31. **Point selection** stays `EditState` point indices; tools ask for a
     new one through `ToolRequests::points` (applied after the commands,
     so indices refer to the new geometry) and `created_points` (the pen's

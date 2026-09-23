@@ -158,7 +158,33 @@ two more entries belong under it.
 
 The size with all of these linked in is recorded under **Size** above.
 
+## The `.xarast` desktop integration (phase 6 W7, XARA-US-0084)
+
+- `packaging/linux/xarast.xml`: `application/vnd.xarast+zip`, glob
+  `*.xarast`, three-level magic (`PK\003\004` at 0, `mimetype` at 30, the
+  MIME string at 38), **priority 80** (above generic zip), `sub-class-of
+  application/zip`. Checked 2026-09-23 with `update-mime-database` into a
+  scratch `XDG_DATA_HOME` and `gio info`: a saved package **with no
+  extension** is detected as `application/vnd.xarast+zip`.
+- `xarast.desktop` already lists the MIME type (desktop-file-validate
+  clean).
+- `xarast-thumbnailer` (`xarast-cli`): extracts `thumbnail.png` only,
+  checked against the 512 px cap before decoding, box-filtered down to
+  `-s SIZE`; never parses `document.svg`, never renders (it runs on every
+  file a file manager lists). No thumbnail → exit 1, the file manager
+  shows the icon. Registered by `packaging/linux/xarast.thumbnailer`
+  (`Exec=xarast-thumbnailer -s %s %i %o`).
+- `build-appimage.sh` builds and installs the thumbnailer
+  (`usr/bin`, `usr/share/thumbnailers`) and passes it to linuxdeploy as a
+  second `--executable`. **Caveat:** files inside an AppImage are not seen
+  by the host's MIME database or thumbnail cache until something
+  integrates the image (appimaged, Gear Lever, a distro package). Not
+  measured yet in a built image.
+
 ## Open TODOs
+
+- [ ] Run a built AppImage's `xarast-thumbnailer` on a saved `.xarast`
+      in a file manager on a desktop that integrates AppImages.
 
 - [x] Distro smoke matrix (W0.4.8): done locally and wired into CI as
       `distro-smoke` (2026-09-23).
