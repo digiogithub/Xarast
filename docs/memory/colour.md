@@ -167,14 +167,16 @@ Plain round-to-nearest would get **545** of them wrong.
 ## Open TODOs
 
 - [ ] Walker: resolve through `PaletteResolver`, fold `palette_epoch` into
-      render cache keys, repaint `ColourUses::users_of(changed)` (filed).
+      render cache keys, repaint `ColourUses::users_of(changed)`
+      (XARA-T-0203).
 - [ ] App: `EditCommand` variants for the fill and palette commands; fill
-      and transparency tools (W8.3/W8.4, next round).
+      and transparency tools (XARA-T-0212; W8.3/W8.4 next round).
 - [ ] `ColourUses` incremental maintenance in the attribute-set paths
       (today: rebuild on load and after a batch).
-- [ ] T8.1.5 "no colour" as a first-class `Colour` value (today it is
-      `Option<Colour>` in the importer); T8.1.7 palette `.xarast` round trip
-      with the new kinds; T8.2.5 `MutateFill`; T8.2.7 group transparency.
+- [ ] T8.1.5 "no colour" as a first-class `Colour` value (XARA-T-0204;
+      today it is `Option<Colour>` in the importer); T8.1.7 palette
+      `.xarast` round trip with signed shades (XARA-T-0205); T8.2.5
+      `MutateFill` (XARA-T-0210); T8.2.7 group transparency (XARA-T-0211).
 - [ ] `ColourModel::Ciet` has no converter in the original at all; ours is
       a real XYZ transform. No corpus file uses it.
 - [ ] The original drops transparency in every model conversion; we carry
