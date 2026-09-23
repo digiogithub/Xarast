@@ -2,13 +2,14 @@
 id: XARA-US-0009
 type: story
 title: "Shell platform integration: portals, clipboard, DnD, input pipeline"
-status: in_review
+status: done
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, shell]
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T09:40:08Z
+updated: 2026-09-23T12:44:53Z
 started: 2026-09-23T09:40:08Z
+closed: 2026-09-23T12:44:53Z
 ---
 
 ## Description

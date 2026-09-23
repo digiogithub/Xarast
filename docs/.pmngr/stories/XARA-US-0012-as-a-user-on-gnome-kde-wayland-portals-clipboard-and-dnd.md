@@ -2,13 +2,13 @@
 id: XARA-US-0012
 type: story
 title: As a user on GNOME/KDE Wayland, portals, clipboard and DnD work for real
-status: in_progress
+status: in_review
 priority: high
 parent: XARA-EP-0017
 author: mcp
 labels: [shell, hardware]
 created: 2026-09-23T09:40:31Z
-updated: 2026-09-23T11:45:54Z
+updated: 2026-09-23T12:40:56Z
 started: 2026-09-23T11:45:54Z
 ---
 

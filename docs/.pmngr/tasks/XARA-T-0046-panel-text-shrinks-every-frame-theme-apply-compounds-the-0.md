@@ -2,12 +2,13 @@
 id: XARA-T-0046
 type: task
 title: "Panel text shrinks every frame: theme::apply compounds the 0.92 font scale"
-status: todo
+status: done
 priority: high
 author: mcp
 labels: [ui, defect]
 created: 2026-09-23T12:09:55Z
-updated: 2026-09-23T12:09:55Z
+updated: 2026-09-23T12:44:53Z
+closed: 2026-09-23T12:44:53Z
 ---
 
 ## Description
