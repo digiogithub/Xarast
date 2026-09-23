@@ -243,13 +243,8 @@ pub fn adapter_available() -> bool {
 /// A minimal block-on, so that the crate does not take an async runtime as
 /// a dependency for one call at the edge of a test.
 fn pollster_block_on<F: std::future::Future>(fut: F) -> F::Output {
-    use std::task::{Context, Poll, Wake, Waker};
-    struct Noop;
-    impl Wake for Noop {
-        fn wake(self: Arc<Self>) {}
-    }
-    let waker = Waker::from(Arc::new(Noop));
-    let mut cx = Context::from_waker(&waker);
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
     let mut fut = Box::pin(fut);
     loop {
         match fut.as_mut().poll(&mut cx) {

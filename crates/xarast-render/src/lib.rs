@@ -62,6 +62,7 @@
 pub mod backend;
 pub mod blend;
 pub mod cache;
+pub mod compose;
 pub mod corpus;
 pub mod display_list;
 pub mod golden;
@@ -83,6 +84,7 @@ pub use blend::{
 pub use cache::{
     AdmissionPolicy, CacheKey, CacheStats, CachedSurface, RenderCache, scale_step, step_scale,
 };
+pub use compose::{TileGrid, TileKey, TilePlacement, compose_cpu, source_texel};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
@@ -103,3 +105,5 @@ pub use tiling::{GPU_TILE_SIZE, MIN_BAND_SCANLINES, TileBin, TilePlan, plan_band
 
 #[cfg(feature = "gpu")]
 pub use backend::gpu::{GpuBackend, GpuConfig};
+#[cfg(feature = "gpu")]
+pub use backend::gpu_tiles::{GpuTileCache, GpuTileCacheConfig};

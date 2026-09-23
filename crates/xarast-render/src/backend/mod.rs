@@ -14,6 +14,8 @@ use xarast_geom::{FillRule, StrokeStyle};
 pub mod cpu;
 #[cfg(feature = "gpu")]
 pub mod gpu;
+#[cfg(feature = "gpu")]
+pub mod gpu_tiles;
 
 /// An offscreen layer opened by [`Rasterizer::push_layer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
