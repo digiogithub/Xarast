@@ -131,6 +131,9 @@ winit = { version = "0.30", default-features = false, features = [
     "x11",
     "rwh_06",
 ] }
+# `StreamExt` for the settings portal's change signal, on the services
+# thread. Already in the graph through `async-io`. `MIT OR Apache-2.0`.
+futures-lite = { version = "2", default-features = false, features = ["std"] }
 # The AccessKit platform adapter: carries egui's accessibility tree to AT-SPI
 # on Linux (and UIA/NSAccessibility in phase 14). 0.29.x is the release line
 # built on `accesskit 0.21`, the version `egui 0.33` publishes; 0.34 pairs

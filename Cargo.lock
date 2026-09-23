@@ -5376,6 +5376,7 @@ dependencies = [
  "arboard",
  "ashpd",
  "egui",
+ "futures-lite",
  "pollster 1.0.1",
  "rfd",
  "thiserror 2.0.20",

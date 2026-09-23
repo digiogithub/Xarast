@@ -810,7 +810,12 @@ impl<A: ShellApp> ShellLoop<A> {
             gpu: None,
             translator: EventTranslator::new(),
             clipboard: system_clipboard(),
-            portals: PortalService::start(),
+            portals: {
+                // A portal answer, or the desktop changing colour scheme,
+                // must reach a loop that is parked with nothing to do.
+                let waker = waker.clone();
+                PortalService::start_with_waker(move || waker.wake())
+            },
             app,
             pending: PendingFrame::default(),
             waker,

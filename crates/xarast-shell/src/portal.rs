@@ -172,8 +172,8 @@ impl PortalHandle {
     /// Asks the settings portal for the desktop colour scheme.
     ///
     /// The answer arrives as [`PortalEvent::ColorSchemeChanged`]. Called once
-    /// at start-up; live change notification is an open item recorded in
-    /// `docs/memory/ui.md`.
+    /// at start-up; later changes arrive on their own, from the watcher
+    /// [`PortalService::start_with_waker`] starts.
     pub fn query_color_scheme(&self) {
         let _ = self.tx.send(PortalCommand::QueryColorScheme);
     }
@@ -191,22 +191,38 @@ pub struct PortalService {
 }
 
 impl PortalService {
-    /// Starts the services thread.
+    /// Starts the services thread, with nothing to wake.
     ///
     /// Never fails: a portal-less system still gets a service, whose every
     /// answer is [`PortalEvent::Failed`] with the reason.
     #[must_use]
     pub fn start() -> Self {
+        Self::start_with_waker(|| {})
+    }
+
+    /// Starts the services thread and, where the settings portal can be
+    /// reached, a watcher that reports every change of the desktop colour
+    /// scheme as a [`PortalEvent::ColorSchemeChanged`].
+    ///
+    /// `wake` is called after each answer is queued, from the thread that
+    /// queued it, so that an event loop parked with nothing to do still
+    /// notices a dialog closing or the desktop turning dark.
+    #[must_use]
+    pub fn start_with_waker(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let wake: Wake = Arc::new(wake);
         let (tx, rx) = channel::<PortalCommand>();
         let (atx, answers) = channel::<PortalEvent>();
         let availability = portal_availability();
         if let Err(reason) = &availability {
             tracing::info!(reason, "XDG portals unavailable; file dialogs are disabled");
         }
+        if availability.is_ok() {
+            watch_color_scheme(atx.clone(), wake.clone());
+        }
 
         let thread = std::thread::Builder::new()
             .name("xarast-services".to_owned())
-            .spawn(move || service_loop(&rx, &atx, availability.as_ref().err().cloned()))
+            .spawn(move || service_loop(&rx, &atx, availability.as_ref().err().cloned(), &*wake))
             .ok();
 
         Self {
@@ -245,10 +261,14 @@ impl Drop for PortalService {
     }
 }
 
+/// Called from a services thread after it queues an answer.
+type Wake = Arc<dyn Fn() + Send + Sync>;
+
 fn service_loop(
     rx: &Receiver<PortalCommand>,
     answers: &Sender<PortalEvent>,
     unavailable: Option<String>,
+    wake: &(dyn Fn() + Send + Sync),
 ) {
     while let Ok(cmd) = rx.recv() {
         let answer = match cmd {
@@ -272,11 +292,69 @@ fn service_loop(
                 None => Some(PortalEvent::ColorSchemeChanged(color_scheme())),
             },
         };
-        if let Some(answer) = answer
-            && answers.send(answer).is_err()
-        {
-            return;
+        if let Some(answer) = answer {
+            if answers.send(answer).is_err() {
+                return;
+            }
+            wake();
         }
+    }
+}
+
+/// Watches the settings portal's `SettingChanged` signal for the colour
+/// scheme, on a thread of its own: the services thread blocks inside a
+/// file dialog, and a theme change must not wait for one to close.
+///
+/// The thread is detached rather than joined. It spends its life parked on
+/// the D-Bus signal, and it ends at the first change after the service is
+/// dropped, when the answer channel is gone.
+#[cfg(feature = "portals")]
+fn watch_color_scheme(answers: Sender<PortalEvent>, wake: Wake) {
+    let spawned = std::thread::Builder::new()
+        .name("xarast-settings".to_owned())
+        .spawn(move || {
+            use futures_lite::StreamExt;
+            pollster::block_on(async move {
+                let settings = match ashpd::desktop::settings::Settings::new().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::info!(error = %e, "no settings portal; the colour scheme will not follow the desktop");
+                        return;
+                    }
+                };
+                let mut changes = match settings.receive_color_scheme_changed().await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        tracing::info!(error = %e, "the settings portal does not report changes");
+                        return;
+                    }
+                };
+                while let Some(scheme) = changes.next().await {
+                    let scheme = from_portal(scheme);
+                    tracing::info!(?scheme, "desktop colour scheme changed");
+                    if answers.send(PortalEvent::ColorSchemeChanged(scheme)).is_err() {
+                        return;
+                    }
+                    wake();
+                }
+            });
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "could not start the settings watcher");
+    }
+}
+
+#[cfg(not(feature = "portals"))]
+fn watch_color_scheme(_answers: Sender<PortalEvent>, _wake: Wake) {}
+
+/// The portal's colour scheme in the shell's vocabulary.
+#[cfg(feature = "portals")]
+const fn from_portal(scheme: ashpd::desktop::settings::ColorScheme) -> ColorScheme {
+    use ashpd::desktop::settings::ColorScheme as P;
+    match scheme {
+        P::PreferDark => ColorScheme::Dark,
+        P::PreferLight => ColorScheme::Light,
+        P::NoPreference => ColorScheme::NoPreference,
     }
 }
 
@@ -338,11 +416,7 @@ fn color_scheme() -> ColorScheme {
         let scheme: AshColorScheme = settings.color_scheme().await.ok()?;
         Some(scheme)
     });
-    match read {
-        Some(AshColorScheme::PreferDark) => ColorScheme::Dark,
-        Some(AshColorScheme::PreferLight) => ColorScheme::Light,
-        _ => ColorScheme::NoPreference,
-    }
+    read.map_or(ColorScheme::NoPreference, from_portal)
 }
 
 #[cfg(not(feature = "portals"))]
@@ -439,6 +513,26 @@ mod tests {
             matches!(out.first(), Some(PortalEvent::ColorSchemeChanged(_))),
             "got {out:?}"
         );
+    }
+
+    #[test]
+    fn an_answer_wakes_whoever_is_waiting() {
+        let woken = Arc::new(AtomicU64::new(0));
+        let counter = woken.clone();
+        let service = PortalService::start_with_waker(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        });
+        service.handle().query_color_scheme();
+        let mut out = Vec::new();
+        for _ in 0..400 {
+            service.poll(&mut out);
+            if !out.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!out.is_empty());
+        assert!(woken.load(Ordering::Relaxed) >= 1, "the loop was woken");
     }
 
     #[test]

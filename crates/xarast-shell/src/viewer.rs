@@ -484,6 +484,9 @@ impl Viewer {
             }
             ShellEvent::ColorSchemeChanged(s)
             | ShellEvent::Portal(PortalEvent::ColorSchemeChanged(s)) => {
+                if self.scheme != *s {
+                    tracing::info!(scheme = ?s, "following the desktop colour scheme");
+                }
                 self.scheme = *s;
                 redraw = true;
             }
