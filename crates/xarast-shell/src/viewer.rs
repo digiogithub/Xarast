@@ -598,6 +598,7 @@ impl Viewer {
             recent: self.app.recent.paths().to_vec(),
             prompt: self.app.prompt().cloned(),
             palette: vec![xarast_ui::model::PaletteEntry::none()],
+            colour_editor: self.app.active().and_then(Session::colour_editor_view),
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
                 ColorScheme::Dark => xarast_ui::ColorScheme::Dark,
@@ -768,6 +769,7 @@ impl Viewer {
             UiCommand::ClearRecent => Intent::ClearRecent,
             UiCommand::AnswerPrompt(a) => Intent::AnswerPrompt(a),
             UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
+            UiCommand::ColourEditor(op) => Intent::ColourEditor(op),
             UiCommand::Align(spec) => Intent::Align(spec),
             UiCommand::AddGuide(g) => Intent::Guides(GuideOp::Add {
                 horizontal: g.axis == xarast_ui::guides::Axis::Horizontal,
@@ -1938,6 +1940,23 @@ mod tests {
             Some(Intent::ZoomTo(xarast_app::ZoomTarget::Drawing))
         );
         assert_eq!(v.ui_intent(UiCommand::RequestRedraw, 1.0), None);
+    }
+
+    #[test]
+    fn colour_editor_commands_become_intents_and_the_model_shows_the_editor() {
+        let mut v = Viewer::new(Vec::new());
+        let op = xarast_app::colour_editor::ColourEditorOp::Commit;
+        assert_eq!(
+            v.ui_intent(UiCommand::ColourEditor(op.clone()), 1.0),
+            Some(Intent::ColourEditor(op))
+        );
+        assert!(v.ui_model(1.0).colour_editor.is_none(), "no document");
+        v.app.new_document();
+        let editor = v
+            .ui_model(1.0)
+            .colour_editor
+            .expect("a document has an editor");
+        assert_eq!(editor.title, "Fill for new objects");
     }
 
     /// A viewer with one open document and a primed 800×600 canvas, as
