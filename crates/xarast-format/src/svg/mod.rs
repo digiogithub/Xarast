@@ -211,6 +211,34 @@ fn bitmap_entry(
     Some((kind, ext, std::sync::Arc::clone(&o.bytes), renderable))
 }
 
+/// The most entries a bitmap palette resource may hold.
+pub(crate) const MAX_PALETTE_ENTRIES: usize = 256;
+
+/// A bitmap's reconstruction palette as its resource bytes: `r g b a` per
+/// entry, in order (`research/06 §6.9`). `None` for no palette (or an
+/// oversized one, which no importer produces).
+pub(crate) fn palette_bytes(palette: &[xarast_color::Rgba8]) -> Option<Vec<u8>> {
+    if palette.is_empty() || palette.len() > MAX_PALETTE_ENTRIES {
+        return None;
+    }
+    Some(palette.iter().flat_map(|c| [c.r, c.g, c.b, c.a]).collect())
+}
+
+/// The inverse of [`palette_bytes`]: `None` unless the bytes are 1–256
+/// whole entries.
+pub(crate) fn palette_from_bytes(bytes: &[u8]) -> Option<Vec<xarast_color::Rgba8>> {
+    let (entries, rest) = bytes.as_chunks::<4>();
+    if !rest.is_empty() || entries.is_empty() || entries.len() > MAX_PALETTE_ENTRIES {
+        return None;
+    }
+    Some(
+        entries
+            .iter()
+            .map(|&[r, g, b, a]| xarast_color::Rgba8 { r, g, b, a })
+            .collect(),
+    )
+}
+
 /// Serialises a document as `document.svg`, adding the bitmaps it
 /// references to `resources` (one reference per `href` written).
 pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOptions) -> SvgDocument {
@@ -236,6 +264,9 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
         if let Some(hit) = cache.get(&id) {
             if let Some(r) = hit {
                 resources.count_path(&r.href);
+                if let Some(p) = &r.palette {
+                    resources.count_path(p);
+                }
             }
             return hit.clone();
         }
@@ -248,10 +279,21 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
             if !renderable {
                 unrenderable += 1;
             }
+            // The reconstruction palette of a `.xar` JPEG8BPP bitmap: data
+            // only Xarast reads, so a blob beside the (browser-readable)
+            // image rather than inside it.
+            let palette = palette_bytes(&res.pixels.palette).and_then(|b| {
+                let pid = resources.insert(ResourceKind::Blob, "bin", b).ok()?;
+                Some(resources.get(pid).map_or_else(
+                    || resource_path(ResourceKind::Blob, pid, "bin"),
+                    |r| r.path(),
+                ))
+            });
             Some(paint::BitmapRef {
                 href: path,
                 width: res.info.width,
                 height: res.info.height,
+                palette,
             })
         });
         cache.insert(id, out.clone());

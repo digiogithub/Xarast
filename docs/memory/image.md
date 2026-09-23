@@ -251,13 +251,13 @@ unset means repeat — the original's default. `Fill Types simple.xar`'s
 bitmap row shows single, repeating and mirrored tiles, contone and
 duotone.
 
-`.xarast` round trip: bitmaps survive (the package stores the — normalised
-— original bytes), but four writer gaps are now visible and listed in
-`xarast_roundtrip.rs`'s `KNOWN_RENDER_GAPS`: the JPEG8BPP palette
-(XARA-T-0154: leafgirl, Groucho2), duotone contone colours (XARA-T-0155:
-Fill Types simple), bitmap-fill mapping (XARA-T-0109: Fill Types simple,
-WATCH, Spitfire) and the bitmap-transparency image (XARA-T-0111: JagSS100
-simple, scope3 simple).
+`.xarast` round trip: bitmaps survive — the package stores the
+(normalised) original bytes and, for tag 71, the snap palette as a blob
+(`xarast:palette`, XARA-T-0154). The render round trip is pixel-identical
+for 59/59; the writer gaps bitmaps first exposed (palette, contone,
+fill mapping, transparency image) are all closed. Open: the CPU backend
+samples bitmap fills and transparencies vertically flipped relative to
+the documented mapping (XARA-T-0171, found against resvg).
 
 ## Dead ends (do not retry)
 

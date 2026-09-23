@@ -42,6 +42,21 @@ pub(crate) struct BitmapRef {
     pub href: String,
     pub width: u32,
     pub height: u32,
+    /// The package path of the bitmap's reconstruction palette
+    /// (`xarast:palette`), when it has one.
+    pub palette: Option<String>,
+}
+
+impl BitmapRef {
+    /// `href`, `xlink:href` and, when there is a palette,
+    /// `xarast:palette`.
+    pub fn attrs(&self, s: &mut String) {
+        attr(s, "href", &self.href);
+        attr(s, "xlink:href", &self.href);
+        if let Some(p) = &self.palette {
+            attr(s, "xarast:palette", p);
+        }
+    }
 }
 
 /// The SVG for one paint (a fill or a stroke).
@@ -717,31 +732,7 @@ pub(crate) fn colour_paint(
                     ..PaintOut::default()
                 };
             };
-            // The unit square of the image, top row first, onto the
-            // parallelogram: its top-left corner is `origin + (axis_y -
-            // origin)` in document space, which is up.
-            let (ox, oy) = ctx.frame.pt(*origin);
-            let (xx, xy) = ctx.frame.pt(*axis_x);
-            let (yx, yy) = ctx.frame.pt(*axis_y);
-            let (ux, uy) = (xx - ox, xy - oy);
-            let (vx, vy) = (yx - ox, yy - oy);
-            let mut body = String::new();
-            attr(&mut body, "patternUnits", "userSpaceOnUse");
-            attr(&mut body, "width", "1");
-            attr(&mut body, "height", "1");
-            attr(
-                &mut body,
-                "patternTransform",
-                &format!(
-                    "matrix({} {} {} {} {} {})",
-                    mp(ux),
-                    mp(uy),
-                    mp(-vx),
-                    mp(-vy),
-                    mp(ox + vx),
-                    mp(oy + vy)
-                ),
-            );
+            let mut body = bitmap_pattern_head(ctx, *origin, *axis_x, *axis_y);
             attr(&mut body, "xarast:fill", "bitmap");
             if *own != Tiling::None {
                 attr(&mut body, "xarast:tile-mode", repeat_name(*own));
@@ -774,13 +765,10 @@ pub(crate) fn colour_paint(
                 attr(&mut body, "xarast:fill-repeat", repeat_name(tiling));
             }
             effect_attr(&mut body, effect);
-            body.push_str("><image");
-            attr(&mut body, "width", "1");
-            attr(&mut body, "height", "1");
-            attr(&mut body, "preserveAspectRatio", "none");
-            attr(&mut body, "href", &bm.href);
-            attr(&mut body, "xlink:href", &bm.href);
-            body.push_str("/></pattern>");
+            let filter = contone
+                .as_ref()
+                .map(|(a, b)| contone_filter(ctx, a, b, effect));
+            bitmap_pattern_tail(&mut body, &bm, filter.as_deref());
             let id = ctx.defs.add('p', "pattern", &body);
             PaintOut {
                 value: format!("url(#{id})"),
@@ -788,6 +776,141 @@ pub(crate) fn colour_paint(
             }
         }
     }
+}
+
+/// The opening of a bitmap `<pattern>`: the unit square of the image, top
+/// row first, onto the parallelogram. Its top-left corner is `origin +
+/// (axis_y - origin)` in document space, which is up.
+fn bitmap_pattern_head(ctx: &PaintCtx<'_>, origin: Point, axis_x: Point, axis_y: Point) -> String {
+    let (ox, oy) = ctx.frame.pt(origin);
+    let (xx, xy) = ctx.frame.pt(axis_x);
+    let (yx, yy) = ctx.frame.pt(axis_y);
+    let (ux, uy) = (xx - ox, xy - oy);
+    let (vx, vy) = (yx - ox, yy - oy);
+    let mut body = String::new();
+    attr(&mut body, "patternUnits", "userSpaceOnUse");
+    attr(&mut body, "width", "1");
+    attr(&mut body, "height", "1");
+    attr(
+        &mut body,
+        "patternTransform",
+        &format!(
+            "matrix({} {} {} {} {} {})",
+            mp(ux),
+            mp(uy),
+            mp(-vx),
+            mp(-vy),
+            mp(ox + vx),
+            mp(oy + vy)
+        ),
+    );
+    body
+}
+
+/// The image of a bitmap `<pattern>` (through `filter`, when given) and
+/// its end tag.
+fn bitmap_pattern_tail(body: &mut String, bm: &BitmapRef, filter: Option<&str>) {
+    body.push_str("><image");
+    attr(body, "width", "1");
+    attr(body, "height", "1");
+    attr(body, "preserveAspectRatio", "none");
+    bm.attrs(body);
+    if let Some(f) = filter {
+        attr(body, "filter", &format!("url(#{f})"));
+    }
+    body.push_str("/></pattern>");
+}
+
+/// BT.601 luma into every colour channel, alpha kept.
+const LUMA_MATRIX: &str = ".299 .587 .114 0 0 .299 .587 .114 0 0 .299 .587 .114 0 0 0 0 0 1 0";
+
+/// A contone (duotone) bitmap as a browser draws it: each texel's luma
+/// (BT.601) picks a colour on the ramp from `a` (black) to `b` (white),
+/// sampled into `feComponentTransfer` tables — two entries for a plain
+/// fade (exact), 17 for a rainbow effect. Derived from the key colours as
+/// written, so a reload re-derives the same bytes. The pattern's twin is
+/// the model; this filter carries no data of its own.
+fn contone_filter(ctx: &mut PaintCtx<'_>, a: &Colour, b: &Colour, effect: FillEffect) -> String {
+    let (a, _) = key_colour(a, ctx);
+    let (b, _) = key_colour(b, ctx);
+    let n: u16 = if effect == FillEffect::Fade { 2 } else { 17 };
+    let samples: Vec<Rgba8> = (0..n)
+        .map(|i| {
+            let t = f32::from(i) / f32::from(n - 1);
+            xarast_color::interpolate(a, b, t, effect).to_rgba8()
+        })
+        .collect();
+    let table = |ch: fn(&Rgba8) -> u8| {
+        samples
+            .iter()
+            .map(|c| f64s(f64::from(ch(c)) / 255.0, 4))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut body = String::new();
+    attr(&mut body, "xarast:filter", "contone");
+    attr(&mut body, "color-interpolation-filters", "sRGB");
+    body.push_str("><feColorMatrix");
+    attr(&mut body, "type", "matrix");
+    attr(&mut body, "values", LUMA_MATRIX);
+    body.push_str("/><feComponentTransfer>");
+    for (f, v) in [
+        ("feFuncR", table(|c| c.r)),
+        ("feFuncG", table(|c| c.g)),
+        ("feFuncB", table(|c| c.b)),
+    ] {
+        let _ = write!(body, "<{f}");
+        attr(&mut body, "type", "table");
+        attr(&mut body, "tableValues", &v);
+        body.push_str("/>");
+    }
+    body.push_str("</feComponentTransfer></filter>");
+    ctx.defs.add('f', "filter", &body)
+}
+
+/// A bitmap transparency as a luminance `<mask>` over the element's box:
+/// the image tiled as a bitmap fill is, through a filter that turns each
+/// texel into `1 - luma` (BT.601 on the straight colour, alpha ignored).
+/// A texel's transparency level is its luma (0 opaque … 255 clear), so the
+/// mask is its complement. The mask carries no model data: the twin does.
+fn bitmap_mask(
+    ctx: &mut PaintCtx<'_>,
+    bm: &BitmapRef,
+    origin: Point,
+    axis_x: Point,
+    axis_y: Point,
+    bounds: (i64, i64, i64, i64),
+) -> String {
+    let (x0, y0, x1, y1) = bounds;
+    let mut pattern = bitmap_pattern_head(ctx, origin, axis_x, axis_y);
+    bitmap_pattern_tail(&mut pattern, bm, None);
+    let pattern = ctx.defs.add('p', "pattern", &pattern);
+    let row = "-.299 -.587 -.114 0 1";
+    let filter = ctx.defs.add(
+        'f',
+        "filter",
+        &format!(
+            " xarast:filter=\"transparency-mask\" color-interpolation-filters=\"sRGB\"><feColorMatrix type=\"matrix\" \
+             values=\"{row} {row} {row} 0 0 0 0 1\"/></filter>"
+        ),
+    );
+    let mut body = String::new();
+    attr(&mut body, "maskUnits", "userSpaceOnUse");
+    let rect = |b: &mut String| {
+        attr(b, "x", &mp(x0));
+        attr(b, "y", &mp(y0));
+        attr(b, "width", &mp(x1 - x0));
+        attr(b, "height", &mp(y1 - y0));
+    };
+    rect(&mut body);
+    attr(&mut body, "color-interpolation", "sRGB");
+    body.push_str("><rect");
+    rect(&mut body);
+    attr(&mut body, "fill", &format!("url(#{pattern})"));
+    attr(&mut body, "filter", &format!("url(#{filter})"));
+    body.push_str("/></mask>");
+    ctx.stats.masks += 1;
+    ctx.defs.add('m', "mask", &body)
 }
 
 fn ramp_twin(side: &mut String, k: &KeyRamp, tiling: Tiling) {
@@ -1021,10 +1144,25 @@ pub(crate) fn transparency(
                 sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
-        FillGeometry::Bitmap { .. } => {
-            ctx.stats.fills_approximated += 1;
+        FillGeometry::Bitmap {
+            image,
+            origin,
+            axis_x,
+            axis_y,
+            ..
+        } => {
+            // The twin is the model; the mask is what a browser draws.
+            let sidecar = Some(transparency_twin(ctx, t, tiling));
+            let mask = match (bounds, (ctx.bitmap_href)(*image)) {
+                (Some(b), Some(bm)) => Some(bitmap_mask(ctx, &bm, *origin, *axis_x, *axis_y, b)),
+                _ => {
+                    ctx.stats.fills_approximated += 1;
+                    None
+                }
+            };
             TranspOut {
-                sidecar: Some(transparency_twin(ctx, t, tiling)),
+                mask,
+                sidecar,
                 ..TranspOut::default()
             }
         }
@@ -1101,8 +1239,7 @@ fn transparency_twin(ctx: &mut PaintCtx<'_>, t: &TranspPaint, tiling: Tiling) ->
             ..
         } => {
             if let Some(bm) = (ctx.bitmap_href)(*image) {
-                attr(&mut s, "href", &bm.href);
-                attr(&mut s, "xlink:href", &bm.href);
+                bm.attrs(&mut s);
             }
             if *own != Tiling::None {
                 attr(&mut s, "xarast:tile-mode", repeat_name(*own));

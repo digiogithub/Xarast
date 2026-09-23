@@ -40,7 +40,8 @@
 //!    by namespace and name, its fragments with their position (clamped to
 //!    the node's number of children, which is where the writer puts them).
 //! 6. **Resources** only as referenced: a bitmap is the BLAKE3 of its
-//!    original bytes and its pixel size; unreferenced resources are not
+//!    original bytes, its pixel size and the BLAKE3 of its reconstruction
+//!    palette (`xarast:palette`, XARA-T-0154); unreferenced resources are not
 //!    part of it (the profile writes only what an element names).
 //!
 //! Two documents are equivalent when their normal forms are equal. The
@@ -266,6 +267,8 @@ impl Nf<'_> {
                 href: format!("blake3:{}", blake3::hash(&o.bytes).to_hex()),
                 width: res.info.width,
                 height: res.info.height,
+                palette: crate::svg::palette_bytes(&res.pixels.palette)
+                    .map(|b| format!("blake3:{}", blake3::hash(&b).to_hex())),
             })
         });
         self.bitmaps.insert(id, r.clone());
@@ -519,7 +522,8 @@ impl Nf<'_> {
                             (r.width, r.height)
                         } else {
                             (0, 0)
-                        }
+                        },
+                        r.palette
                     ))
                 );
                 self.ink(n, depth, head, Some(corners(o, u, v)), false, false, true);

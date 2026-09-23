@@ -1181,6 +1181,9 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 Some(r) => {
                     el.a("href", r.href.clone());
                     el.a("xlink:href", r.href.clone());
+                    if let Some(p) = &r.palette {
+                        el.a("xarast:palette", p.clone());
+                    }
                     if r.width > 0 && r.height > 0 {
                         el.a("xarast:pixels", format!("{} {}", r.width, r.height));
                     }

@@ -1589,6 +1589,7 @@ declarative **effect chain**:
 | Bitmap node | `TAG_NODE_BITMAP` 198 | `<image xlink:href="resources/images/b3-….png" x y width height preserveAspectRatio="none" transform="matrix(…)"/>` | `xarast:bitmap-id="b3-…"` |
 | Duotone bitmap | `TAG_NODE_CONTONEDBITMAP` 199 | `<image>` + duotone `filter` | `xarast:contone-start/end` |
 | Bitmap definition | `TAG_DEFINEBITMAP_*` 65-71, 4138 | Entry in `resources/images/` | `mf:digest` in the manifest |
+| JPEG8BPP reconstruction palette | `TAG_DEFINEBITMAP_JPEG8BPP` 71 | — (the JPEG in `resources/images/` is drawn as is) | `xarast:palette="resources/blobs/b3-….bin"` on every element naming the image (§6.9.1) |
 | Bitmap properties | `TAG_BITMAP_PROPERTIES` 4115 | — | `<xarast:bitmap-props xarast:dpi xarast:interpolate xarast:transparent-index>` |
 | Document smoothing | `TAG_DOCUMENTBITMAPSMOOTHING` 4116 | `image-rendering="auto|pixelated"` | `xarast:bitmap-smoothing` |
 | Non-destructive processing (XPE) | `TAG_XPE_BITMAP_PROPERTIES` 4117, `TAG_DEFINEBITMAP_XPE` 4118 | `<image>` to the derived rendition **or** `<image>` to the master + `filter` | `<xarast:photo-ops>` (operation chain) + `mf:derived-from` |
@@ -1610,6 +1611,47 @@ declarative **effect chain**:
 This is the mechanism that reproduces Xara's efficiency with bitmaps: **the master is
 stored once**, the variants are described with parameters, and a derived rendition is
 only materialised when the cost of regenerating it on opening would be high (§4.4).
+
+#### 6.9.1 The JPEG8BPP palette (normative for Xarast writers)
+
+A `.xar` tag-71 bitmap is a JPEG whose decoded colours the original snaps to a palette
+of 1–256 entries (`research/01`, XARA-T-0129). The JPEG stays a plain, browser-readable
+resource; the palette is Xarast-only data and is stored beside it:
+
+- **Resource.** `resources/blobs/b3-<hash>.bin`, media type
+  `application/octet-stream`: the entries in order, **4 bytes each, `r g b a`**, 1–256
+  entries (4–1024 bytes). Content-addressed like every resource, so two bitmaps with the
+  same palette share one entry.
+- **Reference.** `xarast:palette="<package path>"` on **every** element that names the
+  image: the `<image>` of a bitmap node, the `<image>` of a bitmap-fill `<pattern>`,
+  the `<xarast:transparency>` twin of a bitmap transparency and the `<image>` of its
+  mask pattern. Each reference counts one reference for garbage collection.
+- **Identity.** A bitmap is the pair *(image, palette)*: the same JPEG with two palettes
+  is two bitmaps; without `xarast:palette` it is the plain JPEG.
+- **Reader.** A palette that is missing, outside the package, not a whole number of
+  entries or longer than 256 is a warning (`DanglingReference`) and the bitmap has no
+  palette. A browser ignores the attribute and draws the unsnapped JPEG — a difference
+  of a few levels.
+
+#### 6.9.2 What a browser draws for bitmap paint (normative for Xarast writers)
+
+- **Bitmap transparency.** Besides its twin (§6.14 rule 6), a bitmap transparency on an
+  element with a box is a `<mask maskUnits="userSpaceOnUse">` over that box (as for a
+  graduated transparency, §6.5) holding one `<rect>` filled with the image `<pattern>`
+  (the bitmap-fill mapping) through
+  `<filter xarast:filter="transparency-mask" color-interpolation-filters="sRGB">` with
+  one `feColorMatrix` whose three colour rows are `-.299 -.587 -.114 0 1` and whose
+  alpha row is `0 0 0 0 1`: a texel's transparency level is its BT.601 luma (0 opaque …
+  255 clear), so the mask is `1 − luma`, alpha ignored. The mask carries no model data;
+  a reader takes the twin.
+- **Contone bitmap fill.** The pattern's `<image>` has
+  `filter="url(#f…)"`, `<filter xarast:filter="contone" color-interpolation-filters="sRGB">`:
+  an `feColorMatrix` putting the BT.601 luma into every colour channel (alpha kept), then
+  `feComponentTransfer` with `feFuncR/G/B type="table"` sampled from the ramp start →
+  end at evenly spaced luma — 2 entries for a fade (exact), 17 for a rainbow effect —
+  computed from the key colours **as written** (§6.14 rule 2).
+- Both filters are the writer's own: a reader recognises a `<filter>` in `<defs>` by its
+  `xarast:filter` value and regenerates it; any other `<filter>` is foreign data (§8).
 
 ### 6.10 Clipping and masks
 
@@ -1800,6 +1842,9 @@ from).
    there is a fill.
 8. **`meta.xml` statistics** count what was written: `xarast:bitmaps` is the number of
    distinct bitmaps in the package (a bitmap no element uses is not written).
+9. **Bitmap palettes.** A bitmap with a reconstruction palette writes
+   `xarast:palette` wherever it writes its `href` (§6.9.1); the normal form includes
+   the palette's BLAKE3 next to the image's.
 
 ---
 

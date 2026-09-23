@@ -383,7 +383,7 @@ impl<'d> Reader<'d, '_, '_> {
         let bounds = corners_box(frame.pt(origin), frame.vec(major), frame.vec(minor));
         let href = attr(e, "", "href").or_else(|| attr(e, NS_XLINK, "href"));
         let pixels = xa(e, "pixels").and_then(parse::floats);
-        let image = self.bitmap_for(href, pixels.as_deref(), e.start);
+        let image = self.bitmap_for(href, xa(e, "palette"), pixels.as_deref(), e.start);
         let kind = NodeKind::Bitmap(Box::new(BitmapNode {
             image,
             origin,
@@ -404,20 +404,25 @@ impl<'d> Reader<'d, '_, '_> {
                         "x" | "y" | "width" | "height" | "href" | "preserveAspectRatio"
                     ))
                 || (ns == NS_XLINK && l == "href")
-                || (ns == NS_XARAST && matches!(l, "pixels" | "bitmap-missing"))
+                || (ns == NS_XARAST && matches!(l, "pixels" | "palette" | "bitmap-missing"))
         };
         self.ink_node(e, &cctx, kind, info, leftover, &known)?;
         Ok(true)
     }
 
-    /// The bitmap resource an `href` names, defined once per `href`.
+    /// The bitmap resource an `href` (and its `xarast:palette`) names,
+    /// defined once per pair.
     pub(crate) fn bitmap_for(
         &mut self,
         href: Option<&str>,
+        palette: Option<&str>,
         pixels: Option<&[f64]>,
         at: usize,
     ) -> BitmapId {
-        let key = href.unwrap_or("").to_owned();
+        let key = match palette {
+            Some(p) => format!("{}\n{p}", href.unwrap_or("")),
+            None => href.unwrap_or("").to_owned(),
+        };
         if let Some(id) = self.bitmaps.get(&key) {
             return *id;
         }
@@ -454,6 +459,7 @@ impl<'d> Reader<'d, '_, '_> {
             },
             _ => BitmapInfo::default(),
         };
+        let palette = palette.and_then(|p| self.bitmap_palette(p, at));
         let original = bytes.map(|b| {
             Arc::new(OriginalEncoded {
                 format: sniff_image(&b),
@@ -463,7 +469,10 @@ impl<'d> Reader<'d, '_, '_> {
         let id = self.b.define_bitmap(BitmapResource {
             name: Arc::from(""),
             info,
-            pixels: Arc::new(BitmapData::default()),
+            pixels: Arc::new(BitmapData {
+                palette: palette.map(Arc::from).unwrap_or_default(),
+                ..BitmapData::default()
+            }),
             original,
             procedural: None,
             transparent_index: None,
@@ -472,13 +481,34 @@ impl<'d> Reader<'d, '_, '_> {
         id
     }
 
+    /// The reconstruction palette an `xarast:palette` names: a package
+    /// resource of 1–256 `r g b a` entries. Anything else is a warning and
+    /// no palette.
+    fn bitmap_palette(&mut self, path: &str, at: usize) -> Option<Vec<xarast_color::Rgba8>> {
+        let bytes = if path.starts_with("resources/") {
+            (self.fetch)(path)
+        } else {
+            None
+        };
+        let palette = bytes.as_deref().and_then(crate::svg::palette_from_bytes);
+        if palette.is_none() {
+            self.diag(
+                Severity::Warning,
+                DiagCode::DanglingReference,
+                format!("bitmap palette {path:?} is missing or malformed; it is ignored"),
+                at,
+            );
+        }
+        palette
+    }
+
     /// A bitmap for a paint that names none (the writer does not record
     /// the image of a bitmap transparency, XARA-T-0111).
     pub(crate) fn placeholder_bitmap(&mut self) -> BitmapId {
         if let Some(p) = self.placeholder {
             return p;
         }
-        let id = self.bitmap_for(None, None, 0);
+        let id = self.bitmap_for(None, None, None, 0);
         self.placeholder = Some(id);
         id
     }
