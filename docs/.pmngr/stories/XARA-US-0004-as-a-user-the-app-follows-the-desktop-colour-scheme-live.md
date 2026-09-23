@@ -2,15 +2,16 @@
 id: XARA-US-0004
 type: story
 title: As a user, the app follows the desktop colour scheme live
-status: in_review
+status: done
 priority: low
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, shell, portal]
 estimate: 2
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T11:09:25Z
+updated: 2026-09-23T11:13:01Z
 started: 2026-09-23T11:06:17Z
+closed: 2026-09-23T11:13:01Z
 ---
 
 ## Description

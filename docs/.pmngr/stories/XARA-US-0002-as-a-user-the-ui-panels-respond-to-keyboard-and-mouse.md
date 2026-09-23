@@ -2,15 +2,16 @@
 id: XARA-US-0002
 type: story
 title: As a user, the UI panels respond to keyboard and mouse through egui
-status: in_review
+status: done
 priority: high
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, ui]
 estimate: 5
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T10:55:21Z
+updated: 2026-09-23T11:13:01Z
 started: 2026-09-23T10:44:09Z
+closed: 2026-09-23T11:13:01Z
 ---
 
 ## Description
