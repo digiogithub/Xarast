@@ -2,12 +2,14 @@
 id: XARA-T-0152
 type: task
 title: "App: build and maintain HitIndex from the document and pick with HitShape (HitTester::pick / pick_all)"
-status: todo
+status: done
 parent: XARA-US-0031
 author: mcp
 labels: [phase-7, app-core]
 created: 2026-09-23T17:41:32Z
-updated: 2026-09-23T17:41:32Z
+updated: 2026-09-23T18:10:26Z
+started: 2026-09-23T18:10:14Z
+closed: 2026-09-23T18:10:26Z
 ---
 
 ## Description

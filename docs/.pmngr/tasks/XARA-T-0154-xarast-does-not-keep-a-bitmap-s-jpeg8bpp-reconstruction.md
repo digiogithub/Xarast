@@ -2,13 +2,14 @@
 id: XARA-T-0154
 type: task
 title: .xarast does not keep a bitmap's JPEG8BPP reconstruction palette
-status: backlog
+status: in_progress
 priority: low
 parent: XARA-US-0051
 author: mcp
 labels: [phase-10, image, xarast-format]
 created: 2026-09-23T17:48:11Z
-updated: 2026-09-23T17:48:11Z
+updated: 2026-09-23T18:08:36Z
+started: 2026-09-23T18:08:36Z
 ---
 
 ## Description

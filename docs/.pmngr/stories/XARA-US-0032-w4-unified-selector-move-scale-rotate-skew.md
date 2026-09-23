@@ -2,13 +2,13 @@
 id: XARA-US-0032
 type: story
 title: "W4 — Unified selector: move, scale, rotate, skew"
-status: in_progress
+status: in_review
 priority: high
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, tools]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T17:25:34Z
+updated: 2026-09-23T18:11:21Z
 started: 2026-09-23T17:25:34Z
 ---
 
