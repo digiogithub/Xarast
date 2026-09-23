@@ -479,3 +479,32 @@ fn every_baked_ramp_is_within_two_levels_of_the_model_curve() {
     assert!(checked >= 20, "{checked} baked ramps checked");
     assert!(worst <= 2.0, "worst baked-ramp error {worst}/255");
 }
+
+#[test]
+fn fills_svg_has_no_paint_for_are_baked_into_geometry() {
+    let (doc, _) = fixture();
+    let mut out = Cursor::new(Vec::new());
+    save_to(&doc, &mut out, &deterministic()).unwrap();
+    let svg = svg_of(&out.into_inner());
+    // Per profile × effect: conical, diamond, three- and four-colour fills
+    // as patterns; per profile: conical and diamond transparencies as
+    // masks (mesh transparencies have no renderer counterpart yet and
+    // stay flat, as the renderer draws them).
+    let patterns = svg.matches("<pattern").count();
+    let baked_masks = svg
+        .split("<mask")
+        .skip(1)
+        .filter(|m| m.split('>').next().unwrap().contains("fill-bake"))
+        .count();
+    assert_eq!(patterns, 3 * 3 * 4, "baked fill patterns");
+    assert_eq!(baked_masks, 3 * 2, "baked transparency masks");
+    assert_eq!(
+        svg.matches("xarast:generated=\"fill-bake\"").count(),
+        patterns + baked_masks
+    );
+    // Every baked fill keeps its twin, the diamond's included.
+    assert_eq!(svg.matches("xarast:type=\"diamond\"").count(), 3 * 3 + 3);
+    assert!(svg.contains("shape-rendering=\"crispEdges\""));
+    // No radial approximation is left for a baked diamond.
+    assert!(!svg.contains("xarast:fill=\"diamond\""), "a radial diamond");
+}

@@ -563,24 +563,45 @@ impl<'d> Reader<'d, '_, '_> {
             .map(|(i, c)| self.keyed(c, refs.get(i).copied().flatten()))
             .collect();
         let c = |i: usize| colours.get(i).cloned();
+        // The keyed ramp of a conical or diamond twin.
+        let keyed_ramp = |s: &Self| -> Option<(Colour, Colour, Ramp<Colour>)> {
+            let profile = profile_of(g("profile")).unwrap_or(BiasGain::IDENTITY);
+            let mapping = if g("ramp-mapping") == Some("sin") {
+                RampMapping::Sin
+            } else {
+                RampMapping::Linear
+            };
+            let refs = s.key_refs(g("stop-refs"));
+            let k: Vec<(f32, Colour)> = keys(g("stops")?)?
+                .into_iter()
+                .enumerate()
+                .map(|(i, (p, c))| (p, s.keyed(c, refs.get(i).copied().flatten())))
+                .collect();
+            ramp_of(k, profile, mapping)
+        };
         let paint = match g("type")? {
             "conical" => {
-                let profile = profile_of(g("profile")).unwrap_or(BiasGain::IDENTITY);
-                let mapping = if g("ramp-mapping") == Some("sin") {
-                    RampMapping::Sin
-                } else {
-                    RampMapping::Linear
-                };
-                let refs = self.key_refs(g("stop-refs"));
-                let k: Vec<(f32, Colour)> = keys(g("stops")?)?
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (p, c))| (p, self.keyed(c, refs.get(i).copied().flatten())))
-                    .collect();
-                let (from, to, ramp) = ramp_of(k, profile, mapping)?;
+                let (from, to, ramp) = keyed_ramp(self)?;
                 FillGeometry::Conical {
                     centre: self.pt_attr(ctx, g("centre"))?,
                     zero_dir: self.pt_attr(ctx, g("zero-dir"))?,
+                    from,
+                    to,
+                    ramp,
+                }
+            }
+            // A diamond the writer baked into geometry (a perspective one
+            // is still a marked radial gradient, read as a paint server).
+            "diamond" => {
+                let (from, to, ramp) = keyed_ramp(self)?;
+                FillGeometry::Diamond {
+                    centre: pt(self, 0)?,
+                    corner1: pt(self, 1)?,
+                    corner2: pt(self, 2)?,
+                    persp: match (pt(self, 3), pt(self, 4)) {
+                        (Some(p2), Some(p3)) => Some(Perspective { p2, p3 }),
+                        _ => None,
+                    },
                     from,
                     to,
                     ramp,
@@ -681,21 +702,39 @@ impl<'d> Reader<'d, '_, '_> {
                 tileable: is_true(g("tileable")),
             })
         };
+        let keyed_levels = || {
+            let mapping = if xa(t, "ramp-mapping") == Some("sin") {
+                RampMapping::Sin
+            } else {
+                RampMapping::Linear
+            };
+            let keys: Vec<(f32, Transparency)> = xa(t, "levels")
+                .and_then(level_keys)
+                .map(|k| k.into_iter().map(|(p, l)| (p, key(l))).collect())
+                .unwrap_or_else(|| vec![(0.0, v), (1.0, v)]);
+            ramp_of(keys, profile, mapping)
+        };
         Some(match xa(t, "type")? {
             "conical" => {
-                let mapping = if xa(t, "ramp-mapping") == Some("sin") {
-                    RampMapping::Sin
-                } else {
-                    RampMapping::Linear
-                };
-                let keys: Vec<(f32, Transparency)> = xa(t, "levels")
-                    .and_then(level_keys)
-                    .map(|k| k.into_iter().map(|(p, l)| (p, key(l))).collect())
-                    .unwrap_or_else(|| vec![(0.0, v), (1.0, v)]);
-                let (from, to, ramp) = ramp_of(keys, profile, mapping)?;
+                let (from, to, ramp) = keyed_levels()?;
                 FillGeometry::Conical {
                     centre: pt(self, 0)?,
                     zero_dir: pt(self, 1)?,
+                    from,
+                    to,
+                    ramp,
+                }
+            }
+            "diamond" => {
+                let (from, to, ramp) = keyed_levels()?;
+                FillGeometry::Diamond {
+                    centre: pt(self, 0)?,
+                    corner1: pt(self, 1)?,
+                    corner2: pt(self, 2)?,
+                    persp: match (pt(self, 3), pt(self, 4)) {
+                        (Some(p2), Some(p3)) => Some(Perspective { p2, p3 }),
+                        _ => None,
+                    },
                     from,
                     to,
                     ramp,

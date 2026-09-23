@@ -7,14 +7,11 @@
 # the reason the file differs. Lowering a limit after a fix is welcome;
 # raising one needs the reason written here. Numbers: docs/memory/export.md.
 
-# The profile's bake ladder draws conical, diamond and 3/4-colour fills as
-# their nearest SVG paint (XARA-T-0102); PDF approximates conical fills
-# with a wedge fan.
-Fill Types simple svg 23
+# PDF approximates conical fills with a wedge fan. (SVG bakes conical,
+# diamond and 3/4-colour fills into geometry since XARA-US-0043: Fill Types
+# simple 19.7 -> 1.9, WATCH2 16.5 -> 0.7, WATCH 5.1 -> 2.4, all under the
+# default now.)
 Fill Types simple pdf 8.5
-# Its background is such a fill.
-WATCH2 svg 19
-WATCH svg 6
 WATCH pdf 5.6
 
 # resvg draws seams between the tiles of a bitmap-fill <pattern>; PDF
