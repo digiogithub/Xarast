@@ -1101,14 +1101,8 @@ impl Session {
                 changed |= self.run_tool(|m, cx| m.text_input(&input, cx))?.0;
             }
             Intent::ConvertToShapes => {
-                changed |= self.cancel_gesture();
                 let nodes: Vec<_> = self.edit.selection().collect();
-                if self
-                    .apply_edit(EditCommand::ConvertToPaths { nodes })?
-                    .is_some()
-                {
-                    changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
-                }
+                changed |= self.convert_to_shapes(crate::convert::ConvertCommand::new(nodes))?;
             }
             Intent::DeleteSelection => {
                 changed |= self.cancel_gesture();
@@ -1344,6 +1338,46 @@ impl Session {
         if !created.is_empty() {
             self.edit.select(created, SelectMode::Replace);
         }
+        changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+        Ok(changed)
+    }
+
+    /// Runs "Convert to editable shapes" as one undo step and selects what
+    /// the selection became: a converted story's group replaces the story.
+    /// Nothing convertible records no step and changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the command refuses (a locked layer); the document is left
+    /// as it was.
+    pub fn convert_to_shapes(
+        &mut self,
+        cmd: crate::convert::ConvertCommand,
+    ) -> Result<Changed, SessionError> {
+        let mut changed = self.cancel_gesture();
+        if cmd.nodes.is_empty() {
+            return Ok(changed);
+        }
+        match self.dispatch(&cmd) {
+            Ok(_) => {}
+            Err(SessionError::Edit(e)) if e == crate::structure::NOTHING_TO_DO => {
+                return Ok(changed);
+            }
+            Err(e) => return Err(e),
+        }
+        let converted = cmd.converted.take();
+        let selection: Vec<xarast_doc::NodeId> = cmd
+            .nodes
+            .iter()
+            .map(|n| {
+                converted
+                    .iter()
+                    .find(|(before, _)| before == n)
+                    .map_or(*n, |(_, after)| *after)
+            })
+            .filter(|n| self.doc.tree.contains(*n))
+            .collect();
+        self.edit.select(selection, SelectMode::Replace);
         changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
         Ok(changed)
     }

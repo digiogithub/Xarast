@@ -66,6 +66,7 @@ pub mod app;
 pub mod autosave;
 pub mod command;
 pub mod commands;
+pub mod convert;
 pub mod edit;
 pub mod fill_handles;
 pub mod fill_tool;

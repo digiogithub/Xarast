@@ -166,8 +166,11 @@ pub enum EditCommand {
         origin: PathOrigin,
     },
     /// Turns rectangles, ellipses and quick shapes into editable paths of
-    /// the same outline — "Convert to editable shapes". The node keeps
+    /// the same outline, and text stories into groups of glyph outlines —
+    /// "Convert to editable shapes" ([`crate::convert`]). A shape keeps
     /// its identity and its attributes; anything else is left alone.
+    /// The session dispatches [`crate::convert::ConvertCommand`] instead,
+    /// which also reports what each node became.
     ConvertToPaths {
         /// The nodes.
         nodes: Vec<NodeId>,
@@ -358,7 +361,7 @@ impl EditCommand {
 
 /// The outermost of `nodes`: those with no listed ancestor, in order,
 /// without duplicates.
-fn outermost(tx: &Tx<'_>, nodes: &[NodeId]) -> Vec<NodeId> {
+pub(crate) fn outermost(tx: &Tx<'_>, nodes: &[NodeId]) -> Vec<NodeId> {
     let tree = &tx.doc().tree;
     let mut out: Vec<NodeId> = Vec::with_capacity(nodes.len());
     for &n in nodes {
@@ -385,7 +388,7 @@ pub fn on_locked_layer(doc: &Document, node: NodeId) -> bool {
         .unwrap_or(false)
 }
 
-fn check_layers(tx: &Tx<'_>, nodes: &[NodeId]) -> Result<(), EditError> {
+pub(crate) fn check_layers(tx: &Tx<'_>, nodes: &[NodeId]) -> Result<(), EditError> {
     match nodes.iter().find(|n| on_locked_layer(tx.doc(), **n)) {
         Some(n) => Err(EditError::NotPermitted(*n)),
         None => Ok(()),
@@ -609,24 +612,7 @@ fn run_path_commands(cmd: &EditCommand, tx: &mut Tx<'_>) -> Result<(), EditError
             Ok(())
         }
         EditCommand::ConvertToPaths { nodes } => {
-            let nodes = outermost(tx, nodes);
-            check_layers(tx, &nodes)?;
-            for n in nodes {
-                let Some(kind) = tx.doc().tree.kind(n) else {
-                    continue;
-                };
-                if !matches!(kind, NodeKind::Shape(_) | NodeKind::QuickShape(_)) {
-                    continue;
-                }
-                let Some(outline) = crate::picking::geometry_of(kind) else {
-                    continue;
-                };
-                tx.set_kind(
-                    n,
-                    NodeKind::Path(Box::new(PathNode::new((*outline).clone()))),
-                )?;
-            }
-            Ok(())
+            crate::convert::convert_nodes(tx, nodes, &crate::fonts::shared()).map(|_| ())
         }
         EditCommand::SetWindingRule { nodes, rule } => {
             check_layers(tx, nodes)?;
