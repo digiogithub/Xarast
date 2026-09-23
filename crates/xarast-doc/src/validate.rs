@@ -118,11 +118,6 @@ impl ValidationReport {
             self.errors
         );
     }
-
-    fn merge(&mut self, other: ValidationReport) {
-        self.errors.extend(other.errors);
-        self.warnings.extend(other.warnings);
-    }
 }
 
 /// Checks every structural invariant of a tree.
@@ -306,13 +301,20 @@ pub fn validate_document(doc: &crate::Document) -> ValidationReport {
         crate::resources::refs_of(&data.kind, &mut refs);
         for rf in &refs {
             if !doc.resources.contains(*rf) {
-                r.merge(ValidationReport {
-                    errors: vec![Invariant::MissingResource {
-                        node: id,
-                        resource: *rf,
-                    }],
-                    warnings: Vec::new(),
-                });
+                let missing = Invariant::MissingResource {
+                    node: id,
+                    resource: *rf,
+                };
+                // A colour reference resolves through the table's own
+                // fallback, so a dangling one still renders and is only a
+                // warning; `DocumentBuilder::finish` keeps such nodes on
+                // exactly that basis. A missing bitmap, dash or arrow
+                // cannot be drawn at all and is an error.
+                if matches!(rf, crate::resources::ResourceRef::Colour(_)) {
+                    r.warnings.push(missing);
+                } else {
+                    r.errors.push(missing);
+                }
             }
         }
     }
