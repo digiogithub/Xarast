@@ -419,7 +419,7 @@ mod tests {
         ) -> Result<(), ClipboardError> {
             Ok(())
         }
-        fn persists_after_focus_loss(&self) -> bool {
+        fn persists_after_exit(&self) -> bool {
             true
         }
     }

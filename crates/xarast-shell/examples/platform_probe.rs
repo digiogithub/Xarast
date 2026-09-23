@@ -129,11 +129,11 @@ impl Probe {
                 Err(e) => self.say("reply", &format!("paste-image Err({e})")),
             },
             "clipboard-info" => {
-                let persists = ctx.clipboard().persists_after_focus_loss();
+                let persists = ctx.clipboard().persists_after_exit();
                 self.say(
                     "reply",
                     &format!(
-                        "clipboard {:?} persists_after_focus_loss={persists}",
+                        "clipboard {:?} persists_after_exit={persists}",
                         ctx.clipboard()
                     ),
                 );

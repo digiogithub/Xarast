@@ -1,13 +1,18 @@
 //! The clipboard.
 //!
-//! One behaviour is worth stating rather than discovering: **on Wayland the
-//! clipboard belongs to the focused client.** Copy something, close the
-//! window, and the data is gone unless the compositor implements a
-//! data-control manager or a clipboard manager is running. That is not a bug
-//! we can fix; it is a property of the protocol, and the honest response is
-//! to say so in the status bar instead of pretending the copy persisted. The
-//! `wayland-data-control` backend is enabled precisely so that the cases
-//! where it *can* persist actually do.
+//! One behaviour is worth stating rather than discovering: **a copy lives
+//! in the process that made it.** It survives the window losing focus (the
+//! selection stays with its source until replaced), but quitting takes it
+//! along unless a clipboard manager adopts it. GNOME's compositor does
+//! (measured on GNOME 46); a generic Wayland compositor may not, and the
+//! honest response there is to say so in the status bar rather than
+//! pretend. [`Clipboard::persists_after_exit`] is that answer.
+//!
+//! `arboard` reaches the clipboard through `wlr`/`ext-data-control` where
+//! the compositor offers it (COSMIC, KDE, wlroots) and otherwise through
+//! X11 — on GNOME that means XWayland, so a GNOME session without XWayland
+//! has no clipboard here (measured: `NullClipboard`, "X11 server connection
+//! timed out").
 //!
 //! Every operation returns a [`ClipboardError`] rather than panicking. A
 //! headless build gets [`NullClipboard`], whose errors name the reason.
@@ -94,10 +99,10 @@ pub trait Clipboard: fmt::Debug + Send {
     /// When there is no clipboard or the platform refused.
     fn set_image(&mut self, image: &ClipboardImage) -> Result<(), ClipboardError>;
 
-    /// Whether data put here survives this window losing focus.
+    /// Whether data put here survives this application exiting.
     ///
     /// The status bar uses it to warn before the user finds out the hard way.
-    fn persists_after_focus_loss(&self) -> bool;
+    fn persists_after_exit(&self) -> bool;
 }
 
 /// The clipboard on a machine that has none.
@@ -133,9 +138,22 @@ impl Clipboard for NullClipboard {
     fn set_image(&mut self, _image: &ClipboardImage) -> Result<(), ClipboardError> {
         self.err()
     }
-    fn persists_after_focus_loss(&self) -> bool {
+    fn persists_after_exit(&self) -> bool {
         false
     }
+}
+
+/// Whether a copy survives the application exiting, on this desktop.
+///
+/// X11 sessions normally run a clipboard manager that takes ownership when a
+/// client exits. On Wayland only GNOME's behaviour is known: mutter keeps the
+/// selection after its owner quits (measured on GNOME 46 through XWayland,
+/// which is the path `arboard` takes there).
+#[must_use]
+pub fn persists_after_exit(env: &crate::display::DisplayEnvironment) -> bool {
+    use crate::display::{Desktop, DisplayServer};
+    env.capabilities().clipboard_survives_exit
+        || (env.server() == DisplayServer::Wayland && env.desktop() == Desktop::Gnome)
 }
 
 #[cfg(feature = "clipboard")]
@@ -154,7 +172,7 @@ mod system {
     impl std::fmt::Debug for SystemClipboard {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("SystemClipboard")
-                .field("persists_after_focus_loss", &self.persists)
+                .field("persists_after_exit", &self.persists)
                 .finish_non_exhaustive()
         }
     }
@@ -171,10 +189,7 @@ mod system {
                 .map_err(|e| ClipboardError::Unavailable(e.to_string()))?;
             Ok(Self {
                 inner,
-                // X11 sessions normally run a clipboard manager that takes
-                // ownership when a client exits; Wayland has no such
-                // guarantee without a data-control manager.
-                persists: env.capabilities().clipboard_survives_focus_loss,
+                persists: super::persists_after_exit(&env),
             })
         }
     }
@@ -207,7 +222,7 @@ mod system {
                 .map_err(map_err)
         }
 
-        fn persists_after_focus_loss(&self) -> bool {
+        fn persists_after_exit(&self) -> bool {
             self.persists
         }
     }
@@ -299,7 +314,7 @@ mod tests {
             let e = e.expect("a null clipboard must refuse, not succeed");
             assert!(e.to_string().contains("no display server"), "{e}");
         }
-        assert!(!c.persists_after_focus_loss());
+        assert!(!c.persists_after_exit());
     }
 
     #[test]
@@ -312,15 +327,30 @@ mod tests {
                 c.text().is_err(),
                 "a headless build must not claim to have clipboard text"
             );
-            assert!(!c.persists_after_focus_loss());
+            assert!(!c.persists_after_exit());
         }
     }
 
     #[test]
-    fn wayland_is_not_claimed_to_persist_after_focus_loss() {
+    fn a_generic_wayland_compositor_is_not_claimed_to_keep_a_copy_after_exit() {
         // The capability table is what the status bar reads; if this ever
         // flips to true, users will be told their copy survived when it did
         // not.
-        const { assert!(!crate::display::PlatformCapabilities::WAYLAND.clipboard_survives_focus_loss) }
+        const { assert!(!crate::display::PlatformCapabilities::WAYLAND.clipboard_survives_exit) }
+    }
+
+    #[test]
+    fn only_x11_and_gnome_are_claimed_to_keep_a_copy_after_exit() {
+        let mut env = crate::display::DisplayEnvironment {
+            wayland_display: Some("wayland-0".to_owned()),
+            current_desktop: Some("GNOME".to_owned()),
+            ..Default::default()
+        };
+        assert!(persists_after_exit(&env));
+        env.current_desktop = Some("KDE".to_owned());
+        assert!(!persists_after_exit(&env));
+        env.wayland_display = None;
+        env.x11_display = Some(":0".to_owned());
+        assert!(persists_after_exit(&env));
     }
 }
