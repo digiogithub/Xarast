@@ -451,5 +451,18 @@ determinism suite asserts it over four band heights.
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
 | 7 | `DisplayList::build` costs 106 ns per command (2.12 ms for 20 000), so 100 000 nodes is ~10.6 ms against a 3 ms budget. The cause is the size of `DrawCmd`; boxing the stroke payload is the obvious next step | Phase 4 follow-up |
 | 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not | Phase 5, which owns the idle timer |
-| 9 | Fuzz targets `fuzz_display_list` and `fuzz_ramp` | Phase 4 follow-up |
+| 9 | ~~Fuzz targets `fuzz_display_list` and `fuzz_ramp`~~ — done 2026-09-23, nightly in CI; see below | — |
 | 10 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | deferred, no phase |
+| 11 | The CPU backend strokes and dashes the **whole** path in document space before clipping to the band. A thick, round-capped, finely dashed stroke along a long path at deep zoom exhausts memory (two 1.8 GB allocations found by `fuzz_display_list`). Needs culling to the band plus the stroke's reach, with the dash phase preserved, or a work budget. `fuzz_display_list` bounds geometry (±10 000 000 mp) and dash counts (≤ 2 000 per path) until then; lift both when fixed. gintrack XARA-T-0022 | Phase 4 follow-up |
+
+### Fuzzing, first runs (2026-09-23)
+
+- `fuzz_ramp`: NaN stop offsets — possible, `Stop` and `TranspStop` have
+  public fields — made the sort's comparator inconsistent, and the
+  standard library's sort **panics** when it detects that. Both ramp
+  builders now map a NaN offset to 0 (as `Stop::new` does) and sort by
+  `total_cmp`. Never sort floats with `partial_cmp().unwrap_or(Equal)`.
+  Clean rerun: 4.66 M execs at ~7 760 exec/s.
+- `fuzz_display_list`: renders every accepted scene twice on the
+  deterministic backend and compares bytes; asserts the display list is
+  balanced and inside the viewport. Found only TODO 11.

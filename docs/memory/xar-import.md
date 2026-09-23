@@ -80,10 +80,12 @@ exist yet.
 | 16 record framing round trip | lossless | **lossless** |
 | 19 bounded allocation per length field | < 1 MiB | **done**, 9 fields |
 | 20 decompression bomb | rejected, < 128 MiB peak | **done** |
-| 18 `fuzz_xar_import`'s "valid or nothing" | asserted in the target | **asserted**; the target exists and compiles, the run does not (below) |
+| 18 `fuzz_xar_import`'s "valid or nothing" | asserted in the target | **asserted and run** (2026-09-23): clean after the three fixes below |
 | 22 `xar-dump` exit codes | one test each | **done**, including 3 for a document that fails validation |
 
-Criteria 17, 18 and 23 are addressed below under **Open TODOs**.
+Criteria 17 and 18 are met: every target has run on nightly (below,
+"Fuzzing, first runs") and runs every night in CI. Criterion 23 is
+addressed under **Open TODOs**.
 
 Timing, `release`, warm cache, parse **and** decode every record — no
 document model built, so these are not the phase's full-import budgets:
@@ -241,6 +243,48 @@ Every one is deliberate, and every one is a phase that owns it:
 10. **The origin is derived from the spread, never assumed.** `(0, 0)` is
     right only for a file whose pasteboard margin is zero, and one corpus
     file out of 59 is like that.
+11. **A second `DOWN` into the same node appends.** `N DOWN a UP DOWN b UP`
+    gives `N` the children `a, b`: each `DOWN` makes the following records
+    children of the last node inserted. Assigning instead of appending lost
+    `a` from the tree while still counting it (fuzz finding, below).
+12. **A subtree the mapper does not descend into is counted as skipped.**
+    Grid records (46/47) and the defaults under `TAG_CURRENTATTRIBUTES` are
+    single records in every real file; anything a corrupt file nests under
+    them is `count_subtree`-ed into `records_skipped`, or invariant 9 breaks.
+
+## Fuzzing, first runs (2026-09-23)
+
+Nightly and `cargo-fuzz` 0.13.2 became available, and all six targets ran
+for ten minutes each, seeded with the synthetic corpus plus, locally only,
+the 59 real files (passed as an extra read-only corpus directory, never
+copied into `fuzz/`). Numbers from one run on a shared 24-core machine:
+
+| Target | Execs | exec/s | Findings |
+|---|---|---|---|
+| `fuzz_xar_records` | 299 k | 497 | none |
+| `fuzz_xar_tree` | 237 k (clean rerun) | 394 | the `DOWN` append bug |
+| `fuzz_xar_decode` | 523 k | 870 | none |
+| `fuzz_xar_import` | 389 k (clean rerun) | 646 | three accounting bugs |
+| `fuzz_xar_path` | 70.2 M | 116 750 | none |
+| `fuzz_xar_colour` | 5.8 M | 9 706 | none |
+
+The findings, each now a test in `tests/fuzz_regressions.rs`:
+
+- The committed `every-tag` seed failed `fuzz_xar_import` on its first
+  execution: an unresolved `TAG_NODE_BITMAP` became an opaque node and was
+  counted as mapped twice.
+- Grid records' and defaults' children were never counted (invariant 12).
+- The tree builder's `DOWN` assignment (invariant 11), found by both
+  `fuzz_xar_tree` and `fuzz_xar_import`.
+
+Nothing panicked, overflowed or ran out of memory: the `clippy` deny list
+of invariant 5 held. Every finding was an accounting or structure bug that
+only the stronger assertions — record accounting, walked nodes equal to
+counted nodes — could see.
+
+Minimising: `cargo fuzz tmin` then rebuild the input by hand with
+`XarBuilder`. The minimised bytes of an input that started from a real
+file are not committed even when they look synthetic.
 
 ## Deviations from the phase document, and why
 
@@ -521,9 +565,8 @@ nodes with `NodeKind::Live`.
 
 ## Open TODOs
 
-- Run the fuzz targets for real (criteria 17 and 18): `cargo fuzz` needs
-  nightly, which is still not available here. All six targets compile and
-  their seeds are committed; `fuzz/README.md` has the exact command lines.
+- ~~Run the fuzz targets for real (criteria 17 and 18).~~ Done
+  2026-09-23; they run nightly in `.github/workflows/fuzz.yml`.
 - The model gaps of finding 10: a one-extra-axis `Linear` fill, an "extra"
   tiling, and the twenty predefined dash patterns (which need a table that
   is not in the format at all).

@@ -408,11 +408,24 @@ flattener should go.
   only an entry and display unit, so nothing round-trips through this constant
   and there was no compatibility to keep, only 2.5 µm per metre of error to
   drop. A test pins the reciprocity.
-- **`fuzz_path_boolean` and `fuzz_svg_path_parse` are not written.** The
-  workspace has no `fuzz/` directory yet and creating one was outside this
-  task's scope. Both targets are straightforward once it exists:
-  `arbitrary` → two paths → every `BoolOp` × `FillRule` → assert no panic and
-  `Path::validate()` on the output.
+- ~~`fuzz_path_boolean` and `fuzz_svg_path_parse` are not written.~~ Done
+  2026-09-23 (`fuzz/fuzz_targets/`), and run nightly. First ten-minute
+  runs: `fuzz_path_boolean` 69 k execs at ~115 exec/s, clean;
+  `fuzz_svg_path_parse` found the arc OOM below within a minute, then
+  12.9 M execs at ~21 500 exec/s, clean.
+  - **SVG numbers are bounded before `kurbo` parses them.** An arc's radii
+    are not coordinates, so the post-parse extent check never saw them, and
+    `kurbo` sizes its arc approximation from the radius: `A 1 8e77 …`
+    between two ordinary points asked for ~10^13 cubics (1.8 GB). Every
+    number in the string must now be within twice the document extent.
+  - **Flattening a degenerate cubic is expensive.** A cubic whose control
+    points sit on its end point is a straight line, yet `flatten_traced`
+    gives ~9 000 vertices for an extent-long one at `Tolerance::BOOLEAN`,
+    because the chord bound sees the non-uniform parametrisation, not the
+    geometry; one overlay of it costs ~35 ms. Correct, not a bug — but it
+    is why `fuzz_path_boolean` runs one `BoolOp` × `FillRule` per input
+    rather than all sixteen, and a candidate for an early collinearity exit
+    in the subdivider.
 - **Mixed-run refitting is not implemented.** Step 3 restores an untouched
   cubic verbatim; a run the boolean *cut* stays a polyline rather than going
   through `kurbo::fit_to_bezpath_opt`. Fitting a run that contains a corner
