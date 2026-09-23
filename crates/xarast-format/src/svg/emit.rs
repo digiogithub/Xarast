@@ -1738,19 +1738,28 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 tangential,
                 left_indent,
                 right_indent,
+                chars,
             } => {
                 self.stats.text_on_path += 1;
                 el.a("xarast:layout", "path");
-                el.a(
-                    "xarast:path-params",
-                    format!(
-                        "{} {} {} {}",
-                        bool_s(*reversed),
-                        bool_s(*tangential),
-                        mp(i64::from(left_indent.raw())),
-                        mp(i64::from(right_indent.raw()))
-                    ),
+                let mut params = format!(
+                    "{} {} {} {}",
+                    bool_s(*reversed),
+                    bool_s(*tangential),
+                    mp(i64::from(left_indent.raw())),
+                    mp(i64::from(right_indent.raw()))
                 );
+                // The pre-fit character transform, only when there is one:
+                // reflected, then rotation and shear as 16.16 radians.
+                if !chars.is_identity() {
+                    params.push_str(&format!(
+                        " {} {} {}",
+                        bool_s(chars.reflected),
+                        chars.rotation,
+                        chars.shear
+                    ));
+                }
+                el.a("xarast:path-params", params);
             }
         }
         if !story.auto_kern {

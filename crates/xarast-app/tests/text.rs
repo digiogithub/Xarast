@@ -97,12 +97,13 @@ fn a_missing_family_is_substituted_and_recorded() {
 }
 
 #[test]
-fn text_on_a_path_is_drawn_straight_and_reported() {
+fn text_on_a_path_without_its_path_is_drawn_straight_and_reported() {
     let d = doc(TextLayout::OnPath {
         reversed: false,
         tangential: true,
         left_indent: Mp::ZERO,
         right_indent: Mp::ZERO,
+        chars: xarast_doc::CharsTransform::default(),
     });
     let (w, _) = walk(&d);
     let stats = w.stats();

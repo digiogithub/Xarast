@@ -1902,15 +1902,23 @@ fn text_story(s: &crate::decode::TextStory, tag: u32, children: &[RecordNode]) -
     }
     let layout = if s.on_path {
         // 2110–2113 and 2114–2117 are `{START,END}_{LEFT,RIGHT}` in that
-        // order, and `research/01 §4.12.2` reads the pair as "from which
-        // end, and in which direction it flows". `reversed` is therefore
-        // the RIGHT half: the odd tags. Confirm against a reference
-        // rendering in Phase 9; seven records in the corpus depend on it.
+        // order. `END` means the text runs along the path reversed and
+        // `RIGHT` that the characters are reflected (a negative character
+        // scale): START_LEFT is plain, END_RIGHT reversed, START_RIGHT
+        // reflected, END_LEFT both (`Kernel/cxftext.cpp:671-700`,
+        // `Kernel/rechtext.cpp:335-540`). The complex forms add the
+        // pre-fit rotation and shear.
+        let variant = tag.saturating_sub(2110) % 4;
         TextLayout::OnPath {
-            reversed: tag % 2 == 1,
+            reversed: variant >= 2,
             tangential: true,
             left_indent: indents.0,
             right_indent: indents.1,
+            chars: xarast_doc::CharsTransform {
+                reflected: variant == 1 || variant == 2,
+                rotation: s.rotation.map_or(0, xarast_doc::CharsTransform::fixed),
+                shear: s.shear.map_or(0, xarast_doc::CharsTransform::fixed),
+            },
         }
     } else {
         match column {
@@ -2424,5 +2432,45 @@ mod tests {
         assert!((b.width().raw() - 80_000).abs() <= 4, "{b:?}");
         assert!((b.height().raw() - 60_000).abs() <= 4, "{b:?}");
         assert!(b.contains(Point::raw(500_000, 0)));
+    }
+
+    #[test]
+    fn the_eight_on_path_tags_say_reversed_and_reflected() {
+        // (tag, reversed, reflected): START_LEFT, START_RIGHT, END_LEFT,
+        // END_RIGHT, simple then complex.
+        let cases = [
+            (2110, false, false),
+            (2111, false, true),
+            (2112, true, true),
+            (2113, true, false),
+            (2114, false, false),
+            (2115, false, true),
+            (2116, true, true),
+            (2117, true, false),
+        ];
+        for (tag, rev, refl) in cases {
+            let complex = tag >= 2114;
+            let s = crate::decode::TextStory {
+                placement: if complex {
+                    TextPlacement::Complex(Matrix::IDENTITY)
+                } else {
+                    TextPlacement::Simple(Point::ORIGIN)
+                },
+                on_path: true,
+                autokern: true,
+                rotation: complex.then_some(0.5),
+                shear: complex.then_some(-0.25),
+            };
+            let node = text_story(&s, tag, &[]);
+            let TextLayout::OnPath {
+                reversed, chars, ..
+            } = node.layout
+            else {
+                panic!("{tag}: not on a path");
+            };
+            assert_eq!((reversed, chars.reflected), (rev, refl), "{tag}");
+            let angles = if complex { (32_768, -16_384) } else { (0, 0) };
+            assert_eq!((chars.rotation, chars.shear), angles, "{tag}");
+        }
     }
 }

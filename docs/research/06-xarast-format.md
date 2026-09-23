@@ -1417,6 +1417,7 @@ render then follow — while the base SVG shows the text where Xarast draws it.
 <text id="x…" xarast:kind="text" transform="matrix(a -b -c d e f)"
       [xarast:matrix="a b c d"] xml:space="preserve" xarast:exact="true"
       [xarast:layout="column" xarast:width="…" [xarast:word-wrap="false"]]
+      [xarast:layout="path" xarast:path-params="REV TAN LEFT RIGHT [REFL ROT SHEAR]"]
       [xarast:auto-kern="false"] …>
   <tspan id="x…" x="…" y="…" [xarast:ruler="36:0 72:2"]>        <!-- one per TextLine -->
     <tspan font-family="'Family', ['Substitute', ]generic" font-size="…" …twins… …paint…>
@@ -1428,6 +1429,13 @@ render then follow — while the base SVG shows the text where Xarast draws it.
 </text>
 ```
 
+0. **Text on a path.** `xarast:path-params` holds, space-separated: reversed
+   (`true`/`false`), tangential, the left and right indents in points, then — only when
+   the story has a pre-fit character transform — reflected, rotation and shear as
+   integers (radians in 16.16 fixed point, the `.xar` `ANGLE`). Missing trailing values
+   are `false`/0. The path the text follows is the story's first path child, written
+   inside the `<g xarast:kind="text-story">` that then wraps the `<text>`. The base SVG
+   still shows the text on straight lines; `<textPath>` is T9.5.6.
 1. **One line `<tspan>` per `TextLine`**, with the line's id. A line node's own ruler
    (the one a `.xar` line carried) is `xarast:ruler`: `position:kind` pairs, the
    position in points, the kind the format's `type_and_flags` byte.

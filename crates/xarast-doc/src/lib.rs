@@ -123,7 +123,8 @@ pub use structure::{
 };
 pub use synth::{SynthSpec, synthetic_document};
 pub use text::{
-    Justification, LineSpacing, Script, TabStop, TextItem, TextLayout, TextLineNode, TextStoryNode,
+    CharsTransform, Justification, LineSpacing, Script, TabStop, TextItem, TextLayout,
+    TextLineNode, TextStoryNode,
 };
 pub use text_convert::{OutlineRun, convert_story_to_shapes, is_text_slot};
 pub use text_edit::{DeleteRange, InsertText, delete_range, insert_text, new_story};

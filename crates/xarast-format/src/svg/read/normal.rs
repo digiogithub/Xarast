@@ -921,12 +921,16 @@ impl Nf<'_> {
                 tangential,
                 left_indent,
                 right_indent,
+                chars,
             } => format!(
-                "path {} {} {} {}",
+                "path {} {} {} {} chars={} {} {}",
                 b(*reversed),
                 b(*tangential),
                 left_indent.raw(),
-                right_indent.raw()
+                right_indent.raw(),
+                b(chars.reflected),
+                chars.rotation,
+                chars.shear
             ),
         };
         let line = format!(
