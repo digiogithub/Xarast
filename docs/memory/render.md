@@ -587,6 +587,42 @@ build ignores them, because reading both arrays made it slower (3.4 ms
 against 1.9). A test compares culled builds with the filtered full build,
 command for command.
 
+**Compositing over a destination that is not opaque (2026-09-23,
+XARA-T-0231).** The twelve families are defined against an opaque
+destination. `blend::composite` now treats a destination of alpha `a_d`
+as that opaque colour over `a_d` of the pixel and as *nothing* over the
+rest: the family's result on the first part, the source alone at
+`α_s = coverage·(1 − t)` on the second, alpha `a_d + (1 − a_d)·α_s`, colour
+the premultiplied sum divided by it. For Mix that is exactly source-over.
+Every non-Mix family behaves as Mix over nothing (it has nothing to read),
+which is the decision the task asked for; the PDF exporter still renders
+those families' backdrops over the paper, as the editor shows them. An
+opaque destination takes the old code path byte for byte, which is why
+119 of the 120 goldens did not move; `layer_nested` did (1 904 px, max
+16/255): its inner Mix layer lands on the outer isolated layer's
+transparent area, which used to darken it. It was regenerated with
+`XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render --test golden_cpu`.
+Surfaces stay premultiplied; `unpremultiply_rgba_in_place` and
+`premultiply_rgba` (in `surface`) convert at the image-file boundary (see
+`export.md`). A `LayerKind::Plain` pop still composites with coverage 255,
+ignoring the layer's own alpha; nothing but the synthetic corpus pushes
+one, so it is left alone (its golden did not move).
+
+**Stroke ends and dash phase follow `stroke_to_path` (XARA-T-0231).** The
+CPU stroker sets `with_start_cap`/`with_end_cap` separately, and starts
+the pattern at `xarast_geom::reduced_dash_offset(offset, resolved)` on
+both routes: the whole-path dasher, and `cull_stroke_input`, which now
+takes the phase and adds it to each kept run's arc length. Adding a
+non-zero phase exposed a latent seam bug in the culled route: when the
+run that ends on a closed subpath's start vertex itself *starts* inside a
+dash, the dasher holds that first dash back and emits it last, so the
+dash ending on the vertex is not the tail's last one and the seam was not
+joined (a missing mitre corner). The tail's dash ending on the vertex is
+now found and moved last before the join.
+`tests/stroke_ends_and_alpha.rs` checks both caps, the offset (shift,
+whole-period invariance, parity with a filled `stroke_to_path` outline)
+and the offset under culling.
+
 **Strokes are cut to the band before dashing (XARA-T-0022).**
 `stroke_cull` clips the centre line, in device space, to the band plus the
 stroke's reach, but only when the stroke reaches more than 256 px past the
@@ -891,10 +927,10 @@ never calls `begin_frame` (export, corpus tools) never evicts.
   default, and `PreferNative` maps only Stained Glass → Multiply and
   Bleach → Screen. Darken, Lighten, Hue, Saturation and Luminosity are
   deliberately *not* mapped to PDF's same-named modes.
-- **Found, not fixed (XARA-T-0231):** `blend::composite` mixes against the
-  destination's straight colour even when its alpha is zero, so partly
-  transparent Mix over a transparent destination darkens (≈ `c·a²`); the
-  CPU stroker ignores `StrokeStyle::cap_end` and `DashPattern::offset`.
+- **Fixed (XARA-T-0231, 2026-09-23):** partly transparent Mix over a
+  transparent destination darkened (≈ `c·a²`), and the CPU stroker
+  ignored `StrokeStyle::cap_end` and `DashPattern::offset`. See the
+  decision "Compositing over a destination that is not opaque" above.
 
 ### Fuzzing, first runs (2026-09-23)
 
