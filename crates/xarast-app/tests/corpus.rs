@@ -352,7 +352,9 @@ fn the_headless_path_renders_the_whole_corpus() {
         let painted = out
             .surface
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[0] != 255 || p[1] != 255 || p[2] != 255)
             .count();
         if painted == 0 {
@@ -362,7 +364,12 @@ fn the_headless_path_renders_the_whole_corpus() {
         // fully opaque: the background is opaque and nothing composites
         // a hole in it.
         assert!(
-            out.surface.data().chunks_exact(4).all(|p| p[3] == 255),
+            out.surface
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| p[3] == 255),
             "{}: the render punched a hole in an opaque background",
             f.rel
         );
