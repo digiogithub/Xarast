@@ -384,6 +384,16 @@ impl SceneWalker {
             _ => (true, true),
         };
         let id = scene_id(doc, node);
+        // A bitmap *fill* whose image is not decoded paints nothing, like a
+        // bitmap node; say so rather than drop it silently
+        // (`Designs/leafgirl.xar`'s figure is 350 such paths).
+        if filled
+            && let AttrValue::Fill(xarast_doc::fill::FillGeometry::Bitmap { image, .. }) =
+                attrs.get(AttrSlot::FillGeometry)
+            && !self.images.contains_key(image)
+        {
+            self.stats.images_pending += 1;
+        }
         let mut ctx = PaintCtx {
             colours: &doc.resources.colours,
             ramp_length: quality.ramp_length(),
