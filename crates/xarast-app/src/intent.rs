@@ -193,6 +193,9 @@ pub enum Intent {
     /// Sets one of the current attributes, which every object created
     /// from now on is given (`phase-07` T2.7).
     SetCurrentAttribute(xarast_doc::AttrValue),
+    /// An operation of the colour editor (phase 8, W8.6): a live change, a
+    /// commit, a cancel, a new target. See [`crate::colour_editor`].
+    ColourEditor(crate::colour_editor::ColourEditorOp),
     /// A value typed into a field of the active tool's infobar.
     InfobarEdit {
         /// Which field.

@@ -149,6 +149,50 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);
   stops reuse the `Fill` diamond; a selected handle is drawn `active`.
 
+### Colour editor (phase 8, XARA-US-0041)
+
+- **Seam**: `UiModel::colour_editor: Option<ColourEditorView>` in,
+  `UiCommand::ColourEditor(ColourEditorOp)` out; the shell maps it 1:1 to
+  `Intent::ColourEditor`. The model, the targets and the live/committed
+  split are `xarast-app`'s (`colour.md` decisions 19–23). The panel keeps
+  only interaction state: the slider component, the press in flight, a
+  name being typed. With no document the panel says so and still draws
+  the colour line.
+- **Layout** (`panels::colour`): target chooser ("Selection fill",
+  "Selection line", each named colour) + "New colour" → title → model
+  tabs (RGB/HSV/Grey/CMYK, locked for a tint or shade) + "Slider:"
+  chooser for RGB/CMYK → 128 pt 2D field + 18 pt strip → numeric grid →
+  before/after preview + hex → "Redefine ‘name’" (selection using a named
+  colour) or "Apply to fill"/"Apply to line" (entry) → derivation editor
+  (name, "Colour type", "Parent colour", tint %, shade shifts, link
+  "Follow the parent's:" checkboxes).
+- **Field** (`colour_field`): HSV = S across × V up, hue on the strip
+  (drawn at full S and V); RGB/CIE = the two channels not on the strip;
+  CMYK = two of C/M/Y, key numeric only; grey = a horizontal strip only.
+  **Meshes, not textures**: vertex colours interpolate exactly over RGB
+  planes and HSV S×V squares (bilinear; asserted by
+  `bilinear_vertex_colours_are_exact_over_rgb_and_hsv`), CMYK's clip
+  bends within a pixel at 16×16. 289 + 74 vertices a frame, nothing to
+  upload or invalidate — the phase's "texture per fixed axis" mitigation
+  is not needed.
+- **Interaction**: `PressState` turns a press into `Preview` every frame
+  it is held, `Commit` on release, `Cancel` on `Esc` while held (the rest
+  of that press is ignored). Numbers and derivation sliders: dragged →
+  `Preview`, `drag_stopped` → `Commit`, typed or stepped → `Set`.
+  A focused field or strip takes the arrow keys (focus-lock filter) at
+  1 % a press, 10 % with Shift, each press its own `Set`.
+- **Units** (T8.6.3, `component_specs`): RGB 0–255, hue in degrees,
+  everything else per cent; typed values clamp to the range.
+- **Accessibility**: the field is a `Slider` named "Green (across) and
+  Blue (up)", the strip "Red slider", each number a `SpinButton` named
+  after its component, combos "Edit: …", "Slider: …", "Colour type: …",
+  "Parent colour: …", the preview "Colour preview #RRGGBB". The
+  accessibility tests assert names on every interactive node of both the
+  selection and the entry views, and drive the field by keyboard alone.
+- **egui density (architecture question 2)**: no frame-time number was
+  taken for the editor; it adds ~40 widgets and two meshes to a panel,
+  far below the spike's 1,789-control probe. Unmeasured, not assumed.
+
 ## Panels and canvas
 
 ### Current state
@@ -165,7 +209,8 @@ integration) in about a tenth of a second.
 | `rulers` | `Ruler::draw` plus the pure `ticks()`/`major_step()` used by the tests; 1-2-5 steps, imperial and pica subdivisions |
 | `grid`, `guides` | Rectangular grid with subdivision dropout and snapping arithmetic; guides created by dragging from a ruler, moved, deleted by dropping back |
 | `panels::layers` | Virtualised list, visibility, lock, active layer, reorder, rename, full keyboard operation |
-| `panels::colour` | Colour line with "no colour", RGB/HSV/grey/CMYK editor over `xarast-color`, named colours marked |
+| `panels::colour` | Colour line with "no colour"; the phase-8 colour editor over `xarast_app::colour_editor` (target, 2D field, numbers, derivation, Redefine/Apply), named colours marked |
+| `colour_field` | The editor's field/strip meshes, axes per model, component ranges and units, press tracking |
 | `panels::status` | Coordinates in the document's unit, zoom, quality, cache pressure, renderer tier |
 | `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState` |
 | `theme` | Dark and light token sets, density, WCAG-asserted contrast, live scheme change |

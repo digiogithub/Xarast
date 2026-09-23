@@ -188,6 +188,9 @@ pub enum EditCommand {
         /// The edits, in order. The first names the step.
         edits: Vec<crate::fill_tool::FillCommand>,
     },
+    /// A palette edit (phase 8): create, redefine, rename, derive or
+    /// delete a named colour. Every use of a redefined colour repaints.
+    Palette(crate::colour_editor::PaletteCommand),
     /// Types into a story (phase 9, T9.4.6), replacing a byte range of its
     /// text (the selection; empty for a caret). Commands of one typing
     /// burst merge into one undo step (`burst`, see [`TYPING_KIND`]).
@@ -294,6 +297,7 @@ impl EditCommand {
             EditCommand::ConvertToPaths { .. } => "Convert to Editable Shapes",
             EditCommand::SetWindingRule { .. } => "Winding Rule",
             EditCommand::Fill { edits } => edits.first().map_or("Fill", |e| e.command().label()),
+            EditCommand::Palette(p) => p.label(),
             EditCommand::TypeText { .. } => "Typing",
             EditCommand::DeleteText { .. } => "Delete Text",
             EditCommand::CreateText { .. } => "New Text",
@@ -334,6 +338,8 @@ impl EditCommand {
                     && a.len() == b.len()
                     && a.iter().zip(b).all(|(x, y)| x.node() == y.node())
             }
+            // A colour-editor drag redefining one entry: one step.
+            (EditCommand::Palette(a), EditCommand::Palette(b)) => a.coalesces_with(b),
             _ => false,
         }
     }
@@ -354,7 +360,8 @@ impl EditCommand {
             EditCommand::CreateShape { .. }
             | EditCommand::SetShapeParams { .. }
             | EditCommand::SetPath { .. }
-            | EditCommand::CreatePath { .. } => false,
+            | EditCommand::CreatePath { .. }
+            | EditCommand::Palette(_) => false,
         }
     }
 }
@@ -524,6 +531,7 @@ impl xarast_doc::Command for EditCommand {
                 }
                 Ok(())
             }
+            EditCommand::Palette(p) => p.run(tx),
             EditCommand::TypeText {
                 story,
                 replace,

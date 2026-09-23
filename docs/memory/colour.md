@@ -8,7 +8,7 @@ command modules of `xarast-doc` (`palette`, `fill_edit`). Phase spec:
 phase). Phase-1 colour decisions (naive CMYK, the inherit sentinel, the
 depth limit) stay in [`geometry.md`](geometry.md).
 
-## Current state (2026-09-23, XARA-US-0037 / XARA-US-0038)
+## Current state (2026-09-24, XARA-US-0037 / 0038 / 0041)
 
 | Piece | Where | State |
 |---|---|---|
@@ -28,9 +28,23 @@ depth limit) stay in [`geometry.md`](geometry.md).
 | `MutateFill`, `mutate_fill` (the W8.2 mapping table), `FillShape`, `MutationLoss` | `xarast-doc/src/fill_mutate.rs` | done (XARA-US-0039, for the type menu) |
 | Group transparency (T8.2.7), "no colour" value (T8.1.5), `.xarast` palette round trip (T8.1.7) | — | **not done**, filed |
 | App `EditCommand::Fill` for the fill commands | `xarast-app/src/ops.rs`, `fill_tool.rs` | done (XARA-US-0039) |
-| Walker using `PaletteResolver` + epoch in cache keys; palette `EditCommand` variants | `xarast-app` | **not done**, filed |
+| Walker using `PaletteResolver` + epoch in cache keys | `xarast-app` | **not done**, filed (XARA-T-0203) |
+| `EditCommand::Palette(PaletteCommand)` — `Create`, `Redefine`, `Rename`, `Derive` (reparent + link mask in one step), `Delete` | `xarast-app/src/colour_editor.rs`, `ops.rs` | done (XARA-US-0041) |
+| Colour editor model: `ColourEditorModel`, `ColourEditorView`, `ColourEditorOp`, `Intent::ColourEditor` | `xarast-app/src/colour_editor.rs` | done (XARA-US-0041) |
+| Colour editor UI: 2D field + slider, numeric entry, derivation editor, Redefine / Apply | `xarast-ui/src/colour_field.rs`, `panels/colour.rs` | done (XARA-US-0041) |
+| `History::discard_redo` | `xarast-doc/src/history.rs` | done (for the editor's Esc) |
 
-Tests: `xarast-color/tests/palette.rs` (24, incl. `table::cycles` over 1 000
+Tests: `xarast-app/tests/colour_editor.rs` (13: a 60-event drag is one
+step and undoes by digest; Esc mid-drag leaves digest, labels, serial and
+redo list untouched; hue kept through S = 0; editing a linked object
+unlinks only it and Redefine repaints every user; current attribute with
+nothing selected; line target; tint drag = one "Link Colour" step, cycle
+refused by digest; HSV link inheriting the hue follows the parent; new
+named colour + rename; model change of an entry; undo mid-drag; locked
+layer refused), `xarast-ui` `colour_field` (7) and `panels::colour` (8)
+unit tests, `xarast-ui/tests/accessibility.rs` (colour editor named
+controls, derivation editor, keyboard-only field operation),
+`xarast-color/tests/palette.rs` (24, incl. `table::cycles` over 1 000
 random graphs and the round-trip error table), `xarast-xar/tests/palette_corpus.rs`
 (corpus oracle), `xarast-doc/tests/fill_palette.rs` (14, every command with
 digest-exact undo/redo, a 60-event drag = one step, a 5 000-object
@@ -148,6 +162,45 @@ Plain round-to-nearest would get **545** of them wrong.
     seeds the extra colours from its middle stop or `to`. Bitmap, fractal
     and noise sources are refused. The fill commands derive `PartialEq`.
 
+19. **The colour editor (W8.6) edits live and commits once.** A preview
+    applies a real command inside a bus gesture opened by the first
+    preview; they coalesce (`EditCommand::coalesces_with`: `Fill` with the
+    same label and nodes, `Palette` of the same entry) into one step.
+    Rejected: the fill tool's `Preview::attrs` route (decision 45 of
+    `tools.md`) — a palette redefinition has no preview override in the
+    walker, and the phase asks for the coalescing mechanism. **Esc** undoes
+    the step (walks back to the serial recorded at the first preview) and
+    `History::discard_redo` drops it: digest, labels and state serial
+    return. Known loss: a redo branch that existed before the drag was
+    already dropped by its first command and does not come back.
+20. **Editor targets.** `Selection(PaintSlot)` edits each selected
+    object's `StopTarget::From` via `SetStopValue` ("Set Fill Colour"):
+    the colour of a flat fill, the start colour of a gradient — never
+    flattening a gradient. With nothing selected it sets the current
+    attribute (session state, not undoable; Esc restores it).
+    `Entry(id)` redefines the palette entry in **its own model**: for an
+    entry the display model *is* the definition's model, and switching
+    the model tab converts the entry ("Edit Colour"); a tint's or shade's
+    model is its parent's, so the tab is locked and the components are
+    read-only (edit the derivation). A link's inherited components are
+    read-only and stay `None` through a redefinition.
+21. **Editing a linked object never redefines the named colour.** It
+    writes a direct colour (the link breaks for those objects only).
+    Redefining is the explicit switch of target to the entry
+    (`ColourEditorView::linked_entry` names it); putting a named colour on
+    the selection as a live reference is `ColourEditorOp::ApplyEntry`.
+    These are T8.6.5's "two explicit actions".
+22. **"HSV delta" is a link in HSV.** `Derivation::Linked { model,
+    inherit }` = reparent to `Linked` then redefine with `None` in the
+    inherited slots, in one step ("Link Colour"). An HSV link inheriting
+    the hue follows the parent's hue with its own S/V; inheriting S/V
+    gives a hue that is its own. No separate delta representation exists
+    in the format, so none is invented.
+23. **The editor remembers the components it showed** (`Shown`) while the
+    document still resolves to exactly the value it wrote, so a hue
+    survives a saturation dragged to zero; any other change (undo, another
+    edit) and the view re-derives from the document.
+
 ## Invariants that must not be broken
 
 1. Every `ColourValue` component is in `0..=1` and finite (phase 1); shade
@@ -180,8 +233,15 @@ Plain round-to-nearest would get **545** of them wrong.
       render cache keys, repaint `ColourUses::users_of(changed)`
       (XARA-T-0203).
 - [x] App: `EditCommand::Fill` and the fill/transparency tools
-      (XARA-US-0039). Palette commands still dispatch directly
-      (rest of XARA-T-0212).
+      (XARA-US-0039); `EditCommand::Palette` (XARA-US-0041) closes the
+      palette half of XARA-T-0212. The repaint set
+      (`ColourUses::users_of`) is still the walker task XARA-T-0203; a
+      palette edit today repaints through the whole-resources bump.
+- [ ] Colour editor on a gradient: edits the **start** colour only; the
+      fill tool's selected stop is not the editor's target yet (filed).
+- [ ] Colour editor: "no colour" cannot be set from it (waits for
+      XARA-T-0204); spot colours are editable as normal ones (no ink
+      name / separation UI).
 - [ ] `ColourUses` incremental maintenance in the attribute-set paths
       (today: rebuild on load and after a batch).
 - [ ] T8.1.5 "no colour" as a first-class `Colour` value (XARA-T-0204;
