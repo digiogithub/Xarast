@@ -2,13 +2,14 @@
 id: XARA-US-0033
 type: story
 title: W5 — Rectangle and ellipse tools with parametric shapes
-status: in_review
+status: done
 parent: XARA-EP-0008
 author: mcp
 labels: [phase-7, tools]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T18:11:21Z
+updated: 2026-09-23T18:13:58Z
 started: 2026-09-23T17:25:34Z
+closed: 2026-09-23T18:13:58Z
 ---
 
 ## Tasks (full table: phase-07 §W5)
