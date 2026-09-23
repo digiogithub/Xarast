@@ -2,13 +2,14 @@
 id: XARA-T-0048
 type: task
 title: "Portal dialogs: pass the parent window identifier (xdg-foreign)"
-status: backlog
+status: done
 priority: low
 parent: XARA-US-0012
 author: mcp
 labels: [shell]
 created: 2026-09-23T12:09:55Z
-updated: 2026-09-23T12:09:55Z
+updated: 2026-09-23T14:14:13Z
+closed: 2026-09-23T14:14:13Z
 ---
 
 ## Description

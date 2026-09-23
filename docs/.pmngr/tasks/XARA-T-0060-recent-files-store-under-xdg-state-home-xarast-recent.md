@@ -2,14 +2,15 @@
 id: XARA-T-0060
 type: task
 title: Recent files store under $XDG_STATE_HOME/xarast/recent
-status: in_progress
+status: done
 priority: high
 parent: XARA-US-0082
 author: mcp
 labels: [phase-5, app]
 created: 2026-09-23T13:50:18Z
-updated: 2026-09-23T13:50:18Z
+updated: 2026-09-23T14:14:13Z
 started: 2026-09-23T13:50:18Z
+closed: 2026-09-23T14:14:13Z
 ---
 
 ## Description

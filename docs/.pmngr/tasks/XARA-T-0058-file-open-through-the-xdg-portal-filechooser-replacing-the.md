@@ -2,14 +2,15 @@
 id: XARA-T-0058
 type: task
 title: File › Open through the XDG portal FileChooser, replacing the current document
-status: in_progress
+status: done
 priority: critical
 parent: XARA-US-0082
 author: mcp
 labels: [phase-5, shell]
 created: 2026-09-23T13:50:18Z
-updated: 2026-09-23T13:50:18Z
+updated: 2026-09-23T14:14:13Z
 started: 2026-09-23T13:50:18Z
+closed: 2026-09-23T14:14:13Z
 ---
 
 ## Description

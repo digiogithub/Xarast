@@ -2,14 +2,15 @@
 id: XARA-T-0057
 type: task
 title: Menu bar (File, View, Help) drawn in-window by egui, backed by an app command table
-status: in_progress
+status: done
 priority: critical
 parent: XARA-US-0082
 author: mcp
 labels: [phase-5, ui]
 created: 2026-09-23T13:50:18Z
-updated: 2026-09-23T13:50:18Z
+updated: 2026-09-23T14:14:13Z
 started: 2026-09-23T13:50:18Z
+closed: 2026-09-23T14:14:13Z
 ---
 
 ## Description
