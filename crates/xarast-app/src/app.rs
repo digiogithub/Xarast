@@ -197,6 +197,15 @@ impl AppState {
         id
     }
 
+    /// Takes a document built in memory (a synthetic one, for the
+    /// latency probes) and makes it active.
+    pub fn adopt(&mut self, doc: xarast_doc::Document) -> DocumentId {
+        let id = self.docs.next_id();
+        let id = self.docs.insert(Session::adopt(id, doc, None));
+        self.active = Some(id);
+        id
+    }
+
     /// Opens a file and makes it active.
     ///
     /// Importer diagnostics land in the problem list; they never block
