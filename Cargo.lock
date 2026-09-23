@@ -5321,7 +5321,6 @@ dependencies = [
  "blake3",
  "criterion",
  "flate2",
- "proptest",
  "quick-xml",
  "tempfile",
  "thiserror 2.0.20",
