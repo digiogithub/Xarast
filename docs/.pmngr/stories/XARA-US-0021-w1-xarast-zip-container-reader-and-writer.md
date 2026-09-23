@@ -2,13 +2,14 @@
 id: XARA-US-0021
 type: story
 title: W1 — .xarast ZIP container reader and writer
-status: backlog
+status: in_progress
 priority: high
 parent: XARA-EP-0007
 author: mcp
 labels: [phase-6, xarast-format]
 created: 2026-09-23T09:41:28Z
-updated: 2026-09-23T09:41:28Z
+updated: 2026-09-23T13:51:08Z
+started: 2026-09-23T13:51:08Z
 ---
 
 ## Description

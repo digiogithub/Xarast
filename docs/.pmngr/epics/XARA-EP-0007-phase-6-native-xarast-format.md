@@ -2,13 +2,14 @@
 id: XARA-EP-0007
 type: epic
 title: Phase 6 — Native .xarast format
-status: backlog
+status: in_progress
 priority: high
 milestone: XARA-M-0004
 author: mcp
 labels: [phase-6]
 created: 2026-09-23T09:39:43Z
-updated: 2026-09-23T09:39:43Z
+updated: 2026-09-23T13:50:59Z
+started: 2026-09-23T13:50:59Z
 ---
 
 ## Description
