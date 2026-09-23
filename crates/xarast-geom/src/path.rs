@@ -803,6 +803,7 @@ impl Path {
     /// Coordinates are read as millipoints, matching what
     /// [`Path::to_svg_path_data`] writes.
     pub fn from_svg_path_data(s: &str) -> Result<Path, PathError> {
+        check_svg_magnitudes(s)?;
         let bez = kurbo::BezPath::from_svg(s).map_err(|e| PathError::Svg(e.to_string()))?;
         let (p, clamped) = Path::from_bez_path(&bez);
         if clamped {
@@ -1094,6 +1095,81 @@ impl Iterator for SegmentIter<'_> {
         }
         None
     }
+}
+
+/// The largest magnitude a number in SVG path data may have: twice the
+/// document extent, which is the longest relative move between two points
+/// inside it. Anything bigger cannot describe a coordinate that survives
+/// the extent check anyway.
+const SVG_MAX_MAGNITUDE: f64 = 2.0 * Mp::EXTENT_MAX.to_f64();
+
+/// Rejects SVG path data holding a number beyond [`SVG_MAX_MAGNITUDE`],
+/// before `kurbo` sees it.
+///
+/// The extent check after parsing is not enough on its own: an elliptical
+/// arc's *radii* are not coordinates, and `kurbo` sizes its cubic
+/// approximation of an arc from the radius, so `A 1 8e77 …` between two
+/// ordinary points asks for some 10^13 cubics — `fuzz_svg_path_parse` found
+/// it as a 1.8 GB allocation from a 30-byte string. Bounding every number
+/// bounds the radii, and with them the approximation, to a few dozen
+/// cubics per turn.
+///
+/// The scan follows the SVG number grammar, so `1.5.5` is two numbers and
+/// `1e-5` one. Arc flags written with no separator before a number
+/// (`a 1 1 0 112345…`) read as one long number; that can only reject a
+/// path whose next number is already near the limit, never accept a bad
+/// one.
+fn check_svg_magnitudes(s: &str) -> Result<(), PathError> {
+    let b = s.as_bytes();
+    let digit = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
+    let mut i = 0usize;
+    while i < b.len() {
+        let start = i;
+        let mut j = i;
+        if matches!(b.get(j), Some(b'+' | b'-')) {
+            j += 1;
+        }
+        let int_start = j;
+        while digit(j) {
+            j += 1;
+        }
+        let mut is_number = j > int_start;
+        if b.get(j) == Some(&b'.') {
+            let mut k = j + 1;
+            while digit(k) {
+                k += 1;
+            }
+            if is_number || k > j + 1 {
+                is_number = true;
+                j = k;
+            }
+        }
+        if !is_number {
+            i = start + 1;
+            continue;
+        }
+        if matches!(b.get(j), Some(b'e' | b'E')) {
+            let mut k = j + 1;
+            if matches!(b.get(k), Some(b'+' | b'-')) {
+                k += 1;
+            }
+            let exp_start = k;
+            while digit(k) {
+                k += 1;
+            }
+            if k > exp_start {
+                j = k;
+            }
+        }
+        let v: f64 = s.get(start..j).and_then(|t| t.parse().ok()).unwrap_or(0.0);
+        if v.is_nan() || v.abs() > SVG_MAX_MAGNITUDE {
+            return Err(PathError::Svg(
+                "a number is too large for the document extent".to_owned(),
+            ));
+        }
+        i = j;
+    }
+    Ok(())
 }
 
 /// Builds a [`Path`] while upholding its invariants.
