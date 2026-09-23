@@ -999,6 +999,12 @@ mod tests {
 
     /// A headless device on whatever adapter there is, or `None`.
     fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+        // Real GPUs are opt-in: an unattended `cargo test` must never touch the
+        // maintainer's display driver (concurrent runs once hung the desktop).
+        if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+            return None;
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all().with_env(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()

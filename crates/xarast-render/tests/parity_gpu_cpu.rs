@@ -18,6 +18,12 @@ use xarast_render::golden::compare;
 
 #[test]
 fn the_two_backends_agree_within_the_parity_band() {
+    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
+    // maintainer's display driver, not even to enumerate adapters.
+    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+        return;
+    }
     if !adapter_available() {
         eprintln!(
             "skipping GPU parity: wgpu enumerated no adapter on this machine. \
@@ -68,6 +74,12 @@ fn the_two_backends_agree_within_the_parity_band() {
 }
 
 fn create_device() -> Option<(std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>)> {
+    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
+    // maintainer's display driver (concurrent runs once hung the desktop).
+    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+        return None;
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;

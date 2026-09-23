@@ -48,6 +48,12 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 /// Every adapter, or those whose name contains `WGPU_ADAPTER_NAME`
 /// (case-insensitive), with a device each.
 fn devices() -> Vec<(String, Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
+    // maintainer's display driver (concurrent runs once hung the desktop).
+    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
+        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+        return Vec::new();
+    }
     if wgpu::Instance::enabled_backend_features().is_empty() {
         return Vec::new();
     }

@@ -253,6 +253,12 @@ mod tests {
     /// the machine has no adapter, as every GPU test in this crate does.
     #[test]
     fn a_validation_error_on_a_real_device_is_counted_not_fatal() {
+        // Real GPUs are opt-in: an unattended `cargo test` must never touch the
+        // maintainer's display driver (concurrent runs once hung the desktop).
+        if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
+            eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+            return;
+        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
