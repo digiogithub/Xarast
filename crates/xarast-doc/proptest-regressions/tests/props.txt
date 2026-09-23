@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc bb354ca9a6920d27d496ff6d13b5be8c8c6f709c3a50cca748ea8ae282a7715c # shrinks to ops = [Detach(6), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0), CreateAttach(0, 0)]
 cc b69127b8219f0c3455ce51a730e95c25507c9b4820c0cf1e6951552906b23d41 # shrinks to edits = [Delete(9), Add(0), Delete(26)]
+cc 6ebe738f32f5dba0b724cf860a550df437c0f0fd78a73011e505695a20dfb2c0 # shrinks to edits = [AddSpread(3), Delete(52), Nudge(0, 0, 0), AddSpread(16), AddSpread(3), AddSpread(3), Add(3), Add(16), Add(3), SetActive(42, false)]

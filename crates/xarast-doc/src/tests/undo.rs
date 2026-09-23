@@ -484,3 +484,70 @@ fn the_active_layer_can_be_moved_within_one_transaction() {
     assert_eq!(doc.active_layer(spread), Some(first));
     doc.validate().assert_clean();
 }
+
+/// The commit repairs only the spreads a transaction touched. A spread edited
+/// while it was detached is unreachable at that commit, so it is not repaired
+/// then; re-attaching it later must still be noticed, which is why an attach
+/// looks for spreads inside the whole attached subtree.
+#[test]
+fn a_spread_broken_while_detached_is_repaired_when_it_comes_back() {
+    let f = fixture();
+    let mut doc = f.doc;
+    let spread = doc.active_spread();
+    let layer = doc
+        .active_layer(spread)
+        .expect("fixture has an active layer");
+    let chapter = doc.tree.links(spread).parent.expect("spread has a chapter");
+    let mut bus = CommandBus::new();
+
+    bus.dispatch(
+        &mut doc,
+        &cmd("detach the spread and break it", move |tx| {
+            tx.delete(spread)?;
+            let Some(NodeKind::Layer(l)) = tx.doc().tree.kind(layer) else {
+                unreachable!("the fixture layer is a layer")
+            };
+            let mut l = l.clone();
+            l.active = false;
+            tx.set_kind(layer, NodeKind::Layer(l))
+        }),
+    )
+    .unwrap();
+
+    // Inside a group, so that the spread is not the root of the attach.
+    bus.dispatch(
+        &mut doc,
+        &cmd("bring it back inside a group", move |tx| {
+            let g = tx.create(NodeKind::Group(Box::default()))?;
+            tx.attach(spread, g, Attach::FirstChild)?;
+            tx.attach(g, chapter, Attach::LastChild)
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(doc.active_layer(spread), Some(layer));
+    assert!(
+        !doc.validate()
+            .errors
+            .iter()
+            .any(|e| matches!(e, crate::validate::Invariant::NoActiveLayer { .. })),
+        "the re-attached spread was not repaired"
+    );
+}
+
+/// A commit that touches no spread must cost O(what changed), not O(document
+/// size). Checked structurally: a transform-only transaction records no spread
+/// and does not fall back to a full rescan.
+#[test]
+fn a_transform_touches_no_spread() {
+    let f = fixture();
+    let mut doc = f.doc;
+    let mut tx = Tx::begin(&mut doc);
+    tx.transform(
+        f.group,
+        Matrix::translate(Vector::new(Mp::new(10), Mp::new(0))),
+    )
+    .unwrap();
+    assert_eq!(tx.spreads_to_check(), (0, false));
+    let _ = tx.commit("nudge");
+}
