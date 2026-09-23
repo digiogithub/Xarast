@@ -2,12 +2,13 @@
 id: XARA-T-0082
 type: task
 title: ThumbnailProvider implementation over the renderer (F5.8/F5.9)
-status: todo
+status: done
 parent: XARA-US-0025
 author: mcp
 labels: [phase-6, xarast-app]
 created: 2026-09-23T14:23:15Z
-updated: 2026-09-23T14:23:15Z
+updated: 2026-09-23T19:53:37Z
+closed: 2026-09-23T19:53:37Z
 ---
 
 ## Description

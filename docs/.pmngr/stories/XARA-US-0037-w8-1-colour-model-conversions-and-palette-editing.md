@@ -2,12 +2,12 @@
 id: XARA-US-0037
 type: story
 title: W8.1 — Colour model conversions and palette editing
-status: in_progress
+status: in_review
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, color]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T19:12:34Z
+updated: 2026-09-23T19:53:54Z
 started: 2026-09-23T19:12:34Z
 ---
 

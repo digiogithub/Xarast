@@ -2,12 +2,13 @@
 id: XARA-T-0087
 type: task
 title: F6.5–F6.7 — Autosave session, NDJSON journal, recovery scan
-status: todo
+status: done
 parent: XARA-US-0026
 author: mcp
 labels: [phase-6, xarast-format, durability]
 created: 2026-09-23T14:23:38Z
-updated: 2026-09-23T14:23:38Z
+updated: 2026-09-23T19:53:37Z
+closed: 2026-09-23T19:53:37Z
 ---
 
 ## Description

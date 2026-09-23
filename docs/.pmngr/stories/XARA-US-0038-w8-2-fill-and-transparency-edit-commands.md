@@ -2,12 +2,12 @@
 id: XARA-US-0038
 type: story
 title: W8.2 — Fill and transparency edit commands
-status: in_progress
+status: in_review
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, doc]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T19:12:34Z
+updated: 2026-09-23T19:53:54Z
 started: 2026-09-23T19:12:34Z
 ---
 
