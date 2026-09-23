@@ -21,6 +21,7 @@ xarast-doc = { path = "../crates/xarast-doc" }
 xarast-render = { path = "../crates/xarast-render" }
 xarast-color = { path = "../crates/xarast-color" }
 xarast-format = { path = "../crates/xarast-format" }
+xarast-image = { path = "../crates/xarast-image" }
 arbitrary = { version = "1", features = ["derive"] }
 # Only to forge dangling resource keys for `fuzz_doc_builder`.
 slotmap = "1.0"
@@ -144,6 +145,13 @@ bench = false
 [[bin]]
 name = "fuzz_xarast_svg_read"
 path = "fuzz_targets/fuzz_xarast_svg_read.rs"
+
+# Every image format through the `xarast-image` facade with tight limits,
+# and the legacy `.xar` bitmap wrappings (headerless DIB, BMPZIP, the 8 bpp
+# JPEG palette).
+[[bin]]
+name = "fuzz_image_decode"
+path = "fuzz_targets/fuzz_image_decode.rs"
 test = false
 doc = false
 bench = false

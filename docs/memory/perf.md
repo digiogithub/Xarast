@@ -96,6 +96,34 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | BLAKE3 throughput, one core | ≥ 1 GB/s | **5.4–5.9 GiB/s** | passes |
 | Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
 | Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
+| Image probe (header only), 24 Mpx JPEG / PNG | ≤ 200 µs | **59 ns** / **390 ns** | passes (phase 10; JPEG probe no longer goes through `image`) |
+| Decode a 24 Mpx baseline JPEG (7.5 MB, q90) | ≤ 400 ms | **184 ms** (181–190) | passes |
+| Decode a 24 Mpx PNG (27.5 MB) | ≤ 600 ms | **227 ms** (209–239) | passes |
+| Decode a 4K PNG (10.3 MB) | — | **50 ms** | information |
+| BLAKE3 of 100 MB of decoded pixels | ≤ 200 ms | **29 ms** | passes |
+
+### Images (`xarast-image`, phase 10)
+
+`taskset -c 0-7 cargo bench -p xarast-image --bench decode`, 2026-09-23, at
+load 25–28 (other agents fuzzing and compiling), so the decode figures are
+pessimistic; an earlier run at load ~6 gave JPEG 194 ms at its minimum and
+PNG 24 Mpx 279 ms. The inputs are synthesised in the bench (gradients +
+noise, so the encoders produce realistic sizes). Output is premultiplied
+RGBA8, conversion and orientation included. All single-threaded: none of
+the decoders uses `rayon`.
+
+- The first JPEG probe went through `image`'s decoder and took **487 µs**:
+  it copies the whole input before reading the header. The own segment
+  walk takes 59 ns. Counting scans (a linear walk of the entropy data,
+  ≈ 3 ms on 7.5 MB) is done only in `decode`.
+- The whole 59-file `.xar` corpus decodes in ≈ 120 ms (test profile); 99 ms
+  of that is the eight JPEG8BPP records, mostly the palette snap (358 ms
+  before its exact-key cache).
+- **Size**: a stripped release binary that decodes through the façade is
+  **1.26 MiB larger** than one that does not (1.58 MiB vs 0.32 MiB, thin
+  LTO). The shipped binary does not link `xarast-image` yet; `arboard`
+  already brings `image` + `png` + `tiff`, so the real increment in the
+  AppImage will be smaller (JPEG, WebP, GIF, BMP, PNM codecs).
 
 ### Document model
 
