@@ -228,6 +228,16 @@ impl CpuBackend {
         let luts = &self.luts;
 
         let t_raster = Instant::now();
+        let band_of = |i: usize, rows: &[u8]| {
+            let y0 = i * rows_per_band;
+            let h = rows.len() / stride;
+            DeviceRect::new(
+                0,
+                i32::try_from(y0).unwrap_or(i32::MAX),
+                i32::try_from(width).unwrap_or(i32::MAX),
+                i32::try_from(y0 + h).unwrap_or(i32::MAX),
+            )
+        };
         // Bands are independent and are written back by index, which is
         // what keeps a parallel render byte-identical to a serial one.
         let chunk = rows_per_band * stride;
@@ -236,18 +246,16 @@ impl CpuBackend {
                 .data_mut()
                 .chunks_mut(chunk)
                 .enumerate()
-                .map(|(i, rows)| {
-                    render_band(dl, res, luts, &cfg, width, i * rows_per_band, rows, area)
-                })
+                .map(|(i, rows)| render_band(dl, res, luts, &cfg, band_of(i, rows), rows, area))
                 .collect()
+        } else if let Some(tiles) = column_tiles(&cfg, area, rows_per_band, target.bounds()) {
+            render_tiles(dl, res, luts, &cfg, &tiles, target, area)
         } else {
             target
                 .data_mut()
                 .par_chunks_mut(chunk)
                 .enumerate()
-                .map(|(i, rows)| {
-                    render_band(dl, res, luts, &cfg, width, i * rows_per_band, rows, area)
-                })
+                .map(|(i, rows)| render_band(dl, res, luts, &cfg, band_of(i, rows), rows, area))
                 .collect()
         };
         let raster_us = elapsed_us(t_raster);
@@ -283,8 +291,109 @@ struct Layer {
     kind: LayerKind,
 }
 
-/// Renders one horizontal band. `y0` is the band's first row in device
-/// space, `rows` is the band's slice of the target.
+/// The narrowest column a tile is split to, in pixels.
+const MIN_TILE_WIDTH: u32 = 64;
+
+/// Column tiles for an area that spans too few bands to occupy the
+/// machine: a strip exposed by a pan is one band tall, and would otherwise
+/// rasterise on one core (gintrack XARA-T-0034).
+///
+/// Only the interactive configuration tiles. The deterministic one keeps
+/// full-width bands, so export and the goldens never see a tile edge. A
+/// tile edge clips coverage horizontally exactly as a dirty rectangle's
+/// edge already does, and the tiling depends only on the area, never on
+/// the thread count, so a frame is still the same on every run.
+fn column_tiles(
+    cfg: &CpuConfig,
+    area: DeviceRect,
+    rows_per_band: usize,
+    target: DeviceRect,
+) -> Option<Vec<DeviceRect>> {
+    if cfg.pin_simd || rows_per_band == 0 {
+        return None;
+    }
+    let rpb = i32::try_from(rows_per_band).ok()?;
+    let first = area.y0.div_euclid(rpb);
+    let last = (area.y1 - 1).div_euclid(rpb);
+    let bands = usize::try_from(last - first + 1).ok()?;
+    // Enough work items for a many-core machine; the count is fixed so
+    // that the picture never depends on the machine.
+    const WANT: usize = 32;
+    if bands * 2 > WANT {
+        return None;
+    }
+    let cols = (WANT / bands)
+        .min((area.width() / MIN_TILE_WIDTH).max(1) as usize)
+        .max(1);
+    if cols < 2 {
+        return None;
+    }
+    let cols_i = i32::try_from(cols).ok()?;
+    let mut tiles = Vec::with_capacity(bands * cols);
+    for b in first..=last {
+        let rows =
+            DeviceRect::new(target.x0, b * rpb, target.x1, (b + 1) * rpb).intersection(target);
+        for c in 0..cols_i {
+            let x0 = area.x0 + (area.x1 - area.x0) * c / cols_i;
+            let x1 = area.x0 + (area.x1 - area.x0) * (c + 1) / cols_i;
+            let t = DeviceRect::new(x0, rows.y0, x1, rows.y1);
+            if !t.is_empty() {
+                tiles.push(t);
+            }
+        }
+    }
+    Some(tiles)
+}
+
+/// Renders column tiles in parallel, each in its own buffer copied out of
+/// the target and back.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
+fn render_tiles(
+    dl: &DisplayList,
+    res: &Resolver,
+    luts: &BlendLuts,
+    cfg: &CpuConfig,
+    tiles: &[DeviceRect],
+    target: &mut Surface,
+    area: DeviceRect,
+) -> Vec<BandStats> {
+    let stride = target.width() as usize * 4;
+    let src = target.data();
+    let copy_out = |t: &DeviceRect| -> Vec<u8> {
+        let w = t.width() as usize * 4;
+        let mut buf = Vec::with_capacity(w * t.height() as usize);
+        for y in t.y0..t.y1 {
+            let o = y as usize * stride + t.x0 as usize * 4;
+            buf.extend_from_slice(&src[o..o + w]);
+        }
+        buf
+    };
+    let done: Vec<(BandStats, Vec<u8>)> = tiles
+        .par_iter()
+        .map(|t| {
+            let mut buf = copy_out(t);
+            let stats = render_band(dl, res, luts, cfg, *t, &mut buf, area);
+            (stats, buf)
+        })
+        .collect();
+    let dst = target.data_mut();
+    let mut out = Vec::with_capacity(done.len());
+    for (t, (stats, buf)) in tiles.iter().zip(done) {
+        let w = t.width() as usize * 4;
+        for (row, y) in (t.y0..t.y1).enumerate() {
+            let o = y as usize * stride + t.x0 as usize * 4;
+            dst[o..o + w].copy_from_slice(&buf[row * w..(row + 1) * w]);
+        }
+        out.push(stats);
+    }
+    out
+}
+
+/// Renders one band or tile. `band` is its device rectangle and `rows` its
+/// pixels, `band.width()` to a row.
 #[allow(
     clippy::too_many_arguments,
     reason = "a band's state is genuinely this wide"
@@ -294,22 +403,15 @@ fn render_band(
     res: &Resolver,
     luts: &BlendLuts,
     cfg: &CpuConfig,
-    width: u32,
-    y0: usize,
+    band: DeviceRect,
     rows: &mut [u8],
     area: DeviceRect,
 ) -> BandStats {
     let mut stats = BandStats::default();
-    let height = u32::try_from(rows.len() / (width as usize * 4)).unwrap_or(0);
-    if width == 0 || height == 0 {
+    let width = band.width();
+    if band.is_empty() || rows.len() < band.area() as usize * 4 {
         return stats;
     }
-    let band = DeviceRect::new(
-        0,
-        i32::try_from(y0).unwrap_or(0),
-        i32::try_from(width).unwrap_or(i32::MAX),
-        i32::try_from(y0 + height as usize).unwrap_or(i32::MAX),
-    );
     // `area` is the display list's bounds, already intersected with the
     // dirty region: nothing outside it may be touched, which is what makes
     // an incremental redraw cheap rather than merely correct.
