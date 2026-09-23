@@ -78,12 +78,12 @@ pub mod walker;
 pub use app::{AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, Severity};
 pub use edit::{ControlPoints, EditState, Modifiers, SelectMode, ToolId, ToolState};
 pub use geometry::{DevicePoint, DeviceSize, DocPoint, DocPointF, DocRect};
-pub use headless::{HeadlessError, HeadlessOptions, HeadlessResult, render_to_png};
+pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult, render_to_png};
 pub use intent::{Changed, Intent, PointerButton, PointerSample};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
 pub use render_thread::{
-    FINAL_SLAB_ROWS, FrameJob, FrameRenderer, FrameReuse, RenderRequest, RenderStats, RenderThread,
-    RenderedFrame,
+    FINAL_COLUMNS, FrameJob, FrameRenderer, FrameReuse, MIN_COLUMN_WIDTH, RenderRequest,
+    RenderStats, RenderThread, RenderedFrame,
 };
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};

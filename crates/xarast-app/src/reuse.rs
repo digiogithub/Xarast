@@ -226,15 +226,24 @@ pub(crate) fn ring(all: DeviceRect, inner: DeviceRect) -> Vec<DeviceRect> {
     .collect()
 }
 
-/// Horizontal slabs of at most `rows` rows covering `all`, top first.
-pub(crate) fn slabs(all: DeviceRect, rows: u32) -> Vec<DeviceRect> {
-    let step = i32::try_from(rows.max(1)).unwrap_or(i32::MAX);
+/// `all` cut into at most `n` full-height columns, left first.
+///
+/// Columns, not rows: the CPU backend parallelises over horizontal bands,
+/// so a full-height column keeps every core busy, where a short row slab
+/// would leave most of them idle (measured: 192-row slabs doubled a
+/// 1080p `Final`).
+pub(crate) fn columns(all: DeviceRect, n: u32) -> Vec<DeviceRect> {
+    let w = all.width();
+    if w == 0 || all.height() == 0 {
+        return Vec::new();
+    }
+    let step = i32::try_from(w.div_ceil(n.clamp(1, w))).unwrap_or(i32::MAX);
     let mut out = Vec::new();
-    let mut y = all.y0;
-    while y < all.y1 {
-        let y1 = y.saturating_add(step).min(all.y1);
-        out.push(DeviceRect::new(all.x0, y, all.x1, y1));
-        y = y1;
+    let mut x = all.x0;
+    while x < all.x1 {
+        let x1 = x.saturating_add(step).min(all.x1);
+        out.push(DeviceRect::new(x, all.y0, x1, all.y1));
+        x = x1;
     }
     out
 }
@@ -289,6 +298,7 @@ mod tests {
             doc: DocumentId(1),
             scene: std::sync::Arc::default(),
             scene_epoch: 4,
+            ink: DeviceRect::EMPTY,
             resolver: std::sync::Arc::default(),
             view: v,
             background: [1, 2, 3, 255],
@@ -407,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn the_ring_and_the_slabs_tile_exactly() {
+    fn the_ring_and_the_columns_tile_exactly() {
         let all = DeviceRect::from_size(100, 80);
         let inner = DeviceRect::new(10, 20, 60, 50);
         let r = ring(all, inner);
@@ -422,9 +432,11 @@ mod tests {
         assert_eq!(ring(all, DeviceRect::EMPTY), vec![all]);
         assert!(ring(all, all).is_empty());
 
-        let s = slabs(all, 32);
+        let s = columns(all, 3);
         assert_eq!(s.len(), 3);
-        assert_eq!(s[2], DeviceRect::new(0, 64, 100, 80));
+        assert_eq!(s[2], DeviceRect::new(68, 0, 100, 80));
+        assert_eq!(columns(DeviceRect::from_size(2, 5), 4).len(), 2);
+        assert!(columns(DeviceRect::EMPTY, 4).is_empty());
         assert_eq!(s.iter().map(|r| r.area()).sum::<u64>(), all.area());
     }
 }

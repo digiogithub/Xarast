@@ -180,6 +180,9 @@ pub struct Session {
     /// Bumped by every rebuild, so the render thread can tell whether the
     /// pixels it kept were drawn from the scene it is now given.
     scene_epoch: u64,
+    /// A document-space superset of what the scene can draw, taken at the
+    /// last rebuild: the render thread skips strips outside it.
+    scene_ink: crate::geometry::DocRect,
     walker: SceneWalker,
     /// The resolver as of the last walk, shared with the render thread.
     /// Taken lazily and dropped by every rebuild, so a pan (which does not
@@ -219,6 +222,7 @@ impl Session {
             quality: RenderQuality::Final,
             scene: Arc::new(Scene::new()),
             scene_epoch: 0,
+            scene_ink: crate::geometry::DocRect::EMPTY,
             walker: SceneWalker::new(),
             resolver_snapshot: None,
             dirty: Dirty::everything(size),
@@ -387,6 +391,7 @@ impl Session {
         )?;
         self.dirty.scene = false;
         self.scene_epoch += 1;
+        self.scene_ink = crate::viewport::content_rect(&self.doc);
         self.resolver_snapshot = None;
         Ok(stats)
     }
@@ -440,6 +445,12 @@ impl Session {
             doc: self.id,
             scene: self.scene_snapshot(),
             scene_epoch: self.scene_epoch,
+            ink: {
+                let r = crate::viewport::device_rect_of(&self.viewport, self.scene_ink);
+                // Two pixels of slack: antialiasing, and a Draft pan
+                // snapped by up to half a pixel.
+                if r.is_empty() { r } else { r.inflated(2) }
+            },
             resolver: self.resolver_snapshot(),
             view,
             background,

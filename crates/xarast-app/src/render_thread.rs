@@ -37,11 +37,10 @@
 //! * a result is never published over a newer one, so the main thread
 //!   cannot present frames out of order.
 //!
-//! A `Final` frame is rasterised in horizontal slabs of
-//! [`FINAL_SLAB_ROWS`] rows, and the worker checks between slabs whether
-//! it has been cancelled or superseded; if so it abandons the frame
-//! ([`RenderStats::aborted`]). That bounds how long new input waits
-//! behind an upgrade to one slab. A `Draft` frame is not abandoned for a
+//! A `Final` frame is rasterised in [`FINAL_COLUMNS`] full-height columns,
+//! and the worker checks between columns whether it has been cancelled or
+//! superseded; if so it abandons the frame ([`RenderStats::aborted`]).
+//! That bounds how long new input waits behind an upgrade to one column. A `Draft` frame is not abandoned for a
 //! newer one, or a continuous gesture could starve the screen; it is
 //! cheap anyway, because it reuses pixels.
 //!
@@ -71,9 +70,13 @@ use xarast_render::{
 use crate::reuse::{self, Kept, Plan};
 use crate::session::DocumentId;
 
-/// A `Final` frame is rasterised this many rows at a time, and abandoned
-/// between slabs when newer input has arrived.
-pub const FINAL_SLAB_ROWS: u32 = 192;
+/// A `Final` frame is rasterised in this many columns, and abandoned
+/// between columns when newer input has arrived.
+pub const FINAL_COLUMNS: u32 = 4;
+
+/// No `Final` column is narrower than this: below it the per-call cost
+/// outweighs the shorter wait, and a small frame is one call.
+pub const MIN_COLUMN_WIDTH: u32 = 256;
 
 /// One frame for the render thread to rasterise.
 ///
@@ -89,6 +92,10 @@ pub struct FrameJob {
     /// [`crate::Session::scene_epoch`] when the scene was taken: equal
     /// epochs mean equal scenes, which is what licenses reusing pixels.
     pub scene_epoch: u64,
+    /// A device-space superset of everything the scene draws in `view`.
+    /// A strip outside it is backdrop only, and no display list is built
+    /// for it — building one scans every command in the scene.
+    pub ink: DeviceRect,
     /// What the scene's ramp and image ids refer to. A scene is never
     /// sent without it (`app-core.md` invariant 6).
     pub resolver: Arc<Resolver>,
@@ -180,7 +187,7 @@ pub struct RenderStats {
     pub rendered: u64,
     /// Finished frames replaced before the main thread collected them.
     pub dropped: u64,
-    /// `Final` frames abandoned between slabs for newer input.
+    /// `Final` frames abandoned between columns for newer input.
     pub aborted: u64,
     /// Frames drawn by scrolling the previous one.
     pub scrolled: u64,
@@ -491,13 +498,21 @@ impl<R: FrameRenderer> Worker<'_, R> {
         target: &mut Surface,
         timings: &mut FrameTimings,
     ) -> Option<BackendError> {
+        if !rect.intersects(job.ink) {
+            reuse::fill_rect(target, rect, job.background);
+            if let Some((page, colour)) = job.page {
+                reuse::fill_rect(target, page.intersection(rect), colour);
+            }
+            return None;
+        }
         let t = Instant::now();
         let list = DisplayList::build(&job.scene, view, &DirtyRect::of(rect));
         timings.build_us = timings.build_us.saturating_add(elapsed_us(t));
         self.draw(job, &list, rect, target, timings)
     }
 
-    /// A whole frame. A `Final` goes slab by slab and may be abandoned.
+    /// A whole frame. A `Final` goes column by column and may be
+    /// abandoned between them.
     fn full(
         &mut self,
         job: &FrameJob,
@@ -509,18 +524,16 @@ impl<R: FrameRenderer> Worker<'_, R> {
             let err = self.draw_rect(job, &job.view, vp, &mut surface, timings);
             return Ok((surface, err));
         }
-        // One list for the whole view, then a cheap per-slab subset of it:
-        // building from the scene per slab would re-derive every command's
-        // bounds once per slab.
-        let t = Instant::now();
-        let list = DisplayList::build(&job.scene, &job.view, &DirtyRect::of(vp));
-        timings.build_us = timings.build_us.saturating_add(elapsed_us(t));
-        for slab in reuse::slabs(vp, FINAL_SLAB_ROWS) {
+        // One display list per column, built from the scene. Building one
+        // list for the whole view and filtering it per column costs more:
+        // the filter clones every command once more (measured 65 ms at
+        // 224 000 primitives, against 60 ms for the whole build).
+        let n = FINAL_COLUMNS.min(vp.width() / MIN_COLUMN_WIDTH).max(1);
+        for piece in reuse::columns(vp, n) {
             if self.stale(job) {
                 return Err(Abandoned);
             }
-            let sub = restrict(&list, slab);
-            if let Some(e) = self.draw(job, &sub, slab, &mut surface, timings) {
+            if let Some(e) = self.draw_rect(job, &job.view, piece, &mut surface, timings) {
                 return Ok((surface, Some(e)));
             }
         }
@@ -594,18 +607,6 @@ impl<R: FrameRenderer> Worker<'_, R> {
             error,
         })
     }
-}
-
-/// The commands of `list` that touch `clip`, as a list clipped to it.
-/// Structural commands are always kept, so the stream stays balanced.
-fn restrict(list: &DisplayList, clip: DeviceRect) -> Arc<DisplayList> {
-    let cmds = list
-        .commands()
-        .iter()
-        .filter(|c| c.bounds().is_none_or(|b| b.intersects(clip)))
-        .cloned()
-        .collect();
-    DisplayList::from_commands(cmds, clip.intersection(list.bounds()), *list.view())
 }
 
 fn add_timings(a: &mut FrameTimings, b: &FrameTimings) {
@@ -717,6 +718,7 @@ mod tests {
             doc: DocumentId(7),
             scene: Arc::new(Scene::new()),
             scene_epoch: EPOCH.fetch_add(1, Ordering::SeqCst),
+            ink: view.viewport,
             resolver: Arc::new(Resolver::new()),
             view,
             background: [10, 20, 30, 255],
@@ -951,11 +953,9 @@ mod tests {
     }
 
     #[test]
-    fn a_final_is_abandoned_between_slabs_when_a_newer_frame_arrives() {
+    fn a_final_is_abandoned_between_columns_when_a_newer_frame_arrives() {
         let (mut rt, started, release, _) = gated();
-        // Three slabs tall.
-        let tall = FINAL_SLAB_ROWS * 2 + 8;
-        let a = rt.submit(job(8, tall));
+        let a = rt.submit(job(MIN_COLUMN_WIDTH * 2, 8));
         assert_eq!(started.recv_timeout(T).unwrap(), a);
         let b = rt.submit(job(8, 8));
         release.send(()).unwrap();
@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn a_draft_is_not_abandoned_for_a_newer_frame() {
         let (mut rt, started, release, _) = gated();
-        let mut j = job(8, FINAL_SLAB_ROWS * 2 + 8);
+        let mut j = job(MIN_COLUMN_WIDTH * 2, 8);
         j.view.quality = RenderQuality::Draft;
         let a = rt.submit(j);
         assert_eq!(started.recv_timeout(T).unwrap(), a);
@@ -1123,5 +1123,35 @@ mod tests {
         assert_eq!(f.reuse, FrameReuse::Full);
         assert!(f.exact);
         assert_eq!(f.view, s.view_params());
+    }
+
+    #[test]
+    fn a_final_drawn_in_columns_matches_one_call() {
+        let mut s = drawing();
+        s.apply(crate::Intent::Resize(crate::DeviceSize::new(
+            MIN_COLUMN_WIDTH * 3,
+            150,
+        )))
+        .unwrap();
+        s.rebuild_scene(None).unwrap();
+        let job = s.frame_job(BG, PAGE);
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(job.clone());
+        let f = next_frame(&rt, &woken);
+        assert!(f.timings.tiles > 0, "the drawing is in view");
+
+        let mut one = Surface::filled(job.view.viewport.width(), 150, BG);
+        if let Some((page, colour)) = job.page {
+            reuse::fill_rect(&mut one, page, colour);
+        }
+        let list = DisplayList::build(&job.scene, &job.view, &DirtyRect::of(job.view.viewport));
+        CpuBackend::new(CpuConfig::deterministic())
+            .render(&list, &job.resolver, &mut one)
+            .unwrap();
+        assert!(
+            max_diff(&f.surface, &one) <= 1,
+            "{}",
+            max_diff(&f.surface, &one)
+        );
     }
 }
