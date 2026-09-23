@@ -2867,6 +2867,12 @@ mod tests {
                     ChordKey::Function(n) => Key::Named(NamedKey::Function(n)),
                     ChordKey::Backspace => Key::Named(NamedKey::Backspace),
                     ChordKey::Enter => Key::Named(NamedKey::Enter),
+                    ChordKey::NumPad(c) => Key::char(c),
+                };
+                let location = if matches!(chord.key, ChordKey::NumPad(_)) {
+                    KeyLocation::Numpad
+                } else {
+                    KeyLocation::Standard
                 };
                 let mut modifiers = Modifiers::NONE;
                 if chord.ctrl {
@@ -2877,7 +2883,7 @@ mod tests {
                 }
                 let event = KeyEvent {
                     key,
-                    location: KeyLocation::Standard,
+                    location,
                     state: KeyState::Pressed,
                     repeat: false,
                     text: None,
