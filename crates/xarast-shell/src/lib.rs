@@ -36,6 +36,7 @@
 //! | [`scale`] | The single owner of the fractional scale factor |
 //! | [`decorations`] | Who draws the window frame |
 //! | [`input`] | The platform-neutral event model and its translation |
+//! | [`intents`] | Physical [`ShellEvent`]s to semantic `xarast_app::Intent`s |
 //! | [`portal`] | XDG portals on a services thread |
 //! | [`clipboard`] | The system clipboard, and its Wayland caveat |
 //!
@@ -50,8 +51,11 @@ pub mod clipboard;
 pub mod decorations;
 pub mod display;
 pub mod input;
+pub mod intents;
+mod paint;
 pub mod portal;
 pub mod scale;
+pub mod viewer;
 mod window;
 
 /// The input-method seam.
@@ -73,11 +77,12 @@ pub use input::event::{
 };
 pub use input::keyboard::{Key, KeyEvent, KeyLocation, KeyState, Modifiers, NamedKey, Shortcut};
 pub use input::tablet::{InputSource, StrokeSample, TabletCaps, TabletSource, ToolAxes};
+pub use paint::{CanvasFrame, UiFrame};
 pub use portal::{
     FileFilter, OpenFileRequest, PortalEvent, PortalHandle, PortalRequestId, SaveFileRequest,
 };
 pub use scale::{LogicalSize, PhysicalPos, PhysicalSize, ScaleFactor};
-pub use window::ShellCtx;
+pub use window::{ShellCtx, ShellWaker};
 
 /// The Wayland and X11 application identifier.
 ///

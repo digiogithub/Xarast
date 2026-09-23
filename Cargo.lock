@@ -4505,6 +4505,7 @@ version = "0.0.1"
 dependencies = [
  "arboard",
  "ashpd",
+ "egui",
  "pollster 1.0.1",
  "rfd",
  "thiserror 2.0.20",
@@ -4513,7 +4514,10 @@ dependencies = [
  "wgpu",
  "winit",
  "xarast-app",
+ "xarast-doc",
+ "xarast-geom",
  "xarast-render",
+ "xarast-ui",
 ]
 
 [[package]]

@@ -122,7 +122,10 @@ invent them.
   canvas cannot survive. The dock sits beside it.
 - **The canvas region is transparent and reported in whole device
   pixels**, rounded *outwards*, so the document pass covers every pixel
-  egui left clear. Rounding inwards leaves a seam.
+  egui left clear. Rounding inwards leaves a seam. The `CentralPanel`
+  that hosts it is transparent too whenever a document is open; the
+  `canvas_backdrop` fill is only for the empty state
+  (`nothing_opaque_is_painted_over_the_canvas_region` enforces it).
 - **The view transform is read-only here.** Pan and zoom are commands.
   There is exactly one owner of the transform and it is not the
   interface.
@@ -172,6 +175,9 @@ invent them.
   rectangles, so a one-frame test asserts that the widget ignored an
   event it had not been told about. The canvas tests run a warm-up frame.
 - **egui 0.34–0.36 on this toolchain.** They need rustc ≥ 1.92/1.95.
+- **An opaque `CentralPanel` frame under the canvas.** The shell draws
+  the document *beneath* the interface; an opaque panel fill hid it and
+  the first composed window came up blank.
 
 ### Open TODOs
 
@@ -193,7 +199,17 @@ invent them.
   mapping onto `xarast_app::{AppState, Intent}` now that that crate has
   landed its API: `UiCommand` → `Intent` is a one-function translation,
   and `Unit`, `ZoomTarget` and the theme preference exist on both sides
-  and should converge on the `xarast-app` spelling.
+  and should converge on the `xarast-app` spelling. The translation now
+  exists, in the composition root (`xarast_shell::viewer::Viewer::ui_intent`
+  and `document_view`); converging the types would delete most of it.
+- **`ViewTransform` has no Y flip.** It is scale + offset with `y`
+  down, while document `y` is up. The composition root therefore hands
+  the interface **y-negated** document coordinates (page, and the offset
+  derived from `Viewport`), which lands the page edge on the rendered
+  page to the pixel (`the_interface_page_edge_lands_on_the_rendered_page`)
+  but makes the vertical ruler read negative numbers. Fix it here: give
+  `ViewTransform` the viewport's orientation (or take the `Viewport`
+  itself) so the rulers label document `y` correctly.
 
 ---
 
@@ -335,9 +351,31 @@ instrumentation), which was extended rather than replaced.
 | `input::translate` | `winit` 0.30 → `ShellEvent`, `parse_uri_list` | Done; **the only module phase 14 rewrites** |
 | `portal` | `PortalService` on a services thread, `PortalHandle`, `rfd`+`ashpd` | Done; **the dialogs themselves are unmeasured** — no D-Bus session bus here |
 | `clipboard` | `Clipboard` trait, `SystemClipboard` (`arboard`), `NullClipboard` | Done; **unmeasured** — no display server here |
-| `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest` | Done; **the GPU path is unmeasured** — `wgpu` enumerates zero adapters here |
+| `window` | Event loop, `Gpu`, `ShellCtx`, `ShellApp`, `FrameRequest`, `ShellWaker`, `--screenshot` read-back | Done; **runs on real hardware** (NVIDIA RTX 4000 SFF Ada, Vulkan, COSMIC/Wayland) |
+| `intents` | `IntentAdapter`, `semantic_modifiers`, `semantic_button`, `CanvasRegion` — physical `ShellEvent` → semantic `xarast_app::Intent` | Done (XARA-T-0001) |
+| `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame` | Done (XARA-T-0003) |
+| `viewer` | `Viewer`, the composition root: `ShellApp` over `AppState` + `Workspace` + `RenderThread` | Done (XARA-T-0003); panels receive no input yet (XARA-US-0002) |
 
-100 unit tests, all passing with no compositor and no GPU.
+127 unit tests (shell), all passing with no compositor and no GPU.
+
+### The running application (XARA-US-0001)
+
+`xarast FILE.xar …` opens the files and shows the last one;
+`xarast --screenshot out.png FILE.xar` renders, reads the composed
+swapchain back, writes it and exits. Over the whole 59-file corpus in a
+real Wayland window on the NVIDIA machine: **59/59 open, render and
+capture**, the three `*GradFilledShapes*` files at 4–5 s each (XARA-T-0014)
+and everything else under 2.2 s from launch to capture; cold start to
+first frame ~440 ms (budget 400 ms, XARA-T-0010).
+
+```text
+ ShellEvent ─► intents::IntentAdapter ─► Intent ─► AppState::apply ─► Changed
+ egui frame ─► Workspace::ui ─► UiCommand ─► Viewer::ui_intent ─┘   │
+   │                                           needs_scene: rebuild_scene
+   ▼                                           needs_redraw: Session::frame_job
+ UiFrame ─► ShellCtx::show_ui            RenderThread::submit (CPU backend)
+ CanvasFrame ─► ShellCtx::show_canvas ◄─ take_latest ◄─ ShellWaker (proxy)
+```
 
 ### Decisions taken (and why)
 
@@ -410,6 +448,41 @@ instrumentation), which was extended rather than replaced.
 14. **No `unsafe` anywhere in the crate.** None was needed: `winit` and
     `wgpu` are safe interfaces and the platform-specific setters are
     behind `cfg`, not behind pointers.
+15. **The composition root lives in `xarast-shell` (`viewer.rs`), and the
+    shell depends on `xarast-ui`.** Architecture §1 draws the shell under
+    the UI and phase-05 criterion 16 allows `egui` in exactly those two
+    crates; U5.1 (frame composition) and U4.1 (the egui shim) are both
+    the shell's. A separate binary crate would have moved the AppImage's
+    `-p xarast-shell --bin xarast` for no gain. `xarast-ui` still does not
+    name `winit` or `wgpu`, and `xarast-app` still names neither.
+16. **The shell paints `egui` itself** (`paint.rs`, ~400 lines): one
+    pipeline, one texture table, one uniform that switches between
+    points (interface) and device pixels (canvas). `egui-wgpu` 0.33 is
+    built against `wgpu` 27 and the workspace is on 30; two `wgpu`s cannot
+    share a device.
+17. **The swapchain is 8-bit non-sRGB (`Bgra8Unorm`/`Rgba8Unorm`), chosen
+    by exact match.** The CPU canvas and egui both hand over *encoded*
+    sRGB; the textures are `Rgba8Unorm` and no stage converts, blending
+    premultiplied in encoded space as egui expects. This reverses the
+    walking skeleton's "prefer sRGB", which only ever drew a clear colour.
+18. **The ShellEvent → Intent table is `intents.rs`, outside
+    `input::translate`.** It names no `winit` type, so phase 14 inherits
+    it. `xarast-app` cannot host it: it must not see `ShellEvent`.
+    Pointer motion comes from the ordered `ShellEvent::Pointer` stream,
+    not the per-frame `Stroke` drain, which arrives after that frame's
+    presses and releases; the stroke path carries pressure only, which
+    `winit` 0.30 never supplies. Wheel: pan 50 px a notch; constrain +
+    wheel zooms √2 a notch about the pointer; adjust + wheel pans
+    sideways. DPI is `96 × scale`, sent as `Intent::SetDpi`.
+19. **The render thread wakes the loop through an `EventLoopProxy`**
+    wrapped as `ShellWaker` (`user_event` → `request_redraw`), so the loop
+    parks at 0 % between frames and still presents a finished render at
+    once. `ShellCtx::waker()` is how anything off the main thread gets it.
+20. **`--screenshot` reads back the swapchain**, not the canvas surface:
+    it proves the composition (canvas + interface + format), and it works
+    on compositors without `wlr-screencopy` (COSMIC has none; `grim`
+    fails there). It captures once the rendered frame matches the canvas
+    size and nothing is pending.
 
 ### Invariants that must not be broken
 
@@ -434,6 +507,15 @@ instrumentation), which was extended rather than replaced.
 7. **A surface is never configured at zero size.** `PhysicalSize::new`
    clamps to 1×1 and `PhysicalSize::is_degenerate` is what the resize path
    checks; a minimised window reports 0×0 on Wayland.
+8. **A surface is never reconfigured while a `SurfaceTexture` is held.**
+   `Suboptimal` presents first, then reconfigures. `wgpu` treats the
+   violation as a fatal validation error (it killed the window on
+   `Designs/Groucho2.xar`).
+9. **Texture deltas from egui reach the GPU exactly once, in order**,
+   applied right after `on_frame` whether or not the present succeeds;
+   two interface frames between presents merge their deltas.
+10. **Pass order is fixed: canvas, then interface**, in one render pass
+    with one encoder. The interface is premultiplied over the canvas.
 
 ### Dead ends (do not retry)
 
@@ -450,6 +532,16 @@ instrumentation), which was extended rather than replaced.
 - **`arboard` without `image-data`.** `get_image`/`set_image` simply do
   not exist; the feature is what compiles them in.
 - **A fixed-capacity ring buffer for stroke samples.** See decision 5.
+- **An sRGB swapchain.** Double-encodes both passes; everything comes out
+  washed out.
+- **"The first non-sRGB format the surface offers".** On NVIDIA/Wayland
+  that can be a 10-bit or half-float format: wrong colours and not four
+  bytes a pixel (the read-back failed validation). Match
+  `Bgra8Unorm | Rgba8Unorm` exactly.
+- **`egui-wgpu` 0.33.** Pairs with `wgpu` 27; see decision 16.
+- **`grim` for screenshots on COSMIC.** No `wlr-screencopy`; the desktop
+  portal screenshot captures the whole desktop, other windows included.
+  Use `xarast --screenshot`.
 
 ### Open TODOs
 
@@ -463,8 +555,15 @@ instrumentation), which was extended rather than replaced.
   and unmeasured**. They need a session bus and a compositor.
 - `wgpu` adapter selection, the four-level capability ladder (S4/U2.5) and
   frame pacing beyond `Wait`/`WaitUntil` are still the walking skeleton's:
-  one adapter request, one clear pass. They need an adapter to develop
-  against.
+  one adapter request. The canvas is CPU-rendered and uploaded; the GPU
+  backend is not wired.
+- **`wgpu` validation errors are fatal** (the default error handler
+  panics). Install `Device::on_uncaptured_error` to log and degrade
+  instead, so a driver quirk cannot take the document down with it.
+- **The panels are drawn but inert** until the egui input shim
+  (XARA-US-0002). When it lands, the canvas widget's own navigation
+  (`UiCommand::Pan`/`ZoomAbout`) and the `intents` adapter both see the
+  same wheel: route canvas-region input to exactly one of them.
 - **Live** colour-scheme change notification: the settings portal is read
   once at start-up. `ashpd` exposes a signal stream; wiring it needs a bus
   to test against.
@@ -476,12 +575,7 @@ instrumentation), which was extended rather than replaced.
 - The `egui`→`winit` shim (S9/U4.1) is **not written**. It is `xarast-ui`'s
   boundary as much as the shell's, and it should be built directly on
   `ShellEvent` rather than on `winit`, so that phase 14 gets it for free.
-- **Bridge `ShellEvent` to `xarast_app::Intent`.** `xarast-app` landed its
-  `Intent`/`Changed` contract while this crate was being written, so the
-  shell still defines its own `Modifiers` and `PointerButton` at the
-  platform boundary. That is correct layering — the shell's are physical,
-  the app's are semantic — but the translation from one to the other has
-  to be written, and it belongs in `xarast-app` or in a thin adapter, not
-  in `input::translate`.
+- [x] **Bridge `ShellEvent` to `xarast_app::Intent`** — `intents.rs`,
+  decision 18 (XARA-T-0001).
 - X11 pressure via `octotablet` remains deferred; X11 is a documented
   degradation (`PlatformCapabilities::X11`), not a target.

@@ -116,7 +116,11 @@ impl CpuConfig {
 }
 
 /// Everything a display list needs looked up while it is rendered.
-#[derive(Debug, Default)]
+///
+/// `Clone` so that a snapshot can travel to the render thread with the
+/// display list it belongs to: images are shared by `Arc`, and ramps are
+/// small tables.
+#[derive(Debug, Clone, Default)]
 pub struct Resolver {
     /// Interned gradient ramps.
     pub ramps: RampCache,

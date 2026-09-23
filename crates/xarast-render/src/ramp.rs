@@ -284,7 +284,7 @@ struct RampKey {
 
 /// Interns built ramps so that a gradient drawn a thousand times builds its
 /// table once.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RampCache {
     keys: HashMap<RampKey, RampId>,
     tables: Vec<Vec<Rgba8>>,

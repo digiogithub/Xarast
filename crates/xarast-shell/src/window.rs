@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::clipboard::{Clipboard, system_clipboard};
@@ -16,6 +16,7 @@ use crate::decorations::DecorationPlan;
 use crate::display::{DisplayEnvironment, PlatformCapabilities};
 use crate::input::event::ShellEvent;
 use crate::input::translate::EventTranslator;
+use crate::paint::{CanvasFrame, Painter, UiFrame};
 use crate::portal::{PortalHandle, PortalService};
 use crate::scale::{PhysicalSize, ScaleFactor};
 use crate::{
@@ -36,7 +37,51 @@ pub struct ShellCtx<'a> {
     pub(crate) clipboard: &'a mut dyn Clipboard,
     pub(crate) portal: &'a PortalHandle,
     pub(crate) capabilities: PlatformCapabilities,
+    pub(crate) frame: &'a mut PendingFrame,
+    pub(crate) waker: &'a ShellWaker,
     pub(crate) exit: bool,
+}
+
+/// Wakes the event loop from another thread.
+///
+/// Handed to whatever works off the main thread — the render thread, above
+/// all — so that a finished frame is presented as soon as it exists rather
+/// than at the next input event. Waking a loop that has exited is a no-op.
+#[derive(Debug, Clone)]
+pub struct ShellWaker {
+    proxy: Option<EventLoopProxy<()>>,
+}
+
+impl ShellWaker {
+    /// A waker that wakes nothing, for code that runs with no loop.
+    #[must_use]
+    pub const fn none() -> ShellWaker {
+        ShellWaker { proxy: None }
+    }
+
+    /// Asks the loop for a redraw.
+    pub fn wake(&self) {
+        if let Some(p) = &self.proxy {
+            // An error means the loop is gone, which is not ours to report.
+            let _ = p.send_event(());
+        }
+    }
+}
+
+/// What the application handed over for the next present.
+#[derive(Debug, Default)]
+pub(crate) struct PendingFrame {
+    canvas: Option<CanvasOp>,
+    ui: Option<UiFrame>,
+    /// Read the next presented frame back into a PNG, then maybe exit.
+    capture: Option<(std::path::PathBuf, bool)>,
+}
+
+#[derive(Debug)]
+enum CanvasOp {
+    Show(CanvasFrame),
+    Move((i32, i32)),
+    Clear,
 }
 
 impl ShellCtx<'_> {
@@ -95,6 +140,55 @@ impl ShellCtx<'_> {
         }
     }
 
+    /// A handle another thread can use to wake the loop.
+    #[must_use]
+    pub fn waker(&self) -> ShellWaker {
+        self.waker.clone()
+    }
+
+    /// Shows new canvas pixels from the next present on. The canvas pass
+    /// draws them at `origin`, under the interface.
+    pub fn show_canvas(&mut self, frame: CanvasFrame) {
+        self.frame.canvas = Some(CanvasOp::Show(frame));
+    }
+
+    /// Moves the canvas already shown, with no new pixels.
+    pub fn move_canvas(&mut self, origin: (i32, i32)) {
+        match &mut self.frame.canvas {
+            Some(CanvasOp::Show(f)) => f.origin = origin,
+            _ => self.frame.canvas = Some(CanvasOp::Move(origin)),
+        }
+    }
+
+    /// Stops showing a canvas.
+    pub fn clear_canvas(&mut self) {
+        self.frame.canvas = Some(CanvasOp::Clear);
+    }
+
+    /// Hands over one frame of interface output. Its texture changes are
+    /// applied once; its meshes are drawn on every present until the next.
+    pub fn show_ui(&mut self, mut frame: UiFrame) {
+        // Two interface frames between presents: keep the second's meshes
+        // but every texture change of both, in order.
+        if let Some(prev) = self.frame.ui.take() {
+            let mut textures = prev.textures;
+            textures.append(frame.textures);
+            frame.textures = textures;
+        }
+        self.frame.ui = Some(frame);
+    }
+
+    /// Reads the next presented frame back and writes it to `path` as a
+    /// PNG — exactly the composed window content, canvas and interface,
+    /// and nothing of the rest of the desktop. With `exit_after`, the loop
+    /// quits once the file is written.
+    ///
+    /// Needs a swapchain that allows copies; where it does not, the
+    /// failure is logged and the loop still exits if asked to.
+    pub fn capture(&mut self, path: std::path::PathBuf, exit_after: bool) {
+        self.frame.capture = Some((path, exit_after));
+    }
+
     /// Asks the shell to quit after this callback.
     pub const fn exit(&mut self) {
         self.exit = true;
@@ -118,6 +212,8 @@ macro_rules! ctx_of {
             clipboard: $this.clipboard.as_mut(),
             portal: $this.portals.handle(),
             capabilities: $this.env.capabilities(),
+            frame: &mut $this.pending,
+            waker: &$this.waker,
             exit: false,
         }
     };
@@ -130,6 +226,7 @@ pub(crate) struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    painter: Painter,
     pub(crate) report: AdapterReport,
 }
 
@@ -194,19 +291,37 @@ impl Gpu {
             .ok_or_else(|| {
                 ShellError::Surface("the adapter cannot present to this surface".to_owned())
             })?;
-        // Prefer an sRGB swapchain so that the compositor does not apply a
-        // second, unwanted transfer function to output we already encoded.
+        // A non-sRGB swapchain: the canvas and the interface both hand over
+        // bytes that are already sRGB-encoded (`xarast-render` invariant 2),
+        // and an sRGB target would encode them a second time. See `paint`.
         let caps = surface.get_capabilities(&adapter);
-        if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
-            config.format = srgb;
+        // Exactly eight-bit BGRA or RGBA: "the first non-sRGB format" can
+        // be a 10-bit or half-float one, which is neither what the passes
+        // write nor four bytes a pixel.
+        if let Some(unorm) = caps.formats.iter().copied().find(|f| {
+            matches!(
+                f,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            )
+        }) {
+            config.format = unorm;
+        } else {
+            tracing::warn!(format = ?config.format, "only sRGB swapchain formats; colours will be too light");
+        }
+        // Allow reading the frame back for `--screenshot`, where the
+        // swapchain permits it; nothing else depends on it.
+        if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&device, &config);
+        let painter = Painter::new(&device, config.format);
 
         Ok(Self {
             surface,
             device,
             queue,
             config,
+            painter,
             report,
         })
     }
@@ -224,19 +339,31 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Presents one frame. Phase 0 draws a flat clear colour; the scene
-    /// arrives with the canvas.
-    fn present(&mut self) -> FrameOutcome {
+    /// Takes over what the application handed in this frame.
+    fn apply(&mut self, pending: &mut PendingFrame) {
+        match pending.canvas.take() {
+            Some(CanvasOp::Show(f)) => self.painter.set_canvas(&self.device, &self.queue, &f),
+            Some(CanvasOp::Move(o)) => self.painter.move_canvas(o),
+            Some(CanvasOp::Clear) => self.painter.clear_canvas(),
+            None => {}
+        }
+        if let Some(ui) = pending.ui.take() {
+            self.painter.set_ui(&self.device, &self.queue, ui);
+        }
+    }
+
+    /// Presents one frame: the canvas pass, then the interface pass, over
+    /// a flat backdrop.
+    fn present(&mut self, capture: Option<&std::path::Path>) -> FrameOutcome {
         use wgpu::CurrentSurfaceTexture as Cst;
 
-        let frame = match self.surface.get_current_texture() {
-            Cst::Success(frame) => frame,
+        let (frame, suboptimal) = match self.surface.get_current_texture() {
+            Cst::Success(frame) => (frame, false),
             // Suboptimal still gives us a usable texture. Draw this frame, then
-            // reconfigure so the next one is not suboptimal too.
-            Cst::Suboptimal(frame) => {
-                self.reconfigure();
-                frame
-            }
+            // reconfigure so the next one is not suboptimal too — *after*
+            // presenting: configuring while a texture is held is a
+            // validation error, and wgpu treats those as fatal.
+            Cst::Suboptimal(frame) => (frame, true),
             Cst::Outdated | Cst::Lost => {
                 self.reconfigure();
                 return FrameOutcome::Skipped;
@@ -250,33 +377,125 @@ impl Gpu {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.10,
-                            g: 0.10,
-                            b: 0.11,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        self.painter.draw(
+            &self.device,
+            &mut encoder,
+            &view,
+            [self.config.width, self.config.height],
+            wgpu::Color {
+                r: 0.10,
+                g: 0.10,
+                b: 0.11,
+                a: 1.0,
+            },
+        );
+        let readback = capture.map(|path| (path, self.copy_out(&mut encoder, &frame.texture)));
         self.queue.submit(Some(encoder.finish()));
+        if let Some((path, buffer)) = readback {
+            match buffer.and_then(|b| self.write_capture(&b, path)) {
+                Ok(()) => tracing::info!(path = %path.display(), "frame captured"),
+                Err(e) => tracing::error!(error = %e, "frame capture failed"),
+            }
+        }
         self.queue.present(frame);
+        if suboptimal {
+            self.reconfigure();
+        }
         record_first_frame();
         FrameOutcome::Presented
+    }
+
+    /// Records a copy of the frame into a mappable buffer. Sizes come from
+    /// the texture itself, never from the configuration, which a resize
+    /// may already have moved on from.
+    fn copy_out(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &wgpu::Texture,
+    ) -> Result<Readback, String> {
+        if !texture.usage().contains(wgpu::TextureUsages::COPY_SRC) {
+            return Err("this swapchain cannot be read back".to_owned());
+        }
+        let (width, height) = (texture.width(), texture.height());
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let row = (width * 4).div_ceil(align) * align;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("capture"),
+            size: u64::from(row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        Ok(Readback {
+            buffer,
+            width,
+            height,
+            row,
+            bgra: matches!(
+                texture.format(),
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            ),
+        })
+    }
+
+    /// Maps a read-back buffer and writes it as a PNG.
+    fn write_capture(&self, rb: &Readback, path: &std::path::Path) -> Result<(), String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        rb.buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+            let _ = tx.send(r);
+        });
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| e.to_string())?;
+        rx.recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let (w, h, row) = (rb.width as usize, rb.height as usize, rb.row as usize);
+        let mut surface = xarast_render::Surface::new(rb.width, rb.height);
+        {
+            let mapped = rb.buffer.get_mapped_range(..).map_err(|e| e.to_string())?;
+            let out = surface.data_mut();
+            for y in 0..h {
+                let src = &mapped[y * row..y * row + w * 4];
+                let dst = &mut out[y * w * 4..(y + 1) * w * 4];
+                for (d, s) in dst
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(src.as_chunks::<4>().0)
+                {
+                    // The window is opaque; alpha from the swapchain is
+                    // whatever the compositor left there.
+                    *d = if rb.bgra {
+                        [s[2], s[1], s[0], 255]
+                    } else {
+                        [s[0], s[1], s[2], 255]
+                    };
+                }
+            }
+        }
+        rb.buffer.unmap();
+        xarast_render::golden::write_png(&surface, path).map_err(|e| e.to_string())
     }
 
     /// Re-applies the current configuration, which is how a lost, outdated or
@@ -284,6 +503,16 @@ impl Gpu {
     fn reconfigure(&mut self) {
         self.surface.configure(&self.device, &self.config);
     }
+}
+
+/// A frame copied out for `--screenshot`.
+#[derive(Debug)]
+struct Readback {
+    buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    row: u32,
+    bgra: bool,
 }
 
 /// How far a redraw got. Distinguishing "skipped" from "failed" is what keeps
@@ -312,6 +541,8 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     clipboard: Box<dyn Clipboard>,
     portals: PortalService,
     app: A,
+    pending: PendingFrame,
+    waker: ShellWaker,
     events: Vec<ShellEvent>,
     frames: u32,
     consecutive_failures: u32,
@@ -320,7 +551,7 @@ pub(crate) struct ShellLoop<A: ShellApp> {
 }
 
 impl<A: ShellApp> ShellLoop<A> {
-    fn new(config: ShellConfig, app: A) -> Self {
+    fn new(config: ShellConfig, app: A, waker: ShellWaker) -> Self {
         let env = DisplayEnvironment::from_env();
         let decorations = DecorationPlan::for_environment(&env);
         tracing::info!(session = %env.summary(), decorations = decorations.summary(), "shell starting");
@@ -334,6 +565,8 @@ impl<A: ShellApp> ShellLoop<A> {
             clipboard: system_clipboard(),
             portals: PortalService::start(),
             app,
+            pending: PendingFrame::default(),
+            waker,
             events: Vec::new(),
             frames: 0,
             consecutive_failures: 0,
@@ -459,7 +692,18 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 apply_frame_request(event_loop, self.window.as_ref(), request);
 
                 let Some(gpu) = self.gpu.as_mut() else { return };
-                match gpu.present() {
+                // Applied whether or not this present succeeds: texture
+                // deltas must reach the GPU exactly once and in order.
+                gpu.apply(&mut self.pending);
+                let capture = self.pending.capture.take();
+                let outcome = gpu.present(capture.as_ref().map(|(p, _)| p.as_path()));
+                if outcome != FrameOutcome::Presented {
+                    // Not presented, not captured: try again next frame.
+                    self.pending.capture = capture;
+                } else if let Some((_, true)) = capture {
+                    event_loop.exit();
+                }
+                match outcome {
                     FrameOutcome::Presented => self.frames += 1,
                     // A skipped frame is normal: the window is occluded, or the
                     // swapchain went stale and has just been rebuilt.
@@ -495,6 +739,13 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
             _ => {
                 self.dispatch(event_loop);
             }
+        }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, (): ()) {
+        // Another thread has something to show: a finished render.
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
     }
 
@@ -540,7 +791,10 @@ pub(crate) fn run_shell<A: ShellApp>(
     }
     let event_loop = EventLoop::new().map_err(|e| ShellError::EventLoop(e.to_string()))?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let mut shell = ShellLoop::new(config, app);
+    let waker = ShellWaker {
+        proxy: Some(event_loop.create_proxy()),
+    };
+    let mut shell = ShellLoop::new(config, app, waker);
     event_loop
         .run_app(&mut shell)
         .map_err(|e| ShellError::EventLoop(e.to_string()))?;

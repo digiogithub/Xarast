@@ -1,5 +1,6 @@
 //! Entry point for the Xarast desktop application.
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use xarast_shell::{
@@ -11,7 +12,12 @@ const USAGE: &str = "\
 Xarast — a vector illustration and photo editor
 
 USAGE:
-    xarast [OPTIONS]
+    xarast [OPTIONS] [FILE.xar ...]
+
+Opens each FILE; the last one is shown. Drop a .xar on the window to open
+it too. On the canvas: wheel scrolls, Shift+wheel scrolls sideways,
+Ctrl+wheel zooms about the pointer, middle-drag pans, a trackpad pinch
+zooms; +/- zoom, 1 is 100 %, 0 or Home fits the page, d fits the drawing.
 
 OPTIONS:
     -h, --help              Print this help and exit
@@ -25,6 +31,8 @@ OPTIONS:
                             display server it reports that and exits 0, because
                             the absence of a compositor is a fact, not a fault.
         --frames <N>        Exit after presenting N frames
+        --screenshot <PNG>  Once the document has rendered, write the window's
+                            content to PNG and exit
 
 ENVIRONMENT:
     XARAST_LOG              Log filter, e.g. `info`, `xarast_shell=debug`
@@ -43,6 +51,8 @@ fn main() -> ExitCode {
     let mut selftest_window = false;
     let mut version = false;
     let mut verbose = false;
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut screenshot: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -62,10 +72,18 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
-            other => {
+            "--screenshot" => match args.next() {
+                Some(p) => screenshot = Some(PathBuf::from(p)),
+                None => {
+                    eprintln!("--screenshot needs a file name");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other if other.starts_with('-') => {
                 eprintln!("unknown argument: {other}\n\n{USAGE}");
                 return ExitCode::FAILURE;
             }
+            file => files.push(PathBuf::from(file)),
         }
     }
 
@@ -109,7 +127,11 @@ fn main() -> ExitCode {
         };
     }
 
-    match xarast_shell::run(config) {
+    let mut viewer = xarast_shell::viewer::Viewer::new(files);
+    if let Some(path) = screenshot {
+        viewer = viewer.with_screenshot(path);
+    }
+    match xarast_shell::run_app(config, viewer) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("xarast: {e}");

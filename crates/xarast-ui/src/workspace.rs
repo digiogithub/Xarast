@@ -135,7 +135,14 @@ impl Workspace {
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(tokens.canvas_backdrop))
+            // With a document the panel must stay transparent: the shell's
+            // canvas pass is underneath it, and an opaque fill here hides
+            // the document entirely. The backdrop is for the empty state.
+            .frame(if model.document.is_some() {
+                egui::Frame::NONE
+            } else {
+                egui::Frame::NONE.fill(tokens.canvas_backdrop)
+            })
             .show(ctx, |ui| match model.document.as_ref() {
                 Some(doc) => {
                     canvas_response =
@@ -211,6 +218,45 @@ mod tests {
         let canvas = out.canvas.expect("a canvas");
         assert!(!canvas.rect_device.is_empty());
         assert!(out.commands.is_empty(), "{:?}", out.commands);
+    }
+
+    #[test]
+    fn nothing_opaque_is_painted_over_the_canvas_region() {
+        // The shell draws the document *under* the interface. An opaque
+        // fill anywhere over the canvas region hides it — which is exactly
+        // how the first composed window came up blank.
+        let mut w = Workspace::new();
+        let ctx = egui::Context::default();
+        let m = model();
+        let mut canvas = None;
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let full = ctx.run(input, |ctx| {
+                canvas = w.ui(ctx, &m, Scale::new(1.0), &[]).canvas;
+            });
+            shapes = full.shapes;
+        }
+        let region = canvas.expect("a canvas").rect_points;
+        let probe = region.center();
+        for clipped in &shapes {
+            if let egui::Shape::Rect(r) = &clipped.shape {
+                assert!(
+                    !(r.fill.a() == 255
+                        && r.rect.contains(probe)
+                        && clipped.clip_rect.contains(probe)),
+                    "opaque {:?} fill {:?} covers the canvas at {probe:?}",
+                    r.rect,
+                    r.fill
+                );
+            }
+        }
     }
 
     #[test]

@@ -119,7 +119,7 @@ pub fn ticks(axis: Axis, unit: Unit, view: &ViewTransform, length: f64) -> Vec<T
                 } else {
                     // Minor ticks carry their exact value too, so a tooltip
                     // or a snap can use it.
-                    (major.raw() / subdivisions as i32)
+                    (major.raw() / subdivisions)
                         .saturating_mul(index.rem_euclid(subdivisions as i64) as i32)
                 }),
         );
