@@ -578,6 +578,55 @@ impl DisplayList {
         })
     }
 
+    /// A list drawing `cmds` instead of this list's commands, with the same
+    /// view and the same side tables, so every command taken from
+    /// [`DisplayList::commands`] resolves exactly as it does here.
+    ///
+    /// Vector export uses it to rasterise one object, or one object and
+    /// everything under it, when PDF cannot express what the object does
+    /// (the fidelity ladder of `docs/phases/phase-11-export-filters.md`
+    /// W11.4). The caller keeps the stream balanced: an unmatched
+    /// `PopLayer` composites opaquely, which is what a caller closing a
+    /// prefix wants.
+    #[must_use]
+    pub fn with_commands(&self, cmds: Vec<DrawCmd>) -> Arc<DisplayList> {
+        let clip = self.view.viewport;
+        let mut bounds = DeviceRect::EMPTY;
+        let mut needs_dst_read = false;
+        for c in &cmds {
+            if let Some(b) = c.bounds() {
+                bounds = bounds.union(b);
+            }
+            needs_dst_read |= c.needs_dst_read();
+        }
+        Arc::new(DisplayList {
+            ops: Arc::clone(&self.ops),
+            cmds,
+            xforms: self.xforms.clone(),
+            paints: self.paints.clone(),
+            transps: self.transps.clone(),
+            mappings: self.mappings.clone(),
+            cached: self.cached.clone(),
+            bounds: bounds.intersection(clip),
+            needs_dst_read,
+            view: self.view,
+        })
+    }
+
+    /// The scene op a primitive or clip command came from: what identifies
+    /// "the same object" across two lists built from one scene with
+    /// different views. `None` for the other structural commands.
+    #[must_use]
+    pub const fn op_of(cmd: &DrawCmd) -> Option<u32> {
+        match *cmd {
+            DrawCmd::Fill { op, .. }
+            | DrawCmd::Stroke { op, .. }
+            | DrawCmd::Image { op, .. }
+            | DrawCmd::PushClip { op, .. } => Some(op),
+            _ => None,
+        }
+    }
+
     /// The commands, in order. Order is load-bearing.
     #[must_use]
     pub fn commands(&self) -> &[DrawCmd] {

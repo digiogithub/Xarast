@@ -123,3 +123,42 @@ fn a_bad_size_or_area_is_refused() {
     j.area = Rect::EMPTY;
     assert!(render_export(&j, &|| false, &mut |_, _| {}).is_err());
 }
+
+#[test]
+fn a_list_rasterised_through_its_own_commands_matches_the_export() {
+    use xarast_render::export::ListRasteriser;
+    use xarast_render::{DirtyRect, DisplayList};
+    let mut r = ListRasteriser::new();
+    for case in all_cases().iter().take(40) {
+        let j = job(case, DEFAULT_STRIP_BUDGET);
+        let expected = whole(&j);
+        let view = j.view();
+        let dl = DisplayList::build(&case.scene, &view, &DirtyRect::of(view.viewport));
+        // The same commands through `with_commands`: the same bytes.
+        let same = dl.with_commands(dl.commands().to_vec());
+        let got = r
+            .render(
+                &same,
+                &case.resolver,
+                j.width,
+                j.height,
+                j.background,
+                &|| false,
+            )
+            .expect("renders");
+        assert_eq!(digest(&expected), digest(&got), "{}", case.name);
+        // No commands: the background only.
+        let none = dl.with_commands(Vec::new());
+        let blank = r
+            .render(
+                &none,
+                &case.resolver,
+                j.width,
+                j.height,
+                j.background,
+                &|| false,
+            )
+            .expect("renders");
+        assert!(blank.data().chunks(4).all(|p| p == j.background));
+    }
+}
