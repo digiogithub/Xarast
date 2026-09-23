@@ -369,7 +369,7 @@ pub(crate) fn story_rect(
 /// that ends the story. Every line of a `.xar` story ends with an EOL, so
 /// the last one would otherwise open an empty paragraph after the text,
 /// which the original never draws or measures.
-fn layout_text(st: &StoryText) -> &str {
+pub(crate) fn layout_text(st: &StoryText) -> &str {
     st.text.strip_suffix('\n').unwrap_or(&st.text)
 }
 

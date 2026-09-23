@@ -133,6 +133,8 @@ pub fn convert_one(input: &Path, output: &Path, a: &ConvertArgs) -> Result<Conve
         },
         svg: xarast_format::svg::SvgOptions {
             pretty: a.pretty,
+            // Text placed where Xarast draws it (XARA-T-0172).
+            text: Some(xarast_app::svg_text::placer()),
             ..Default::default()
         },
         ..SaveOptions::default()
