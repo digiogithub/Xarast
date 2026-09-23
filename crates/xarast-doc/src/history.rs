@@ -220,6 +220,10 @@ impl Action {
                 let mut table = (**new).clone();
                 table.advance_epoch_past(past);
                 doc.resources.colours = table;
+                // Resolved colours changed, so the render scope moves on;
+                // no node's geometry or "is painted" did (a palette entry can
+                // never become "no colour"), so the change journal, whose
+                // consumer is the pick index, records nothing.
                 doc.tree.touch_resources();
             }
             Action::Batch(actions) => {
