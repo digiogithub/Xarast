@@ -82,5 +82,6 @@ pub use profile::BiasGain;
 pub use rect::Rect;
 pub use regular::{MAX_REGULAR_SIDES, RegularShapeSpec, regular_shape_outline};
 pub use stroke::{
-    Cap, DashPattern, FillRule, Join, StrokeError, StrokeStyle, dash, offset, stroke_to_path,
+    Cap, DashPattern, FillRule, Join, StrokeError, StrokeStyle, dash, offset, reduced_dash_offset,
+    stroke_to_path,
 };

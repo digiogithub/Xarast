@@ -224,7 +224,12 @@ pub fn stroke_to_path(
 /// offset many periods long costs time proportional to its size; the
 /// result is the same phase either way. Elements alternate on and off, so an
 /// odd-length pattern only repeats after two passes.
-fn reduced_dash_offset(offset: f64, elements: &[f64]) -> f64 {
+///
+/// `elements` are the resolved lengths ([`DashPattern::resolved`]). Every
+/// stroker that honours [`DashPattern::offset`] goes through this, so the
+/// renderer and [`stroke_to_path`] start the pattern at the same phase.
+#[must_use]
+pub fn reduced_dash_offset(offset: f64, elements: &[f64]) -> f64 {
     let pass: f64 = elements.iter().sum();
     let period = if elements.len().is_multiple_of(2) {
         pass
