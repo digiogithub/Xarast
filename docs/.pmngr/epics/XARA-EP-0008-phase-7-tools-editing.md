@@ -2,13 +2,14 @@
 id: XARA-EP-0008
 type: epic
 title: Phase 7 — Tools & editing
-status: backlog
+status: in_progress
 priority: high
 milestone: XARA-M-0004
 author: mcp
 labels: [phase-7]
 created: 2026-09-23T09:39:43Z
-updated: 2026-09-23T09:39:43Z
+updated: 2026-09-23T16:37:31Z
+started: 2026-09-23T16:37:31Z
 ---
 
 ## Description

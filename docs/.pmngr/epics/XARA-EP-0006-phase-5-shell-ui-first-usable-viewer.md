@@ -2,14 +2,15 @@
 id: XARA-EP-0006
 type: epic
 title: "Phase 5 — Shell & UI: first usable viewer"
-status: in_progress
+status: done
 priority: critical
 milestone: XARA-M-0003
 author: mcp
 labels: [phase-5]
 created: 2026-09-23T09:39:43Z
-updated: 2026-09-23T09:39:43Z
+updated: 2026-09-23T16:37:31Z
 started: 2026-09-23T09:39:43Z
+closed: 2026-09-23T16:37:31Z
 ---
 
 ## Description

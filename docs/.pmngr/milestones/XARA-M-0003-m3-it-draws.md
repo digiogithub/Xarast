@@ -2,11 +2,12 @@
 id: XARA-M-0003
 type: milestone
 title: M3 — It draws
-status: in_progress
+status: done
 author: mcp
 created: 2026-09-23T09:39:01Z
-updated: 2026-09-23T09:39:01Z
+updated: 2026-09-23T16:37:31Z
 started: 2026-09-23T09:39:01Z
+closed: 2026-09-23T16:37:31Z
 ---
 
 ## Description

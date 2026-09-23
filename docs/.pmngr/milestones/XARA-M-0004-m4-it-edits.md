@@ -2,10 +2,11 @@
 id: XARA-M-0004
 type: milestone
 title: M4 — It edits
-status: backlog
+status: in_progress
 author: mcp
 created: 2026-09-23T09:39:01Z
-updated: 2026-09-23T09:39:01Z
+updated: 2026-09-23T16:37:31Z
+started: 2026-09-23T16:37:31Z
 ---
 
 ## Description

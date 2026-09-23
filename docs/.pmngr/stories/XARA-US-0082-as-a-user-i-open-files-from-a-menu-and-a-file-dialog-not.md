@@ -2,14 +2,15 @@
 id: XARA-US-0082
 type: story
 title: As a user, I open files from a menu and a file dialog, not only from the command line
-status: in_review
+status: done
 priority: critical
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, ui, shell]
 created: 2026-09-23T13:46:42Z
-updated: 2026-09-23T14:14:32Z
+updated: 2026-09-23T16:37:31Z
 started: 2026-09-23T13:50:01Z
+closed: 2026-09-23T16:37:31Z
 ---
 
 ## Description
