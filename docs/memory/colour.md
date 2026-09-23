@@ -39,7 +39,7 @@ depth limit) stay in [`geometry.md`](geometry.md).
 | Drop picking `Picker::pick_drop`; `Tool::fill_selection` / `FillSelection` | `xarast-app/src/picking.rs`, `tool.rs`, `fill_tool.rs` | done (XARA-US-0042) |
 | Colour editor edits the fill tool's selected stop (T-0247) | `colour_editor.rs` via `colour_bar::selected_stop` | done |
 | Colour bar widget, colour gallery panel | `xarast-ui/src/colour_bar.rs`, `panels/gallery.rs` | done (XARA-US-0042) |
-| Eyedropper (T8.7.6) | — | **not done**, filed |
+| Eyedropper (T8.7.6) | — | **not done**, XARA-T-0253 |
 
 Tests (XARA-US-0042): `xarast-app/tests/colour_bar.rs` (13: the bar's
 order; click = fill / right = line, one step each, undo by digest; a
@@ -298,7 +298,7 @@ Plain round-to-nearest would get **545** of them wrong.
 31. **Deleting from the gallery is `OnDelete::Detach`**: objects keep
     their look as direct colours, derived colours become normal. The
     editor moves off a deleted entry (`colour_editor::forget_entry`)
-    first. No confirmation is asked (filed).
+    first. No confirmation is asked (XARA-T-0255).
 32. **The editor follows the fill tool's selected stop** (XARA-T-0247):
     `selection_colour` / `set_selection_colour` use `selected_stop` for
     the fill slot, and the title says which stop ("Fill end colour of 1
@@ -366,9 +366,9 @@ Plain round-to-nearest would get **545** of them wrong.
       a real XYZ transform. No corpus file uses it.
 - [ ] The original drops transparency in every model conversion; we carry
       it. Revisit only if a file shows the difference.
-- [ ] Eyedropper (T8.7.6, `Ctrl+E`): not done (filed).
+- [ ] Eyedropper (T8.7.6, `Ctrl+E`): not done (XARA-T-0253).
 - [ ] Colour drops on the **transparency** tool's handles, and on a
       stroke's own gradient handles: not resolved (only the fill tool's
-      colour handles are targets). Filed.
+      colour handles are targets). XARA-T-0255.
 - [ ] "Set Fill" is also the label of a line-colour click/drop
-      (`SetFillGeometry` names itself by payload, not slot). Filed.
+      (`SetFillGeometry` names itself by payload, not slot). XARA-T-0255.
