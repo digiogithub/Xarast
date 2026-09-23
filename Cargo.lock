@@ -5035,6 +5035,7 @@ name = "xarast-app"
 version = "0.0.1"
 dependencies = [
  "bitflags 2.13.2",
+ "criterion",
  "indexmap",
  "kurbo 0.13.1",
  "sha2",

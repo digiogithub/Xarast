@@ -29,3 +29,8 @@ kurbo = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 xarast-render = { path = "../xarast-render" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "viewport"
+harness = false
