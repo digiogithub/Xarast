@@ -409,16 +409,22 @@ impl<C: Clone> ShortcutMap<C> {
 
     /// The command this event runs, if any.
     ///
-    /// Later bindings win over earlier ones with the same key but different
-    /// location restrictions, because the more specific binding is added
-    /// afterwards by convention; ties on an identical shortcut cannot occur,
-    /// since [`bind`](Self::bind) replaces.
+    /// A binding restricted to the event's location (the numeric keypad)
+    /// wins over one for the same key anywhere, whatever order they were
+    /// bound in: keypad `1` toggles guides even though `1` alone is 100 %.
+    /// Among equally specific ones the later binding wins; ties on an
+    /// identical shortcut cannot occur, since [`bind`](Self::bind) replaces.
     #[must_use]
     pub fn resolve(&self, event: &KeyEvent, in_drag: bool) -> Option<C> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|(s, _)| s.matches(event, in_drag))
+        let matching = || {
+            self.entries
+                .iter()
+                .rev()
+                .filter(|(s, _)| s.matches(event, in_drag))
+        };
+        matching()
+            .find(|(s, _)| s.location.is_some())
+            .or_else(|| matching().next())
             .map(|(_, c)| c.clone())
     }
 

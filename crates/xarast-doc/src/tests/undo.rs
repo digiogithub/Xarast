@@ -679,3 +679,81 @@ fn the_change_journal_names_what_every_action_touched() {
     let _ = doc.tree.drain_changes();
     assert_eq!(doc.canonical_digest(), before);
 }
+
+#[test]
+fn the_state_serial_names_the_state_undo_and_redo_return_to() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let group = f.group;
+    let nudge = |bus: &mut CommandBus, doc: &mut crate::Document| {
+        bus.dispatch(
+            doc,
+            &cmd("nudge", move |tx: &mut Tx<'_>| {
+                tx.transform(group, Matrix::translate(Vector::raw(10, 0)))
+            }),
+        )
+        .unwrap();
+    };
+    let fresh = bus.history().state_serial();
+    nudge(&mut bus, &mut f.doc);
+    let one = bus.history().state_serial();
+    nudge(&mut bus, &mut f.doc);
+    let two = bus.history().state_serial();
+    assert!(fresh != one && one != two && fresh != two);
+    bus.undo(&mut f.doc);
+    assert_eq!(bus.history().state_serial(), one);
+    bus.undo(&mut f.doc);
+    assert_eq!(bus.history().state_serial(), fresh);
+    bus.redo(&mut f.doc);
+    bus.redo(&mut f.doc);
+    assert_eq!(bus.history().state_serial(), two);
+
+    // A new edit after an undo drops the redo branch: the old state is gone
+    // for good, and the new one is not mistaken for it.
+    bus.undo(&mut f.doc);
+    nudge(&mut bus, &mut f.doc);
+    let branch = bus.history().state_serial();
+    assert!(branch != two && branch != one);
+
+    // A merge into the last step leads somewhere else, so it is a new state.
+    let g = bus.begin_gesture();
+    nudge(&mut bus, &mut f.doc);
+    let merged_a = bus.history().state_serial();
+    nudge(&mut bus, &mut f.doc);
+    bus.end_gesture(g);
+    let merged_b = bus.history().state_serial();
+    assert_ne!(merged_a, merged_b);
+    bus.undo(&mut f.doc);
+    assert_eq!(bus.history().state_serial(), branch);
+
+    // Forgetting the history leaves the document, and its serial, alone.
+    let before = bus.history().state_serial();
+    bus.history_mut().clear(&mut f.doc);
+    assert_eq!(bus.history().state_serial(), before);
+}
+
+#[test]
+fn eviction_keeps_the_state_serial_of_what_it_dropped() {
+    let mut f = fixture();
+    let mut history = History::with_budget(4 * 1024);
+    for i in 0..40 {
+        let node = f
+            .doc
+            .tree
+            .create(path_node(square(Point::raw(i, i), 1_000)));
+        f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
+        let mut tx = Tx::begin(&mut f.doc);
+        tx.delete(node).unwrap();
+        let t = tx.commit("delete");
+        history.commit(&mut f.doc, t);
+    }
+    let top = history.state_serial();
+    let depth = history.len();
+    assert!(depth < 40, "something was evicted");
+    for _ in 0..depth {
+        history.undo(&mut f.doc);
+    }
+    let bottom = history.state_serial();
+    assert_ne!(bottom, 0, "the oldest reachable state is not the fresh one");
+    assert_ne!(bottom, top);
+}

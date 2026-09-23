@@ -10,7 +10,9 @@
     <sub-class-of type="application/zip"/>
     <generic-icon name="image-x-generic"/>
     <glob pattern="*.xarast"/>
-    <magic priority="70">
+    <!-- Priority 80: above the generic application/zip match (40), so a
+         package is never shown as a plain archive. -->
+    <magic priority="80">
       <match type="string" value="PK\003\004" offset="0">
         <match type="string" value="mimetype" offset="30">
           <match type="string" value="application/vnd.xarast+zip" offset="38"/>

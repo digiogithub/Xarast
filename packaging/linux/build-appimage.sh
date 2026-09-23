@@ -38,10 +38,13 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     export RUSTFLAGS="${RUSTFLAGS:-} -C target-cpu=x86-64-v2"
   fi
   cargo build --release --locked -p xarast-shell --bin xarast
+  cargo build --release --locked -p xarast-cli --bin xarast-thumbnailer
 fi
 
 binary="$repo_root/target/release/xarast"
 [[ -x "$binary" ]] || { echo "no binary at $binary" >&2; exit 1; }
+thumbnailer="$repo_root/target/release/xarast-thumbnailer"
+[[ -x "$thumbnailer" ]] || { echo "no binary at $thumbnailer" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 # Assemble the AppDir
@@ -52,9 +55,15 @@ rm -rf "$appdir"
 mkdir -p "$appdir/usr/bin" \
          "$appdir/usr/share/applications" \
          "$appdir/usr/share/metainfo" \
-         "$appdir/usr/share/mime/packages"
+         "$appdir/usr/share/mime/packages" \
+         "$appdir/usr/share/thumbnailers"
 
 install -m 755 "$binary" "$appdir/usr/bin/xarast"
+# File managers run the thumbnailer on every .xarast they list; it only
+# extracts the package's own thumbnail.png (phase 6 F7.3).
+install -m 755 "$thumbnailer" "$appdir/usr/bin/xarast-thumbnailer"
+install -m 644 "$repo_root/packaging/linux/xarast.thumbnailer" \
+               "$appdir/usr/share/thumbnailers/xarast.thumbnailer"
 install -m 644 "$repo_root/packaging/linux/xarast.desktop" \
                "$appdir/usr/share/applications/xarast.desktop"
 install -m 644 "$repo_root/packaging/linux/es.digio.Xarast.metainfo.xml" \
@@ -127,6 +136,7 @@ LINUXDEPLOY_OUTPUT_VERSION="$(git -C "$repo_root" describe --tags --always --dir
 "$tools_dir/linuxdeploy" \
   --appdir "$appdir" \
   --executable "$appdir/usr/bin/xarast" \
+  --executable "$appdir/usr/bin/xarast-thumbnailer" \
   --desktop-file "$appdir/usr/share/applications/xarast.desktop" \
   --icon-file "$icon_root/256x256/apps/xarast.png" \
   "${exclude_args[@]}" \

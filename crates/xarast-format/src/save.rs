@@ -28,6 +28,11 @@ pub struct SaveOptions {
     pub svg: SvgOptions,
     /// The atomic-write sequence.
     pub atomic: AtomicOptions,
+    /// `thumbnail.png`, already rendered (the application's
+    /// [`ThumbnailProvider`](crate::ThumbnailProvider)): RGBA8, longer side
+    /// at most 512 px. `None` writes no thumbnail; a re-save never carries
+    /// the source package's, which would show the old drawing.
+    pub thumbnail: Option<std::sync::Arc<[u8]>>,
 }
 
 /// What a save did and how long each part took.
@@ -78,6 +83,23 @@ pub fn save_to<W: Write + Seek>(
     Ok(SaveReport { package, ..partial })
 }
 
+/// The first half of [`save`]: `document.svg`, `meta.xml` and the
+/// resources, serialised into a [`PackageWriter`] that is not written yet.
+/// For a caller that adds entries of its own before writing — the
+/// application renders `thumbnail.png` on another thread meanwhile and
+/// sets it with [`PackageWriter::set_thumbnail`] — then finishes with
+/// [`PackageWriter::finish`] inside [`crate::write_atomic_with`].
+///
+/// # Errors
+///
+/// [`WriteError::BadThumbnail`] for a bad [`SaveOptions::thumbnail`].
+pub fn prepare_save(
+    doc: &Document,
+    opts: &SaveOptions,
+) -> Result<(PackageWriter, SaveReport), WriteError> {
+    prepare(doc, opts)
+}
+
 fn prepare(doc: &Document, opts: &SaveOptions) -> Result<(PackageWriter, SaveReport), WriteError> {
     let t = Instant::now();
     let mut resources = ResourceIndex::new();
@@ -89,6 +111,9 @@ fn prepare(doc: &Document, opts: &SaveOptions) -> Result<(PackageWriter, SaveRep
     w.set_document(svg.svg.into_bytes());
     w.set_meta(meta.into_bytes());
     w.add_resources(&resources);
+    if let Some(png) = &opts.thumbnail {
+        w.set_thumbnail(png.clone())?;
+    }
     Ok((
         w,
         SaveReport {

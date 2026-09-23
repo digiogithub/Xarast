@@ -259,8 +259,21 @@ pub enum Intent {
     CloseDocument,
     /// Forget the recently opened files.
     ClearRecent,
-    /// End the application.
+    /// End the application. Asks first about unsaved changes.
     Quit,
+    /// File › Save: write the active document to its own `.xarast`, or ask
+    /// for a name when it has none (an import, a new or read-only one).
+    Save,
+    /// File › Save As…: ask for a name, then save there.
+    SaveAs,
+    /// The name the save dialog came back with. A missing or foreign
+    /// extension becomes `.xarast`.
+    SaveTo(std::path::PathBuf),
+    /// The save dialog was dismissed or failed: whatever was waiting on the
+    /// save (a close, a quit) is dropped.
+    SaveDialogClosed,
+    /// The answer to the question [`crate::AppState::prompt`] is asking.
+    AnswerPrompt(crate::prompt::PromptAnswer),
 }
 
 /// Something only the platform layer can do, queued by
@@ -272,6 +285,16 @@ pub enum PlatformRequest {
     ShowOpenDialog,
     /// End the application.
     Quit,
+    /// Show a file chooser for saving a document. The answer comes back as
+    /// [`Intent::SaveTo`], or [`Intent::SaveDialogClosed`].
+    ShowSaveDialog {
+        /// The dialog title ("Save As").
+        title: String,
+        /// The file name to offer, with its `.xarast` extension.
+        file_name: String,
+        /// Where to start, when the document has a directory.
+        directory: Option<std::path::PathBuf>,
+    },
     /// Put this text on the system clipboard: a copy's SVG flavour.
     SetClipboardText(String),
     /// Open a dialog or panel of the interface.

@@ -13,12 +13,14 @@ const USAGE: &str = "\
 Xarast — a vector illustration and photo editor
 
 USAGE:
-    xarast [OPTIONS] [FILE.xar ...]
+    xarast [OPTIONS] [FILE.xar|FILE.xarast ...]
 
 Opens FILE (of several, the last one that opens is shown); with none,
 shows a start page with Open… and the recent files. File › Open… (Ctrl+O)
 uses the desktop's file chooser; dropping a .xar on the window opens it
-too. Ctrl+W closes the document, Ctrl+Q quits. On the canvas: wheel
+too. Ctrl+S saves as .xarast (Ctrl+Shift+S under a new name; a .xar is
+never overwritten), Ctrl+W closes the document, Ctrl+Q quits — both ask
+first about unsaved changes. On the canvas: wheel
 scrolls, Shift+wheel scrolls sideways, Ctrl+wheel zooms about the
 pointer, middle-drag pans, a trackpad pinch zooms; +/- zoom, 1 is 100 %,
 0 or Home fits the page, d fits the drawing (the View menu lists them).
@@ -55,7 +57,9 @@ ENVIRONMENT:
     XARAST_LOG              Log filter, e.g. `info`, `xarast_shell=debug`
     XDG_STATE_HOME          The recent files are kept in
                             $XDG_STATE_HOME/xarast/recent
-                            (default ~/.local/state/xarast/recent)
+                            (default ~/.local/state/xarast/recent),
+                            unsaved work is autosaved to
+                            $XDG_STATE_HOME/xarast/autosave/
     XARAST_RENDERER         Canvas renderer: `auto` (default), `gpu` or `hybrid`
                             (GPU tile compositing) or `cpu` (CPU compositing;
                             the GPU only presents). The status bar shows the
@@ -199,6 +203,16 @@ fn main() -> ExitCode {
     if let Some(store) = xarast_app::recent::default_store_path() {
         viewer = viewer.with_recent_store(store);
     }
+    // Autosave and recovery are for people editing: a screenshot or a
+    // latency probe would only leave snapshots of synthetic work behind.
+    if screenshot.is_none()
+        && probe.is_none()
+        && let Some(dir) = xarast_app::autosave::default_dir()
+    {
+        viewer = viewer.with_autosave(dir);
+    }
+    let signals = xarast_shell::signals::SignalWatch::install();
+    viewer = viewer.with_signals(signals.clone());
     if let Some(nodes) = synthetic {
         viewer = viewer.with_synthetic(nodes);
     }
@@ -210,7 +224,10 @@ fn main() -> ExitCode {
         viewer = viewer.with_probe(Probe::new(kind, probe_samples));
     }
     match xarast_shell::run_app(config, viewer) {
-        Ok(()) => ExitCode::SUCCESS,
+        // Ended by a signal: say so the way a shell expects.
+        Ok(()) => signals.signal().map_or(ExitCode::SUCCESS, |sig| {
+            ExitCode::from(u8::try_from(128 + sig).unwrap_or(1))
+        }),
         Err(e) => {
             eprintln!("xarast: {e}");
             ExitCode::FAILURE

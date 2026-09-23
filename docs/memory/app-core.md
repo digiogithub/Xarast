@@ -127,6 +127,11 @@ scale factor and calls `Intent::SetDpi`.
 | `selector` | the unified selector: dual state, scale/rotate/skew, infobar |
 | `shapes` | the rectangle and ellipse tools and quick-shape helpers |
 | `tools` | `builtin()`, push, zoom and pending tools |
+| `save` | `SaveJob` (snapshot → restore → thumbnail ∥ SVG → atomic write), `SaveWorker` (thread per job, waker), `SaveKind`, `SaveOutcome` |
+| `locks` | `HeldLock` (a `DocumentLock` in a process registry), `LockMode`, `release_all` for signals |
+| `autosave` | `AutosaveStore` (entries under `$XDG_STATE_HOME/xarast/autosave/<id>/`), `AutosavePolicy`, `Recoverable`, `scan` |
+| `prompt` | `Prompt`, `PromptChoice`, `PromptAnswer`, `ChoiceRole`: the questions the core asks |
+| `thumbnail` | `CpuThumbnails` (the `ThumbnailProvider`), `thumbnail_png` |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
 | `structure` | `StructureCommand`/`StructureOp` (group, ungroup, z-order, move-each, duplicate, cut), `ZOrder`, `AlignSpec`, `align_moves`, clipboard fragments (`copy_fragment`, `PasteFragment`, `fragment_svg`, `fragment_from_svg`) |
 | `snap` | `SnapSource`, `SnapResolver`, `SnapSettings`, grid/guide/object sources, `GuideCommand` |
@@ -208,12 +213,11 @@ reason the walker *reports*, which is its own test.
     diagnostics go into `Session::diagnostics`; a refusal is
     `SessionError::Xarast`). `Session::open`, argv and File › Open all go
     through `open_bytes`; the Open dialog lists "Xarast documents
-    (*.xarast)" first. Every save still returns
-    `SessionError::Unsupported` with the reason in the message. The
-    session does not keep the package reader yet: the save path will want
-    `OpenedDocument::package` for `save_opened`'s raw copies. Writing
-    `.xar` says "a permanent non-goal" and a test asserts that wording,
-    because that is a decision, not a gap.
+    (*.xarast)" first. Saving is wired (XARA-US-0084, "Saving" below);
+    the session keeps the opened package's bytes (`source_package`) for
+    `save_opened`'s raw copies. Writing `.xar` says "a permanent
+    non-goal" and a test asserts that wording, because that is a
+    decision, not a gap.
 15. **Session state is flat and public.** `Session`'s fields are `pub`
     because reading them is the whole point; mutation is still funnelled
     through `dispatch`, `undo`, `redo` and `apply`, which are the only
@@ -381,6 +385,110 @@ reason the walker *reports*, which is its own test.
     store is opt-in (`with_recent_store`): tests and probes keep the list
     in memory and never touch the user's state directory.
 
+39. **Saving (XARA-US-0084).** See the section below.
+
+---
+
+## Saving (XARA-US-0084)
+
+**Modified = the undo state differs from the saved one.**
+`xarast_doc::History::state_serial()` names the state the history is at:
+every commit (a merge into the last step included) hands out a new
+serial, undo/redo move between serials already handed out, a dropped
+redo branch's serials are never reused, eviction keeps the evicted
+step's serial as the base. `Session` records `clean_serial` at open and at
+each save; `is_modified()` is `clean_serial != Some(state_serial)`. So
+undoing back to the save clears the marker and redoing sets it again; an
+edit during a save keeps the document modified (the job captured the
+serial it wrote). A recovered snapshot has `clean_serial = None`.
+
+**A save is a job.** `Session::save_job(kind, path)` takes a
+`Document::snapshot()` on the interface thread (ProbeX16, 518 k nodes:
+~50 ms) and the source package bytes; `SaveJob::run` (on a `SaveWorker`
+thread) restores a document from it (~130 ms), renders `thumbnail.png`
+on a scoped thread while `xarast_format::prepare_save`/`prepare_resave`
+serialise the SVG, then writes atomically. Over the corpus the snapshot
+path writes **byte-identical** packages to a direct save of the live
+document, first save and raw-copy re-save alike (`tests/save.rs`).
+The live document is never touched by a save: a failure is a status line
+and a problem-list entry, the document stays modified, the target file is
+untouched (`write_atomic`).
+
+**`AppState` owns the flow.** Intents `Save`, `SaveAs`, `SaveTo(path)`,
+`SaveDialogClosed`, `AnswerPrompt(answer)`; request `ShowSaveDialog {
+title, file_name, directory }`. Save in place only when
+`can_save_in_place()` (a `.xarast` path, not read-only); anything else —
+untitled, a `.xar`, read-only — asks for a name. `xarast_path` makes the
+chosen name a `.xarast` (`.xar` replaced, other extensions appended).
+Saving to a new target takes its lock first; a target another session
+holds is refused with a status line. `poll_saves()` (every frame; the
+worker's waker wakes an idle loop) applies outcomes: mark clean, new
+path, the new lock, recent files, delete the autosave, status line
+"Saved name (size, ms)", then the action that waited.
+
+**Asking before losing work.** `CloseDocument`, `Quit` and `OpenFile`
+over modified documents become a `PendingAction` and a
+`Prompt::unsaved` (Save / Discard / Cancel). Save → save (asking for a
+name if needed), then re-run the action; Discard → remember the document
+as discarded and re-run the action (so a quit asks once per modified
+document); Cancel / a closed save dialog / a failed save → drop it. While
+a prompt is up, `apply` ignores everything but `AnswerPrompt`, `Resize`
+and `SetDpi`. `OpenFile` with nothing modified still returns the open
+error, as the viewer and `tests/open.rs` expect. `Quit` closes every
+session (releasing locks, deleting autosaves) before it queues
+`PlatformRequest::Quit`.
+
+**Locks (T-0086).** A `.xarast` is locked when it opens
+(`HeldLock::acquire(path, Normal)` = `steal_if_stale`: a dead holder on
+this boot is taken silently). Held by someone else → `Prompt::locked`:
+*Open read-only* (no lock, `read_only`, Save asks for a name), *Open a
+copy* (no lock, no path, "name (copy)", clean), *Force (risky)*
+(`DocumentLock::force`; the old holder's drop does not remove the new
+file), Cancel. Unavailable (read-only directory) → open unlocked with an
+Info diagnostic. Locks drop with the session. `HeldLock` also lists
+itself in a process registry so `locks::release_all()` can remove this
+process's lock files from a signal handler (only files that still name
+this pid).
+
+**Autosave (T-0087).** Opt-in: `with_autosave(dir, policy)` (the binary
+passes `autosave::default_dir()`; tests use scratch dirs). `tick(now)`
+(every frame; returns when the next is due) snapshots a modified
+document when it has been idle `policy.idle` (2 s), no gesture is in
+flight, and `policy.interval` (60 s) has passed since its last snapshot
+or since it became modified. Entry: `<id>/snapshot.xarast` (deflate 1,
+no thumbnail), `holder` (lock-file format, written *before* the
+snapshot so another process never mistakes a live entry for a crash),
+`origin` (raw path bytes). Deleted on a real save that leaves the
+document clean, on undo back to clean, on close and on quit.
+`emergency_shutdown()` (signals) writes a fresh snapshot inline and
+closes everything **keeping** the entries. **No journal**: the model has
+no serialisable command form (F6.6 open).
+
+**Recovery.** `with_autosave` scans: an entry is offered when its holder
+is dead or from another boot/host and its snapshot is strictly newer
+than its origin file (a tie is offered, not deleted); older ones are
+deleted; a live process's entries are left alone. `offer_recovery()`
+asks once (`Prompt::recovery`: Recover / Discard / Later). Recover opens
+each snapshot as a modified document whose path is the origin (Save
+writes there; a `.xar` origin asks for a name), re-records the holder,
+takes the origin's lock (held → read-only) and keeps the entry until a
+save or close.
+
+**Thumbnail (T-0082).** `thumbnail::CpuThumbnails`: the active spread's
+first page edge to edge, 256 px on the longer side, page colour beneath,
+parallel CPU configuration (ProbeX16: walk 182 ms + raster 167 ms; the
+deterministic configuration took 456 ms to raster). 50 of 59 corpus
+thumbnails show ink (the others are blank pages or text-only in the
+walker's reach).
+
+**Numbers** (`examples/save_probe.rs`, release, tmpfs, 2026-09-23):
+ProbeX16 — interface thread 54 ms (snapshot); save thread 1.09 s with
+thumbnail, 1.05 s without (restore 126 ms + `xarast_format::save` 856 ms
+of which serialise 507 ms, package 327 ms). Groucho2 — 15 ms. On the
+99 %-full md RAID of the dev machine the fsync alone added 0.5–7 s:
+measure on tmpfs. The ≤ 1 s budget is missed by ~9 % on ProbeX16 — the
+restore is the part the app adds (follow-up task filed).
+
 ---
 
 ## Invariants that must not be broken
@@ -409,6 +517,14 @@ reason the walker *reports*, which is its own test.
    `&Document` (compile-fail doctest in `tool.rs`).
 11. **Scroll bounds are refreshed at `rebuild_scene`**, never in
     `after_mutation` (34 ms per undo at 250 000 nodes; `tools.md`).
+13. **A save never mutates the live document** and never runs on the
+    interface thread beyond `save_job`'s snapshot. `tests/save.rs` pins
+    the byte identity of the snapshot path over the corpus.
+14. **Nothing closes a modified document without asking** except
+    `AppState::close` (the caller's explicit decision) and
+    `emergency_shutdown` (which autosaves first). Every intent that closes
+    documents goes through `request`.
+15. **An autosave entry's `holder` is written before its snapshot.**
 12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
     `InfobarEdit` (typed `InfobarValue`), `AutoScroll`,
     `SetCurrentAttribute`; pointer intents now drive the `ToolMachine`,
@@ -452,6 +568,17 @@ be better run once at `Tx::commit` than after every call.
 ---
 
 ## Dead ends (do not retry)
+
+- **Tracking "modified" from `past.len()` and a flag.** A coalesced
+  gesture merges into the last step without changing the length, and
+  budget eviction shifts every depth; neither is visible from outside the
+  history. The state serial lives in `History` for that reason.
+- **Rendering the thumbnail before serialising.** On ProbeX16 it doubled
+  the save (2.0 s against 1.05 s); render it beside the SVG instead.
+- **The deterministic CPU configuration for thumbnails.** Single-threaded;
+  2.7× slower than the interactive one for the same pixels budget.
+- **`release_all` in a unit test.** Tests run in parallel in one process;
+  it removes every other test's locks. Test `release_where` on one file.
 
 - **Row slabs for an interruptible Final.** 192-row slabs cost 730 ms
   against 370 ms for one call at 224 000 primitives: each slab is one or

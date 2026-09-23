@@ -352,6 +352,10 @@ pub struct UiModel {
     /// The editing state the Edit menu, the tool palette and the infobar
     /// show. `None` with no document open.
     pub editing: Option<EditingView>,
+    /// A question the application needs answered before it goes on
+    /// (unsaved changes, a locked document, recovery). Shown as a modal
+    /// dialog; the answer is [`UiCommand::AnswerPrompt`].
+    pub prompt: Option<xarast_app::Prompt>,
 }
 
 /// What the editing chrome shows: the Edit menu's labels, the tool in force
@@ -469,6 +473,8 @@ pub enum UiCommand {
     OpenRecent(std::path::PathBuf),
     /// Forget the recent files.
     ClearRecent,
+    /// The answer to [`UiModel::prompt`].
+    AnswerPrompt(xarast_app::PromptAnswer),
     /// A value typed, ticked or chosen in the tool's infobar, already
     /// parsed (lengths into millipoints, angles into degrees).
     InfobarEdit {

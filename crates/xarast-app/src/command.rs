@@ -155,6 +155,11 @@ impl fmt::Display for KeyChord {
 pub enum AppCommand {
     /// File › Open…: ask the platform for a file to open.
     Open,
+    /// File › Save: write the active document to its `.xarast`, asking
+    /// for a name the first time.
+    Save,
+    /// File › Save As…: write it under a new name.
+    SaveAs,
     /// File › Close: close the active document.
     Close,
     /// File › Quit.
@@ -188,7 +193,7 @@ pub enum AppCommand {
     /// A command for the tool in force: the shape editor's path
     /// operations (`research/04 §4.11`), Enter.
     Action(ToolAction),
-    /// Convert to editable shapes (`Ctrl+Shift+S`): rectangles, ellipses
+    /// Convert to editable shapes (`Ctrl+Shift+C`): rectangles, ellipses
     /// and quick shapes become paths.
     ConvertToShapes,
     /// Edit › Cut.
@@ -227,8 +232,10 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 49] = [
+    pub const ALL: [AppCommand; 51] = [
         AppCommand::Open,
+        AppCommand::Save,
+        AppCommand::SaveAs,
         AppCommand::Close,
         AppCommand::Quit,
         AppCommand::Undo,
@@ -284,6 +291,8 @@ impl AppCommand {
     pub const fn label(self) -> &'static str {
         match self {
             AppCommand::Open => "Open…",
+            AppCommand::Save => "Save",
+            AppCommand::SaveAs => "Save As…",
             AppCommand::Close => "Close",
             AppCommand::Quit => "Quit",
             AppCommand::ZoomIn => "Zoom in",
@@ -335,6 +344,8 @@ impl AppCommand {
     #[must_use]
     pub const fn shortcuts(self) -> &'static [KeyChord] {
         const OPEN: &[KeyChord] = &[KeyChord::ctrl('o')];
+        const SAVE: &[KeyChord] = &[KeyChord::ctrl('s')];
+        const SAVE_AS: &[KeyChord] = &[KeyChord::ctrl_shift('s')];
         const CLOSE: &[KeyChord] = &[KeyChord::ctrl('w')];
         const QUIT: &[KeyChord] = &[KeyChord::ctrl('q')];
         const ZOOM_IN: &[KeyChord] = &[
@@ -375,7 +386,9 @@ impl AppCommand {
         const CUSP: &[KeyChord] = &[KeyChord::char('z')];
         const BREAK: &[KeyChord] = &[KeyChord::char('b')];
         const JOIN: &[KeyChord] = &[KeyChord::char('j')];
-        const CONVERT: &[KeyChord] = &[KeyChord::ctrl_shift('s')];
+        // The original's Ctrl+Shift+S is Save As here, as on every other
+        // desktop program; Ctrl+Shift+C is Inkscape's "Object to Path" (tools.md).
+        const CONVERT: &[KeyChord] = &[KeyChord::ctrl_shift('c')];
         const NONE: &[KeyChord] = &[];
         // Edit and Arrange, `research/04 §4.2`, §4.3.
         const CUT: &[KeyChord] = &[KeyChord::ctrl('x')];
@@ -400,6 +413,8 @@ impl AppCommand {
         const SHOW_GUIDES: &[KeyChord] = &[KeyChord::numpad('1')];
         match self {
             AppCommand::Open => OPEN,
+            AppCommand::Save => SAVE,
+            AppCommand::SaveAs => SAVE_AS,
             AppCommand::Close => CLOSE,
             AppCommand::Quit => QUIT,
             AppCommand::ZoomIn => ZOOM_IN,
@@ -482,6 +497,8 @@ impl AppCommand {
     pub fn intent(self, centre: DevicePoint) -> Intent {
         match self {
             AppCommand::Open => Intent::ShowOpenDialog,
+            AppCommand::Save => Intent::Save,
+            AppCommand::SaveAs => Intent::SaveAs,
             AppCommand::Close => Intent::CloseDocument,
             AppCommand::Quit => Intent::Quit,
             AppCommand::ZoomIn => Intent::Zoom {
@@ -545,6 +562,14 @@ mod tests {
     fn the_edit_and_tool_keys_are_the_documented_ones() {
         let key = |c: AppCommand| c.primary_shortcut().unwrap().to_string();
         assert_eq!(key(AppCommand::Undo), "Ctrl+Z");
+        assert_eq!(key(AppCommand::Save), "Ctrl+S");
+        assert_eq!(key(AppCommand::SaveAs), "Ctrl+Shift+S");
+        assert_eq!(key(AppCommand::ConvertToShapes), "Ctrl+Shift+C");
+        assert_eq!(
+            AppCommand::Save.intent(DevicePoint::new(0.0, 0.0)),
+            Intent::Save
+        );
+        assert!(AppCommand::SaveAs.needs_document());
         assert_eq!(key(AppCommand::Redo), "Ctrl+Shift+Z");
         assert_eq!(AppCommand::Redo.shortcuts()[1].to_string(), "Ctrl+Y");
         assert_eq!(key(AppCommand::Delete), "Del");

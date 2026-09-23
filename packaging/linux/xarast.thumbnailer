@@ -1,0 +1,4 @@
+[Thumbnailer Entry]
+TryExec=xarast-thumbnailer
+Exec=xarast-thumbnailer -s %s %i %o
+MimeType=application/vnd.xarast+zip;
