@@ -226,7 +226,7 @@ pub fn stroke_to_path(
 /// odd-length pattern only repeats after two passes.
 fn reduced_dash_offset(offset: f64, elements: &[f64]) -> f64 {
     let pass: f64 = elements.iter().sum();
-    let period = if elements.len() % 2 == 0 {
+    let period = if elements.len().is_multiple_of(2) {
         pass
     } else {
         2.0 * pass
