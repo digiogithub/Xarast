@@ -18,7 +18,7 @@ tool (W9.4) and text on a path (W9.5) are later rounds.
 |---|---|---|
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
-| XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3–T9.6.5 are `xarast-doc`/`xarast-format` work | in progress |
+| XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
 | XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
@@ -287,6 +287,53 @@ burst ends, graphemes, selection replace + Enter, pending → story in one
 step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
+
+## Convert to shapes (W9.6, as built, XARA-US-0049)
+
+Code: `xarast-doc/src/text_convert.rs` (`convert_story_to_shapes`,
+`OutlineRun`, `is_text_slot`), `xarast-app/src/convert.rs`
+(`ConvertCommand`, `convert_nodes`), `xarast-app/src/text.rs`
+(`story_outlines`), `GroupNode::source_text`.
+
+- **Split across crates because of layering.** The phase doc puts
+  `ConvertTextToShapes` in `xarast-doc`, which has no fonts. The layout
+  half lives in `xarast-app` (`story_outlines` = `build_story`, the
+  walker's own geometry: one `BezPath` per attribute run, document space,
+  faux italic and underline included); the tree half is
+  `xarast_doc::convert_story_to_shapes`, fed `OutlineRun { path, attrs }`.
+  Because the geometry is literally the walker's, the render cannot drift:
+  **zero differing pixels** on every `TextDesigns` story.
+- **What the tree gets.** A `Group` at the story's place (`Attach::Prev`,
+  then the story is deleted, retained by the undo step) with
+  `source_text` = the story's layout text (`StoryText::text` without the
+  final EOL; paragraphs separated by `'\n'`). One `Path` (filled and
+  stroked flags on) per run; its own attribute children are **the non-text
+  slots whose run value differs from `resolve_inherited(story)`**, so a run
+  paints exactly as it did and nothing redundant is written. Text slots
+  (`Txt*`) are dropped. **Winding is forced non-zero** (glyphs always fill
+  non-zero in the walker) whenever the inherited rule is not. The story's
+  own *slotless* attributes (object name, user attributes) move to the
+  group. Multi attributes of the runs are not copied (the walker ignores
+  them on text).
+- **A story with no ink** (only spaces, or no font at all) is left alone,
+  not replaced by an empty group. Text on a path converts to what the
+  walker draws today: straight (XARA-T-0246 after W9.5).
+- **Source text in `.xarast`**: `<g xarast:kind="group"
+  xarast:was-text="true">` with a first child
+  `<xarast:text-source>…</xarast:text-source>` (`research/06 §6.7`);
+  the reader takes it back into `source_text` and skips the element as a
+  child. In the canonical digest it is appended only when present, so
+  every existing group digest is unchanged.
+
+Evidence (`xarast-app/tests/text_convert.rs`, pinned fonts, CPU backend,
+800 × 600, frame = the drawing): all 14 `TextDesigns` files, **54
+stories**, convert with **0 differing pixels**; the outlines' tight box
+equals the walker's text ink box within 1 mp; one undo step; undo
+restores the canonical digest and the render exactly; the converted
+document saved as `.xarast` and reopened renders identically and every
+group keeps its text. Synthetic: a two-colour story in a group on an
+even-odd layer → group of 2 paths with non-zero winding and the name on
+the group; selecting the story selects the group it became.
 
 ## Walker integration (as built, round 2)
 
@@ -651,6 +698,9 @@ first story of a process waits for enumeration when nothing prewarmed
   does not pick up attributes chosen while the caret is up (needs
   `SetTextAttr`, T9.2.4); Unicode line/paragraph separators (U+2028/9)
   type as characters, not breaks.
+- Convert to shapes leftovers: T9.6.5 (outline fallback for export and
+  profile C, XARA-T-0245); on-path geometry once W9.5 lands
+  (XARA-T-0246).
 
 ## The `.xarast` text writer (XARA-T-0172, done)
 
