@@ -23,7 +23,10 @@
 //! viewport, so an extent-sized dashed rectangle at high zoom asks for
 //! millions of dashes flattened at a fraction of a millipoint — a known
 //! gap, recorded in `docs/memory/render.md`, that would otherwise be the
-//! only thing this target ever found.
+//! only thing this target ever found. For the same reason a dash pattern
+//! that would cut a path into more than [`MAX_DASHES`] pieces is dropped:
+//! a thick, round-capped stroke with one-point dashes along a page-sized
+//! rectangle, at the deepest zoom, is enough to exhaust memory today.
 
 #![no_main]
 
@@ -45,6 +48,8 @@ const MAX_STEPS: usize = 32;
 /// See the module documentation.
 const GEOMETRY_LIMIT: i32 = 10_000_000;
 const MAX_DASH: usize = 8;
+/// See [`limit_dashes`].
+const MAX_DASHES: f64 = 2_000.0;
 
 #[derive(Arbitrary, Debug)]
 enum PaintSel {
@@ -343,6 +348,24 @@ fn stroke_style(
     }
 }
 
+/// Drops a dash pattern that would cut the path into more than
+/// [`MAX_DASHES`] pieces. See the module documentation: the CPU backend
+/// dashes the whole path before clipping, so a fine pattern on a long path
+/// is a known memory hazard rather than a new finding.
+fn limit_dashes(style: &mut StrokeStyle, path: &xarast_geom::Path) {
+    let Some(d) = &style.dash else {
+        return;
+    };
+    let period: f64 = d.elements.iter().map(|e| e.to_f64().abs()).sum();
+    let b = path.bounds();
+    let perimeter =
+        2.0 * ((b.hi.x.to_f64() - b.lo.x.to_f64()) + (b.hi.y.to_f64() - b.lo.y.to_f64()));
+    // Curves can be longer than their box; four times is generous.
+    if period <= 0.0 || 4.0 * perimeter / period > MAX_DASHES {
+        style.dash = None;
+    }
+}
+
 /// Checks that the structural commands nest properly.
 fn assert_balanced(dl: &DisplayList) {
     #[derive(PartialEq, Debug)]
@@ -430,9 +453,10 @@ fuzz_target!(|input: Input| {
                     dash,
                     paint,
                 } => {
-                    let p = PathRef::new(common::build_path_within(path, GEOMETRY_LIMIT));
-                    let style = stroke_style(*width, *caps, *join, *mitre, dash);
-                    b.stroke(id, &p, style, ctx.paint(paint));
+                    let geometry = common::build_path_within(path, GEOMETRY_LIMIT);
+                    let mut style = stroke_style(*width, *caps, *join, *mitre, dash);
+                    limit_dashes(&mut style, &geometry);
+                    b.stroke(id, &PathRef::new(geometry), style, ctx.paint(paint));
                 }
                 Step::Image {
                     handles,
