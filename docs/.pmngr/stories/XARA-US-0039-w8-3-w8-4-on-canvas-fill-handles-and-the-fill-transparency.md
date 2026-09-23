@@ -2,13 +2,14 @@
 id: XARA-US-0039
 type: story
 title: W8.3/W8.4 — On-canvas fill handles and the fill/transparency tools
-status: in_review
+status: done
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, tools]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T21:25:16Z
+updated: 2026-09-23T21:47:18Z
 started: 2026-09-23T20:50:11Z
+closed: 2026-09-23T21:47:18Z
 ---
 
 ## Description

@@ -2,13 +2,14 @@
 id: XARA-US-0059
 type: story
 title: W11.4 — PDF export
-status: in_review
+status: done
 parent: XARA-EP-0012
 author: mcp
 labels: [phase-11, io, pdf]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T21:41:29Z
+updated: 2026-09-23T21:47:18Z
 started: 2026-09-23T20:52:45Z
+closed: 2026-09-23T21:47:18Z
 ---
 
 ## Tasks (full table: phase-11 §W11.4)

@@ -2,13 +2,14 @@
 id: XARA-US-0047
 type: story
 title: "W9.4 — The text tool: caret, selection, bidi navigation"
-status: in_review
+status: done
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, tools, text]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T21:29:04Z
+updated: 2026-09-23T21:47:18Z
 started: 2026-09-23T20:55:30Z
+closed: 2026-09-23T21:47:18Z
 ---
 
 ## Tasks (full table: phase-09 §W9.4)
