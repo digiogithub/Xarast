@@ -2,13 +2,14 @@
 id: XARA-T-0168
 type: task
 title: "Incremental pick index: update HitIndex per committed transaction instead of a lazy full rebuild (62 ms at 100k)"
-status: in_progress
+status: done
 parent: XARA-US-0031
 author: mcp
 labels: [phase-7, app-core, perf]
 created: 2026-09-23T18:11:06Z
-updated: 2026-09-23T18:17:47Z
+updated: 2026-09-23T19:28:20Z
 started: 2026-09-23T18:17:47Z
+closed: 2026-09-23T19:28:20Z
 ---
 
 ## Description

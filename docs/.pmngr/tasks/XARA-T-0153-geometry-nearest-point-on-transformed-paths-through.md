@@ -2,11 +2,13 @@
 id: XARA-T-0153
 type: task
 title: "Geometry: nearest point on transformed paths through HitIndex, for snapping to paths (W8)"
-status: backlog
+status: done
 author: mcp
 labels: [phase-7, geometry]
 created: 2026-09-23T17:41:32Z
-updated: 2026-09-23T17:41:32Z
+updated: 2026-09-23T19:28:37Z
+started: 2026-09-23T19:28:20Z
+closed: 2026-09-23T19:28:37Z
 ---
 
 ## Description

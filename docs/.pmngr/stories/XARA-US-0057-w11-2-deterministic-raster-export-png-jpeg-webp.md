@@ -2,12 +2,13 @@
 id: XARA-US-0057
 type: story
 title: "W11.2 — Deterministic raster export: PNG, JPEG, WebP"
-status: backlog
+status: in_progress
 parent: XARA-EP-0012
 author: mcp
 labels: [phase-11, io, render]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-23T19:09:55Z
+started: 2026-09-23T19:09:55Z
 ---
 
 ## Tasks (full table: phase-11 §W11.2)
