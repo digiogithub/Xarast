@@ -107,7 +107,9 @@ pub struct ExportJob<'a> {
     pub quality: RenderQuality,
     /// Output resolution, for hairlines and the view's bookkeeping.
     pub dpi: f64,
-    /// Straight RGBA the surface is cleared to before drawing.
+    /// Straight RGBA the surface is cleared to before drawing. The strips
+    /// themselves are premultiplied, as every [`Surface`] is; an image
+    /// writer converts them with [`crate::unpremultiply_rgba_in_place`].
     pub background: [u8; 4],
     /// Working memory for one strip; see [`export_strip_lines`].
     pub strip_budget_bytes: usize,
@@ -207,6 +209,7 @@ pub fn render_export_strips<E>(
         band_lines: band,
         ..ExportStats::default()
     };
+    let clear = crate::surface::premultiply_rgba(job.background);
     let mut surface: Option<Surface> = None;
     let mut y0 = 0u32;
     while y0 < job.height {
@@ -216,10 +219,10 @@ pub fn render_export_strips<E>(
         let h = strip.min(job.height - y0);
         let s = match surface.take() {
             Some(mut s) if s.height() == h => {
-                s.fill(job.background);
+                s.fill(clear);
                 s
             }
-            _ => Surface::filled(job.width, h, job.background),
+            _ => Surface::filled(job.width, h, clear),
         };
         let mut s = s;
         match backend.render_rows(&dl, job.resolver, y0, band, &mut s, cancelled)? {

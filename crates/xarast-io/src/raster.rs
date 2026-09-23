@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 
 use xarast_color::Rgba8;
 use xarast_geom::Rect;
-use xarast_render::Surface;
 use xarast_render::export::{
     DEFAULT_STRIP_BUDGET, ExportJob, ExportRenderError, render_export_strips,
 };
+use xarast_render::{Surface, unpremultiply_rgba_in_place};
 
 use crate::model::{Background, ExportRequest};
 use crate::options::{FormatId, FormatOptions, PngDepth, PngOptions};
@@ -132,7 +132,8 @@ fn render_error<E: std::fmt::Display>(e: ExportRenderError<E>) -> ExportError {
     }
 }
 
-/// Renders the whole export into one surface.
+/// Renders the whole export into one surface, in **straight** RGBA ready
+/// for an image encoder (unlike a render surface, which is premultiplied).
 ///
 /// # Errors
 ///
@@ -155,7 +156,10 @@ pub fn render_for_export(
         &mut |done, total| progress.report(Stage::Render, frac(done, total)),
         &mut |y0, strip: &Surface| -> Result<(), std::convert::Infallible> {
             let o = y0 as usize * stride;
-            out.data_mut()[o..o + strip.data().len()].copy_from_slice(strip.data());
+            let rows = &mut out.data_mut()[o..o + strip.data().len()];
+            rows.copy_from_slice(strip.data());
+            // Image files store straight colour; surfaces are premultiplied.
+            unpremultiply_rgba_in_place(rows);
             Ok(())
         },
     )
@@ -313,13 +317,17 @@ impl Exporter for PngExporter {
                     .map_err(|e| ExportError::Encode(e.to_string()))?;
                 let j = job(&built, &p, req);
                 let cancelled = || progress.cancelled();
+                let mut straight = Vec::new();
                 let stats = render_export_strips(
                     &j,
                     &cancelled,
                     &mut |done, total| progress.report(Stage::Render, frac(done, total)),
                     &mut |_, strip: &Surface| {
                         let te = Instant::now();
-                        let r = png.write_rgba_rows(strip.data());
+                        straight.clear();
+                        straight.extend_from_slice(strip.data());
+                        unpremultiply_rgba_in_place(&mut straight);
+                        let r = png.write_rgba_rows(&straight);
                         encode += te.elapsed();
                         r
                     },

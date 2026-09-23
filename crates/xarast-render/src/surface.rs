@@ -345,6 +345,39 @@ impl Surface {
     }
 }
 
+/// A straight RGBA colour as the premultiplied pixel a [`Surface`] holds.
+#[must_use]
+pub fn premultiply_rgba(px: [u8; 4]) -> [u8; 4] {
+    let a = px[3];
+    if a == 255 {
+        return px;
+    }
+    let m = |c: u8| crate::blend::mul(c, a);
+    [m(px[0]), m(px[1]), m(px[2]), a]
+}
+
+/// Converts premultiplied RGBA8 pixels to straight RGBA8 in place, rounding
+/// to nearest.
+///
+/// Surfaces are premultiplied; image files (PNG, WebP) store straight
+/// colour. Writing premultiplied bytes as straight darkens every partly
+/// transparent pixel by its own alpha (gintrack XARA-T-0231). A fully
+/// transparent pixel becomes `[0, 0, 0, 0]`.
+pub fn unpremultiply_rgba_in_place(data: &mut [u8]) {
+    for px in data.as_chunks_mut::<4>().0.iter_mut() {
+        let a = u32::from(px[3]);
+        match a {
+            255 => {}
+            0 => *px = [0; 4],
+            _ => {
+                for c in &mut px[..3] {
+                    *c = u8::try_from((u32::from(*c) * 255 + a / 2) / a).unwrap_or(255);
+                }
+            }
+        }
+    }
+}
+
 /// Moves the contents of a surface by `(dx, dy)`, the equivalent of
 /// `GDraw_ScrollBitmap`, and returns the two strips that are now invalid.
 ///
