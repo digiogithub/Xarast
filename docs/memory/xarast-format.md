@@ -7,14 +7,15 @@ Normative spec: `docs/research/06-xarast-format.md`. Plan:
 ## Current state
 
 Phase 6, round 1 (2026-09-23): the byte layer. Round 2 (2026-09-23): the
-SVG profile writer (W3), the document-level save and `xarast-cli convert`;
-the reader (W4) is next.
+SVG profile writer (W3), the document-level save and `xarast-cli convert`.
+Round 3 (2026-09-23): passes 4–5, `zlib-rs` everywhere, the path-data
+separator fix; the reader (W4) is being written alongside.
 
 | Workstream | State | Where |
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
 | W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
-| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 passes 1–3 and 6–8 done, **4–5 open** (XARA-T-0101); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `emit`), `save.rs` |
+| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `style`, `emit`), `save.rs` |
 | W4 SVG read + preservation | not started (the container half of F4.8 is done: unknown entries are raw-copied with their rows) | `writer.rs::carry_from` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4–F6.9 open | `durability/` |
@@ -53,12 +54,13 @@ stats, foreign_count, foreign_digest }`.
   and W4 can map elements to nodes one to one. Exceptions: chapters (rows in
   `<xarast:document>`), text lines (`<tspan id>`), characters (text). The
   clip shape of a ClipView is its element, placed inside the `<clipPath>`.
-- **Attribute nodes produce no element; every ink element carries its
-  resolved paint**, resolved with `AttrStack` exactly as the renderer's
-  walker does (a parent's ink after its children's attributes). No `<g>`
-  ever sets a paint property, so eliding SVG defaults (pass 3) is always
-  safe. Consequence for W4: see XARA-T-0105 (the reader must localise, and
-  the model round trip compares a normalised form).
+- **Attribute nodes produce no element; every ink element's paint is
+  resolved** with `AttrStack` exactly as the renderer's walker does (a
+  parent's ink after its children's attributes), then passes 4–5 move
+  shared values onto `<g>`s and into CSS classes — see "Passes 4–5" below
+  for exactly what the reader must resolve. Consequence for W4: see
+  XARA-T-0105 (the reader must localise, and the model round trip compares
+  a normalised form).
 - **Coordinates** (`svg/frame.rs`): per spread, `(x − ox, oy − y)` in
   integer millipoints, `(ox, oy)` = top-left of the spread's pages, written
   on the spread as `xarast:origin` so the inverse is exact. Formatting is
@@ -122,6 +124,79 @@ stats, foreign_count, foreign_digest }`.
   Kerns are dropped; stories on a path are laid out as lines. Fill only,
   no stroke.
 
+### Passes 4–5: hoisted paint and CSS classes (XARA-T-0101) — the reader contract
+
+`svg/style.rs`. The walk writes every start tag *except* its paint and
+leaves a **slot** (13 interned values) at the end of the tag; every `<g>`
+gets one too. Hoisting runs when a `<g>` closes; classes are chosen after
+the walk; the body is then copied out with every slot expanded. Nothing is
+parsed back, and `SvgOptions { hoist, classes }` (both on by default)
+switch each pass off alone. Output written **before** round 3 (no hoisting,
+no classes) is a special case of this contract, so a reader implementing it
+reads both.
+
+**The properties** (and nothing else) that live in slots, in written order:
+`fill`, `fill-opacity`, `fill-rule`, `xarast:fill-ref`, `stroke`,
+`stroke-opacity`, `stroke-width`, `stroke-linecap`, `stroke-linejoin`,
+`stroke-miterlimit`, `stroke-dasharray`, `stroke-dashoffset`,
+`xarast:stroke-ref`. `vector-effect`, `opacity`, `mask`, `style`
+(`mix-blend-mode`), `xarast:blend` and every other attribute stay on the
+element; none of them is ever hoisted or classed. A slot's attributes come
+**last** in the start tag (after foreign attributes).
+
+**What the reader must resolve, per element, to get the resolved paint the
+writer started from:**
+
+1. **Inheritance (pass 4).** For each property above, the value is the
+   element's own attribute if present; else the class rule's value (point
+   2); else the **nearest ancestor `<g>`**'s attribute (or its class's
+   value); else the SVG initial value (`fill` black, `stroke` none,
+   `stroke-width` 1, …; for the two twins: *no palette reference*). This is
+   plain SVG inheritance for the SVG properties; the profile declares
+   `xarast:fill-ref` and `xarast:stroke-ref` **inherited the same way**.
+   The writer guarantees it only hoists a value when every painting child
+   (ink, or a `<g>` over ink) had that exact value, and that text, images,
+   foreign fragments and nested `<svg>` spreads block any hoist above
+   them, so no element ever inherits a value it did not have. Values are
+   hoisted onto *any* `<g>`: groups, layers, the first spread, ClipView and
+   live-effect `<g>`s. A `<g>` whose foreign baggage already carries a
+   paint property, a `class` or a non-`display` `style` never receives one.
+2. **Classes (pass 5).** One `<style type="text/css">` is the **first
+   child of `<defs>`**, holding only rules of the form
+   `.NAME{prop:value;prop:value}` (one per line, class selectors only,
+   properties from the list above minus the twins, values exactly as the
+   attribute would be written). An element with `class="NAME"` takes those
+   declarations as if they were its own attributes (it never also carries
+   them as attributes). The class's **twins** are not CSS (resvg drops the
+   rest of a rule at a custom property — found by rendering): they are
+   `<xarast:paint-class xarast:class="NAME" xarast:fill-ref="#c-N"
+   xarast:stroke-ref="#c-M"/>` elements right after the `<style>`, one per
+   class that has twins; apply their `xarast:*-ref` attributes to every
+   element of that class. `NAME` is `c1`, `c2`, … unless the document's
+   foreign baggage already uses `c<digits>` class names, in which case the
+   prefix is `xc`, `xrc` or `xarast-c` (first free one) — so a reader must
+   take the names from the `<style>`, not assume `cN`. Classes go on ink
+   elements and on `<g>`s alike; an element with a foreign `class`
+   attribute never gets one.
+3. **Precedence** is the CSS one, and the writer never makes it matter: an
+   element has either the attribute or the class for a given property,
+   never both; the properties it has neither for come from its ancestors.
+4. **Localising** (XARA-T-0105): after resolving, the paint of an ink
+   element is its complete resolved set; a `<g>`'s own hoisted attributes
+   are *not* model attributes of the group — drop them once resolved (the
+   model has them on the leaves, where `.xar` import put them).
+
+Inside `<clipPath>` (the ClipView's clip shape, written into `<defs>`)
+there are no slots: paint is written inline as before.
+
+Size effect: ProbeX16 `document.svg` 56.7 → 50.8 MB (−10.4 %), corpus
+103.1 → 96.5 MB (−6.4 %). Rendering: all 59 corpus files are
+**pixel-identical in resvg** with and without the passes, identical in
+Inkscape on 8 files checked; Chrome is identical on 7 and differs on
+`20000GradFilledShapes50PCtransparent` by ≤ 11/255 on 0.09 % of pixels
+(SSIM 0.99999: Chrome composites an inherited `fill-opacity` over a
+gradient a hair differently than an explicit one).
+
 ### Conformance (2026-09-23, by hand; XARA-T-0106 automates it)
 
 All 59 corpus files convert, and every `document.svg`, `meta.xml` and
@@ -149,16 +224,23 @@ fine bitmap-filled figure, resampled differently by each.
   runtime, no date crate: `std::fs::File::try_lock` (stable 1.89) gives
   `flock`, the temporary name is built by hand, and the two date conversions
   are the days-to-civil algorithm in `time.rs`.
-- **DEFLATE backend: `miniz_oxide`, the workspace's only one.** The phase
-  plan said "pin to `zlib-rs`"; that was tried and reverted. flate2 selects
-  one backend per *build*, so enabling `zlib-rs` through `zip` switched the
-  `.xar` reader too, and `xarast-xar/tests/fuzz_seeds.rs` failed in
-  `cargo test --workspace` (a committed seed is compressed bytes) while
-  passing with `-p xarast-xar`. The same mechanism would make a
-  deterministic `.xarast` differ between binaries. One backend everywhere,
-  pinned by the lock file, guarded by
-  `tests/container.rs::deterministic_bytes_are_pinned`. Cost: 273 ms vs
-  92 ms per 20 MB save (XARA-T-0090 tracks switching everyone to `zlib-rs`).
+- **DEFLATE backend: `zlib-rs`, the workspace's only one** (XARA-T-0090,
+  round 3). flate2 selects one backend per *build*, and `zlib-rs` wins over
+  `miniz_oxide` whenever any crate enables it, so the choice is made once,
+  on the workspace `flate2` line (`default-features = false, features =
+  ["zlib-rs", "runtime_detection"]`), never through `zip`'s
+  `deflate-flate2-zlib-rs` feature. Round 2 had enabled it through `zip`
+  alone, which switched the `.xar` reader only in workspace builds and
+  broke a committed fuzz seed; now everything moved together and the seeds
+  were regenerated. Two tests pin it: `deflate_backend_is_pinned` (raw
+  DEFLATE at levels 6 and 1: a backend swap) and
+  `deterministic_bytes_are_pinned` (a whole package: a layout change).
+  zlib-rs output does not depend on the CPU: its SIMD paths
+  (`compare256`, `slide_hash`) compute what the scalar ones do and the
+  hash function depends only on the level — confirmed when turning on
+  `runtime_detection` left both pins unchanged. Numbers in `perf.md`
+  (20 MB save 273 → 89 ms; ProbeX16's 56 MB SVG deflates in ~335 ms vs
+  ~965 ms; packages ~2 % larger).
 - **Zstandard is not compiled in.** The `compact` profile is v1.0 scope;
   a zstd entry opens (listed, diagnosed `UnsupportedMethod`, raw-copyable on
   save) but cannot be decoded. `WriteOptions::profile = Compact` is refused.
@@ -236,7 +318,9 @@ fine bitmap-filled figure, resampled differently by each.
 - `open` never reads `document.svg`
   (`tests/container.rs::open_does_not_parse_the_document`).
 - Deterministic save: DOS 1980-01-01, `0o644`, system `Unix`, canonical
-  order and manifest, one DEFLATE backend (the golden digest test). An
+  order and manifest, one DEFLATE backend, `zlib-rs` (the two golden
+  digest tests). The SVG writer is deterministic too: slots, classes and
+  hoisting depend only on the document, never on hash order. An
   unchanged re-save through `from_package` + `carry_from` + raw copies is
   **byte-identical** (`resave_from_the_package_is_a_fixed_point`).
 - Preserved entries are raw-copied (same compressed bytes, same method,
@@ -294,6 +378,20 @@ the file means", not crashes; each input is now a unit test in
   point on re-save).
 - Selecting a DEFLATE backend through `zip`'s `deflate-flate2-zlib-rs`
   feature (changes every crate's backend; see Decisions).
+- `default-features = false` on flate2 **without** `runtime_detection`:
+  zlib-rs silently runs scalar code wherever no other crate brings
+  flate2's defaults back (`png` does in the app, nothing does in
+  `xarast-xar`'s own bench or the fuzz targets): `.xar` inflate ~50 %
+  slower.
+- CSS custom properties (`--xarast-fill-ref:…`) in the paint classes:
+  resvg's CSS parser stops at the first one and drops the rest of the
+  rule (3 corpus files rendered differently). Twins go into
+  `<xarast:paint-class>` instead.
+- The old path-data separator check scanned back through the output over
+  `-`: after `1.5-5`, a `.5` lost its space and read as `-5.5`. It must be
+  the previous number's own dot (`pathdata.rs` tracks it; 112 corrupted
+  numbers in ProbeX16, 11 corpus files render closer to the reference
+  since).
 - Comparing lock-file text to decide ownership on release.
 
 ## Open TODOs
@@ -301,7 +399,7 @@ the file means", not crashes; each input is now a unit test in
 - W4: the reader, preservation context and the re-save path
   (`from_package` + `carry_from` + raw copies) on top of `save`;
   attribute localisation (XARA-T-0105); the preservation digest as above.
-- W3 leftovers: passes 4–5 (XARA-T-0101), baking/`BakeProvider`
+- W3 leftovers: baking/`BakeProvider`
   (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
   entry (§5.9, SHOULD), split layout above 32 spreads / 8 MiB.
