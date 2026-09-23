@@ -5,6 +5,8 @@
 //!   ladder, script fallback with a preference override, faces embedded in a
 //!   document (shadowing system faces of the same name), and shared,
 //!   LRU-cached face data.
+//! * [`FontDb::glyph_outline`] — cached glyph outlines as `kurbo::BezPath`,
+//!   what the renderer and convert-to-shapes draw.
 //!
 //! Nothing outside this crate names a `parley`, `fontique` or `skrifa` type:
 //! the whole Linebender text stack is pre-1.0 and sits behind this API.
@@ -12,6 +14,7 @@
 //! See `docs/phases/phase-09-text.md` and `docs/memory/text.md`.
 
 pub mod font;
+mod outline;
 pub mod style;
 
 pub use font::{

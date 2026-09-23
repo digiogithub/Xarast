@@ -212,6 +212,7 @@ pub(crate) struct DbInner {
     lru: FaceLru,
     substitutions: Vec<FontSubstitution>,
     families_cache: Option<Arc<[Arc<str>]>>,
+    pub(crate) outlines: crate::outline::OutlineCache,
 }
 
 /// System plus embedded font database.
@@ -275,6 +276,7 @@ impl FontDb {
                 lru: FaceLru::new(options.face_cache_capacity.max(1)),
                 substitutions: Vec::new(),
                 families_cache: None,
+                outlines: crate::outline::OutlineCache::default(),
             }),
         }
     }
