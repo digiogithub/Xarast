@@ -1,0 +1,11 @@
+# Per-file limits for `cargo xtask export-check --limits` over the built-in
+# documents (`xarast-cli fixtures --dpi 72 --background paper`), which CI
+# checks on every push (phase 11 T11.6.2, T11.6.3). Every other file must
+# stay under the default 4/255 mean |difference|.
+#
+# Format: <stem> <svg|pdf> <max mean |difference| in 1/255>
+
+# 2 000 small paths stroked 0.25-4 pt: Poppler strokes anything under a
+# pixel as a whole pixel (8.9) and Ghostscript's 4-bit antialiasing
+# darkens thin strokes (3.5, close to the default). resvg: 1.7.
+synthetic pdf 5

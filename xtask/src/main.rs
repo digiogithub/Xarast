@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod export_check;
+
 /// Icon sizes required by the freedesktop icon theme specification, plus the
 /// 512 that AppImage thumbnailers prefer.
 const ICON_SIZES: &[u32] = &[16, 22, 24, 32, 48, 64, 128, 256, 512];
@@ -28,6 +30,15 @@ TASKS:
                 *.svg files) with usvg and render it with resvg at 256 px
                 wide; with --interchange, also fail on any `xarast`
                 vocabulary. Exported SVG's validation (phase 11 T11.3.7)
+    export-check [--require-tools] [--limits FILE] [--max-mean N] <DIR>:
+                for every <stem>.png in DIR (our raster export over the
+                paper), render <stem>.svg with resvg and <stem>.pdf with
+                Poppler's pdftoppm at the PNG's size and compare; run
+                `qpdf --check` on every PDF. Fails when a file does not
+                parse, carries `xarast:`, qpdf complains, or the mean
+                |difference| exceeds its limit (default 4/255; per-file
+                limits in FILE). --require-tools fails when pdftoppm or qpdf
+                is missing instead of skipping (phase 11 T11.6.2, T11.6.3)
     help        Print this help
 ";
 
@@ -37,6 +48,7 @@ fn main() -> ExitCode {
         "icons" => icons(),
         "svg-render" => svg_render(&std::env::args().skip(2).collect::<Vec<_>>()),
         "svg-check" => svg_check(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "export-check" => export_check::run(&std::env::args().skip(2).collect::<Vec<_>>()),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;

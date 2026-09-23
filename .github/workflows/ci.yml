@@ -25,6 +25,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Poppler turns on the PDF render comparisons in the test suite
+      # (crates/xarast-io/tests/pdf.rs, crates/xarast-cli/tests/fidelity.rs);
+      # without it they skip.
+      - name: Install Poppler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -38,6 +44,75 @@ jobs:
         run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # Phase 11 W11.6: the built-in documents (`xarast-cli fixtures`, no text,
+  # so no font dependence) exported to all five formats on two different
+  # machines. Each machine checks that two runs are byte-identical, that
+  # every SVG parses and renders in resvg, that every PDF passes
+  # `qpdf --check`, and that the SVG and PDF renders (resvg; Poppler and
+  # Ghostscript) match our PNG export within the stated limits. The
+  # `reproducible` job then requires both machines' bytes to be equal.
+  export:
+    name: Export checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-22.04]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: export-${{ matrix.os }}
+
+      - name: Install the reference tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils ghostscript qpdf
+
+      - name: Build
+        run: cargo build --release --locked -p xarast-cli -p xtask
+
+      - name: Export the fixtures twice
+        run: |
+          for run in a b; do
+            for fmt in png jpeg webp pdf svg; do
+              target/release/xarast-cli fixtures --out-dir "export-$run" \
+                --format "$fmt" --dpi 72 --background paper
+            done
+          done
+          diff -r export-a export-b
+          (cd export-a && sha256sum -- * | sort -k2) > export-${{ matrix.os }}.sha256
+          cat export-${{ matrix.os }}.sha256
+
+      - name: SVG parses and renders, no private vocabulary
+        run: target/release/xtask svg-check --interchange export-a
+
+      - name: SVG and PDF against the PNG; qpdf --check
+        run: |
+          target/release/xtask export-check --require-tools \
+            --limits xtask/export-limits-fixtures.txt export-a
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: export-${{ matrix.os }}
+          path: |
+            export-a
+            export-${{ matrix.os }}.sha256
+
+  reproducible:
+    name: Export bytes equal across machines
+    needs: export
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: export-*
+          merge-multiple: true
+
+      - name: Compare the hash manifests
+        run: diff export-ubuntu-24.04.sha256 export-ubuntu-22.04.sha256
 
   licences:
     name: Licence and advisory policy

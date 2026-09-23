@@ -1,0 +1,43 @@
+# Per-file limits for `cargo xtask export-check --limits` over the .xar
+# corpus exported at 72 dpi over the paper (phase 11 T11.6.2, T11.6.3).
+# Every other file must stay under the default 4/255 mean |difference|.
+#
+# Format: <stem> <svg|pdf> <max mean |difference| in 1/255>
+# Each limit is the value measured on 2026-09-24 plus ~15 % headroom, with
+# the reason the file differs. Lowering a limit after a fix is welcome;
+# raising one needs the reason written here. Numbers: docs/memory/export.md.
+
+# The profile's bake ladder draws conical, diamond and 3/4-colour fills as
+# their nearest SVG paint (XARA-T-0102); PDF approximates conical fills
+# with a wedge fan.
+Fill Types simple svg 23
+Fill Types simple pdf 8.5
+# Its background is such a fill.
+WATCH2 svg 19
+WATCH svg 6
+WATCH pdf 5.6
+
+# resvg draws seams between the tiles of a bitmap-fill <pattern>; PDF
+# rasterises bitmap fills (XARA-T-0229) and the renderers resample them.
+leafgirl svg 13
+leafgirl pdf 9
+TestBitmapFill pdf 6.5
+
+# Feathering is approximated by an SVG blur.
+SoftShadow svg 4.8
+
+# Small text (5-9 px glyphs at 72 dpi) drawn as filled outlines: Poppler
+# and Ghostscript both paint thin features darker than our coverage
+# antialiasing. At 8x the same PDF is within 2.5/255 of our export, so the
+# geometry is right; this is the renderers' small-shape policy.
+TextJust pdf 15.8
+ScaleTest2 pdf 11
+SimpleText pdf 9.8
+ScaleTest pdf 8.5
+Paragraph pdf 7.8
+FontChangesInText pdf 7.7
+SuperSub pdf 6.6
+Rotated pdf 6.3
+ManualKern pdf 5.8
+Tracking pdf 5.4
+ProbeX16 pdf 4.8
