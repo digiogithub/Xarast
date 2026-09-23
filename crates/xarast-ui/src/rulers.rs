@@ -140,6 +140,18 @@ pub fn ticks(axis: Axis, unit: Unit, view: &ViewTransform, length: f64) -> Vec<T
     out
 }
 
+/// Where a vertical ruler's label lands once turned a quarter turn
+/// anticlockwise: its `size` is the horizontal layout's, `along` the tick's
+/// position down the strip. The label reads upwards, starting just above
+/// the tick, one point in from the strip's outer edge.
+pub fn vertical_label_rect(size: egui::Vec2, strip: egui::Rect, along: f32) -> egui::Rect {
+    let bottom = along - 2.0;
+    egui::Rect::from_min_max(
+        egui::pos2(strip.min.x + 1.0, bottom - size.x),
+        egui::pos2(strip.min.x + 1.0 + size.y, bottom),
+    )
+}
+
 /// One ruler strip, ready to draw.
 ///
 /// A struct rather than six arguments: the ruler needs the axis, the
@@ -224,15 +236,22 @@ impl Ruler<'_> {
                         stroke,
                     );
                     if let Some(label) = tick.label {
-                        // A horizontal label under the tick is legible in
-                        // an 18-point strip and needs no rotated text
-                        // pass, which egui would rasterise per frame.
-                        painter.text(
-                            egui::pos2(strip.min.x + 1.0, snapped + 1.0),
-                            egui::Align2::LEFT_TOP,
-                            label,
-                            egui::FontId::proportional(8.0),
-                            self.tokens.text_muted,
+                        // Turned a quarter turn anticlockwise, reading up
+                        // the strip from just above its tick. Laid out
+                        // horizontally, `1450pt` is wider than the 18 pt
+                        // strip and was clipped (XARA-T-0032). A rotated
+                        // galley reuses the same glyph atlas; only the
+                        // quad corners turn.
+                        let galley =
+                            painter.layout_no_wrap(label, font.clone(), self.tokens.text_muted);
+                        let at = vertical_label_rect(galley.size(), strip, snapped);
+                        painter.add(
+                            egui::epaint::TextShape::new(
+                                egui::pos2(at.min.x, at.max.y),
+                                galley,
+                                self.tokens.text_muted,
+                            )
+                            .with_angle(-std::f32::consts::FRAC_PI_2),
                         );
                     }
                 }
@@ -443,6 +462,53 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn vertical_labels_fit_the_strip_at_every_scale() {
+        // XARA-T-0032: every label a vertical ruler can produce, laid out
+        // with the font the ruler uses, fits across the strip and ends
+        // before the next label starts.
+        let font = egui::FontId::proportional(9.0);
+        for ppp in [1.0, 1.25, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(ppp);
+            let _ = ctx.run(egui::RawInput::default(), |_| {});
+            let strip = egui::Rect::from_min_size(
+                egui::pos2(0.0, 18.0),
+                egui::vec2(RULER_THICKNESS, 5_000.0),
+            );
+            let mut checked = 0;
+            for unit in Unit::ALL {
+                for zoom in [0.05, 0.1, 0.5, 1.0, 3.0, 20.0, 250.0] {
+                    let view = ViewTransform {
+                        zoom,
+                        origin_x: 0.0,
+                        origin_y: 600.0,
+                        y_up: true,
+                    };
+                    for tick in ticks(Axis::Vertical, unit, &view, 1_600.0) {
+                        let Some(label) = tick.label else { continue };
+                        let size = ctx.fonts_mut(|f| {
+                            f.layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE)
+                                .size()
+                        });
+                        let r = vertical_label_rect(size, strip, tick.position as f32);
+                        assert!(
+                            r.min.x >= strip.min.x && r.max.x <= strip.max.x,
+                            "{label} at {ppp}×: {r:?} is wider than the strip"
+                        );
+                        assert!(
+                            r.height() + 2.0 < MIN_MAJOR_SEPARATION as f32,
+                            "{label} at {ppp}×: {} long, runs into the next label",
+                            r.height()
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(checked > 100, "{checked} labels checked");
+        }
     }
 
     #[test]
