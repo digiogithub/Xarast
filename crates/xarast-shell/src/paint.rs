@@ -211,6 +211,7 @@ impl Painter {
         device: &wgpu::Device,
         size: [u32; 2],
         sampler: &wgpu::Sampler,
+        extra: wgpu::TextureUsages,
     ) -> GpuTexture {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -224,7 +225,7 @@ impl Painter {
             dimension: wgpu::TextureDimension::D2,
             // Encoded bytes in, encoded bytes out: never an sRGB format.
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | extra,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -292,16 +293,51 @@ impl Painter {
         queue: &wgpu::Queue,
         frame: &CanvasFrame,
     ) {
-        let size = [frame.surface.width(), frame.surface.height()];
-        let reuse = self.canvas.as_ref().is_some_and(|(t, _)| t.size == size);
-        if !reuse {
-            let t = self.make_texture(device, size, &self.nearest);
-            self.canvas = Some((t, frame.origin));
-        }
-        if let Some((t, origin)) = self.canvas.as_mut() {
-            *origin = frame.origin;
-            Self::write(queue, &t.texture, [0, 0], size, frame.surface.data());
-        }
+        self.upload_canvas(device, queue, &frame.surface, frame.origin);
+    }
+
+    /// Uploads `surface` as the canvas image at `origin`: the whole-frame
+    /// path, and the CPU tier's composite.
+    pub(crate) fn upload_canvas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: &xarast_render::Surface,
+        origin: (i32, i32),
+    ) {
+        let size = [surface.width(), surface.height()];
+        let t = self.canvas_target(device, size, origin);
+        Self::write(queue, t, [0, 0], size, surface.data());
+    }
+
+    /// The canvas texture, created or replaced to be `size`, drawn at
+    /// `origin`. It is a render attachment too, which is what lets the GPU
+    /// tile compositor draw into it (`tiles.rs`); the format is
+    /// `Rgba8Unorm`, the one the tile cache writes.
+    pub(crate) fn canvas_target(
+        &mut self,
+        device: &wgpu::Device,
+        size: [u32; 2],
+        origin: (i32, i32),
+    ) -> &wgpu::Texture {
+        let canvas = match self.canvas.take() {
+            Some((t, _)) if t.size == size => (t, origin),
+            _ => (
+                self.make_texture(
+                    device,
+                    size,
+                    &self.nearest,
+                    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                ),
+                origin,
+            ),
+        };
+        &self.canvas.insert(canvas).0.texture
+    }
+
+    /// The canvas texture, if there is one.
+    pub(crate) fn canvas_texture(&self) -> Option<&wgpu::Texture> {
+        self.canvas.as_ref().map(|(t, _)| &t.texture)
     }
 
     /// Moves the canvas without new pixels, when the layout moved it.
@@ -329,7 +365,8 @@ impl Painter {
             let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
             match delta.pos {
                 None => {
-                    let t = self.make_texture(device, size, &self.linear);
+                    let t =
+                        self.make_texture(device, size, &self.linear, wgpu::TextureUsages::empty());
                     Self::write(queue, &t.texture, [0, 0], size, &bytes);
                     self.textures.insert(*id, t);
                 }

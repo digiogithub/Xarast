@@ -22,7 +22,8 @@ clipboard = ["dep:arboard"]
 
 [dependencies]
 xarast-app = { path = "../xarast-app" }
-xarast-render = { path = "../xarast-render" }
+# `gpu`: the tile cache the canvas is composited through (`tiles.rs`).
+xarast-render = { path = "../xarast-render", features = ["gpu"] }
 # The composition root: the binary drives the interface and paints its
 # output, so the shell sits above `xarast-ui` (architecture §1; phase-05
 # criterion 16 allows `egui` here and only here besides `xarast-ui`).
