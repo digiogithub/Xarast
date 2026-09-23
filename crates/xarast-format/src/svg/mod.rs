@@ -18,10 +18,11 @@
 //! | `defs` | passes 6–7: content-hashed ids, deduplicated `<defs>` |
 //! | [`frame`] | §5.5: Y-up document space → Y-down SVG space, in integers |
 //! | [`xml`] | escaping and the well-formedness guarantees |
+//! | `style` | passes 4–5: paint hoisted onto `<g>`, CSS paint classes |
 //!
 //! Passes 3 (default elision) and 8 (minimal indentation) are done inline.
-//! Passes 4 (attribute hoisting) and 5 (CSS classes) are **not** done yet:
-//! every ink element carries its resolved paint.
+//! Passes 4 (attribute hoisting) and 5 (CSS classes) work on paint *slots*
+//! that the walk leaves in the start tags and expands at the end (`style`).
 //!
 //! # Security (F3.11)
 //!
@@ -38,6 +39,7 @@ pub mod frame;
 pub mod num;
 mod paint;
 pub mod pathdata;
+mod style;
 pub mod xml;
 
 use std::collections::HashMap;
@@ -78,10 +80,26 @@ pub enum FragmentKind {
 }
 
 /// Options for [`write_svg`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvgOptions {
     /// Indent one space per level (pass 8's `--pretty`), for diffs.
     pub pretty: bool,
+    /// Pass 4: move paint every child of a `<g>` shares onto the `<g>`.
+    /// On by default; off only to test the passes apart.
+    pub hoist: bool,
+    /// Pass 5: `class="cN"` for paint sets shared by ≥ 8 elements. On by
+    /// default; off only to test the passes apart.
+    pub classes: bool,
+}
+
+impl Default for SvgOptions {
+    fn default() -> SvgOptions {
+        SvgOptions {
+            pretty: false,
+            hoist: true,
+            classes: true,
+        }
+    }
 }
 
 /// What a write produced and what it had to approximate: the numbers
@@ -146,6 +164,13 @@ pub struct Stats {
     pub foreign_dropped: usize,
     /// `<defs>` requests satisfied by an identical definition.
     pub defs_deduplicated: usize,
+    /// Pass 4: paint attributes removed from children because their `<g>`
+    /// now carries them.
+    pub paint_hoisted: usize,
+    /// Pass 5: CSS paint classes written.
+    pub paint_classes: usize,
+    /// Pass 5: elements (ink or `<g>`) whose paint is a class.
+    pub paint_classed: usize,
     /// Size of the SVG text in bytes.
     pub bytes: usize,
 }
@@ -227,10 +252,14 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
         out
     };
 
-    let mut e = emit::Emitter::new(doc, frame, opts.pretty, &mut href);
+    let mut e = emit::Emitter::new(doc, frame, opts, &mut href);
     e.document();
+    e.styler.plan();
     let mut stats = std::mem::take(&mut e.stats);
     stats.defs_deduplicated = e.defs.hits;
+    stats.paint_hoisted = e.styler.stats.hoisted;
+    stats.paint_classes = e.styler.stats.classes;
+    stats.paint_classed = e.styler.stats.classed;
     let digest: [u8; 32] = e.foreign_hash.finalize().into();
     let count = e.foreign_count;
     let svg = assemble(&e, doc, w, h, count, &digest);
@@ -301,6 +330,11 @@ fn assemble(
         s.push_str("</dc:source>");
     }
     s.push_str("</cc:Work></rdf:RDF></metadata>\n<defs>\n");
+    let style = e.styler.style_element();
+    if !style.is_empty() {
+        s.push_str(&style);
+        s.push('\n');
+    }
 
     s.push_str("<xarast:document");
     attr(&mut s, "xarast:version", "1.0");
@@ -367,7 +401,7 @@ fn assemble(
         }
         s.push_str("</sodipodi:namedview>\n");
     }
-    s.push_str(&e.body);
+    e.styler.write_body(&e.body, &mut s);
     s.push_str("</svg>\n");
     s
 }
