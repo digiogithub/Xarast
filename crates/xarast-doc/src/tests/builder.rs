@@ -159,6 +159,31 @@ fn a_controller_with_no_source_is_repaired() {
     assert!(diags.iter().any(|d| d.code == DiagCode::Repaired));
 }
 
+/// `fuzz_doc_builder`: a sourceless controller at the depth limit. The
+/// repair's `attach` of an empty source was refused as too deep, the
+/// error was ignored, and `finish` returned `Inconsistent`.
+#[test]
+fn a_sourceless_controller_at_the_depth_limit_is_dropped() {
+    let mut b = DocumentBuilder::new(BuildLimits {
+        max_depth: 3,
+        ..BuildLimits::small()
+    });
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.node(live(LiveRole::Controller)).unwrap();
+    let (doc, diags) = b.finish().expect("the controller is repaired away");
+    doc.validate().assert_clean();
+    assert!(diags.iter().any(|d| d.code == DiagCode::Repaired));
+    assert!(
+        !doc.tree
+            .preorder(doc.tree.root())
+            .any(|n| matches!(doc.tree.kind(n), Some(NodeKind::Live(_)))),
+        "the controller must be gone"
+    );
+}
+
 #[test]
 fn a_spread_with_no_active_layer_is_repaired() {
     use crate::structure::{PageNode, SpreadNode};

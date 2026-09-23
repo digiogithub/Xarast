@@ -537,12 +537,25 @@ impl DocumentBuilder {
                         regen: ctl.regen,
                         name: None,
                     })));
-                    let _ = self.doc.tree.attach(src, c, Attach::FirstChild);
-                    self.diagnostics.push(Diagnostic::new(
-                        Severity::Warning,
-                        DiagCode::Repaired,
-                        "a live controller had no source subtree; an empty one was added",
-                    ));
+                    if self.doc.tree.attach(src, c, Attach::FirstChild).is_ok() {
+                        self.diagnostics.push(Diagnostic::new(
+                            Severity::Warning,
+                            DiagCode::Repaired,
+                            "a live controller had no source subtree; an empty one was added",
+                        ));
+                    } else {
+                        // A controller at the depth limit has no room for a
+                        // source child, and a controller without one is
+                        // invalid, so the controller goes.
+                        self.doc.tree.destroy_subtree(src);
+                        self.doc.tree.destroy_subtree(c);
+                        self.diagnostics.push(Diagnostic::new(
+                            Severity::Warning,
+                            DiagCode::Repaired,
+                            "a live controller at the depth limit had no source and no room \
+                             for one; it was dropped",
+                        ));
+                    }
                 }
                 _ => {
                     for extra in sources.into_iter().skip(1) {
