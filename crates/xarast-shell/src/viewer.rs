@@ -28,13 +28,25 @@
 //!
 //! * a press or a wheel at a point where `egui` shows something above the
 //!   canvas (a popup, a menu, a floating window) is not the canvas's;
-//! * view keys do nothing while a text field has the keyboard.
+//! * shortcuts do nothing while a text field has the keyboard.
+//!
+//! # Commands and the platform
+//!
+//! Menu items and shortcuts are the same [`AppCommand`]s from
+//! `xarast-app`'s command table: the menu raises them as
+//! [`UiCommand::App`], the keyboard through a [`ShortcutMap`] built from the
+//! same table. Either way they become [`Intent`]s applied to [`AppState`].
+//! What only the platform can do — show a file chooser, quit — comes back
+//! from the core as a [`PlatformRequest`], and this module carries it out
+//! with the shell: the dialog is a [`PortalHandle`](crate::portal::PortalHandle)
+//! request whose answer arrives later as a [`ShellEvent::Portal`]. The
+//! interface never calls the portal itself.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use xarast_app::schedule::{Backdrop, Canvas};
-use xarast_app::{AppState, Changed, Intent, Session};
+use xarast_app::{AppCommand, AppState, Changed, ChordKey, Intent, PlatformRequest, Session};
 use xarast_ui::model::{
     DocumentView, LayerInfo, LayerKey, StatusInfo, UiCommand, UiModel, ViewTransform,
 };
@@ -42,10 +54,10 @@ use xarast_ui::{Scale, Workspace};
 
 use crate::egui_input::{EguiInput, cursor_shape};
 use crate::input::event::{ColorScheme, DragEvent, PointerPhase, ShellEvent};
-use crate::input::keyboard::{Key, KeyState, NamedKey};
+use crate::input::keyboard::{Key, KeyEvent, KeyState, Modifiers, NamedKey, Shortcut, ShortcutMap};
 use crate::intents::{CanvasRegion, IntentAdapter};
 use crate::paint::UiFrame;
-use crate::portal::PortalEvent;
+use crate::portal::{FileFilter, OpenFileRequest, PortalEvent, PortalRequestId};
 use crate::probe::Probe;
 use crate::scale::{PhysicalPos, PhysicalSize, ScaleFactor};
 use crate::tiles::{CanvasView, TiledFrame};
@@ -54,6 +66,10 @@ use crate::{CursorShape, FrameRequest, ShellApp, ShellCtx};
 /// The pasteboard, premultiplied sRGB: a neutral mid grey that reads as
 /// "not the page" under both themes.
 pub const PASTEBOARD: [u8; 4] = [0x80, 0x80, 0x84, 0xff];
+
+/// Frames to draw before capturing a window with no document in it
+/// (`--screenshot` with no file); see `on_frame`.
+const EMPTY_CAPTURE_FRAMES: u32 = 6;
 
 /// The page underneath the drawing.
 pub const PAGE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
@@ -106,6 +122,16 @@ pub struct Viewer {
     settled_once: bool,
     /// A canvas view has been handed to the shell and not cleared.
     view_shown: bool,
+    /// Frames drawn with nothing open while a screenshot waits.
+    empty_frames: u32,
+    /// The keys of the command table.
+    shortcuts: ShortcutMap<AppCommand>,
+    /// What the core asked the platform to do, not yet done.
+    requests: Vec<PlatformRequest>,
+    /// The file chooser on screen, if one is.
+    open_dialog: Option<PortalRequestId>,
+    /// The active document changed: the window title is owed.
+    title_stale: bool,
 }
 
 /// One interface frame, before it is handed to the shell.
@@ -160,6 +186,11 @@ impl Viewer {
             probe: None,
             settled_once: false,
             view_shown: false,
+            empty_frames: 0,
+            shortcuts: command_shortcuts(),
+            requests: Vec::new(),
+            open_dialog: None,
+            title_stale: false,
         }
         .with_external_navigation()
     }
@@ -168,6 +199,15 @@ impl Viewer {
     fn with_external_navigation(mut self) -> Viewer {
         self.workspace
             .set_canvas_navigation(xarast_ui::CanvasNavigation::External);
+        self
+    }
+
+    /// Keeps the recent files in `file` between runs (the binary passes
+    /// `$XDG_STATE_HOME/xarast/recent`). Without it the list lives only as
+    /// long as the process, which is what the tests want.
+    #[must_use]
+    pub fn with_recent_store(mut self, file: PathBuf) -> Viewer {
+        self.app = std::mem::take(&mut self.app).with_recent_store(file);
         self
     }
 
@@ -211,33 +251,53 @@ impl Viewer {
         &self.app
     }
 
+    /// Opens what the command line or a drop queued. Each one replaces the
+    /// document before it (the single-document model), so of several files
+    /// the last that opens is the one shown.
     fn open_queued(&mut self) {
-        for path in std::mem::take(&mut self.to_open) {
-            match self.app.open(&path) {
-                Ok(_) => {
-                    tracing::info!(path = %path.display(), "opened");
-                    self.message = None;
-                    self.fit_pending = true;
-                    self.scene_stale = true;
-                    self.render_stale = true;
-                }
-                Err(e) => {
-                    tracing::error!(path = %path.display(), error = %e, "could not open");
-                    self.message = Some(format!("Could not open {}: {e}", path.display()));
-                }
-            }
-        }
+        let paths = std::mem::take(&mut self.to_open);
+        let intents = paths.into_iter().map(Intent::OpenFile).collect();
+        self.apply(intents);
     }
 
-    /// Applies intents to the active document and records what is owed.
+    /// Applies intents and records what is owed: a scene, a frame, a new
+    /// title, a platform request. A failure is shown, never fatal.
     fn apply(&mut self, intents: Vec<Intent>) -> Changed {
         let mut changed = Changed::empty();
         for intent in intents {
+            let opening = match &intent {
+                Intent::OpenFile(p) => Some(p.clone()),
+                _ => None,
+            };
             match self.app.apply(intent) {
-                Ok(c) => changed |= c,
-                Err(e) => self.message = Some(e.to_string()),
+                Ok(c) => {
+                    if let Some(path) = opening {
+                        tracing::info!(path = %path.display(), "opened");
+                        self.message = None;
+                    }
+                    changed |= c;
+                }
+                Err(e) => {
+                    self.message = Some(match opening {
+                        Some(path) => {
+                            tracing::error!(path = %path.display(), error = %e, "could not open");
+                            format!("Could not open {e}")
+                        }
+                        None => e.to_string(),
+                    });
+                }
             }
         }
+        if changed.contains(Changed::ACTIVE) {
+            // A different document, or none: frame it once the canvas has
+            // its size, re-title the window, forget the old frame.
+            self.primed = false;
+            self.fit_pending = self.app.active().is_some();
+            self.title_stale = true;
+            self.shown = 0;
+            self.settled_once = false;
+        }
+        self.requests.extend(self.app.take_requests());
         self.scene_stale |= changed.needs_scene();
         self.render_stale |= changed.needs_redraw();
         if let Some(canvas) = self.render.as_mut() {
@@ -246,29 +306,97 @@ impl Viewer {
         changed
     }
 
-    /// A key binding for the view, until the shortcut table (U4.7) exists.
-    fn key_intent(key: &Key) -> Option<Intent> {
-        use xarast_app::ZoomTarget;
-        match key {
-            Key::Character(c) => match c.as_str() {
-                // The anchor is filled in by the caller, which knows the
-                // canvas.
-                "+" | "=" => Some(Intent::Zoom {
-                    factor: std::f64::consts::SQRT_2,
-                    anchor: xarast_app::DevicePoint::new(0.0, 0.0),
-                }),
-                "-" => Some(Intent::Zoom {
-                    factor: std::f64::consts::FRAC_1_SQRT_2,
-                    anchor: xarast_app::DevicePoint::new(0.0, 0.0),
-                }),
-                "1" => Some(Intent::ZoomTo(ZoomTarget::Percent100)),
-                "0" => Some(Intent::ZoomTo(ZoomTarget::Page)),
-                "d" => Some(Intent::ZoomTo(ZoomTarget::Drawing)),
-                _ => None,
-            },
-            Key::Named(NamedKey::Home) => Some(Intent::ZoomTo(ZoomTarget::Page)),
-            _ => None,
+    /// Runs a command of the table, from a menu or a key. A command that
+    /// needs a document does nothing when none is open.
+    fn run_command(&mut self, command: AppCommand) -> Changed {
+        if command.needs_document() && self.app.active().is_none() {
+            return Changed::empty();
         }
+        let intent = command.intent(self.canvas_centre());
+        self.apply(vec![intent])
+    }
+
+    /// The centre of the canvas, in canvas device pixels: where a keyboard
+    /// or menu zoom is anchored.
+    fn canvas_centre(&self) -> xarast_app::DevicePoint {
+        let c = self.adapter.canvas();
+        xarast_app::DevicePoint::new(f64::from(c.width) / 2.0, f64::from(c.height) / 2.0)
+    }
+
+    /// The command a key press runs, if any. Nothing fires while a text
+    /// field has the keyboard (typing "1" into a layer name must not zoom),
+    /// nor, unless marked otherwise, in the middle of a drag.
+    fn shortcut(&self, key: &KeyEvent) -> Option<AppCommand> {
+        if self.text_input {
+            return None;
+        }
+        let in_drag = self
+            .app
+            .active()
+            .is_some_and(|s| s.edit.tool.drag_from.is_some());
+        self.shortcuts.resolve(key, in_drag)
+    }
+
+    /// Carries out what the core asked of the platform.
+    fn perform_requests(&mut self, ctx: &mut ShellCtx<'_>) {
+        for request in std::mem::take(&mut self.requests) {
+            match request {
+                PlatformRequest::ShowOpenDialog => {
+                    // One chooser at a time: a second Ctrl+O while one is
+                    // open would stack another dialog behind it.
+                    if self.open_dialog.is_none() {
+                        let id = ctx.portal().open_files(open_request(ctx.parent_window()));
+                        self.open_dialog = Some(id);
+                    }
+                }
+                PlatformRequest::Quit => ctx.exit(),
+                other => tracing::warn!(?other, "platform request not handled"),
+            }
+        }
+    }
+
+    /// The window title for the active document.
+    fn window_title(&self) -> String {
+        match self.app.active() {
+            Some(s) => {
+                let name = s.path.as_ref().and_then(|p| p.file_name()).map_or_else(
+                    || "Untitled".to_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                format!("{name} — Xarast")
+            }
+            None => "Xarast".to_owned(),
+        }
+    }
+
+    /// Takes the answer to the open dialog. Returns false for an answer to
+    /// something else.
+    fn portal_answer(&mut self, event: &PortalEvent) -> bool {
+        let (request, outcome) = match event {
+            PortalEvent::FilesChosen { request, paths } => (request, Ok(paths.first())),
+            PortalEvent::Cancelled { request } => (request, Ok(None)),
+            PortalEvent::Failed { request, reason } => (request, Err(reason)),
+            _ => return false,
+        };
+        if self.open_dialog != Some(*request) {
+            return false;
+        }
+        self.open_dialog = None;
+        match outcome {
+            Ok(Some(path)) => self.to_open.push(path.clone()),
+            Ok(None) => {}
+            Err(reason) => {
+                let message = format!("Could not show the file chooser: {reason}");
+                tracing::warn!("{message}");
+                self.app.diagnostics.push(xarast_app::DiagnosticEntry {
+                    severity: xarast_app::Severity::Error,
+                    message: message.clone(),
+                    document: None,
+                });
+                self.message = Some(message);
+            }
+        }
+        true
     }
 
     fn ui_model(&mut self, scale: f64) -> UiModel {
@@ -286,6 +414,7 @@ impl Viewer {
                 problem_count: self.app.diagnostics.entries().len(),
                 ..StatusInfo::default()
             },
+            recent: self.app.recent.paths().to_vec(),
             palette: vec![xarast_ui::model::PaletteEntry::none()],
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
@@ -442,6 +571,10 @@ impl Viewer {
                 anchor: xarast_app::DevicePoint::new(anchor_x * ppp, anchor_y * ppp),
             },
             UiCommand::ZoomTo(t) => Intent::ZoomTo(zoom_target(t)),
+            UiCommand::App(c) if c.needs_document() && self.app.active().is_none() => return None,
+            UiCommand::App(c) => c.intent(self.canvas_centre()),
+            UiCommand::OpenRecent(path) => Intent::OpenFile(path),
+            UiCommand::ClearRecent => Intent::ClearRecent,
             // Guides, grid, unit, colours, layer order and the theme have
             // no intent yet; they are phase 7/8 commands.
             _ => return None,
@@ -553,6 +686,52 @@ impl Viewer {
     }
 }
 
+/// The command table's keys as the shell's shortcuts.
+///
+/// Punctuation some layouts type with Shift (`+` is Shift+`=` on a US
+/// keyboard, a key of its own on the keypad) is bound with and without it;
+/// letters and digits are bound exactly, because Shift changes what they
+/// are.
+fn command_shortcuts() -> ShortcutMap<AppCommand> {
+    let mut map = ShortcutMap::new();
+    for command in AppCommand::ALL {
+        for chord in command.shortcuts() {
+            let key = match chord.key {
+                ChordKey::Char(c) => Key::char(c),
+                ChordKey::Home => Key::Named(NamedKey::Home),
+            };
+            let mut modifiers = Modifiers::NONE;
+            if chord.ctrl {
+                modifiers = modifiers.with_ctrl();
+            }
+            if chord.shift {
+                modifiers = modifiers.with_shift();
+            }
+            if let Some(clash) = map.bind(Shortcut::new(key.clone(), modifiers), command) {
+                tracing::warn!(%chord, ?clash, ?command, "shortcut bound twice");
+            }
+            if chord.shift_is_layout_dependent() && !chord.shift {
+                map.bind(Shortcut::new(key, modifiers.with_shift()), command);
+            }
+        }
+    }
+    map
+}
+
+/// File › Open…: `.xar` documents first, then anything.
+fn open_request(parent: Option<String>) -> OpenFileRequest {
+    OpenFileRequest {
+        title: "Open".to_owned(),
+        filters: vec![
+            FileFilter::new("Xara documents (*.xar)", &["xar"]),
+            FileFilter::new("All files", &["*"]),
+        ],
+        multiple: false,
+        directory: None,
+        parent,
+    }
+}
+
 fn zoom_target(t: xarast_ui::model::ZoomTarget) -> xarast_app::ZoomTarget {
     use xarast_app::ZoomTarget as A;
     use xarast_ui::model::ZoomTarget as U;
@@ -597,6 +776,7 @@ impl Viewer {
                 ));
                 redraw = true;
             }
+            ShellEvent::Portal(answer) if self.portal_answer(answer) => redraw = true,
             ShellEvent::ColorSchemeChanged(s)
             | ShellEvent::Portal(PortalEvent::ColorSchemeChanged(s)) => {
                 if self.scheme != *s {
@@ -607,22 +787,17 @@ impl Viewer {
             }
             // A text field has the keyboard: typing "1" into a layer name
             // must not zoom to 100 %.
-            ShellEvent::Key(k)
-                if k.state == KeyState::Pressed && !k.modifiers.constrain() && !self.text_input =>
-            {
-                if let Some(pan) = self.arrow_pan(&k.key) {
+            ShellEvent::Key(k) if k.state == KeyState::Pressed && !self.text_input => {
+                if !k.modifiers.constrain()
+                    && let Some(pan) = self.arrow_pan(&k.key)
+                {
                     redraw |= self.apply(vec![pan]).needs_redraw();
                 }
-                if let Some(mut intent) = Self::key_intent(&k.key) {
-                    // Keyboard zoom is about the canvas centre.
-                    if let Intent::Zoom { anchor, .. } = &mut intent {
-                        let c = self.adapter.canvas();
-                        *anchor = xarast_app::DevicePoint::new(
-                            f64::from(c.width) / 2.0,
-                            f64::from(c.height) / 2.0,
-                        );
-                    }
-                    redraw |= self.apply(vec![intent]).needs_redraw();
+                if let Some(command) = self.shortcut(k) {
+                    let changed = self.run_command(command);
+                    redraw |= changed.needs_redraw()
+                        || changed.contains(Changed::ACTIVE)
+                        || !self.requests.is_empty();
                 }
             }
             _ => {}
@@ -765,23 +940,12 @@ impl ShellApp for Viewer {
         if self.handle(&event) || for_egui {
             ctx.request_redraw();
         }
+        self.perform_requests(ctx);
     }
 
     fn on_frame(&mut self, ctx: &mut ShellCtx<'_>) -> FrameRequest {
         if !self.to_open.is_empty() {
             self.open_queued();
-            if let Some(s) = self.app.active() {
-                let title = s
-                    .path
-                    .as_ref()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                self.title = format!("{title} — Xarast");
-                ctx.set_title(&self.title);
-                // A new document has no size yet; give it the canvas's.
-                self.primed = false;
-            }
         }
 
         self.drive_probe(ctx);
@@ -790,6 +954,11 @@ impl ShellApp for Viewer {
         ctx.show_ui(step.frame);
         self.platform_output(step.output, ctx);
         let repaint = step.repaint;
+        self.perform_requests(ctx);
+        if std::mem::take(&mut self.title_stale) {
+            self.title = self.window_title();
+            ctx.set_title(&self.title);
+        }
 
         if let Some(region) = step.region.filter(|r| r.width > 0 && r.height > 0)
             && let Some(origin) = self.place_canvas(region, ctx.scale())
@@ -854,12 +1023,19 @@ impl ShellApp for Viewer {
         }
 
         // Nothing to render (no document, or it failed to open): capture
-        // what there is rather than wait forever.
-        if self.app.active().is_none()
-            && self.to_open.is_empty()
-            && let Some(path) = self.screenshot.take()
-        {
-            ctx.capture(path, true);
+        // what there is rather than wait forever — but not the very first
+        // frame. On Wayland the compositor's fractional scale arrives after
+        // the first frame (measured at 1.25 on GNOME 46: the first frame
+        // laid the interface out at 1.0 in a 1.25 surface), so let a few
+        // frames and a scale change go by first.
+        if self.app.active().is_none() && self.to_open.is_empty() && self.screenshot.is_some() {
+            self.empty_frames += 1;
+            if self.empty_frames < EMPTY_CAPTURE_FRAMES {
+                return FrameRequest::RedrawAfter(Duration::from_millis(50));
+            }
+            if let Some(path) = self.screenshot.take() {
+                ctx.capture(path, true);
+            }
         }
 
         // Wake for the owed Final even when nothing else is animating.
@@ -891,6 +1067,7 @@ impl ShellApp for Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::portal::{PortalEvent, PortalRequestId};
     use xarast_app::{DeviceSize, DocumentId};
 
     fn session() -> Session {
@@ -1109,16 +1286,35 @@ mod tests {
     }
 
     #[test]
-    fn view_keys_map_to_view_intents() {
-        assert!(matches!(
-            Viewer::key_intent(&Key::char('1')),
-            Some(Intent::ZoomTo(xarast_app::ZoomTarget::Percent100))
-        ));
-        assert!(matches!(
-            Viewer::key_intent(&Key::char('+')),
-            Some(Intent::Zoom { factor, .. }) if factor > 1.0
-        ));
-        assert!(Viewer::key_intent(&Key::char('q')).is_none());
+    fn view_keys_are_the_view_commands_shortcuts() {
+        let map = command_shortcuts();
+        let key = |k: Key, m: Modifiers| crate::input::keyboard::KeyEvent {
+            key: k,
+            location: crate::input::keyboard::KeyLocation::Standard,
+            state: KeyState::Pressed,
+            repeat: false,
+            text: None,
+            modifiers: m,
+        };
+        let none = Modifiers::NONE;
+        let ctrl = none.with_ctrl();
+        for (k, m, want) in [
+            (Key::char('1'), none, Some(AppCommand::Zoom100)),
+            (Key::char('0'), none, Some(AppCommand::FitPage)),
+            (Key::Named(NamedKey::Home), none, Some(AppCommand::FitPage)),
+            (Key::char('d'), none, Some(AppCommand::FitDrawing)),
+            (Key::char('+'), none, Some(AppCommand::ZoomIn)),
+            (Key::char('+'), none.with_shift(), Some(AppCommand::ZoomIn)),
+            (Key::char('-'), none, Some(AppCommand::ZoomOut)),
+            (Key::char('o'), ctrl, Some(AppCommand::Open)),
+            (Key::char('w'), ctrl, Some(AppCommand::Close)),
+            (Key::char('q'), ctrl, Some(AppCommand::Quit)),
+            (Key::char('o'), none, None),
+            (Key::char('D'), none.with_shift(), None),
+            (Key::char('1'), ctrl, None),
+        ] {
+            assert_eq!(map.resolve(&key(k.clone(), m), false), want, "{k:?} {m:?}");
+        }
     }
 
     // ---- The egui input shim, end to end (XARA-US-0002) ----------------
@@ -1384,6 +1580,329 @@ mod tests {
             (zoom(&v) - before).abs() > 1e-9 || (before - 1.0).abs() < 1e-9,
             "'1' outside a text field zooms to 100 %"
         );
+    }
+
+    // ---- Menus, shortcuts, the open dialog (XARA-US-0082) ---------------
+
+    /// A small `.xar` the importer accepts, written to a scratch directory.
+    fn tiny_xar(name: &str) -> PathBuf {
+        let mut spread = Vec::new();
+        for v in [600_000i32, 450_000, 0, 0] {
+            spread.extend_from_slice(&v.to_le_bytes());
+        }
+        spread.push(2);
+        let mut layer = vec![0x01 | 0x04 | 0x08];
+        for u in "Layer 1".encode_utf16().chain([0]) {
+            layer.extend_from_slice(&u.to_le_bytes());
+        }
+        let bytes = xarast_xar::synth::XarBuilder::new()
+            .record(40, &[])
+            .down()
+            .record(41, &[])
+            .down()
+            .record(42, &[])
+            .down()
+            .record(45, &spread)
+            .record(43, &[])
+            .down()
+            .record(48, &layer)
+            .up()
+            .up()
+            .up()
+            .up()
+            .end_of_file()
+            .finish();
+        let dir = std::env::temp_dir().join(format!("xarast-viewer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// Runs `f` with a shell context whose portal is an offline service
+    /// (every request fails at once, no D-Bus is touched) and returns
+    /// whether `f` asked the shell to exit, and what the portal answered.
+    fn with_ctx(f: impl FnOnce(&mut ShellCtx<'_>)) -> (bool, Vec<PortalEvent>) {
+        let service = crate::portal::PortalService::offline("no portal in tests");
+        let mut clipboard = crate::clipboard::NullClipboard::new("tests");
+        let mut frame = crate::window::PendingFrame::default();
+        let waker = crate::ShellWaker::none();
+        let mut ctx = ShellCtx {
+            window: None,
+            scale: one(),
+            size: PhysicalSize::new(SIZE.0, SIZE.1),
+            clipboard: &mut clipboard,
+            portal: service.handle(),
+            capabilities: crate::display::PlatformCapabilities::HEADLESS,
+            frame: &mut frame,
+            waker: &waker,
+            exit: false,
+            renderer: None,
+            last_present: None,
+            parent_window: Some("wayland:test-handle"),
+        };
+        f(&mut ctx);
+        let exit = ctx.exit;
+        let mut answers = Vec::new();
+        for _ in 0..200 {
+            service.poll(&mut answers);
+            if !answers.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (exit, answers)
+    }
+
+    fn press(v: &mut Viewer, key: Key, modifiers: crate::input::keyboard::Modifiers) {
+        use crate::input::keyboard::{KeyEvent, KeyLocation};
+        for state in [KeyState::Pressed, KeyState::Released] {
+            send(
+                v,
+                &[ShellEvent::Key(KeyEvent {
+                    key: key.clone(),
+                    location: KeyLocation::Standard,
+                    state,
+                    repeat: false,
+                    text: None,
+                    modifiers,
+                })],
+            );
+        }
+    }
+
+    /// Clicks the first accessible node with this label, as a screen
+    /// reader would.
+    fn activate(v: &mut Viewer, label: &str) {
+        let tree = ui_frames(v, 1).expect("accessibility is on");
+        let target = tree
+            .nodes
+            .iter()
+            .find_map(|(id, n)| (n.label() == Some(label)).then_some(*id))
+            .unwrap_or_else(|| panic!("no node named {label:?}"));
+        send(
+            v,
+            &[ShellEvent::AccessibilityAction(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Click,
+                    target,
+                    data: None,
+                },
+            )],
+        );
+        ui_frames(v, 2);
+    }
+
+    fn empty_viewer() -> Viewer {
+        let mut v = Viewer::new(Vec::new());
+        v.egui.enable_accesskit();
+        ui_frames(&mut v, 3);
+        v
+    }
+
+    #[test]
+    fn the_menu_bar_is_in_the_first_frame_with_and_without_a_document() {
+        for mut v in [empty_viewer(), live_viewer()] {
+            let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+            for title in ["File", "View", "Help"] {
+                let (_, y) = centre_of(&tree, |l| l == title);
+                assert!(y < 40.0, "{title} is not at the top: {y}");
+            }
+        }
+    }
+
+    #[test]
+    fn file_open_asks_the_platform_for_a_dialog_and_a_failure_is_shown() {
+        let mut v = empty_viewer();
+        activate(&mut v, "File");
+        activate(&mut v, "Open…");
+        assert_eq!(v.requests, [PlatformRequest::ShowOpenDialog]);
+
+        let (exit, answers) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(!exit);
+        assert!(v.open_dialog.is_some(), "a dialog is outstanding");
+        assert!(v.requests.is_empty());
+        // The offline portal answers at once with a reason.
+        assert_eq!(answers.len(), 1, "{answers:?}");
+        for a in answers {
+            v.handle(&ShellEvent::Portal(a));
+        }
+        assert!(v.open_dialog.is_none());
+        let message = v.message.clone().unwrap_or_default();
+        assert!(
+            message.starts_with("Could not show the file chooser"),
+            "{message}"
+        );
+        assert!(
+            v.app
+                .diagnostics
+                .entries()
+                .iter()
+                .any(|e| e.message == message),
+            "the failure is in the problem list too"
+        );
+    }
+
+    #[test]
+    fn the_empty_state_open_button_asks_for_the_dialog_too() {
+        let mut v = empty_viewer();
+        let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+        // The empty state's button is the only "Open…" while no menu is open.
+        let (x, y) = centre_of(&tree, |l| l == "Open…");
+        click(&mut v, x, y);
+        assert_eq!(v.requests, [PlatformRequest::ShowOpenDialog]);
+    }
+
+    #[test]
+    fn a_chosen_file_replaces_the_document_and_retitles_the_window() {
+        let mut v = live_viewer();
+        v.open_dialog = Some(PortalRequestId(7));
+        let path = tiny_xar("chosen.xar");
+        // An answer to some other request is not ours.
+        assert!(!v.portal_answer(&PortalEvent::Cancelled {
+            request: PortalRequestId(3)
+        }));
+        v.handle(&ShellEvent::Portal(PortalEvent::FilesChosen {
+            request: PortalRequestId(7),
+            paths: vec![path.clone()],
+        }));
+        assert!(v.open_dialog.is_none());
+        v.open_queued();
+        assert_eq!(v.app.docs.len(), 1, "the document was replaced");
+        assert_eq!(
+            v.app.active().unwrap().path.as_deref(),
+            Some(path.as_path())
+        );
+        assert!(v.title_stale && v.fit_pending && !v.primed);
+        assert_eq!(v.window_title(), "chosen.xar — Xarast");
+        assert_eq!(v.app.recent.paths(), [path]);
+    }
+
+    #[test]
+    fn a_cancelled_dialog_changes_nothing() {
+        let mut v = live_viewer();
+        v.open_dialog = Some(PortalRequestId(1));
+        v.handle(&ShellEvent::Portal(PortalEvent::Cancelled {
+            request: PortalRequestId(1),
+        }));
+        assert!(v.open_dialog.is_none() && v.to_open.is_empty() && v.message.is_none());
+        assert_eq!(v.app.docs.len(), 1);
+    }
+
+    #[test]
+    fn only_one_dialog_is_asked_for_at_a_time() {
+        let mut v = empty_viewer();
+        v.open_dialog = Some(PortalRequestId(1));
+        v.run_command(AppCommand::Open);
+        let (_, answers) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(answers.is_empty(), "no second dialog: {answers:?}");
+        assert_eq!(v.open_dialog, Some(PortalRequestId(1)));
+    }
+
+    #[test]
+    fn a_file_that_fails_to_open_keeps_the_document_and_says_why() {
+        let mut v = live_viewer();
+        let before = v.app.active().unwrap().id;
+        v.to_open.push(PathBuf::from("/nonexistent/broken.xar"));
+        v.open_queued();
+        assert_eq!(v.app.active().unwrap().id, before);
+        let message = v.message.clone().unwrap_or_default();
+        assert!(
+            message.starts_with("Could not open /nonexistent/broken.xar"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn ctrl_o_asks_for_the_dialog_and_ctrl_q_quits() {
+        let ctrl = crate::input::keyboard::Modifiers::NONE.with_ctrl();
+        let mut v = empty_viewer();
+        press(&mut v, Key::char('o'), ctrl);
+        assert_eq!(v.requests, [PlatformRequest::ShowOpenDialog]);
+        v.requests.clear();
+        press(&mut v, Key::char('q'), ctrl);
+        let (exit, _) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(exit, "Ctrl+Q ends the application");
+    }
+
+    #[test]
+    fn ctrl_w_closes_the_document_and_the_empty_state_comes_back() {
+        let ctrl = crate::input::keyboard::Modifiers::NONE.with_ctrl();
+        let mut v = live_viewer();
+        press(&mut v, Key::char('w'), ctrl);
+        assert!(v.app.active().is_none());
+        assert_eq!(v.window_title(), "Xarast");
+        // The interface has no canvas any more: the empty state is back.
+        let step = v.ui_step(one(), PhysicalSize::new(SIZE.0, SIZE.1));
+        assert!(step.region.is_none());
+        assert!(v.ui_model(1.0).document.is_none());
+        // View shortcuts with nothing open do nothing, and do not panic.
+        press(
+            &mut v,
+            Key::char('1'),
+            crate::input::keyboard::Modifiers::NONE,
+        );
+        assert!(v.app.active().is_none());
+    }
+
+    #[test]
+    fn view_menu_items_and_their_keys_do_the_same_thing() {
+        let mut by_menu = live_viewer();
+        activate(&mut by_menu, "View");
+        activate(&mut by_menu, "Zoom in");
+        let mut by_key = live_viewer();
+        let before = zoom(&by_key);
+        press(
+            &mut by_key,
+            Key::char('+'),
+            crate::input::keyboard::Modifiers::NONE,
+        );
+        assert!((zoom(&by_key) / before - xarast_app::command::ZOOM_STEP).abs() < 1e-9);
+        assert!((zoom(&by_menu) - zoom(&by_key)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn no_shortcut_fires_while_a_text_field_has_the_keyboard() {
+        let ctrl = crate::input::keyboard::Modifiers::NONE.with_ctrl();
+        let mut v = live_viewer();
+        let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+        let original = v.ui_model(1.0).document.unwrap().layers[0].name.clone();
+        let (x, y) = centre_of(&tree, |l| l.starts_with(&format!("{original}, ")));
+        click(&mut v, x, y);
+        click(&mut v, x, y);
+        ui_frames(&mut v, 2);
+        assert!(v.text_input, "the rename field has the keyboard");
+        let before = zoom(&v);
+        for (key, m) in [
+            (Key::char('o'), ctrl),
+            (Key::char('w'), ctrl),
+            (Key::char('q'), ctrl),
+            (Key::char('d'), crate::input::keyboard::Modifiers::NONE),
+            (Key::char('+'), crate::input::keyboard::Modifiers::NONE),
+        ] {
+            press(&mut v, key, m);
+        }
+        assert!(v.requests.is_empty(), "{:?}", v.requests);
+        assert!(v.app.active().is_some(), "Ctrl+W did not close");
+        assert!((zoom(&v) - before).abs() < 1e-12);
+    }
+
+    #[test]
+    fn open_recent_opens_the_file_and_clear_forgets_them() {
+        let mut v = empty_viewer();
+        let path = tiny_xar("recent.xar");
+        v.app.recent.remember(&path);
+        let label = xarast_ui::menus::recent_label(&path);
+        activate(&mut v, &label);
+        v.open_queued();
+        assert_eq!(
+            v.app.active().unwrap().path.as_deref(),
+            Some(path.as_path())
+        );
+        activate(&mut v, "File");
+        activate(&mut v, "Open Recent");
+        activate(&mut v, "Clear Recent Files");
+        assert!(v.app.recent.is_empty());
     }
 
     // ---- AccessKit (XARA-US-0003) ---------------------------------------

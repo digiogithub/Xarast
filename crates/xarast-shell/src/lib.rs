@@ -68,6 +68,11 @@ pub mod viewer;
     not(any(target_os = "macos", target_os = "ios", target_os = "android"))
 ))]
 mod wayland_dnd;
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "android"))
+))]
+mod wayland_export;
 mod window;
 
 /// The input-method seam.

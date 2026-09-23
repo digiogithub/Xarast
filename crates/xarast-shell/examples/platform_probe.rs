@@ -82,6 +82,7 @@ impl Probe {
                     filters,
                     multiple: cmd == "open-many",
                     directory: None,
+                    parent: ctx.parent_window(),
                 });
                 self.say("reply", &format!("requested {id:?}"));
             }
@@ -91,6 +92,7 @@ impl Probe {
                     filters,
                     file_name: Some("untitled.xar".to_owned()),
                     directory: None,
+                    parent: ctx.parent_window(),
                 });
                 self.say("reply", &format!("requested {id:?}"));
             }

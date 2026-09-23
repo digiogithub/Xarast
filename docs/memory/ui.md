@@ -88,7 +88,7 @@ integration) in about a tenth of a second.
 
 | Module | State |
 |---|---|
-| `workspace` | `Workspace::ui()` — the whole interface in one call: dock, canvas, status bar, theming. This is the shell's entry point |
+| `workspace` | `Workspace::ui()` — the whole interface in one call: menu bar, dock, canvas (or the empty state), status bar, theming. This is the shell's entry point |
 | `canvas` | Region reservation and reporting in whole device pixels, transparent so the shell's canvas pass shows through, wheel/Ctrl-wheel/pinch/middle-drag/keyboard navigation, guide creation and dragging, page edge, grid and guides; `CanvasNavigation::External` hands navigation to the host |
 | `overlay` | Handles (bounds, rotate, node, fill, centre), lines, rectangles, dashes, hit-testing; device-pixel snapped |
 | `rulers` | `Ruler::draw` plus the pure `ticks()`/`major_step()` used by the tests; 1-2-5 steps, imperial and pica subdivisions |
@@ -102,9 +102,9 @@ integration) in about a tenth of a second.
 | `units` | `10mm`, `1in`, `3p6`, `12mm + 3pt`, bumps, formatting that round-trips |
 | `a11y` | Names and roles for what egui does not name itself |
 | `density` | The spike probe, shared by the example, the bench and the tests |
+| `menus` | `AppMenu`: the in-window File/View/Help menu bar, the About box, and `empty_state` (Open… + recent files) (XARA-US-0082) |
 
-**Stubbed or absent on purpose:** menus and the command palette (they need
-the shortcut table, which is `xarast-app`'s W4.7), the problem list
+**Stubbed or absent on purpose:** the command palette, the problem list
 (needs the diagnostics feed), galleries, and anything Phase 7 and later
 own. No tool handles are produced — the overlay takes them, it does not
 invent them.
@@ -155,6 +155,17 @@ invent them.
 - **Focus and selection look different.** egui 0.33 paints a focused
   widget with `widgets.active`, so the focus ring is a two-point stroke in
   a `focus` token that is deliberately not the accent.
+- **The menu bar is drawn in the window by egui**, as the workspace's
+  first `TopBottomPanel::top`, never as a native or global menu: GNOME
+  and COSMIC on Wayland have none (the maintainer saw "no menu anywhere").
+  Items come from `xarast_app::AppCommand` (label + primary shortcut) and
+  raise `UiCommand::App(cmd)`; Open Recent raises `OpenRecent(path)`.
+  Items needing a document are disabled without one. Each item is
+  re-published to AccessKit as `Role::MenuItem` named by its label alone,
+  with the shortcut in `keyboard_shortcut` — egui otherwise names a
+  button after all its text ("Open… Ctrl+O", "Open Recent ⏵").
+- **With no document the canvas area is the empty state**: "No document
+  open", an Open… button, a Ctrl+O/drop hint and the recent files.
 - **Labels, not icons, for state.** Partly accessibility, partly the
   clean-room rule: no icon of another program is copied, and any icon
   this crate ever needs is drawn with the painter.
@@ -230,6 +241,11 @@ invent them.
   spread over about eleven frames (12.7, 8.7, 5.9, … points), so a zoom
   or pan driven from it lands late and in pieces. The shell's adapter
   applies a notch whole, at once.
+- **`RichText::strong()` for headings.** The theme maps egui's strong
+  text to `widgets.active.fg_stroke` = the on-accent colour, almost
+  invisible on the dark backdrop. Colour headings with `tokens.text`.
+- **Querying a menu item by its visible text in kittest.** The status bar
+  also says "100 %"; use `get_by_role_and_label(Role::MenuItem, …)`.
 - **Minor ruler tick values from `index / subdivisions` plus
   `index.rem_euclid(subdivisions)`.** Truncating division and a Euclidean
   remainder disagree for negative indices: the minor tick one step left of
@@ -248,8 +264,11 @@ invent them.
   adapter in the same change.
 - Bump to egui 0.36 when the workspace moves to rustc 1.95, and drop
   `egui_tiles` 0.14 for 0.17 at the same time.
-- Wire the menus and the command palette when `xarast-app`'s shortcut
-  table lands, and the problem list when the diagnostics feed does.
+- [x] Menus wired to `xarast-app`'s command table (XARA-US-0082).
+  Still open: the command palette, an Edit menu (undo/redo exist as
+  intents), and the problem list when the diagnostics feed does.
+- The About box's third-party licence list is a placeholder; generate
+  it at packaging time (`cargo about` or similar) and show it there.
 - Replace the crate-local `UiModel`/`UiCommand` adapter with a direct
   mapping onto `xarast_app::{AppState, Intent}` now that that crate has
   landed its API: `UiCommand` → `Intent` is a one-function translation,
@@ -649,6 +668,39 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     `--screenshot`, captures the view it left). `examples/canvas_probe`
     runs the same path offscreen at any size (COSMIC tiles the window,
     so the live canvas is 1796 × 1338 whatever `--size` asks).
+32. **Commands, shortcuts and platform requests** (XARA-US-0082). The
+    viewer maps `UiCommand::App` through `AppCommand::intent(canvas
+    centre)` and binds keys with a `ShortcutMap<AppCommand>` built from
+    the same table (`command_shortcuts`): Ctrl+O/W/Q, `+`/`=`/Ctrl+`=`,
+    `-`/Ctrl+`-`, `0`/Home, `d`, `1`. Punctuation is bound with and
+    without Shift (`+` is Shift+`=` on US layouts); letters and digits
+    exactly. The old hard-coded `key_intent` is gone. No shortcut fires
+    while a text field has the keyboard (`text_input`, decision 23) or,
+    unless `works_in_drag`, during a drag. `AppState::take_requests()` is
+    drained after every apply and carried out in `perform_requests`
+    (from `on_event` and `on_frame`): `ShowOpenDialog` → one
+    `PortalHandle::open_files` at a time (filters "Xara documents
+    (*.xar)" and "All files"), `Quit` → `ctx.exit()`. The answer is a
+    `ShellEvent::Portal` matched on the outstanding request id; a chosen
+    path goes through the same `to_open` queue as the command line and
+    drops (`Intent::OpenFile`, replace). A portal failure goes to the
+    status bar and the problem list. The binary passes
+    `default_store_path()` to `Viewer::with_recent_store`; tests don't.
+33. **Portal dialogs are parented** (XARA-T-0048). On Wayland,
+    `wayland_export` exports the toplevel once at window creation with
+    `xdg-foreign-unstable-v2` on its own connection over `winit`'s
+    `wl_display` and keeps the export alive with the window (dropped in
+    `exiting`); the portal gets `wayland:<handle>`. X11 gets `x11:<xid>`.
+    `ShellCtx::parent_window()`; `OpenFileRequest`/`SaveFileRequest`
+    carry `parent`, parsed with `ashpd::WindowIdentifierType` (an
+    unparsable one opens unparented, never fails). Measured: COSMIC and
+    GNOME 46 both hand out a handle. This adds two `unsafe` calls at the
+    same FFI boundary as decision 27 (`from_foreign_display`, and
+    `ObjectId::from_ptr` for `winit`'s `wl_surface`).
+34. **`--screenshot` with no document waits six frames** (50 ms apart)
+    before capturing. On Wayland the fractional scale arrives after the
+    first frame: at 1.25 the first frame was laid out at 1.0 in a 1.25
+    surface.
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,
@@ -693,7 +745,8 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
 13. **The AccessKit adapter exists before the window is first shown**,
     and its handlers never touch interface state: they only queue and
     wake.
-14. **`WaylandDrops` is dropped in `exiting`, before the event loop.** It
+14. **`WaylandDrops` and `ExportedWindow` are dropped in `exiting`,
+    before the event loop.** It
     borrows `winit`'s `wl_display`; its `Drop` wakes its thread with a
     `wl_display.sync` on its own queue and joins it (measured: clean quit
     in 146 ms).
@@ -751,7 +804,12 @@ isolated GNOME session on a private bus:
 
 1. Export *first* a private `XDG_RUNTIME_DIR` (0700), `XDG_CONFIG_HOME`,
    `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` and a private
-   `DCONF_PROFILE` (`user-db:xarasttest`), then `dbus-run-session`.
+   `DCONF_PROFILE`, then `dbus-run-session`. **`DCONF_PROFILE` must be
+   the path of a profile *file* containing `user-db:xarasttest`**, not the
+   string itself: given the string, dconf warns "unable to open named
+   profile" and uses the null configuration, so every `gsettings set`
+   fails (harmless, but mutter then offers no fractional scales). With
+   the file, the db lands in `$XDG_CONFIG_HOME/dconf/xarasttest`.
 2. Inside: `gsettings set org.gnome.mutter experimental-features
    "['scale-monitor-framebuffer']"`, hot corners off, then
    `gnome-shell --headless --wayland [--no-x11] --wayland-display
@@ -782,9 +840,9 @@ isolated GNOME session on a private bus:
   the `uinput` virtual tablet: neither exists in this environment.
   `ScriptedSource` covers the pipeline; it does not cover the driver.
 - [x] Portal dialogs, clipboard round-trips and drag-and-drop — measured
-  and fixed (XARA-T-0041/42/43). Open: clipboard on GNOME without
-  XWayland (XARA-T-0047), dialogs without a parent window (XARA-T-0048),
-  drag *out* of Xarast (no API in `winit` 0.30).
+  and fixed (XARA-T-0041/42/43); dialogs are parented (decision 33,
+  XARA-T-0048). Open: clipboard on GNOME without
+  XWayland (XARA-T-0047), drag *out* of Xarast (no API in `winit` 0.30).
 - [x] `wgpu` adapter selection and the capability ladder — decision 28
   (XARA-T-0050): adapter ladder, GPU tiles / CPU tier, runtime demotion.
   Still open: `--version --verbose` does not print the tier (it needs a
@@ -813,6 +871,15 @@ isolated GNOME session on a private bus:
 - [x] Cursor shapes and the IME caret area — measured on GNOME 46 (12
   shapes; ibus candidate window under the caret at 1× and 1.25×). Not
   measured on COSMIC.
+- [ ] **The live File › Open dialog has not been driven end to end**
+  (XARA-US-0082): tests use `PortalService::offline` and synthetic
+  `PortalEvent`s; opening a real dialog needs a click or Ctrl+O on a
+  desktop. Manual check: launch `xarast`, Ctrl+O → a chooser titled
+  "Open" appears *attached to the Xarast window*, filter "Xara documents
+  (*.xar)" selected, "All files" offered; pick a `.xar` → it replaces the
+  document, the title changes, it heads File › Open Recent; Escape →
+  nothing changes; a non-`.xar` via "All files" → status bar says "Could
+  not open …" and the old document stays.
 - [x] **Bridge `ShellEvent` to `xarast_app::Intent`** — `intents.rs`,
   decision 18 (XARA-T-0001).
 - X11 pressure via `octotablet` remains deferred; X11 is a documented

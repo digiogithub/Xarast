@@ -15,10 +15,13 @@ Xarast — a vector illustration and photo editor
 USAGE:
     xarast [OPTIONS] [FILE.xar ...]
 
-Opens each FILE; the last one is shown. Drop a .xar on the window to open
-it too. On the canvas: wheel scrolls, Shift+wheel scrolls sideways,
-Ctrl+wheel zooms about the pointer, middle-drag pans, a trackpad pinch
-zooms; +/- zoom, 1 is 100 %, 0 or Home fits the page, d fits the drawing.
+Opens FILE (of several, the last one that opens is shown); with none,
+shows a start page with Open… and the recent files. File › Open… (Ctrl+O)
+uses the desktop's file chooser; dropping a .xar on the window opens it
+too. Ctrl+W closes the document, Ctrl+Q quits. On the canvas: wheel
+scrolls, Shift+wheel scrolls sideways, Ctrl+wheel zooms about the
+pointer, middle-drag pans, a trackpad pinch zooms; +/- zoom, 1 is 100 %,
+0 or Home fits the page, d fits the drawing (the View menu lists them).
 
 OPTIONS:
     -h, --help              Print this help and exit
@@ -44,6 +47,9 @@ OPTIONS:
 
 ENVIRONMENT:
     XARAST_LOG              Log filter, e.g. `info`, `xarast_shell=debug`
+    XDG_STATE_HOME          The recent files are kept in
+                            $XDG_STATE_HOME/xarast/recent
+                            (default ~/.local/state/xarast/recent)
     XARAST_RENDERER         Canvas renderer: `auto` (default), `gpu` or `hybrid`
                             (GPU tile compositing) or `cpu` (CPU compositing;
                             the GPU only presents). The status bar shows the
@@ -177,6 +183,9 @@ fn main() -> ExitCode {
     }
 
     let mut viewer = xarast_shell::viewer::Viewer::new(files);
+    if let Some(store) = xarast_app::recent::default_store_path() {
+        viewer = viewer.with_recent_store(store);
+    }
     if let Some(nodes) = synthetic {
         viewer = viewer.with_synthetic(nodes);
     }

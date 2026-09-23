@@ -346,6 +346,9 @@ pub struct UiModel {
     pub theme: Theme,
     /// What the desktop reported, for `Theme::FollowSystem`.
     pub system_scheme: ColorScheme,
+    /// The recently opened files, newest first, for File › Open Recent
+    /// and the empty state.
+    pub recent: Vec<std::path::PathBuf>,
 }
 
 /// Something the interface wants the application to do.
@@ -436,6 +439,13 @@ pub enum UiCommand {
     SetTheme(Theme),
     /// Open the problem list — the non-modal importer diagnostics.
     ShowProblems,
+    /// Run a named operation of the application: a menu item, the
+    /// empty state's "Open…" button.
+    App(xarast_app::AppCommand),
+    /// Open a file from the recent list.
+    OpenRecent(std::path::PathBuf),
+    /// Forget the recent files.
+    ClearRecent,
     /// The interface needs another frame soon, for example because a drag
     /// is in progress.
     RequestRedraw,

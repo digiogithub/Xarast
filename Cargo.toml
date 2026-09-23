@@ -181,6 +181,13 @@ wayland-backend = { version = "0.3.10", default-features = false, features = [
     "client_system",
 ] }
 raw-window-handle = "0.6"
+# `xdg-foreign-unstable-v2`, to export the window's surface so a portal
+# dialog can be stacked on it (XARA-T-0048). Already in the graph through
+# `smithay-client-toolkit` with these features. `MIT`.
+wayland-protocols = { version = "0.32.13", default-features = false, features = [
+    "client",
+    "unstable",
+] }
 # Clipboard. `wayland-data-control` gives copy/paste that survives focus loss
 # where the compositor implements `wlr-data-control`. `MIT OR Apache-2.0`.
 arboard = { version = "3.6", default-features = false, features = [
