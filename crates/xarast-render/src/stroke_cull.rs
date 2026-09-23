@@ -108,14 +108,17 @@ pub struct CulledStroke {
 /// The path is in document space; `keep.rect` is in device space and must
 /// already include the stroke's reach: half the width times the mitre
 /// limit, and the square cap's diagonal. `dashes` is the resolved pattern
-/// in document units, empty for a solid stroke; the offset is zero and
-/// restarts at every subpath, as the stroker's own dashing does.
+/// in document units, empty for a solid stroke. `offset` is the pattern's
+/// starting phase, already reduced modulo the period
+/// (`xarast_geom::reduced_dash_offset`); like the stroker's own dashing,
+/// it restarts at every subpath.
 /// `per_dash` is [`dash_cost`] for this stroke.
 #[must_use]
 pub fn cull_stroke_input(
     path: &BezPath,
     keep: Window,
     dashes: &[f64],
+    offset: f64,
     per_dash: f64,
 ) -> CulledStroke {
     let subpaths = split_subpaths(path.elements());
@@ -145,7 +148,7 @@ pub fn cull_stroke_input(
     for (i, runs, whole) in kept {
         let sp = &subpaths[i];
         if whole {
-            emit(&mut out, sp.els.iter().copied(), 0.0, dashes, dashed);
+            emit(&mut out, sp.els.iter().copied(), offset, dashes, dashed);
             continue;
         }
         let wraps = sp.closed
@@ -162,9 +165,21 @@ pub fn cull_stroke_input(
             let (first, first_s) = &runs[0];
             let (last, last_s) = &runs[runs.len() - 1];
             let mut tail = BezPath::new();
-            emit(&mut tail, run_elements(sp, last), *last_s, dashes, dashed);
+            emit(
+                &mut tail,
+                run_elements(sp, last),
+                offset + *last_s,
+                dashes,
+                dashed,
+            );
             let mut head = BezPath::new();
-            emit(&mut head, run_elements(sp, first), *first_s, dashes, dashed);
+            emit(
+                &mut head,
+                run_elements(sp, first),
+                offset + *first_s,
+                dashes,
+                dashed,
+            );
             // The seam is the subpath's start vertex. The tail is inside a
             // dash there when its last drawn element ends on it; the head's
             // first dash is the one that starts on it (the dasher emits it
@@ -172,10 +187,31 @@ pub fn cull_stroke_input(
             let vertex = piece_seg(sp, &first[0]).start();
             let near = |p: Point| (p - vertex).hypot() <= 1e-9 * (1.0 + vertex.to_vec2().hypot());
             let tail_els = tail.elements();
-            let tail_active = tail_els
-                .last()
-                .and_then(PathEl::end_point)
-                .is_some_and(|p| !matches!(tail_els.last(), Some(PathEl::MoveTo(_))) && near(p));
+            // The tail's dashes, as element ranges. The one inside a dash at
+            // the seam is not always the last: when the tail itself starts
+            // inside a dash, the dasher holds that first dash back and emits
+            // it last. Move the one ending on the vertex to the end.
+            let mut dash_ranges: Vec<(usize, usize)> = Vec::new();
+            for (k, el) in tail_els.iter().enumerate() {
+                if matches!(el, PathEl::MoveTo(_)) || dash_ranges.is_empty() {
+                    dash_ranges.push((k, k + 1));
+                } else if let Some(last) = dash_ranges.last_mut() {
+                    last.1 = k + 1;
+                }
+            }
+            let at_seam = dash_ranges
+                .iter()
+                .rposition(|&(a, b)| b - a >= 2 && tail_els[b - 1].end_point().is_some_and(near));
+            let tail_active = at_seam.is_some();
+            for (k, &(a, b)) in dash_ranges.iter().enumerate() {
+                if Some(k) != at_seam {
+                    out.extend(tail_els[a..b].iter().copied());
+                }
+            }
+            if let Some(k) = at_seam {
+                let (a, b) = dash_ranges[k];
+                out.extend(tail_els[a..b].iter().copied());
+            }
             let head_els = head.elements();
             let first_dash = head_els.iter().enumerate().position(|(k, el)| {
                 matches!(el, PathEl::MoveTo(p) if near(*p))
@@ -183,7 +219,6 @@ pub fn cull_stroke_input(
                         .get(k + 1)
                         .is_some_and(|n| !matches!(n, PathEl::MoveTo(_)))
             });
-            out.extend(tail_els.iter().copied());
             match first_dash {
                 Some(k) if tail_active => {
                     let end = head_els[k + 1..]
@@ -199,11 +234,11 @@ pub fn cull_stroke_input(
                 _ => out.extend(head_els.iter().copied()),
             }
             for (run, s) in &runs[1..runs.len() - 1] {
-                emit(&mut out, run_elements(sp, run), *s, dashes, dashed);
+                emit(&mut out, run_elements(sp, run), offset + *s, dashes, dashed);
             }
         } else {
             for (run, s) in &runs {
-                emit(&mut out, run_elements(sp, run), *s, dashes, dashed);
+                emit(&mut out, run_elements(sp, run), offset + *s, dashes, dashed);
             }
         }
     }
@@ -481,11 +516,11 @@ mod tests {
         }
     }
 
-    fn stroke_of(path: &BezPath, dashes: &[f64]) -> BezPath {
+    fn stroke_of(path: &BezPath, dashes: &[f64], offset: f64) -> BezPath {
         let s = Stroke::new(2.0)
             .with_caps(Cap::Butt)
             .with_join(Join::Miter)
-            .with_dashes(0.0, dashes.to_vec());
+            .with_dashes(offset, dashes.to_vec());
         kurbo::stroke(path.iter(), &s, &StrokeOpts::default(), 0.01)
     }
 
@@ -505,10 +540,14 @@ mod tests {
     }
 
     fn check(path: &BezPath, dashes: &[f64], view: Rect) {
+        check_offset(path, dashes, 0.0, view);
+    }
+
+    fn check_offset(path: &BezPath, dashes: &[f64], offset: f64, view: Rect) {
         let reach = 2.0;
         let keep = view.inflate(reach, reach);
-        let whole = stroke_of(path, dashes);
-        let culled = cull_stroke_input(path, win(keep), dashes, 1.0);
+        let whole = stroke_of(path, dashes, offset);
+        let culled = cull_stroke_input(path, win(keep), dashes, offset, 1.0);
         assert!(culled.dashed || dashes.is_empty());
         let s = Stroke::new(2.0).with_caps(Cap::Butt).with_join(Join::Miter);
         let part = kurbo::stroke(culled.path.iter(), &s, &StrokeOpts::default(), 0.01);
@@ -530,6 +569,42 @@ mod tests {
         p.line_to((20_000.0, 7.0));
         check(&p, &[3.0, 2.0, 1.0], Rect::new(-10.0, 0.0, 30.0, 10.0));
         check(&p, &[5.0], Rect::new(12_345.0, 0.0, 12_400.0, 10.0));
+    }
+
+    #[test]
+    fn a_dash_offset_carries_into_every_kept_run() {
+        // XARA-T-0231: the offset shifts the pattern the same whether the
+        // stroke is dashed whole or cut to the window first.
+        let mut p = BezPath::new();
+        p.move_to((-20_000.0, 3.0));
+        p.line_to((20_000.0, 7.0));
+        for offset in [0.5, 2.0, 4.5] {
+            check_offset(&p, &[3.0, 2.0], offset, Rect::new(-10.0, 0.0, 30.0, 10.0));
+            check_offset(
+                &p,
+                &[3.0, 2.0, 1.0],
+                offset,
+                Rect::new(12_345.0, 0.0, 12_400.0, 10.0),
+            );
+        }
+        let mut sq = BezPath::new();
+        sq.move_to((0.0, 0.0));
+        sq.line_to((2_000.0, 0.0));
+        sq.line_to((2_000.0, 2_000.0));
+        sq.line_to((0.0, 2_000.0));
+        sq.close_path();
+        // Every phase at the seam, including a tail that starts inside a
+        // dash (the dasher then emits that dash last, not the one on the
+        // seam).
+        for k in 0..20 {
+            let offset = f64::from(k) * 0.5;
+            check_offset(
+                &sq,
+                &[7.0, 3.0],
+                offset,
+                Rect::new(-20.0, -20.0, 20.0, 20.0),
+            );
+        }
     }
 
     #[test]
@@ -578,6 +653,7 @@ mod tests {
             &p,
             win(Rect::new(4_490.0, -50.0, 4_510.0, 50.0)),
             &[3.0, 1.0],
+            0.0,
             1.0,
         );
         // Tens of dashes, not the thousands of the whole curve.
@@ -596,12 +672,13 @@ mod tests {
         p.curve_to((3.0, 4.0), (6.0, -4.0), (9.0, 0.0));
         p.line_to((9.0, 9.0));
         p.close_path();
-        let culled = cull_stroke_input(&p, win(Rect::new(-10.0, -10.0, 20.0, 20.0)), &[], 1.0);
+        let culled = cull_stroke_input(&p, win(Rect::new(-10.0, -10.0, 20.0, 20.0)), &[], 0.0, 1.0);
         assert_eq!(culled.path, p);
         let dashed = cull_stroke_input(
             &p,
             win(Rect::new(-10.0, -10.0, 20.0, 20.0)),
             &[1.0, 0.5],
+            0.0,
             1.0,
         );
         let expected: BezPath = kurbo::dash(p.iter(), 0.0, &[1.0, 0.5]).collect();
@@ -617,6 +694,7 @@ mod tests {
             &p,
             win(Rect::new(-1.0, -1.0, 1_000_001.0, 1.0)),
             &[1.0],
+            0.0,
             4.0,
         );
         assert!(!culled.dashed);
@@ -628,6 +706,7 @@ mod tests {
             &p,
             win(Rect::new(-1.0, -1.0, 1_000_001.0, 1.0)),
             &[1_000.0],
+            0.0,
             wide,
         );
         assert!(!culled.dashed);
@@ -643,7 +722,7 @@ mod tests {
             to_dev: Affine::new([0.0, 0.0, 0.0, 0.5, 5.0, 0.0]),
             rect: Rect::new(0.0, 0.0, 10.0, 10.0),
         };
-        let culled = cull_stroke_input(&p, keep, &[], 1.0);
+        let culled = cull_stroke_input(&p, keep, &[], 0.0, 1.0);
         let els = culled.path.elements();
         assert_eq!(els.len(), 2);
         let (PathEl::MoveTo(a), PathEl::LineTo(b)) = (els[0], els[1]) else {

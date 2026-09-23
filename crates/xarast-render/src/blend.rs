@@ -646,6 +646,24 @@ fn hue(src: Rgba8, t: u8, dst: Rgba8) -> Rgba8 {
 /// merge exactly as CDraw does (`research/03 §2.3`): the family produces the
 /// fully covering result, and coverage interpolates between the destination
 /// and that result. Both colours are straight, not premultiplied.
+///
+/// # Destinations that are not opaque
+///
+/// The families are defined against an opaque destination. A destination
+/// with alpha `a_d` is treated as that opaque colour over a fraction `a_d`
+/// of the pixel and as nothing over the rest (gintrack XARA-T-0231):
+///
+/// * over the covered fraction, the family's result as above;
+/// * over nothing, the source alone, at alpha `α_s = coverage·(1 − t)`,
+///   whatever the family — there is nothing for a blend to read, so every
+///   family behaves as Mix there, as source-over does in every other
+///   compositing model;
+/// * alpha is `a_d + (1 − a_d)·α_s`, and the colour is the premultiplied
+///   sum of the two parts divided by it.
+///
+/// For Mix this is exactly source-over. An opaque destination takes the
+/// first branch alone, byte for byte as before. Mixing towards the straight
+/// colour of a transparent pixel, which is black, instead gave `colour·α²`.
 #[must_use]
 pub fn composite(
     family: BlendFamily,
@@ -659,15 +677,46 @@ pub fn composite(
     if coverage == 0 || family == BlendFamily::None {
         return dst;
     }
-    let full = blend_pixel(family, luts, weights, src, t, dst);
-    let out_a = dst.a.saturating_add(imul(dst.a, mul(coverage, 255 - t)));
-    if coverage == 255 {
-        return Rgba8 { a: out_a, ..full };
+    let src_alpha = mul(coverage, 255 - t);
+    let over_opaque = if dst.a == 0 {
+        // Never read: its weight is zero.
+        dst
+    } else {
+        let full = blend_pixel(family, luts, weights, src, t, dst);
+        if coverage == 255 {
+            full
+        } else {
+            Rgba8 {
+                r: imul(coverage, dst.r).saturating_add(mul(coverage, full.r)),
+                g: imul(coverage, dst.g).saturating_add(mul(coverage, full.g)),
+                b: imul(coverage, dst.b).saturating_add(mul(coverage, full.b)),
+                a: dst.a,
+            }
+        }
+    };
+    let out_a = dst.a.saturating_add(imul(dst.a, src_alpha));
+    if dst.a == 255 {
+        return Rgba8 {
+            a: out_a,
+            ..over_opaque
+        };
     }
+    // Both parts in units of 255²: the covered fraction's colour and the
+    // source over nothing.
+    let covered = u32::from(dst.a) * 255;
+    let bare = (255 - u32::from(dst.a)) * u32::from(src_alpha);
+    let den = covered + bare;
+    if den == 0 {
+        return dst;
+    }
+    let ch = |o: u8, s: u8| -> u8 {
+        let num = covered * u32::from(o) + bare * u32::from(s);
+        u8::try_from((num + den / 2) / den).unwrap_or(255)
+    };
     Rgba8 {
-        r: imul(coverage, dst.r).saturating_add(mul(coverage, full.r)),
-        g: imul(coverage, dst.g).saturating_add(mul(coverage, full.g)),
-        b: imul(coverage, dst.b).saturating_add(mul(coverage, full.b)),
+        r: ch(over_opaque.r, src.r),
+        g: ch(over_opaque.g, src.g),
+        b: ch(over_opaque.b, src.b),
         a: out_a,
     }
 }
@@ -846,6 +895,62 @@ mod tests {
         assert_eq!(composite(BlendFamily::Mix, &luts, w, s, 0, 255, d).r, 0);
         let half = composite(BlendFamily::Mix, &luts, w, s, 0, 128, d);
         assert!(half.r > 120 && half.r < 135, "{half:?}");
+    }
+
+    #[test]
+    fn over_nothing_every_family_is_the_source_at_its_own_alpha() {
+        // XARA-T-0231: mixing towards the black of an empty pixel gave
+        // colour · alpha² once premultiplied.
+        let luts = BlendLuts::default();
+        let w = LumaWeights::BT601;
+        let s = rgb(200, 100, 50);
+        let empty = Rgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        for f in ALL_FAMILIES {
+            if f == BlendFamily::None {
+                continue;
+            }
+            for (t, cov) in [(0, 255), (127, 255), (0, 100), (200, 30)] {
+                let out = composite(f, &luts, w, s, t, cov, empty);
+                assert_eq!(
+                    out,
+                    Rgba8 {
+                        a: mul(cov, 255 - t),
+                        ..s
+                    },
+                    "{f:?} t={t} cov={cov}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mix_over_a_translucent_destination_is_source_over() {
+        let luts = BlendLuts::default();
+        let w = LumaWeights::BT601;
+        let dst = Rgba8 {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 128,
+        };
+        let out = composite(
+            BlendFamily::Mix,
+            &luts,
+            w,
+            rgb(255, 255, 255),
+            127,
+            255,
+            dst,
+        );
+        // Alpha 128 + 127·128/255 = 192; premultiplied red 128, blue
+        // 128 + 64, so straight red 170 and blue 255.
+        assert_eq!(out.a, 192);
+        assert!(out.r.abs_diff(170) <= 1 && out.b == 255, "{out:?}");
     }
 
     #[test]

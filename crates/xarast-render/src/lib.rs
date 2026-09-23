@@ -104,7 +104,9 @@ pub use scene::{
     CacheHint, ContentHash, LayerKind, RenderQuality, Scene, SceneBuilder, SceneError, SceneNodeId,
     SceneStats,
 };
-pub use surface::{DeviceRect, DirtyRect, Surface, scroll_surface};
+pub use surface::{
+    DeviceRect, DirtyRect, Surface, premultiply_rgba, scroll_surface, unpremultiply_rgba_in_place,
+};
 pub use tiling::{GPU_TILE_SIZE, MIN_BAND_SCANLINES, TileBin, TilePlan, plan_bands, plan_tiles};
 
 #[cfg(feature = "gpu")]

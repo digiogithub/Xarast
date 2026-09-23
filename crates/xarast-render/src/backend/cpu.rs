@@ -834,8 +834,11 @@ fn rasterise_coverage(
             } else {
                 style.width.to_f64()
             };
+            // Each end gets its own cap, on every open subpath and every
+            // dash, as `xarast_geom::stroke_to_path` defines them.
             let solid = KStroke::new(width_doc)
-                .with_caps(to_cap(style.cap_start))
+                .with_start_cap(to_cap(style.cap_start))
+                .with_end_cap(to_cap(style.cap_end))
                 .with_join(to_join(style.join))
                 .with_miter_limit(style.mitre_limit.max(1.0));
             let pattern = style
@@ -843,6 +846,9 @@ fn rasterise_coverage(
                 .as_ref()
                 .map(|d| d.resolved(style.width))
                 .unwrap_or_default();
+            let phase = style.dash.as_ref().map_or(0.0, |d| {
+                xarast_geom::reduced_dash_offset(d.offset.to_f64(), &pattern)
+            });
             // What one dash costs to flatten, for the work budget.
             let per_dash = dash_cost(width_doc * 0.5 * scale, tol_doc * scale);
             // Expanded to an outline at our tolerance and filled, rather
@@ -865,11 +871,11 @@ fn rasterise_coverage(
             });
             let outline = match window {
                 Some(keep) => {
-                    let culled = cull_stroke_input(path.bez(), keep, &pattern, per_dash);
+                    let culled = cull_stroke_input(path.bez(), keep, &pattern, phase, per_dash);
                     kurbo_stroke(&culled.path, &solid, tol_doc)
                 }
                 None if pattern.is_empty() => kurbo_stroke(path.bez(), &solid, tol_doc),
-                None => kurbo_stroke(path.bez(), &solid.with_dashes(0.0, pattern), tol_doc),
+                None => kurbo_stroke(path.bez(), &solid.with_dashes(phase, pattern), tol_doc),
             };
             ctx.set_fill_rule(Fill::NonZero);
             ctx.set_transform(to_origin * xf.to_affine());

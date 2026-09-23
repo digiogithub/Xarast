@@ -293,3 +293,52 @@ fn the_optimise_pass_shrinks_and_keeps_the_pixels() {
     reg.export(&src, &again, &NoProgress).unwrap();
     assert_eq!(sha(&opt.destination), sha(&again.destination));
 }
+
+#[test]
+fn a_half_transparent_square_exports_straight_not_darkened() {
+    // XARA-T-0231: a 50 % white square over a transparent background is
+    // (255, 255, 255, 128) in the file, not grey.
+    use xarast_geom::{FillRule, Path};
+    use xarast_render::{
+        Paint, PathRef, RenderQuality, Resolver, Scene, SceneBuilder, SceneNodeId, Transparency,
+    };
+    let area = Rect::raw(0, 0, 20_000, 20_000);
+    let mut scene = Scene::new();
+    let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+    b.push_transparency(Transparency::mix(127));
+    let mut p = Path::builder();
+    p.rect(area);
+    b.fill(
+        SceneNodeId(1),
+        &PathRef::new(p.build()),
+        FillRule::NonZero,
+        Paint::Solid(Rgba8::WHITE),
+    );
+    b.pop_transparency();
+    b.finish().unwrap();
+    let resolver = Resolver::new();
+    let src = SceneSource {
+        scene: &scene,
+        resolver: &resolver,
+        area,
+        paper: Rgba8::WHITE,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let reg = Registry::with_builtin();
+    for (name, options) in [
+        ("half.png", FormatOptions::default()),
+        ("half.webp", FormatOptions::default_for(FormatId::WebP)),
+    ] {
+        let mut req = request(dir.path(), name, options);
+        req.area = ExportArea::Rect(area);
+        let rep = reg.export(&src, &req, &NoProgress).unwrap();
+        assert!(rep.compromises.is_empty(), "{name}: {:?}", rep.compromises);
+        let img = image::open(&req.destination).unwrap().to_rgba8();
+        let (w, h) = img.dimensions();
+        assert_eq!(
+            img.get_pixel(w / 2, h / 2).0,
+            [255, 255, 255, 128],
+            "{name}"
+        );
+    }
+}

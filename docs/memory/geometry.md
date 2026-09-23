@@ -22,7 +22,7 @@ outside `kurbo`, `i_overlay`, `bitflags`, `thiserror` and `slotmap`.
 | `geom::profile` | `BiasGain` and its LUT | complete |
 | `geom::path` | `Verb`, `PointFlags`, `Path`, `PathBuilder`, SVG and `kurbo` conversion, canonical form | complete |
 | `geom::flatten` | `Tolerance`, `Polyline`, `SegmentTrace`, `flatten`, `flatten_traced` | complete |
-| `geom::stroke` | `Cap`, `Join`, `FillRule`, `DashPattern`, `StrokeStyle`, `stroke_to_path`, `dash`, `offset` | complete |
+| `geom::stroke` | `Cap`, `Join`, `FillRule`, `DashPattern`, `StrokeStyle`, `stroke_to_path`, `dash`, `offset`, `reduced_dash_offset` (public since XARA-T-0231: the renderer's stroker uses it too) | complete |
 | `geom::boolean` | `BoolOp`, `boolean`, `self_union`, the refit pipeline | complete |
 | `geom::measure` | `arclen`, `point_at_arclen`, `nearest_point`, `fill_contains` (exact point-in-fill), `PathHitIndex` (one big path's edges) | complete |
 | `geom::hit` | `HitTolerance`, `hit_fill`, `hit_stroke`, their `_transformed` forms, `HitShape`/`ShapeHit` — picking with a radius (phase 7 W3) | complete |

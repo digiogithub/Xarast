@@ -115,8 +115,10 @@ row), nor are Contrast, Brightness, Bevel.
   the image's pixel grid over the object's bounds and commands are picked
   by **scene op index** (`DisplayList::op_of`), so the pixels are the raster
   exporter's. *Object* mode draws the command alone, twice — over opaque
-  black and opaque white — and unmixes coverage and colour (works around
-  XARA-T-0231). *Backdrop* mode draws every command up to it, closing open
+  black and opaque white — and unmixes coverage and colour. That worked
+  around XARA-T-0231, which is fixed (2026-09-23): a single render over
+  transparency and `unpremultiply_rgba_in_place` would now give the same
+  pixels at half the cost; the switch is left for a PDF task. *Backdrop* mode draws every command up to it, closing open
   clips and layers (`PopLayer { layer: u32::MAX }` composites opaquely;
   the group's own opacity is applied by the PDF group around the image),
   over the **paper** when the page is transparent: a blend reads a colour,
@@ -183,6 +185,15 @@ row), nor are Contrast, Brightness, Bevel.
   `Compromise::AlphaFlattened`. The export renders *onto* that colour
   rather than flattening afterwards, because blend modes over white and
   over transparency differ, and the former is what the user sees.
+- **Straight alpha in image files (XARA-T-0231).** Render surfaces are
+  premultiplied; PNG and WebP store straight colour. `raster.rs` converts
+  every strip with `xarast_render::unpremultiply_rgba_in_place` before
+  encoding (a fully transparent pixel becomes `[0, 0, 0, 0]`), and
+  `render_export_strips` premultiplies `ExportJob::background`, which is
+  straight. Before, premultiplied bytes were written as straight and every
+  partly transparent pixel came out darkened by its own alpha, on top of
+  the compositor's own darkening. Guarded by
+  `tests/raster.rs::a_half_transparent_square_exports_straight_not_darkened`.
 - **One rasteriser, CPU only.** `render_export_strips` constructs
   `CpuBackend::new(CpuConfig::deterministic())` itself; it takes no backend
   argument, so the GPU cannot leak in.
@@ -284,9 +295,9 @@ row), nor are Contrast, Brightness, Bevel.
 - **`oxipng`'s `timeout` for cancellation**: output would depend on timing.
 - **`krilla` for PDF** (0.8.2): see the spike table — no sampled ramps, no
   meshes, `f32` `tiny-skia` geometry, a second `skrifa`, MSRV 1.92.
-- **Rasterising an object over a transparent surface and un-premultiplying**:
-  the renderer darkens partly transparent Mix pixels over nothing
-  (XARA-T-0231); render over black and white and unmix instead.
+- ~~Rasterising an object over a transparent surface and un-premultiplying~~:
+  a dead end only while the renderer darkened partly transparent Mix over
+  nothing. Fixed by XARA-T-0231; it is valid now.
 - **Rasterising a blend's backdrop over a transparent page**: the image
   composites a second time over the vector content under it. Render the
   backdrop over the paper.
@@ -310,8 +321,8 @@ row), nor are Contrast, Brightness, Bevel.
 - PDF follow-ups: XARA-T-0227 (bitmap transparency, ramp alpha, layer
   masks, per-family ΔE), XARA-T-0228 (embedded subset fonts), XARA-T-0229
   (images: DCT passthrough), XARA-T-0230 (multi-page, XMP, output intent,
-  `qpdf` in CI), XARA-T-0232 (ladder cost and file size), XARA-T-0231
-  (renderer: transparent destination, `cap_end`, dash offset — PDF follows
-  the document model, so PDF and raster differ on the last two until then).
+  `qpdf` in CI), XARA-T-0232 (ladder cost and file size). XARA-T-0231 is
+  done: the raster exporters now honour `cap_end` and the dash offset as
+  PDF does, so PDF and raster agree on both.
 - A 20 000 × 20 000 WebP or JPEG holds the whole image (JPEG ≤ 65 535 px a
   side, WebP ≤ 16 383); only PNG streams. `MAX_EXPORT_PIXELS` is 2²⁹.
