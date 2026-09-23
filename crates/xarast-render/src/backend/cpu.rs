@@ -46,6 +46,9 @@ use crate::path::PathRef;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
 use crate::scene::{LayerKind, RenderQuality, SceneOp};
+use crate::stroke_cull::{
+    MAX_DASH_WORK, Window, cull_stroke_input, dash_cost, dash_count_estimate,
+};
 use crate::surface::{DeviceRect, DirtyRect, Surface};
 use crate::tiling::{MIN_BAND_SCANLINES, band_height};
 
@@ -587,20 +590,43 @@ fn rasterise_coverage(
             } else {
                 style.width.to_f64()
             };
-            let mut stroke = KStroke::new(width_doc)
+            let solid = KStroke::new(width_doc)
                 .with_caps(to_cap(style.cap_start))
                 .with_join(to_join(style.join))
                 .with_miter_limit(style.mitre_limit.max(1.0));
-            if let Some(d) = &style.dash {
-                let pattern = d.resolved(style.width);
-                if !pattern.is_empty() {
-                    stroke = stroke.with_dashes(0.0, pattern);
-                }
-            }
+            let pattern = style
+                .dash
+                .as_ref()
+                .map(|d| d.resolved(style.width))
+                .unwrap_or_default();
+            // What one dash costs to flatten, for the work budget.
+            let per_dash = dash_cost(width_doc * 0.5 * scale, tol_doc * scale);
             // Expanded to an outline at our tolerance and filled, rather
             // than handed to the rasteriser's stroker, so that the same
             // flatness rule governs strokes and fills.
-            let outline = kurbo_stroke(path.bez(), &stroke, tol_doc);
+            let window = stroke_window(path, *xf, rect, width_doc, style, tol_doc).or_else(|| {
+                // Near the band, but so finely or so thickly dashed that the
+                // dashes alone are the problem: only the budget applies.
+                (dash_count_estimate(path.bez(), &pattern) * per_dash > MAX_DASH_WORK).then_some(
+                    Window {
+                        to_dev: Affine::IDENTITY,
+                        rect: kurbo::Rect::new(
+                            f64::NEG_INFINITY,
+                            f64::NEG_INFINITY,
+                            f64::INFINITY,
+                            f64::INFINITY,
+                        ),
+                    },
+                )
+            });
+            let outline = match window {
+                Some(keep) => {
+                    let culled = cull_stroke_input(path.bez(), keep, &pattern, per_dash);
+                    kurbo_stroke(&culled.path, &solid, tol_doc)
+                }
+                None if pattern.is_empty() => kurbo_stroke(path.bez(), &solid, tol_doc),
+                None => kurbo_stroke(path.bez(), &solid.with_dashes(0.0, pattern), tol_doc),
+            };
             ctx.set_fill_rule(Fill::NonZero);
             ctx.set_transform(to_origin * xf.to_affine());
             flatten_into(&outline, tol_doc, &mut scratch.flat);
@@ -610,6 +636,42 @@ fn rasterise_coverage(
     ctx.flush();
     ctx.render(&mut scratch.pixmap, resources);
     true
+}
+
+/// How far beyond the band, in device pixels, a stroke may reach before
+/// its centre line is cut to the band (`crate::stroke_cull`). A stroke
+/// that stays within this margin is expanded whole, exactly as before, so
+/// culling only ever engages on paths much bigger than the view.
+const STROKE_CULL_MARGIN_PX: i32 = 256;
+
+/// The window a stroke is cut to, or `None` when the whole stroke lies
+/// within [`STROKE_CULL_MARGIN_PX`] of `rect` and is expanded as it is.
+fn stroke_window(
+    path: &PathRef,
+    xf: Transform2D,
+    rect: DeviceRect,
+    width_doc: f64,
+    style: &StrokeStyle,
+    tol_doc: f64,
+) -> Option<Window> {
+    // Half the width, times the mitre limit or a square cap's diagonal,
+    // whichever reaches further, plus the flattening slack.
+    let reach = width_doc * 0.5 * style.mitre_limit.max(std::f64::consts::SQRT_2) + tol_doc;
+    let window = rect.inflated(STROKE_CULL_MARGIN_PX);
+    let whole = crate::display_list::device_bounds_of(path, xf, reach);
+    if window.intersection(whole) == whole {
+        return None;
+    }
+    let reach_px = reach * xf.max_scale() + 1.0;
+    Some(Window {
+        to_dev: xf.to_affine(),
+        rect: kurbo::Rect::new(
+            f64::from(window.x0) - reach_px,
+            f64::from(window.y0) - reach_px,
+            f64::from(window.x1) + reach_px,
+            f64::from(window.y1) + reach_px,
+        ),
+    })
 }
 
 /// Flattens a path to line segments within `tol` document units, into a

@@ -733,9 +733,9 @@ pub fn eval_paint(paint: &Paint, ramps: &RampCache, images: &ImageRegistry, p: P
                     let (fx, fy) = (x - x0, y - y0);
                     let (x0, y0) = (x0 as i64, y0 as i64);
                     let t00 = img.texel(x0, y0, *repeat);
-                    let t10 = img.texel(x0 + 1, y0, *repeat);
-                    let t01 = img.texel(x0, y0 + 1, *repeat);
-                    let t11 = img.texel(x0 + 1, y0 + 1, *repeat);
+                    let t10 = img.texel(x0.saturating_add(1), y0, *repeat);
+                    let t01 = img.texel(x0, y0.saturating_add(1), *repeat);
+                    let t11 = img.texel(x0.saturating_add(1), y0.saturating_add(1), *repeat);
                     lerp_rgba(lerp_rgba(t00, t10, fx), lerp_rgba(t01, t11, fx), fy)
                 }
             };
