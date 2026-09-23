@@ -2,13 +2,15 @@
 id: XARA-US-0007
 type: story
 title: As a user, the AppImage still fits its size budget with the full UI stack
-status: backlog
+status: done
 parent: XARA-EP-0006
 author: mcp
 labels: [phase-5, packaging]
 estimate: 1
 created: 2026-09-23T09:40:08Z
-updated: 2026-09-23T09:40:08Z
+updated: 2026-09-23T12:24:54Z
+started: 2026-09-23T12:02:56Z
+closed: 2026-09-23T12:24:54Z
 ---
 
 ## Description
