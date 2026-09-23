@@ -41,3 +41,6 @@ path = "src/bin/xar-dump.rs"
 [[bin]]
 name = "xarast-thumbnailer"
 path = "src/bin/xarast-thumbnailer.rs"
+
+[dev-dependencies]
+image = { workspace = true }

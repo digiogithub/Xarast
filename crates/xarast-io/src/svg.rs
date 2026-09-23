@@ -27,7 +27,7 @@ use xarast_format::svg::{self as fsvg, BitmapLinker, SvgDialect};
 
 use crate::model::{Background, ExportRequest};
 use crate::options::{FormatId, FormatOptions, PngColour, PngDepth, SvgOptions, SvgResources};
-use crate::png::{PngHeader, encode_png};
+use crate::png::{PngHeader, encode_png, with_icc_profile};
 use crate::raster::AtomicFile;
 use crate::registry::{Capabilities, Exporter};
 use crate::report::{Compromise, ExportError, ExportReport};
@@ -156,6 +156,12 @@ impl Exporter for SvgExporter {
         report.dpi = 72.0;
         report.commands = out.stats.elements;
         report.compromises = compromises(&out.stats, &out.svg, links.failed);
+        report
+            .compromises
+            .extend(crate::fidelity::document_compromises(
+                src,
+                crate::fidelity::Target::Svg,
+            ));
         report.duration = t0.elapsed();
         Ok(report)
     }
@@ -236,7 +242,7 @@ fn browser_image(res: &BitmapResource) -> Option<(Vec<u8>, &'static str, &'stati
             ImageFormat::Bmp | ImageFormat::Unknown => {}
         }
     }
-    let (w, h, rgba) = pixels(res)?;
+    let (w, h, rgba, icc) = pixels(res)?;
     let header = PngHeader {
         width: w,
         height: h,
@@ -248,22 +254,45 @@ fn browser_image(res: &BitmapResource) -> Option<(Vec<u8>, &'static str, &'stati
     };
     let mut png = Vec::new();
     encode_png(&mut png, header, &rgba).ok()?;
+    // The pixels were decoded without converting them, so the profile
+    // still describes them: it travels in `iCCP` (T11.5.2).
+    if let Some(tagged) = icc.and_then(|p| with_icc_profile(&png, &p)) {
+        png = tagged;
+    }
     Some((png, "image/png", "png"))
 }
+
+/// Width, height, straight RGBA8 samples and the embedded ICC profile.
+type Pixels = (u32, u32, Vec<u8>, Option<Arc<[u8]>>);
 
 /// Straight RGBA8 pixels of a bitmap, by the same rules as the scene
 /// walker: stored pixels of the right size as they are, otherwise the
 /// original decoded (`.xar` tag 71 with its palette, 65 for BMP, 69 for
-/// the importer's compressed BMP).
-fn pixels(res: &BitmapResource) -> Option<(u32, u32, Vec<u8>)> {
-    use xarast_image::xar::decode_xar_bitmap;
+/// the importer's compressed BMP). Also the ICC profile the original
+/// embeds, if any.
+fn pixels(res: &BitmapResource) -> Option<Pixels> {
     let (w, h) = (res.info.width, res.info.height);
     if w > 0 && h > 0 && res.pixels.pixels.len() == w as usize * h as usize * 4 {
-        return Some((w, h, res.pixels.pixels.to_vec()));
+        // Decoding again only for the profile, and only when there is one.
+        let icc = if crate::fidelity::has_icc_profile(res) {
+            decode_original(res).and_then(|d| d.icc)
+        } else {
+            None
+        };
+        return Some((w, h, res.pixels.pixels.to_vec(), icc));
     }
+    let d = decode_original(res)?;
+    let icc = d.icc.clone();
+    let d = d.data;
+    (d.width > 0 && d.height > 0).then(|| (d.width, d.height, d.to_straight_rgba8(), icc))
+}
+
+/// The original bytes decoded by the walker's rules.
+fn decode_original(res: &BitmapResource) -> Option<xarast_image::DecodedImage> {
+    use xarast_image::xar::decode_xar_bitmap;
     let o = res.original.as_ref()?;
     let limits = xarast_image::DecodeLimits::default();
-    let d = match o.format {
+    match o.format {
         ImageFormat::Jpeg if !res.pixels.palette.is_empty() => {
             let palette: Vec<[u8; 3]> =
                 res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect();
@@ -275,9 +304,7 @@ fn pixels(res: &BitmapResource) -> Option<(u32, u32, Vec<u8>)> {
         ImageFormat::Bmp => decode_xar_bitmap(65, &o.bytes, &[], &limits),
         ImageFormat::Unknown => decode_xar_bitmap(69, &o.bytes, &[], &limits),
     }
-    .ok()?
-    .data;
-    (d.width > 0 && d.height > 0).then(|| (d.width, d.height, d.to_straight_rgba8()))
+    .ok()
 }
 
 /// The writer's counters as report entries, then the fonts the file

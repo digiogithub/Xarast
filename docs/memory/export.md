@@ -11,7 +11,9 @@ filter registry and deterministic **raster** export to PNG, JPEG and WebP.
 Round 2 (2026-09-23, XARA-US-0059): **vector PDF 1.7** export, one page per
 export, with the fidelity ladder (section "PDF" below). Round 3
 (2026-09-24, XARA-US-0058): **SVG** export through the `.xarast` profile's
-mapper in its `Interchange` dialect (section "SVG" below). Batch export
+mapper in its `Interchange` dialect (section "SVG" below). Round 4
+(2026-09-24, XARA-US-0060): **colour fidelity and the export regression
+harness** (section "Colour fidelity and regression" below). Batch export
 (T11.1.6), export hints in the document (T11.1.5), palette quantisation
 (T11.2.8), AVIF (T11.2.7) and the dialog (T11.1.8, XARA-T-0192) are not
 built yet.
@@ -37,6 +39,11 @@ built yet.
 | `SvgDialect`, `BitmapLinker`, `SvgOptions::{area, background, minify}` (mapper side) | `crates/xarast-format/src/svg/mod.rs` |
 | The interchange projection | `crates/xarast-format/src/svg/interchange.rs` |
 | `cargo xtask svg-check [--interchange]` (usvg + resvg) | `xtask/src/main.rs` |
+| Colour census, `ColourConverted` / `ProfileDropped`, the sRGB marker table | `crates/xarast-io/src/fidelity.rs` |
+| `png::with_icc_profile` (`sRGB` → `iCCP`) | `crates/xarast-io/src/png.rs` |
+| `xarast-cli fixtures` (colour sheet, features, synthetic) | `crates/xarast-cli/src/fixtures.rs` |
+| `cargo xtask export-check` (SVG/PDF vs PNG, `qpdf --check`) + limits files | `xtask/src/export_check.rs`, `xtask/export-limits-{fixtures,corpus}.txt` |
+| CI: job `export` (two machines) + `reproducible`; nightly `export-corpus.yml` | `.github/workflows/` |
 
 The whole 59-file corpus exports to all three formats with **zero errors**,
 at 96 and at 300 dpi, and two runs are byte-identical for every file and
@@ -131,7 +138,104 @@ behind `SvgOptions::dialect`; that list is the table above.
   12.7 (resvg draws seams between tiles of a bitmap-fill `<pattern>`),
   SimpleText 5.7, WATCH 5.5. Sidecar + minify gives the same numbers.
   Heights differ by one row on some files (resvg rounds the height up).
-  Scripts: scratch only; automating it is XARA-T-0236.
+  Scripts: scratch only; automated since by `cargo xtask export-check`
+  (next section).
+
+## Colour fidelity and regression (W11.5, W11.6, XARA-US-0060)
+
+### Colour (T11.5.1–T11.5.5)
+
+- **Markers** (T11.5.1): PNG `sRGB` (or `iCCP`, below), JPEG EXIF
+  `ColorSpace = 1`, PDF `DeviceRGB`, SVG CSS sRGB. **WebP carries no
+  `ICCP`** on purpose: the container spec makes a chunk-less WebP sRGB, and
+  embedding a profile would cost ~3 KiB a file to restate it (and we have
+  no sRGB profile of our own yet; generating one is also what the PDF
+  output intent of XARA-T-0230 needs). The table is the module doc of
+  `fidelity.rs`; `tests/fidelity.rs` (CLI) asserts each marker.
+- **ICC pass-through** (T11.5.2): SVG passes PNG/JPEG/GIF originals byte
+  for byte (profile included); a bitmap SVG must re-encode (a `.xar` JPEG
+  with a reconstruction palette, BMP flavours) gets the decoder's profile
+  back through `png::with_icc_profile`, which swaps `sRGB` for `iCCP`
+  right after `IHDR` (PNG allows one of the two). Correct because the
+  renderer never converts pixels (`to_working_space` is phase 15). Raster
+  and PDF output draw such images as sRGB → **`Compromise::ProfileDropped
+  { images }`**. Detection: a header probe of the original
+  (`fidelity::has_icc_profile`); the document's `BitmapInfo` records no
+  colour space.
+- **CMYK and spot** (T11.5.3): no output profile exists, so every format
+  gets the naive conversion the renderer uses, and every report says so:
+  **`Compromise::ColourConverted { model: "CMYK" | "spot", count }`**,
+  counted per fill/line colour *attribute* (a gradient with two CMYK stops
+  is one). Spot = `ColourKind::Spot` or anything derived from one (tint,
+  shade, link). No `icc-color()` in SVG and no `DeviceCMYK`/`DeviceN` in
+  PDF: research/06 §6.12.3 makes `icc-color()` conditional on a profile.
+  Note for a future PDF `DeviceCMYK` mode: PDF's own DeviceCMYK→RGB rule
+  (`1 − min(1, C + K)`) is exactly our conversion, so a flat CMYK fill
+  written as `k` would look identical on screen and keep its separations.
+  It needs the CMYK value to survive into the display list (it does not
+  today: the walker resolves to `Rgba8`).
+- **Report** (T11.5.4): `fidelity::document_compromises(src, Target)` is
+  appended by all five exporters (`raster::finish`, `PdfExporter::export`,
+  `SvgExporter::export`); empty for scene-only sources.
+- **Colour sheet** (T11.5.5): `xarast_cli::fixtures::colour_sheet` — 20
+  flat patches (RGB, CMYK, HSV, grey, a named CMYK palette colour, its
+  palette tint, a local tint, a spot ink) with `colour_patches()` giving
+  each patch's rectangle and expected bytes (`resolve(table).to_rgba8()`,
+  the walker's and the SVG writer's rule). `crates/xarast-cli/tests/
+  fidelity.rs` reads all five formats back: PNG/WebP exact over 5×5 px at
+  every centre, JPEG ±6, SVG `<rect>` fills and uncompressed-PDF `rg`
+  operands exact in document order, Poppler's render ±1. Hand-written
+  anchors pin the model (`cmyk(0.2,0.3,0.4,0.1)` → `#b39980`).
+
+### Regression harness (T11.6.1–T11.6.4)
+
+- **`xarast-cli fixtures --out-dir D --format F [export options]`**
+  exports three built-in documents through `SessionSource` and the
+  registry (`export::run_on` takes in-memory inputs): `colour-sheet`,
+  `features` (linear gradient with a middle stop, elliptical radial, 8 pt
+  stroke, 50 % flat transparency over an opaque square), `synthetic`
+  (2 000 nodes of `xarast_doc::synth`). **No text**, so the bytes do not
+  depend on installed fonts.
+- **`cargo xtask export-check [--require-tools] [--limits F] DIR`**: for
+  each `<stem>.png` (our export, 72 dpi, paper) renders `<stem>.svg` with
+  resvg and `<stem>.pdf` with **both Poppler and Ghostscript** at the
+  PNG's exact size, and judges mean |Δ| (1/255, RGB over white) against 4
+  or the per-file limit; `qpdf --check` on every PDF; fails on `xarast:`.
+  A PDF is judged on the renderer that agrees best, but a renderer that
+  *fails to read* it fails the check.
+- **CI** (`ci.yml`): job `export` on ubuntu-24.04 and ubuntu-22.04 —
+  fixtures in five formats twice (`diff -r`), `svg-check --interchange`,
+  `export-check --require-tools`, a SHA-256 manifest uploaded; job
+  `reproducible` diffs the two manifests (T11.6.4 across machines). The
+  `check` job installs Poppler, so `tests/pdf.rs`'s render comparison and
+  the colour sheet's Poppler test now run in CI. Nightly
+  `export-corpus.yml`: sparse checkout of the fork's corpus directories
+  (secret `CORPUS_TOKEN` if the fork is private), corpus tests, the 59
+  files to PNG/SVG/PDF, `export-check` with `export-limits-corpus.txt`.
+- **T11.6.1** was already the CLI corpus test (all five formats, 0
+  failures); T11.6.4 on one machine is `the_fixtures_are_byte_identical_
+  across_processes`.
+
+### Measured (2026-09-24, 72 dpi, paper)
+
+Fixtures: colour-sheet svg 0.49 / pdf 0.50; features 0.23 / 0.87;
+synthetic 1.65 / 3.53 (gs; Poppler 8.9). Corpus: 59/59 each format; SVG
+median 0.73, PDF best-of-two median 1.98; 20 file/format pairs above 4,
+each with a limit and a reason in `export-limits-corpus.txt`:
+
+| Cause | Files (format: mean) |
+|---|---|
+| Bake ladder: conical/diamond/multi-colour fills | Fill Types simple (svg 19.7, pdf 7.2), WATCH2 svg 16.5, WATCH (svg 5.1, pdf 4.8) |
+| Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
+| Feathering as a blur | SoftShadow svg 4.1 |
+| Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) |
+
+Small text: Poppler and Ghostscript both paint thin glyph features darker
+than our coverage AA; rendered at 8× and compared at 8×, TextJust's PDF is
+within 2.4/255 of our 8× export, so the outlines are right. Poppler also
+strokes anything under a pixel as a whole pixel (synthetic 8.9) and
+mis-strokes the degenerate butt cap of `Broken Butt Cap` (12.6 where
+Ghostscript gives 0.97) — the reasons for a second renderer.
 
 
 
@@ -358,7 +462,9 @@ row), nor are Contrast, Brightness, Bevel.
   `NotRendered { what, count }` (walker shortfalls: text with no font,
   text on a path drawn on a straight baseline, quick shapes, images, live
   effects, unsupported clips), `FontSubstituted`,
-  `WidenedFrom8Bit` (16-bit PNG from the 8-bit render), and for vector
+  `WidenedFrom8Bit` (16-bit PNG from the 8-bit render),
+  `ColourConverted { model, count }` (CMYK/spot → sRGB, every format),
+  `ProfileDropped { images }` (raster and PDF), and for vector
   formats `Rasterised { node, reason, dpi }`, `Approximated { node, what }`
   and `BlendModeApproximated { node, ours, theirs }`.
 - The export band height must stay a function of `(width, height)` only, and
@@ -381,6 +487,13 @@ row), nor are Contrast, Brightness, Bevel.
   `ListRasteriser` on `CpuConfig::deterministic()`.
 - **Every rasterised or approximated object is reported**, per object, with
   its scene node (the document tag).
+- **The built-in fixtures stay text-free** (`xarast-cli fixtures`): CI
+  compares their bytes across two machines, and text would make them
+  depend on installed fonts.
+- **A new export-check limit needs its reason** in the limits file; the
+  default stays 4/255.
+- **PNG never carries both `sRGB` and `iCCP`** (`with_icc_profile` removes
+  the former).
 
 ## Dead ends (do not retry)
 
@@ -409,6 +522,12 @@ row), nor are Contrast, Brightness, Bevel.
   SVG can say natively (groups, gradients as gradients, text as text).
 - **Percent-encoding sidecar paths**: resvg does not decode them; sanitise
   the folder name instead.
+- **Judging PDF on Poppler alone**: it strokes sub-pixel widths as a full
+  pixel and mis-strokes `Broken Butt Cap`'s degenerate cap (12.6/255 where
+  Ghostscript gives 0.97). `export-check` renders with both and takes the
+  better; a read failure in either still fails.
+- **`pdftoppm -r 72` for a size-exact comparison**: it rounds the page up
+  (277 × 181 for a 276.25 pt page); use `-scale-to-x/-scale-to-y`.
 - **Comparing Poppler renders of placed images pixel for pixel**: Poppler
   resamples even at 1:1 (mean |Δ| 5–8/255 on the image cases); assert the
   report instead.
@@ -422,16 +541,23 @@ row), nor are Contrast, Brightness, Bevel.
   and the on-screen/headless path's three bands; export itself is done.
 - T11.1.5 export hints in `meta.xml` (the option structs are serde-ready and
   `#[serde(default)]`), T11.1.6 batch export, T11.2.8 palette quantisation
-  (PNG `Palette` is exact-only and refuses > N colours), T11.2.7 AVIF,
-  T11.5.2 ICC passthrough.
+  (PNG `Palette` is exact-only and refuses > N colours), T11.2.7 AVIF.
+- Colour follow-ups: XARA-T-0249 (PDF `DeviceCMYK` option, our own sRGB
+  profile for the output intent and WebP, `icc-color()`/`DeviceN` once a
+  profile exists); colour-managing ICC images is phase 15. XARA-T-0248:
+  compare our corpus renders with the previews the original embedded in
+  each `.xar` (render TODO 5; the original itself cannot run here).
+- `qpdf --check` has never run on this machine (not installed): the first
+  CI `export` job is its first run over our PDFs.
 - SVG follow-ups: XARA-T-0233 (fonts: WOFF2 subset or outlines),
   XARA-T-0234 (precision), XARA-T-0235 (`Reference` resources, physical
-  size, full minify), XARA-T-0236 (resvg check and comparison in CI); the
+  size, full minify); XARA-T-0236 (resvg check and comparison in CI) is
+  done by XARA-US-0060; the
   shared bake ladder is XARA-T-0102 (profile).
 - PDF follow-ups: XARA-T-0227 (bitmap transparency, ramp alpha, layer
   masks, per-family ΔE), XARA-T-0228 (embedded subset fonts), XARA-T-0229
-  (images: DCT passthrough), XARA-T-0230 (multi-page, XMP, output intent,
-  `qpdf` in CI), XARA-T-0232 (ladder cost and file size). XARA-T-0231 is
+  (images: DCT passthrough), XARA-T-0230 (multi-page, XMP, output intent;
+  its `qpdf`-in-CI part is done by XARA-US-0060), XARA-T-0232 (ladder cost and file size). XARA-T-0231 is
   done: the raster exporters now honour `cap_end` and the dash offset as
   PDF does, so PDF and raster agree on both.
 - A 20 000 × 20 000 WebP or JPEG holds the whole image (JPEG ≤ 65 535 px a

@@ -1,0 +1,75 @@
+name: Export corpus
+
+# Phase 11 W11.6 over the real 59-file .xar corpus, every night: the corpus
+# tests of the workspace (XARAST_XAR_CORPUS), then every file exported to
+# PNG, SVG and PDF at 72 dpi over the paper and checked with
+# `cargo xtask export-check` against xtask/export-limits-corpus.txt
+# (resvg for SVG; Poppler and Ghostscript for PDF; qpdf --check).
+#
+# The corpus is never copied into this repository (CLAUDE.md): it is read
+# from the fork of the original, checked out beside the workspace. When
+# that repository is private, set the CORPUS_TOKEN secret to a token that
+# can read it.
+
+on:
+  schedule:
+    # 03:30 UTC, after the fuzz run.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: export-corpus-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    name: Corpus export regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: digiogithub/xara-xtreme
+          ref: claude/xara-xtreme-rust-port-ktggmu
+          path: corpus
+          token: ${{ secrets.CORPUS_TOKEN || github.token }}
+          sparse-checkout: |
+            testfiles
+            Designs
+            Templates
+            TextDesigns
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install the reference tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils ghostscript qpdf
+
+      - name: Corpus tests
+        run: cargo test --workspace --release
+        env:
+          XARAST_XAR_CORPUS: ${{ github.workspace }}/corpus
+
+      - name: Export the corpus
+        run: |
+          cargo build --release --locked -p xarast-cli -p xtask
+          for fmt in png svg pdf; do
+            target/release/xarast-cli export --out-dir exported --format "$fmt" \
+              --dpi 72 --background paper --quiet \
+              corpus/testfiles corpus/Designs corpus/Templates corpus/TextDesigns
+          done
+
+      - name: Check the exports
+        run: |
+          target/release/xtask svg-check --interchange exported
+          target/release/xtask export-check --require-tools \
+            --limits xtask/export-limits-corpus.txt exported

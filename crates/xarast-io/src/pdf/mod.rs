@@ -197,6 +197,12 @@ impl Exporter for PdfExporter {
         }
         report.dpi = 72.0;
         report.compromises.extend(built.compromises);
+        report
+            .compromises
+            .extend(crate::fidelity::document_compromises(
+                src,
+                crate::fidelity::Target::Pdf,
+            ));
         report.duration = t0.elapsed();
         Ok(report)
     }

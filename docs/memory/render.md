@@ -898,7 +898,7 @@ never calls `begin_frame` (export, corpus tools) never evicts.
 | 16 | The iGPU `write_texture` cliff: 1080p 0.6 ms, 4K 24 ms | XARA-T-0052 |
 | 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
 | 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
-| 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the comparison against the original is Phase 11 |
+| 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the original cannot run here (closed CDraw, 2006 binaries), so XARA-T-0248 compares with the previews each `.xar` embeds and keeps the zoom comparison VM-gated |
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
 | 7 | ~~`DisplayList::build` at 100k: 20.8 ms against 3 ms~~. **Done 2026-09-23**: 1.9 ms; the cause and the fix are under "Decisions taken". The 100k CPU full frame is 19 ms against 25 | done (XARA-US-0016) |
 | 8 | Deferred `Draft → Final` upgrade with the 120 ms idle timer and cancellation (R6.8) — the quality levels exist and differ, the scheduler does not. After the G1/G2 re-run this is **what the 16 ms pan/zoom budget depends on**: a 100k full frame costs 35–160 ms on the CPU and 72–86 ms on the iGPU | Phase 5, which owns the idle timer |
