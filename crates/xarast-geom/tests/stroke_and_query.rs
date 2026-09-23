@@ -115,8 +115,8 @@ fn square_and_round_caps_extend_the_stroke() {
 
 #[test]
 fn mismatched_caps_are_handled() {
-    // `kurbo::Stroke` takes both caps, and our extra union pass must not
-    // corrupt the result.
+    // Each end gets its own cap: a round start and a square end, not the
+    // union of both at each end.
     let style = StrokeStyle {
         width: Mp::new(200),
         cap_start: Cap::Round,
@@ -125,7 +125,14 @@ fn mismatched_caps_are_handled() {
     };
     let out = stroke_to_path(&line(0, 0, 1000, 0), &style, TOL).expect("a real width");
     assert_eq!(out.validate(), Ok(()));
-    assert!(out.signed_area().abs() > 200_000.0);
+    // Body 200 000, half-disc 15 708, half-square 20 000.
+    let want = 200_000.0 + std::f64::consts::PI * 100.0 * 100.0 / 2.0 + 20_000.0;
+    let got = out.signed_area().abs();
+    assert!((got - want).abs() < want * 0.005, "area {got}, want {want}");
+    // The start's square corner is outside the round start cap...
+    assert!(!hit_fill(&out, Point::raw(-90, 90), FillRule::NonZero));
+    // ...and the end's square corner is inside the square end cap.
+    assert!(hit_fill(&out, Point::raw(1090, 90), FillRule::NonZero));
 }
 
 #[test]
