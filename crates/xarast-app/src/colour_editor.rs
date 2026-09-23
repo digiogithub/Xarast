@@ -42,9 +42,9 @@ use std::sync::Arc;
 
 use xarast_color::{Colour, ColourDef, ColourId, ColourKind, ColourModel, ColourValue, OnDelete};
 use xarast_doc::fill::FillGeometry;
+pub use xarast_doc::fill_edit::PaintSlot;
 use xarast_doc::fill_edit::{
-    FillChannel, FillValue, PaintSlot, SetStopValue, StopTarget, StopValue, fill_in_force,
-    stop_value,
+    FillChannel, FillValue, SetStopValue, StopTarget, StopValue, fill_in_force, stop_value,
 };
 use xarast_doc::palette::{
     CreateColour, DeleteColour, RedefineColour, RenameColour, ReparentColour,
