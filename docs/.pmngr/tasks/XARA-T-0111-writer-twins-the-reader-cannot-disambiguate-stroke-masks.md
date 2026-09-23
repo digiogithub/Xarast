@@ -2,14 +2,15 @@
 id: XARA-T-0111
 type: task
 title: "Writer twins the reader cannot disambiguate: stroke masks, lone transparency twins, bitmap transparency images"
-status: in_progress
+status: done
 priority: medium
 parent: XARA-US-0024
 author: mcp
 labels: [phase-6, xarast-format, svg]
 created: 2026-09-23T16:46:55Z
-updated: 2026-09-23T17:55:21Z
+updated: 2026-09-23T18:01:50Z
 started: 2026-09-23T17:55:21Z
+closed: 2026-09-23T18:01:50Z
 ---
 
 ## Description

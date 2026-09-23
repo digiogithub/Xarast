@@ -2,14 +2,15 @@
 id: XARA-T-0108
 type: task
 title: Writer drops the subtree under Opaque nodes (9 corpus files lose objects on save)
-status: in_progress
+status: done
 priority: high
 parent: XARA-US-0028
 author: mcp
 labels: [phase-6, xarast-format, svg, data-loss]
 created: 2026-09-23T16:46:17Z
-updated: 2026-09-23T17:10:17Z
+updated: 2026-09-23T18:01:50Z
 started: 2026-09-23T17:10:17Z
+closed: 2026-09-23T18:01:50Z
 ---
 
 ## Description
