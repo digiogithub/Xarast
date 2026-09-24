@@ -2,12 +2,13 @@
 id: XARA-US-0052
 type: story
 title: W10.3/W10.4 — Bitmap fills, contone and resampling quality
-status: backlog
+status: in_progress
 parent: XARA-EP-0011
 author: mcp
 labels: [phase-10, render]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-24T07:30:34Z
+started: 2026-09-24T07:30:34Z
 ---
 
 ## Tasks (full tables: phase-10 §W10.3, §W10.4)

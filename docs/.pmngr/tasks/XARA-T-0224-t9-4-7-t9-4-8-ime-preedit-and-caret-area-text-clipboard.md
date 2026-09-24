@@ -2,12 +2,13 @@
 id: XARA-T-0224
 type: task
 title: T9.4.7–T9.4.8 — IME preedit and caret area; text clipboard
-status: backlog
+status: in_progress
 parent: XARA-US-0047
 author: mcp
 labels: [phase-9, tools, text]
 created: 2026-09-23T21:28:57Z
-updated: 2026-09-23T21:28:57Z
+updated: 2026-09-24T07:28:19Z
+started: 2026-09-24T07:28:19Z
 ---
 
 ## Description
