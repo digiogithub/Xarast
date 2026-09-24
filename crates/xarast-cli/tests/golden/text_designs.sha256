@@ -1,0 +1,21 @@
+# SHA-256 of `xarast-cli render --zoom 200` (CPU, pinned fonts in
+# crates/xarast-text/tests/fonts) of each TextDesigns corpus file, as
+# `xarast_render::golden::digest` computes it. Derived facts only: the
+# files and their renders are never committed. Regenerate with
+# XARAST_UPDATE_GOLDEN=1 (tests/text_designs.rs).
+#
+# sha256  size  path
+bb0d1c08b5fd80d4333eabb2ebac6fcabc4dba9a5f093e2e392da07ad38ac334  1271x977  TextDesigns/AngledText.xar
+789e73cc672422503dc6856e1fc6d922a1aca3251c19f6d6438c7d939bb829db  711x596  TextDesigns/BaselineShift.xar
+0a76883ac2578c80520eeb1163d58baae06e5e64deaaffbff4353b0ea712d10e  793x118  TextDesigns/FontChangesInText.xar
+4541619d4c129ff3b80b53058a4c4ac8cf2a3fb5c5746c1fccf402ead69cd192  416x481  TextDesigns/Kerning.xar
+72da087e2673f0503426a50b91e217e9088b3bbdee7debebecc9be985b089aaf  663x743  TextDesigns/LineSpacing.xar
+ba353c987d71708c60f98f49bdd22809ee0c4e6d5a6746da4714b89050448c2e  691x540  TextDesigns/ManualKern.xar
+a3ab7e3f34321f816495b93922d9136d201ed6c2ecb39773b97a4f9780104e0a  536x418  TextDesigns/Paragraph.xar
+06725be5c68140a8e734e8abfd5e6240918c1692f067325362cdd46c78a1f178  1077x846  TextDesigns/Rotated.xar
+257bb9a0179d9edf3a0b65d9123663bf8c6654ee1d6b19676c039ab282dbfa6f  254x181  TextDesigns/SimpleText.xar
+e3523c1e23cd073ba6d2bdf6417e8e8c233f7f955ce5d934a1e94c744f2640ad  1153x422  TextDesigns/SuperSub.xar
+af6f6d71c3a33de5312d21fee1033999c79b662260a9826a5ae21fca937440c0  418x868  TextDesigns/TextJust.xar
+091f63a3c06659fb572867eafb431576388384656d258f8bd8542f6670cbb38c  733x472  TextDesigns/Tracking.xar
+c55a477946bac192a73eeba1f831deb350ac78586d373e327c437cdfe8e6fc44  811x430  TextDesigns/embeddedFonts.xar
+1233572501c64205f5772957ee0724712d756532befdb39c71d89df0b55eb509  998x528  TextDesigns/hebrew.xar

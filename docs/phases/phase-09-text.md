@@ -364,6 +364,17 @@ something else has its row corrected rather than the test weakened.
 | 13 | `embeddedFonts.xar` | 3.9 KB | Fonts carried inside the document: the embedded-face path, and what happens when the face is also installed | W9.1 |
 | 14 | `hebrew.xar` | 12.4 KB | RTL text: bidi resolution, visual-order caret movement, right-aligned defaults, mixed-direction runs | W9.3, W9.4 |
 
+**T9.7.1 inventory (2026-09-24, XARA-T-0260).** Confirmed against
+`xar-dump --tags`; the per-file table is in `docs/memory/text.md`
+("TextDesigns acceptance gate"). Corrections to the column above:
+`Kerning.xar` also carries manual kerns (`TAG_TEXT_KERN`), its automatic
+kerning being the story's flag; `AngledText.xar` also sets bold, italic
+and tracking; `LineSpacing.xar` uses only proportional spacing (no
+absolute line-spacing tag occurs in any of the 14); `Rotated.xar` covers
+every justification, super/subscript, tracking and kerns;
+`embeddedFonts.xar` carries no font data, so criterion 5 needs a
+synthetic document.
+
 `Designs/TextCurve.xar` is the fifteenth fixture, from the other corpus
 directory: it is the text-on-a-path gate for W9.5.
 
