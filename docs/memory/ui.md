@@ -845,10 +845,10 @@ instrumentation), which was extended rather than replaced.
 | `tiles` | `TilePlanner`, `CpuTileStore`/`GpuTileStore`, `Compositor`: the canvas retained as tiles, GPU and CPU tiers | Done (XARA-T-0050) |
 | `probe` | Scripted pan/zoom latency probe (`--probe`) | Done (XARA-T-0050) |
 | `intents` | `IntentAdapter`, `semantic_modifiers`, `semantic_button`, `CanvasRegion` — physical `ShellEvent` → semantic `xarast_app::Intent` | Done (XARA-T-0001) |
-| `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame` | Done (XARA-T-0003) |
+| `paint` (private) | `Painter`: canvas pass + egui pass in one render pass; `CanvasFrame`, `UiFrame`; `TextureLedger` (CPU copy of the egui textures, for a device rebuild) | Done (XARA-T-0003; ledger XARA-US-0064) |
 | `viewer` | `Viewer`, the composition root: `ShellApp` over `AppState` + `Workspace` + `RenderThread` | Done (XARA-T-0003); panels respond (XARA-US-0002) |
 | `egui_input` | `EguiInput`: `ShellEvent` → `egui::RawInput`; `cursor_shape` | Done (XARA-US-0002) |
-| `gpu_errors` | `GpuErrorSink` (the uncaptured-error and device-lost handler), `GpuRecovery` (the escalation policy) | Done (XARA-T-0027) |
+| `gpu_errors` | `GpuErrorSink` (the uncaptured-error and device-lost handler, with a lost flag), `GpuRecovery` (the escalation policy), `DeviceLoss` (the rebuild ladder), `DeviceRebuilt` | Done (XARA-T-0027; loss XARA-US-0064) |
 | `window` (AccessKit) | `A11y`: `accesskit_winit` adapter, handlers → `ShellEvent::Accessibility*` | Done (XARA-US-0003), behind the default `accessibility` feature |
 
 161 unit tests (shell), all passing with no compositor; the one that needs
@@ -1225,6 +1225,55 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     `poll_saves` (the same waker wakes the loop for both, and for
     thumbnails) and redraws when `poll_thumbnails` says one arrived.
     Tests: `PortalService::offline` and synthetic `FilesChosen` answers.
+43. **Crashes, device loss and safe mode** (XARA-US-0064; the core half
+    is `app-core.md` "Crashes").
+    - **Panic hooks.** `install_panic_hook` chains three: the crash
+      report (`xarast_app::crash`, installed *last* so it runs *first*),
+      a log line naming thread and location only (a run-time message may
+      carry document text, and the log feeds later reports), then Rust's
+      own message. `init_tracing` adds `CrashLogLayer`, which copies every
+      event that passes the filter into the report's 200-line ring.
+    - **Panic on the interface thread**: it unwinds through `winit` and
+      drops the `Viewer`, whose `Drop` runs `emergency_shutdown` when
+      `std::thread::panicking()`. **Panic on the render thread**:
+      `crash::run_guarded` raises `FatalWatch::global()`, which wakes the
+      loop; `housekeeping` answers exactly as for a signal and `main`
+      returns 101. Tests: `a_fatal_worker_panic_autosaves_the_work_and_exits`,
+      `a_panic_on_the_interface_thread_autosaves_while_unwinding`.
+    - **The sentinel.** `main` calls `crash::begin_session` after the
+      arguments (not for `--screenshot`/`--probe`), and `Sentinel::finish`
+      only on a clean return; a fatal panic returns 101 before it, a
+      main-thread panic unwinds past it.
+    - **Device loss (F2).** The device-lost callback calls
+      `GpuErrorSink::record_lost` (a flag besides the error count). After a
+      frame, a set flag makes the loop drop the `Gpu` into a `GpuCarry`
+      (compositor's last `TiledFrame` and `CanvasView`, the
+      `TextureLedger`, the last egui meshes and scale — all CPU memory,
+      nothing read back) and call `Gpu::new` again on the same window;
+      `restore` refills the compositor and replays every texture whole.
+      `DeviceLoss`: the first loss rebuilds as configured, from the second
+      on with `RendererPreference::Cpu`; a failed rebuild waits 250 ms
+      doubling to 2 s and retries at a redraw, absorbing whatever the
+      application hands in meanwhile into the carry (only the last frame
+      and view are kept). Never exits. The application hears
+      `ShellEvent::GpuRebuilt` (status line "…restarted (CPU · …); nothing
+      was lost"). The document is never involved: it lives in `AppState`.
+    - **Testing it without a GPU.** `wgpu`'s `noop` backend, as a
+      dev-dependency feature only (`Cargo.lock` unchanged; the binary
+      never has it): `a_lost_device_hands_its_picture_to_a_cpu_compositor_on_a_new_device`
+      moves a GPU-tier compositor's picture to a CPU-tier one on a second
+      no-op device and compares pixels. In a window,
+      `XARAST_INJECT_DEVICE_LOSS=N` raises the lost flag after N frames —
+      a simulation: no device is destroyed. Not run on the maintainer's
+      desktop (no windows from agents).
+    - **Safe mode (F5).** `ShellConfig::safe_mode` (from `--safe-mode` or
+      a forced crash loop): `RendererPreference::Cpu` and
+      `candidate_adapters(.., prefer_software)`, which tries the fallback
+      (lavapipe/llvmpipe) adapter first. Chosen from the crash prompt,
+      `PlatformRequest::EnterSafeMode` → `ShellCtx::request_safe_mode` →
+      the loop rebuilds the device through the same carry path
+      (`RebuildCause::SafeMode`). Preferences reset in memory; there is
+      no persisted layout, theme, plugin or gallery scan to skip yet.
 
 ### Invariants that must not be broken
 
@@ -1284,6 +1333,15 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
     pins it on whatever adapter the test finds.
 17. **A tile's valid area is always a rectangle of pixels it holds.** A
     piece that would not join it into one restarts the tile.
+18. **A device rebuild needs nothing from the application.** Everything
+    a new `Gpu` shows comes from the `GpuCarry` (`TextureLedger`,
+    compositor carry, last meshes). Every egui texture delta applied to
+    the painter is applied to the ledger too, in the same order.
+19. **No test loses, destroys or resets a real device.** Device loss is
+    simulated (`record_lost`, the `noop` backend); a real-GPU test still
+    takes `gpu_test_lock::acquire`.
+20. **The `Viewer` is never destructured or moved out of by field**: its
+    `Drop` is the interface thread's emergency save.
 
 ### Dead ends (do not retry)
 
@@ -1372,13 +1430,15 @@ isolated GNOME session on a private bus:
   (XARA-T-0050): adapter ladder, GPU tiles / CPU tier, runtime demotion.
   Still open: `--version --verbose` does not print the tier (it needs a
   device), there is no GPU rasteriser tier (by the GPU decision), a
-  lost device is not rebuilt, and the GL swapchain cannot be read back,
+  lost device is rebuilt since XARA-US-0064, and the GL swapchain cannot be read back,
   so `--screenshot` under `WGPU_BACKEND=gl` logs a failed capture.
   Frame pacing beyond `Wait`/`WaitUntil` is still the skeleton's.
 - [x] **`wgpu` validation errors are fatal** — no longer: decision 21
-  (XARA-T-0027). Still open: a *lost device* is logged and backed off
-  from, not recreated. Rebuilding `Gpu` (device, surface, painter
-  textures) after `DeviceLost` is the next step if a driver ever does it.
+  (XARA-T-0027). A *lost device* is rebuilt since decision 43
+  (XARA-US-0064). Still open: the rebuild has never met a real driver
+  reset (soak under a driver-reset script on the reference machine, phase
+  12 risk table), and whether `wgpu` 30 reports a suspend-cycle loss
+  through the device-lost callback or only as surface errors is unmeasured.
 - [x] **The panels are drawn but inert** — they respond; decision 22
   (XARA-US-0002). Real mouse and keyboard were not injected on the
   maintainer's desktop (`ydotool` exists but would type into whatever

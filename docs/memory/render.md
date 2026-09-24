@@ -1252,6 +1252,19 @@ passes the tile parity byte for byte here). Checked on the
 reference machine by holding the file with `flock(1)`: the test waits and
 times out without touching the GPU.
 
+**The one exception: `wgpu`'s no-op backend** (XARA-US-0064,
+2026-09-24). An instance created with `Backends::NOOP` and
+`BackendOptions { noop: NoopBackendOptions::enabled(), .. }` enumerates
+only the no-op adapter, loads no driver and runs nothing, so it takes no
+lock and can run in parallel. `xarast-shell` enables `wgpu`'s `noop`
+feature as a **dev-dependency only** (no new crate in `Cargo.lock`; the
+binary never has it) for the device-loss test
+`tiles::tests::a_lost_device_hands_its_picture_to_a_cpu_compositor_on_a_new_device`.
+Use it for anything that needs a `wgpu::Device` to exist but never needs
+pixels back from it; a no-op device returns nothing meaningful from a
+read-back. Device loss itself is always simulated
+(`GpuErrorSink::record_lost`); no test destroys or resets a real device.
+
 Note for `cargo test -p xarast-render`: the two parity files are
 `#![cfg(feature = "gpu")]`; alone, pass `--features gpu` (in a workspace
 run the shell's dependency turns it on).
@@ -1460,7 +1473,8 @@ arm); whether CDraw does the same is one of the VM questions.
     device first binds `let Some(_gpu) = gpu_test_lock::acquire("…") else
     { return };` and keeps the guard alive, bound first so that it drops
     after every device, queue and resource. A helper that returns a device
-    does not take the lock itself; its caller does.
+    does not take the lock itself; its caller does. An instance limited
+    to `Backends::NOOP` is exempt (it touches no GPU; see "GPU tests").
 
 18. **Images are filtered premultiplied; minified in linear light,
     magnified in encoded sRGB; composited in encoded sRGB.** Only
