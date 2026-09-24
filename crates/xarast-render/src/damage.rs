@@ -42,10 +42,12 @@
 
 use std::collections::HashMap;
 
+use xarast_color::Rgba8;
+
 use crate::backend::cpu::Resolver;
 use crate::blend::{TranspSource, Transparency};
 use crate::display_list::{ViewParams, device_bounds_of, mapping_bounds};
-use crate::paint::{GradRamp, ImageId, Paint};
+use crate::paint::{GradRamp, ImageId, ImageRef, Paint};
 use crate::precision::Transform2D;
 use crate::ramp::RampId;
 use crate::scene::{Scene, SceneOp, stroke_pad};
@@ -409,18 +411,10 @@ impl Diff<'_> {
             ok = ok
                 && match r {
                     Ref::Ramp(id) => *self.ramps.entry(id).or_insert_with(|| {
-                        let (x, y) = (self.a.res, self.b.res);
-                        x.ramps.try_get(id) == y.ramps.try_get(id)
-                            && x.transparency_ramps.get(id.index() as usize)
-                                == y.transparency_ramps.get(id.index() as usize)
+                        ramp_tables(self.a.res, id) == ramp_tables(self.b.res, id)
                     }),
-                    // Never by producing a deferred image's base: that is
-                    // a full evaluation on the render thread (XARA-T-0304).
                     Ref::Image(id) => *self.images.entry(id).or_insert_with(|| {
-                        match (self.a.res.images.get(id), self.b.res.images.get(id)) {
-                            (Some(x), Some(y)) => x.eq_without_producing(y),
-                            (x, y) => x.is_none() && y.is_none(),
-                        }
+                        same_image(self.a.res.images.get(id), self.b.res.images.get(id))
                     }),
                 };
         });
@@ -485,7 +479,7 @@ fn leaf_bounds(
 
 /// A cheap key consistent with op equality: equal ops have equal keys.
 /// Two different ops may share one; the equality test decides.
-fn key(op: &SceneOp) -> u64 {
+pub(crate) fn key(op: &SceneOp) -> u64 {
     fn mix(h: u64, v: u64) -> u64 {
         let mut z = h.rotate_left(5) ^ v.wrapping_add(0x9e37_79b9_7f4a_7c15);
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -518,14 +512,42 @@ fn key(op: &SceneOp) -> u64 {
     }
 }
 
+/// The two tables a ramp id resolves to: the colour table and the
+/// transparency table interned alongside it. Two resolvers agree on a
+/// ramp id exactly when both are equal; the effect layer cache
+/// (`crate::effect_cache`) compares its snapshots by the same rule.
+pub(crate) fn ramp_tables(res: &Resolver, id: RampId) -> (Option<&[Rgba8]>, Option<&[u8]>) {
+    (
+        res.ramps.try_get(id),
+        res.transparency_ramps
+            .get(id.index() as usize)
+            .map(Vec::as_slice),
+    )
+}
+
+/// Whether two resolvers' images under one id draw the same pixels.
+///
+/// Never by producing a deferred image's base: that is a full evaluation
+/// on the render thread (XARA-T-0304), so a pending image counts as
+/// different, which only ever costs a repaint.
+pub(crate) fn same_image(a: Option<&ImageRef>, b: Option<&ImageRef>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => x.eq_without_producing(y),
+        (x, y) => x.is_none() && y.is_none(),
+    }
+}
+
 /// A resource an op refers to by id.
 #[derive(Debug, Clone, Copy)]
-enum Ref {
+pub(crate) enum Ref {
+    /// A gradient or transparency ramp.
     Ramp(RampId),
+    /// A registered image.
     Image(ImageId),
 }
 
-fn refs(op: &SceneOp, f: &mut impl FnMut(Ref)) {
+/// Calls `f` with every ramp and image `op` refers to.
+pub(crate) fn refs(op: &SceneOp, f: &mut impl FnMut(Ref)) {
     match op {
         SceneOp::Fill {
             paint,
