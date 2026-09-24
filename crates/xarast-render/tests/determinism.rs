@@ -153,3 +153,50 @@ fn a_thin_strip_renders_the_same_in_column_tiles() {
     };
     assert_eq!(render(0), render(1), "a column-tile edge changed the strip");
 }
+
+/// A rectangle drawn over a frame is exactly that frame's pixels, however
+/// the rectangle cuts the bands, the columns and the primitives: the
+/// render thread repaints an edit's damage over the frame on screen and
+/// the result must be the frame a full render gives (XARA-T-0221). Before
+/// the rasteriser was given a fixed top left, a rectangle starting inside
+/// a primitive moved `aa_edge_45` by 1/255 in up to 53 pixels.
+#[test]
+fn coverage_does_not_depend_on_the_draw_area() {
+    use xarast_render::{CpuBackend, DeviceRect, DirtyRect, DisplayList};
+    for cfg in [CpuConfig::deterministic(), CpuConfig::interactive()] {
+        for case in all_cases() {
+            let full = render_case_with(&case, cfg);
+            let (w, h) = (
+                i32::try_from(case.view.viewport.width()).unwrap(),
+                i32::try_from(case.view.viewport.height()).unwrap(),
+            );
+            for r in [
+                DeviceRect::new(w / 3, h / 5, w - 7, h - 3),
+                DeviceRect::new(5, 13, w / 2 + 3, h / 2 + 1),
+                DeviceRect::new(w / 4 + 1, 0, w, h),
+                DeviceRect::new(0, h / 3 + 1, w, h),
+                DeviceRect::new(w / 2 - 1, h / 2 - 2, w / 2 + 3, h / 2 + 1),
+            ] {
+                let mut t = full.clone();
+                let stride = case.view.viewport.width() as usize * 4;
+                for y in r.y0..r.y1 {
+                    let row = usize::try_from(y).unwrap() * stride;
+                    let (x0, x1) = (
+                        usize::try_from(r.x0).unwrap() * 4,
+                        usize::try_from(r.x1).unwrap() * 4,
+                    );
+                    t.data_mut()[row + x0..row + x1].fill(0);
+                }
+                let dl = DisplayList::build(&case.scene, &case.view, &DirtyRect::of(r));
+                CpuBackend::new(cfg)
+                    .render(&dl, &case.resolver, &mut t)
+                    .expect("renders");
+                assert!(
+                    t == full,
+                    "{}: drawing {r:?} over the frame changed it ({cfg:?})",
+                    case.name
+                );
+            }
+        }
+    }
+}

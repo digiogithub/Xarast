@@ -37,7 +37,9 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   Graduated and bitmap-sourced transparency feed the same families.
 - **Cache and incremental redraw:** content-hash keys, √2 scale quantisation,
   cost-weighted LRU under a hard byte budget, an admission policy, dirty-rect
-  culling and `scroll_surface` reprojection.
+  culling and `scroll_surface` reprojection. `scene_damage` diffs two scenes
+  into the device rectangles an edit changed (XARA-T-0221, "Edit damage"),
+  and any rectangle drawn over a frame is exactly that frame's pixels.
 - **Validation:** a 120-scene generated feature corpus with committed goldens,
   exact CPU goldens, determinism over 20 runs, the gradient matrix, the blend
   domain, the precision rule (measured *and* grepped), AA level counts and a
@@ -491,6 +493,11 @@ matter to this crate:
   memory; a unit test in the shell holds the two tiers byte-identical on
   every adapter it finds, and real-window screenshots of `ProbeX16.xar`
   on the Intel iGPU and the RTX, each tier, have identical canvases.
+- An edit keeps the tiles (XARA-T-0221): a frame of a new scene epoch
+  whose `base` is the last frame uploaded keeps its level's tiles under
+  the view and uploads only its `fresh` damage; tiles holding texels
+  outside the view restart, every other tile goes (`TileStore::retain`,
+  `GpuTileCache::retain`).
 - The composite target is the painter's canvas texture (`Rgba8Unorm`,
   now also a render attachment); the swapchain may be `Bgra8Unorm`, which
   is why the tiles do not draw into it directly.
@@ -500,6 +507,61 @@ matter to this crate:
 900 000-op scene, so a single 256² tile costs 5–10 ms and a 1920 × 256
 row 12–18 ms. Rasterise one dirty rectangle per frame (as the render
 thread already does) and upload its pieces; do not loop over tiles.
+
+### Edit damage (XARA-T-0221, 2026-09-24)
+
+`damage::scene_damage(old, new, view, max_rects)` returns the device
+rectangles whose pixels may differ between a frame of `old` and a frame of
+`new`. The render thread calls it with the scene of the frame on screen and
+repaints only those rectangles (`app-core.md` decision 40); the shell keeps
+its tiles across the repaint.
+
+- **The model.** A scene is a tree: pushes (group, clip, transparency scope,
+  layer) are inner nodes, fills, strokes and images are leaves. Children of
+  two inner nodes with equal push ops are aligned: common prefix and suffix
+  pairwise, then the middle by a cheap key (op kind, node id, path bounds
+  bits) plus full op equality, cut to the longest order-preserving run
+  (patience/LIS). Matched subtrees recurse; every leaf under an unmatched
+  child, on either side, is damage, with its display-list device bounds
+  (`device_bounds_of`, `mapping_bounds`, `stroke_pad`: the same functions
+  the build uses).
+- **Why it is sufficient.** A pixel outside the damage is covered only by
+  matched leaves, in the same order, under equal pushes, so it is
+  composited from the same inputs. That rests on two renderer properties,
+  both pinned: a leaf touches nothing outside its display-list bounds, and
+  a clip, group or layer with no leaf on a pixel leaves it alone.
+- **Resources are compared by content.** Equal ops can name different
+  ramps: an evicted ramp slot is reused by the next intern. A matched op's
+  ramp ids (colour table and transparency table) and image ids are checked
+  against both resolvers, memoised per id.
+- **It is command-agnostic by design.** It covers a group attribute that
+  recolours its siblings, a named colour redefinition (every user of the
+  colour and nothing else, tested), z-order, undo, redo and previews,
+  with no per-command extent to get wrong. `None` only when the scenes'
+  qualities differ or one is unbalanced.
+- **`damage::coalesce`** merges to at most `max_rects`, cheapest union
+  first, and merges below the limit whenever a union costs no area; above
+  256 raw rectangles it first chunks them in reading order.
+- **Tests.** Unit tests (recolour, move, z-swap, group transform, reused
+  ramp slot, LIS, coalescing); `properties::repainting_the_damage_gives_
+  the_new_frame` (512 random step sequences × 1–3 random edits including
+  layers, clips and blend families, byte-exact); the corpus test in
+  `xarast-shell/tests/edit_damage.rs`. Mutation-checked: dropping the leaves
+  of an unmatched subtree, or matching on the key alone, fails the property.
+
+**A rectangle drawn over a frame is exactly that frame (invariant 15).**
+`vello_cpu` rasterises in `f32` relative to the top left of the pixmap it
+is given. Coverage used to start at the draw area's corner (a column, a
+column tile, a pan strip, a dirty rectangle), which moved `aa_edge_45` by
+1/255 in up to 53 pixels and SimpleSphere's gradients in a few; the old
+tests allowed "within 1/255" for scrolls and columns. Coverage now starts at
+`max(bounds.x0, 0)` and the band's top (clips at the surface's left edge).
+The right edge does not matter (coverage accumulates from the left).
+Aligning the origin to 4 px, vello's tile width, was **not** enough:
+`aa_edge_45` still moved. One-call renders are unchanged, so every golden
+is; `determinism::coverage_does_not_depend_on_the_draw_area` pins five
+rectangles × 120 cases × both configurations, and the scroll and column
+tests in `render_thread.rs` are now exact. Cost in `perf.md`.
 
 ---
 
@@ -829,6 +891,16 @@ never calls `begin_frame` (export, corpus tools) never evicts.
     start point is its bottom row. Only `paint::bitmap_frame` in
     `xarast-app` translates between the two (see "Bitmap fill
     orientation").
+15. **Coverage never depends on the draw area.** A primitive is rasterised
+    from `max(bounds.x0, 0)` and its band's top minus the guard, a clip
+    from the surface's left edge; the draw area (column, tile, strip,
+    dirty rectangle) only limits what is composited. Otherwise an edit's
+    repaint is not the frame a full render gives, and the damage tests
+    fail by 1/255 (XARA-T-0221, "Edit damage").
+16. **`scene_damage` compares ops by equality, never by `ContentHash`.**
+    The walker's hash is per node version and scope and does not see
+    viewport-dependent output or a reused ramp slot; op equality plus the
+    resource check does.
 
 ---
 
@@ -881,6 +953,11 @@ never calls `begin_frame` (export, corpus tools) never evicts.
   go through our renderer, so an upside-down bitmap fill round-trips
   pixel-identical (XARA-T-0171 survived it). Compare against resvg on the
   exported SVG, or pin it with a synthetic asymmetric bitmap.
+- **Snapping the coverage origin to vello's 4 px tile grid** to keep a
+  dirty rectangle's pixels exact. Translating by a multiple of 4 still
+  changes the `f32` geometry: `aa_edge_45` moved in 35 pixels. Start at the
+  primitive's left edge (invariant 15).
+- **Using the walker's `ContentHash` for edit damage.** See invariant 16.
 - **Rasterising tile by tile.** Each call pays a culled display-list build
   linear in the scene (6.5–10 ms at 900k ops), and the assembled frame is
   not byte-identical to a whole one. Rasterise one dirty rectangle and
@@ -907,7 +984,7 @@ never calls `begin_frame` (export, corpus tools) never evicts.
 | 11 | ~~Strokes dashed whole before clipping~~. **Done 2026-09-23** (`stroke_cull`, XARA-T-0022); `fuzz_display_list` now spans the whole extent with unlimited dash patterns | done |
 | 13 | Gradient-heavy export: ≈ 30 ns per composited pixel, and only three 1 MiB bands on a 766 px image. The three `*GradFilledShapes*` files take 2.2–4.5 s | XARA-T-0038 |
 | 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
-| 17 | Dirty region for a fill edit (T8.5.4: old ∪ new fill extent ∩ object bounds). The session still invalidates the whole viewport on every mutation; the render thread's content-hash tile reuse keeps it cheap | XARA-T-0221 |
+| 17 | ~~Dirty region for a fill edit (T8.5.4)~~. **Done 2026-09-24**, for every edit: the render thread diffs scenes (`scene_damage`) and repaints only the damage; see "Edit damage" | done (XARA-T-0221) |
 | 18 | Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5) | XARA-T-0222 |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 

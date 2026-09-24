@@ -207,6 +207,13 @@ pub struct Session {
     /// Shared with the render thread, which builds its display lists from
     /// it. Rebuilt in place while nobody else holds it.
     scene: Arc<Scene>,
+    /// The scene before the last one that could not be rebuilt in place,
+    /// reused once nobody else holds it. The render thread keeps the
+    /// scene of the frame on screen to diff the next one against
+    /// (XARA-T-0221), so after an edit the current scene is always shared;
+    /// this double buffer keeps the rebuild from allocating (and page
+    /// faulting) a whole scene every time.
+    spare_scene: Option<Arc<Scene>>,
     /// Bumped by every rebuild, so the render thread can tell whether the
     /// pixels it kept were drawn from the scene it is now given.
     scene_epoch: u64,
@@ -280,6 +287,7 @@ impl Session {
             bus: CommandBus::new(),
             quality: RenderQuality::Final,
             scene: Arc::new(Scene::new()),
+            spare_scene: None,
             scene_epoch: 0,
             scene_ink: crate::geometry::DocRect::EMPTY,
             walker: SceneWalker::new(),
@@ -563,9 +571,17 @@ impl Session {
             self.viewport.fit_bounds_to(&self.doc);
         }
         // The render thread may still hold the previous scene. Cloning it
-        // only to clear it would be waste, so start from an empty one.
+        // only to clear it would be waste: take the spare if nobody holds
+        // it any more, else an empty one, and keep this one as the spare.
         if Arc::get_mut(&mut self.scene).is_none() {
-            self.scene = Arc::new(Scene::new());
+            // A count of one cannot rise again behind our back: nobody
+            // else holds a reference to clone.
+            let spare = self
+                .spare_scene
+                .take()
+                .filter(|s| Arc::strong_count(s) == 1 && Arc::weak_count(s) == 0);
+            let fresh = spare.unwrap_or_else(|| Arc::new(Scene::new()));
+            self.spare_scene = Some(std::mem::replace(&mut self.scene, fresh));
         }
         // Unique now, so this never clones.
         let scene = Arc::make_mut(&mut self.scene);
@@ -1018,6 +1034,11 @@ impl Session {
         // 250 000 nodes, thirty times the undo budget. The next scene
         // rebuild walks the document anyway, so it refreshes them there.
         self.scroll_bounds_stale = true;
+        // The whole view is an upper bound. What an edit really repaints
+        // is decided on the render thread, which diffs the new scene
+        // against the one on screen (`reuse.rs`, XARA-T-0221): only it
+        // knows which frame is on screen, and the diff covers every
+        // command, undo and preview without per-command bookkeeping.
         self.invalidate();
     }
 

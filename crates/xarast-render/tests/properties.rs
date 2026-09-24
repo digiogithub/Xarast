@@ -159,6 +159,143 @@ fn render(scene: &Scene) -> Surface {
     target
 }
 
+/// One edit of a recorded step sequence.
+#[derive(Debug, Clone)]
+enum Edit {
+    /// Change the colour of the step at this index, if it is a fill.
+    Recolour(usize, u8),
+    /// Move the step at this index: a fill, a group's offset, a clip.
+    Move(usize, f64, f64),
+    /// Swap two steps.
+    Swap(usize, usize),
+    /// Remove a step.
+    Remove(usize),
+    /// Insert a fill.
+    Insert(usize, f64, f64, f64, u8),
+    /// Change a layer's or a transparency scope's family and value.
+    Restyle(usize, usize, u8),
+}
+
+fn edit() -> impl Strategy<Value = Edit> {
+    prop_oneof![
+        (0usize..32, any::<u8>()).prop_map(|(i, c)| Edit::Recolour(i, c)),
+        (0usize..32, -15.0f64..15.0, -15.0f64..15.0).prop_map(|(i, x, y)| Edit::Move(i, x, y)),
+        (0usize..32, 0usize..32).prop_map(|(i, j)| Edit::Swap(i, j)),
+        (0usize..32).prop_map(Edit::Remove),
+        (
+            0usize..32,
+            0.0f64..60.0,
+            0.0f64..60.0,
+            4.0f64..30.0,
+            any::<u8>()
+        )
+            .prop_map(|(i, x, y, s, c)| Edit::Insert(i, x, y, s, c)),
+        (0usize..32, 0usize..12, any::<u8>()).prop_map(|(i, f, t)| Edit::Restyle(i, f, t)),
+    ]
+}
+
+fn apply_edit(steps: &[Step], e: &Edit) -> Vec<Step> {
+    let mut out = steps.to_vec();
+    let n = out.len();
+    if n == 0 {
+        if let Edit::Insert(_, x, y, s, c) = e {
+            out.push(Step::Fill(*x, *y, *s, *c));
+        }
+        return out;
+    }
+    match *e {
+        Edit::Recolour(i, c) => {
+            if let Step::Fill(_, _, _, k) = &mut out[i % n] {
+                *k = c;
+            }
+        }
+        Edit::Move(i, dx, dy) => match &mut out[i % n] {
+            Step::Fill(x, y, _, _) | Step::PushGroup(x, y) => {
+                *x += dx;
+                *y += dy;
+            }
+            Step::PushClip(a, b) => {
+                *a += dx;
+                *b += dy;
+            }
+            _ => {}
+        },
+        Edit::Swap(i, j) => out.swap(i % n, j % n),
+        Edit::Remove(i) => {
+            out.remove(i % n);
+        }
+        Edit::Insert(i, x, y, s, c) => out.insert(i % (n + 1), Step::Fill(x, y, s, c)),
+        Edit::Restyle(i, f, t) => {
+            if let Step::PushLayer(a, b) | Step::PushTransparency(a, b) = &mut out[i % n] {
+                *a = f;
+                *b = t;
+            }
+        }
+    }
+    out
+}
+
+/// The view the damage property draws: a fractional scale and offset, so
+/// that edges fall between pixels.
+fn damage_view() -> ViewParams {
+    ViewParams::new(
+        64,
+        64,
+        Transform2D::new([0.93e-3, 0.0, 0.0, 0.93e-3, 3.25, 1.5]),
+        RenderQuality::Final,
+    )
+}
+
+fn render_into(scene: &Scene, rect: Option<xarast_render::DeviceRect>, target: &mut Surface) {
+    let view = damage_view();
+    let dirty = rect.map_or(DirtyRect::NONE, DirtyRect::of);
+    if let Some(r) = rect {
+        // What the render thread does before drawing a rectangle: put the
+        // backdrop back.
+        let w = target.width() as usize;
+        let data = target.data_mut();
+        for y in r.y0..r.y1 {
+            let row = y as usize * w * 4;
+            data[row + r.x0 as usize * 4..row + r.x1 as usize * 4].fill(0);
+        }
+    }
+    let dl = DisplayList::build(scene, &view, &dirty);
+    CpuBackend::new(CpuConfig::deterministic())
+        .render(&dl, &Resolver::new(), target)
+        .expect("renders");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// The damage of an edit is sufficient: the old frame with only the
+    /// damaged rectangles repainted is, byte for byte, the new frame
+    /// (XARA-T-0221).
+    #[test]
+    fn repainting_the_damage_gives_the_new_frame(
+        steps in prop::collection::vec(step(), 0..24),
+        edits in prop::collection::vec(edit(), 1..4),
+    ) {
+        let (old, _) = record(&steps);
+        let mut changed = steps.clone();
+        for e in &edits {
+            changed = apply_edit(&changed, e);
+        }
+        let (new, _) = record(&changed);
+        let mut frame = Surface::new(64, 64);
+        render_into(&old, None, &mut frame);
+        let res = Resolver::new();
+        let damage = xarast_render::scene_damage((&old, &res), (&new, &res), &damage_view(), 4)
+            .expect("comparable");
+        for r in &damage.rects {
+            render_into(&new, Some(*r), &mut frame);
+        }
+        let mut full = Surface::new(64, 64);
+        render_into(&new, None, &mut full);
+        prop_assert!(frame == full, "damage {:?} missed pixels", damage.rects);
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 

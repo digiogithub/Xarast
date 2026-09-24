@@ -58,6 +58,8 @@ raw-window-handle = { workspace = true }
 [dev-dependencies]
 # Builds a small `.xar` in memory for the open-file tests.
 xarast-xar = { path = "../xarast-xar" }
+# Colours for the edits of the edit-damage test (`tests/edit_damage.rs`).
+xarast-color = { path = "../xarast-color" }
 
 [[bin]]
 name = "xarast"

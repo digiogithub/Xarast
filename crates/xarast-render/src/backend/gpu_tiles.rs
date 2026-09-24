@@ -338,6 +338,20 @@ impl GpuTileCache {
         }
     }
 
+    /// Forgets every tile `keep` refuses; their layers are reused. An
+    /// edit keeps the tiles of the frame it repainted and drops the rest
+    /// (XARA-T-0221).
+    pub fn retain(&mut self, mut keep: impl FnMut(&TileKey) -> bool) {
+        let free = &mut self.free;
+        self.slots.retain(|k, s| {
+            let kept = keep(k);
+            if !kept {
+                free.push(s.layer);
+            }
+            kept
+        });
+    }
+
     /// Forgets every tile, for a new scene or a colour change.
     pub fn clear(&mut self) {
         self.slots.clear();
