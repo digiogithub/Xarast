@@ -78,8 +78,10 @@ pub struct WalkStats {
     /// by the decode limits, or in a format we do not read — so they were
     /// left out. The failure is cached: it is not retried every frame.
     pub images_failed: usize,
-    /// `ClipView` nodes whose "keep the outside" mode the renderer cannot
-    /// express yet, so the clip was dropped.
+    /// `ClipView` nodes whose clipping shape has no geometry the walker can
+    /// clip to (its first child is not a path or a shape with a cached
+    /// path), so the clip was dropped. Both modes, inside and outside, are
+    /// drawn (XARA-US-0017).
     pub clips_unsupported: usize,
     /// Text stories drawn.
     pub text_stories: usize,
@@ -509,11 +511,15 @@ impl SceneWalker {
                     self.draft_ramps = false;
                     if let Some(f) = frames.pop() {
                         debug_assert_eq!(f.node, parent);
-                        if f.clip {
-                            b.pop_clip();
-                        }
+                        // In the reverse of `open`'s order: a ClipView
+                        // pushes its clip, then its group. Popping the
+                        // clip first underflowed the scene, so no
+                        // ClipView ever rendered (XARA-US-0017).
                         if f.group {
                             b.pop_group();
+                        }
+                        if f.clip {
+                            b.pop_clip();
                         }
                     }
                     attrs.pop_scope();
@@ -796,12 +802,21 @@ impl SceneWalker {
                 f.group = true;
             }
             Some(NodeKind::ClipView(cv)) => {
-                if cv.mode == xarast_doc::ClipViewMode::Outside {
-                    self.stats.clips_unsupported += 1;
-                } else if let Some(child) = doc.tree.links(node).first_child {
+                if let Some(child) = doc.tree.links(node).first_child {
                     if let Some(path) = geometry_of(doc, child) {
-                        b.push_clip(&path, winding(attrs));
-                        f.clip = true;
+                        let rule = winding(attrs);
+                        match cv.mode {
+                            xarast_doc::ClipViewMode::Inside => {
+                                b.push_clip(&path, rule);
+                                f.clip = true;
+                            }
+                            xarast_doc::ClipViewMode::Outside => {
+                                if let Some(outside) = outside_clip(doc, node, child, &path, rule) {
+                                    b.push_clip(&outside, FillRule::NonZero);
+                                    f.clip = true;
+                                }
+                            }
+                        }
                         f.clip_child = Some(child);
                     } else {
                         self.stats.clips_unsupported += 1;
@@ -1416,6 +1431,65 @@ fn geometry_of(doc: &Document, node: NodeId) -> Option<PathRef> {
         NodeKind::QuickShape(q) => q.path.as_ref().map(|p| PathRef::from_arc(Arc::clone(p))),
         _ => None,
     }
+}
+
+/// The clip of a ClipView that keeps what lies **outside** its clipping
+/// path (`ClipViewMode::Outside`, XARA-US-0017).
+///
+/// The renderer only clips to the inside of a path, so the outside is made
+/// into an inside: a frame around everything the ClipView's other children
+/// can draw, minus the clipping path, resolved under the ClipView's
+/// winding rule by the boolean engine into a non-overlapping region that
+/// clips with the non-zero rule. The difference leaves every untouched
+/// curve of the clipping path verbatim (`xarast_geom::boolean`), so the
+/// edge stays exact at any zoom.
+///
+/// The frame is the other children's geometric bounds grown by their
+/// larger side, and by at least an inch, so that strokes, mitres and
+/// arrowheads fit inside it. `None` when there is nothing to clip.
+fn outside_clip(
+    doc: &Document,
+    node: NodeId,
+    clip_child: NodeId,
+    clip: &PathRef,
+    rule: FillRule,
+) -> Option<PathRef> {
+    let mut drawn = Rect::EMPTY;
+    for c in doc.tree.children(node) {
+        if c != clip_child {
+            drawn = drawn.union(xarast_doc::bounds::compute_bounds_with(
+                &doc.tree,
+                c,
+                Mp::ZERO,
+            ));
+        }
+    }
+    if drawn.is_empty() {
+        return None;
+    }
+    let margin = drawn.width().max(drawn.height()).max(Mp::new(72_000));
+    let frame = drawn.inflated(margin);
+    let clamp = |p: Point| {
+        Point::new(
+            p.x.max(Mp::EXTENT_MIN).min(Mp::EXTENT_MAX),
+            p.y.max(Mp::EXTENT_MIN).min(Mp::EXTENT_MAX),
+        )
+    };
+    let (lo, hi) = (clamp(frame.lo), clamp(frame.hi));
+    let mut pb = Path::builder();
+    pb.move_to(lo)
+        .line_to(Point::new(hi.x, lo.y))
+        .line_to(hi)
+        .line_to(Point::new(lo.x, hi.y))
+        .close();
+    let cut = xarast_geom::boolean(
+        &pb.build(),
+        clip.path(),
+        xarast_geom::BoolOp::Difference,
+        rule,
+        xarast_geom::Tolerance::BOOLEAN,
+    );
+    Some(PathRef::new(cut))
 }
 
 fn parallelogram_path(origin: Point, major: Vector, minor: Vector) -> Path {

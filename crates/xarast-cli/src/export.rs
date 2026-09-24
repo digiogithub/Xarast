@@ -519,7 +519,7 @@ impl ExportSource for SessionSource<'_> {
             ("images (no pixels)", w.images_pending),
             ("images (failed to decode)", w.images_failed),
             ("live effects", w.live_pending),
-            ("clips (unsupported mode)", w.clips_unsupported),
+            ("clips (no clipping geometry)", w.clips_unsupported),
         ]
         .into_iter()
         .filter(|(_, n)| *n > 0)

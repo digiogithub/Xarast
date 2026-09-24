@@ -27,6 +27,37 @@ use xarast_color::{ColourValue, FillEffect, Rgba8};
 /// agrees_with_the_research_formula` measures it.
 pub type Profile = xarast_geom::BiasGain;
 
+/// How a ramp's parameter is eased before the profile reshapes it: the
+/// document's fill mapping (`xarast_doc::fill::RampMapping`), "linear" or
+/// "sine".
+///
+/// The order is the document model's (`Ramp::sample` in `xarast-doc`):
+/// the parameter is eased first and profiled second, so that the canvas,
+/// the SVG export (which bakes `Ramp::sample` into stops) and the fill
+/// tool agree. The original never draws a sine mapping: its renderers
+/// never read the attribute and its `.xar` writer refuses it
+/// (`Kernel/fillattr.cpp:18639-18660`), so no imported `.xar` file carries
+/// one. It reaches the renderer from a `.xarast` file or the fill tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RampEase {
+    /// The parameter is used as it is.
+    #[default]
+    Linear,
+    /// Half a cosine wave, `(1 - cos(pi t)) / 2`: flat at both ends.
+    Sin,
+}
+
+impl RampEase {
+    /// Eases a parameter in `0..=1`.
+    #[must_use]
+    pub fn map(self, t: f64) -> f64 {
+        match self {
+            RampEase::Linear => t,
+            RampEase::Sin => (1.0 - (t * std::f64::consts::PI).cos()) * 0.5,
+        }
+    }
+}
+
 /// One stop of a colour ramp.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Stop {
@@ -177,6 +208,19 @@ pub fn build_ramp(
     space: EffectSpace,
     len: RampLength,
 ) -> Vec<Rgba8> {
+    build_ramp_eased(stops, profile, RampEase::Linear, space, len)
+}
+
+/// [`build_ramp`] with the parameter eased by `ease` before the profile:
+/// entry `i` is the stop list sampled at `profile(ease(i / (len - 1)))`.
+#[must_use]
+pub fn build_ramp_eased(
+    stops: &[Stop],
+    profile: Profile,
+    ease: RampEase,
+    space: EffectSpace,
+    len: RampLength,
+) -> Vec<Rgba8> {
     let n = len.len();
     if stops.is_empty() {
         return vec![Rgba8::TRANSPARENT; n];
@@ -193,7 +237,7 @@ pub fn build_ramp(
     let identity = profile.map(0.25) == 0.25 && profile.map(0.75) == 0.75;
     (0..n)
         .map(|i| {
-            let x = i as f64 / d;
+            let x = ease.map(i as f64 / d);
             // The identity short-circuit of `biasgain.cpp:341`.
             let f = if identity { x } else { profile.map(x) };
             // f32-ok: a ramp parameter in 0..=1, never a coordinate.
@@ -218,6 +262,18 @@ pub struct TranspStop {
 /// The `+ 2^21` in the seed is a round-to-nearest, not a fudge factor.
 #[must_use]
 pub fn build_transparency_ramp(stops: &[TranspStop], profile: Profile, len: RampLength) -> Vec<u8> {
+    build_transparency_ramp_eased(stops, profile, RampEase::Linear, len)
+}
+
+/// [`build_transparency_ramp`] with the parameter eased by `ease` before
+/// the profile, as [`build_ramp_eased`] does.
+#[must_use]
+pub fn build_transparency_ramp_eased(
+    stops: &[TranspStop],
+    profile: Profile,
+    ease: RampEase,
+    len: RampLength,
+) -> Vec<u8> {
     let n = len.len();
     if stops.is_empty() {
         return vec![0; n];
@@ -237,7 +293,7 @@ pub fn build_transparency_ramp(stops: &[TranspStop], profile: Profile, len: Ramp
     let identity = profile.map(0.25) == 0.25 && profile.map(0.75) == 0.75;
     let mut out = vec![0u8; n];
     for (i, slot) in out.iter_mut().enumerate() {
-        let x = i as f64 / d;
+        let x = ease.map(i as f64 / d);
         // f32-ok: a ramp parameter in 0..=1, never a coordinate.
         let f = if identity { x } else { profile.map(x) } as f32;
         *slot = sample_transparency(&sorted, f);
@@ -286,11 +342,13 @@ impl RampId {
     }
 }
 
-/// A key that identifies a ramp exactly: stops, profile, space and length.
+/// A key that identifies a ramp exactly: stops, profile, easing, space and
+/// length.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RampKey {
     stops: Vec<(u32, [u8; 4])>,
     profile: (u64, u64),
+    ease: RampEase,
     space: EffectSpace,
     len: RampLength,
 }
@@ -340,6 +398,19 @@ impl RampCache {
         space: EffectSpace,
         len: RampLength,
     ) -> RampId {
+        self.intern_eased(stops, profile, RampEase::Linear, space, len)
+    }
+
+    /// [`RampCache::intern`] for a ramp whose parameter is eased before the
+    /// profile ([`build_ramp_eased`]). The easing is part of the key.
+    pub fn intern_eased(
+        &mut self,
+        stops: &[Stop],
+        profile: Profile,
+        ease: RampEase,
+        space: EffectSpace,
+        len: RampLength,
+    ) -> RampId {
         let key = RampKey {
             stops: stops
                 .iter()
@@ -351,6 +422,7 @@ impl RampCache {
                 })
                 .collect(),
             profile: (profile.bias.to_bits(), profile.gain.to_bits()),
+            ease,
             space,
             len,
         };
@@ -358,7 +430,7 @@ impl RampCache {
             self.last_used[id.0 as usize] = self.frame;
             return *id;
         }
-        let table = build_ramp(stops, profile, space, len);
+        let table = build_ramp_eased(stops, profile, ease, space, len);
         self.bytes += table.len() * 4;
         let id = match self.free.pop() {
             Some(slot) => {
@@ -495,6 +567,65 @@ mod tests {
                 len.len()
             );
         }
+    }
+
+    /// A sine-mapped ramp keeps its ends, is symmetric about its middle,
+    /// and lingers near the ends (XARA-US-0017): a quarter of the way
+    /// along, it has covered `(1 - cos(pi/4)) / 2`, about 15 %, of the way.
+    #[test]
+    fn a_sine_mapped_ramp_eases_in_and_out() {
+        let stops = [
+            Stop::new(0.0, rgb(0, 0, 0)),
+            Stop::new(1.0, rgb(255, 255, 255)),
+        ];
+        let len = RampLength::Long;
+        let lin = build_ramp(&stops, Profile::IDENTITY, EffectSpace::Rgb, len);
+        let sin = build_ramp_eased(
+            &stops,
+            Profile::IDENTITY,
+            RampEase::Sin,
+            EffectSpace::Rgb,
+            len,
+        );
+        let n = len.len();
+        assert_eq!(sin[0], lin[0]);
+        assert_eq!(sin[n - 1], lin[n - 1]);
+        let q = (n - 1) / 4;
+        let expect = (255.0 * RampEase::Sin.map(q as f64 / (n - 1) as f64)).round();
+        assert!((f64::from(sin[q].r) - expect).abs() <= 1.0, "{:?}", sin[q]);
+        assert!(sin[q].r < lin[q].r - 20, "{:?} vs {:?}", sin[q], lin[q]);
+        for i in 0..n {
+            let (a, b) = (i32::from(sin[i].r), i32::from(sin[n - 1 - i].r));
+            assert!((a + b - 255).abs() <= 1, "not symmetric at {i}: {a} + {b}");
+        }
+        let transp = [
+            TranspStop {
+                offset: 0.0,
+                level: 0,
+            },
+            TranspStop {
+                offset: 1.0,
+                level: 255,
+            },
+        ];
+        let t = build_transparency_ramp_eased(&transp, Profile::IDENTITY, RampEase::Sin, len);
+        assert_eq!((t[0], t[n - 1]), (0, 255));
+        assert!((i32::from(t[q]) - expect as i32).abs() <= 1, "{}", t[q]);
+    }
+
+    #[test]
+    fn the_easing_is_part_of_the_cache_key() {
+        let stops = [
+            Stop::new(0.0, rgb(0, 0, 0)),
+            Stop::new(1.0, rgb(255, 255, 255)),
+        ];
+        let mut cache = RampCache::default();
+        let (p, s, l) = (Profile::IDENTITY, EffectSpace::Rgb, RampLength::Short);
+        let lin = cache.intern(&stops, p, s, l);
+        assert_eq!(cache.intern_eased(&stops, p, RampEase::Linear, s, l), lin);
+        let sin = cache.intern_eased(&stops, p, RampEase::Sin, s, l);
+        assert_ne!(sin, lin);
+        assert_ne!(cache.get(sin), cache.get(lin));
     }
 
     #[test]

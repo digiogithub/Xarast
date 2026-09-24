@@ -614,6 +614,37 @@ Three-point linear fills (finding 10) still drop their third point: all
 27 corpus records have it within 1.2° of perpendicular (26 within 0.4°),
 so the render is unchanged; the model gap stays filed.
 
+### 16. What the corpus clips and masks with (XARA-US-0017, 2026-09-24)
+
+A raw-record census (every record from `RecordReader`, atomic subtrees
+included; the analysed tree hides the atomic ones and undercounts
+shadows) of the 59 files, for clip and mask constructs:
+
+| Construct | Records | Files | State |
+|---|---|---|---|
+| `TAG_CLIPVIEWCONTROLLER` / `TAG_CLIPVIEW` / `TAG_CLIPVIEW_PATH` (4084/4085/4137) | **0** | — | the importer does not map them (below) |
+| Bitmap transparency (171), a bitmap used as a mask | 3 | JagSS100 simple, scope3 simple | renders (XARA-T-0171) |
+| `TAG_FEATHER` (4086), a soft-edge mask | 75 | Groucho2 63, feathers 9, Watch4 3 | imported as an attribute, drawn unfeathered (Phase 13) |
+| Shadow (4050) / bevel (4052) / contour (4066) controllers | 98 / 22 / 4 | Groucho2, Girard_simple, SoftShadow, Watch4, testimp1 | live objects, Phase 13 |
+| Perspective / envelope moulds (108 / 107) | 129 / 68 | Watch4, ProbeX16, scope3 simple, TextCurve, testimp1 | live objects, Phase 13 |
+
+So "clips in imported files" is, for this corpus, only bitmap
+transparency; `smoke-open` reports every file complete with
+`clips_unsupported` 0, and the 59 PNGs were byte-identical before and
+after the ClipView work. The ClipView *rendering* fixes (`app-core.md`
+decision 43) serve `.xarast` files and the editor.
+
+**Gap (not exercised):** 4084/4085 are not mapped to
+`NodeKind::ClipView`. The original's controller keeps the clipping object
+as its **topmost** (last) child (`research/02` §6.11), while our model
+takes the **first** child; an importer must reorder. Filed under
+XARA-T-0306 (under XARA-US-0020). The original has no "keep the outside" mode; that is
+ours.
+
+There is no perspective gradient in the corpus either: no `.xar` fill
+record carries perspective corners. A perspective fill exists only
+inside a mould, which the original re-moulds on load.
+
 ## Dead ends (do not retry)
 
 - Storing a regular shape's edge path as its outline (finding 12).

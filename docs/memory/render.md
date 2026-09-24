@@ -968,6 +968,20 @@ ramp is made every drag frame; the frame after the release walks it at the
 session's quality again. Pixel comparisons of a preview against its commit
 are exact only at `Draft`.
 
+**Sine-mapped ramps (XARA-US-0017, 2026-09-24).** `RampEase` (`Linear`,
+`Sin`) eases the parameter *before* the profile: entry `i` is the stops
+sampled at `profile(ease(i / (len − 1)))`, `Sin` being `(1 − cos πt) / 2`.
+That is the order of the document's `Ramp::sample`, which the SVG writer
+bakes into stops, so canvas, export and fill tool agree. The API is
+additive: `build_ramp_eased`, `build_transparency_ramp_eased` and
+`RampCache::intern_eased`; the old names delegate with `RampEase::Linear`,
+and the easing is part of `RampKey`. `xarast-app`'s `paint::ease_of` maps
+`RampMapping` onto it for colour and transparency ramps. The original
+never *draws* a sine mapping (its renderers never read the attribute) and
+its `.xar` writer refuses to save one (`Kernel/fillattr.cpp:18639-18660`),
+so no imported file carries it; it comes from `.xarast` files and the
+fill tool.
+
 **`RampCache` evicts least recently used.** The owner calls `begin_frame`
 before a scene build and `evict(budget)` after (the walker, through
 `Resolver::begin_frame` / `trim_ramps`, budget `RAMP_CACHE_BUDGET` = 16 MiB).
@@ -1422,6 +1436,7 @@ Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
 | 21 | Mesh fills ignore `Repeat` (did not fall out of the image work: meshes do not go through the image sampler) | XARA-T-0256 |
 | 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
 | 23 | Re-materialisation of an evicted base is synchronous on the render thread; Draft `Nearest` reads the base even when minified. Draw the proxy, re-materialise on a worker | XARA-T-0281 |
+| 24 | ~~`RampMapping::Sin` ignored; `ClipViewMode::Outside` dropped~~. **Done 2026-09-24**: `RampEase` (above) and the walker's outside clip (`app-core.md` decision 34); the renderer still clips only to a path's inside, on purpose | done (XARA-US-0017) |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
 ### Vector export (PDF, XARA-US-0059, 2026-09-23)
