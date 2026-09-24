@@ -328,6 +328,9 @@ enum Drag<S: Stop> {
         origin: Point,
         /// The last computed target point, for the commit.
         to: Point,
+        /// The other axis an aspect lock (Adjust) turned with it on the
+        /// last frame, for the commit.
+        other: Option<(FillHandle, Point)>,
         /// Whether a bitmap fill's aspect was locked (Adjust) on the last
         /// frame, for the commit.
         lock: bool,
@@ -527,58 +530,26 @@ impl<K: FillKind> FillLikeTool<K> {
             .collect()
     }
 
-    /// The handle's new point: snapped, and with Constrain held, turned to
-    /// the nearest 15° about the arm's other end.
+    /// The handle's new point: snapped, and with Constrain held either
+    /// turned to the nearest 15° about the arm's other end (a handle with
+    /// an anchor) or kept on the nearest 45° axis through where it was
+    /// pressed (a handle that moves on its own, such as a centre): the axis
+    /// lock.
     fn target(
         cx: &mut ToolCtx<'_>,
         g: &FillGeometry<K::S>,
         handle: FillHandle,
+        origin: Point,
         to: Point,
     ) -> Point {
         let to = cx.snap_point(to);
         if !cx.modifiers.constrain || matches!(handle, FillHandle::Stop(_)) {
             return to;
         }
-        let anchor = match (g, handle) {
-            (FillGeometry::Linear { start, .. }, FillHandle::End) => *start,
-            (FillGeometry::Linear { end, .. }, FillHandle::Start) => *end,
-            (
-                FillGeometry::Radial { centre, .. }
-                | FillGeometry::Conical { centre, .. }
-                | FillGeometry::Diamond { centre, .. },
-                FillHandle::Major
-                | FillHandle::Minor
-                | FillHandle::End
-                | FillHandle::Corner1
-                | FillHandle::Corner2,
-            ) => *centre,
-            (
-                FillGeometry::ThreeColour { origin, .. } | FillGeometry::FourColour { origin, .. },
-                FillHandle::End | FillHandle::End2 | FillHandle::End3,
-            ) => *origin,
-            // A bitmap fill's edge handles turn about its centre.
-            (
-                FillGeometry::Bitmap {
-                    origin,
-                    axis_x,
-                    axis_y,
-                    persp: None,
-                    ..
-                },
-                FillHandle::End | FillHandle::End2,
-            ) => bitmap_virtual_points(*origin, *axis_x, *axis_y)[0],
-            _ => return to,
-        };
-        let (ax, ay) = anchor.to_f64();
-        let (px, py) = to.to_f64();
-        let (dx, dy) = (px - ax, py - ay);
-        let len = dx.hypot(dy);
-        if len <= 0.0 {
-            return to;
+        match handle_anchor(g, handle) {
+            Some(anchor) => turn_in_steps(anchor, to),
+            None => origin + crate::tools::constrain_45(to - origin),
         }
-        let step = 15f64.to_radians();
-        let a = (dy.atan2(dx) / step).round() * step;
-        Point::from_f64_round(ax + len * a.cos(), ay + len * a.sin())
     }
 
     /// The fill a new drag from `a` to `b` makes.
@@ -643,6 +614,7 @@ impl<K: FillKind> FillLikeTool<K> {
                 start: set.fill.clone(),
                 origin,
                 to: origin,
+                other: None,
                 lock: false,
             });
             cx.requests.overlay_changed = true;
@@ -690,19 +662,19 @@ impl<K: FillKind> FillLikeTool<K> {
                 start,
                 origin,
                 to: last,
+                other,
                 lock,
             }) => {
                 let target = *origin + (to - from);
-                let target = Self::target(cx, start, *handle, target);
+                let target = Self::target(cx, start, *handle, *origin, target);
                 *last = target;
                 *lock = cx.modifiers.adjust;
-                let mut g = start.clone();
-                let moved = if is_bitmap(start) {
-                    move_bitmap_control(&mut g, *handle, target, *lock)
+                *other = if cx.modifiers.adjust {
+                    aspect_partner(start, *handle, target)
                 } else {
-                    move_control(&mut g, *handle, target)
+                    None
                 };
-                if moved.is_ok() {
+                if let Some(g) = moved_fill(start, *handle, target, *other, *lock) {
                     let nodes = nodes.clone();
                     Self::preview(cx, &nodes, &g);
                 }
@@ -738,54 +710,11 @@ impl<K: FillKind> FillLikeTool<K> {
                 handle,
                 start,
                 to,
+                other,
                 lock,
                 ..
             }) => {
-                let edits = match handle {
-                    FillHandle::Stop(i) => {
-                        let Some((a, b)) = xarast_doc::fill_edit::fill_arm(&start) else {
-                            return;
-                        };
-                        let pos = xarast_doc::fill_edit::arm_position(a, b, to);
-                        // Keep hold of the stop across a re-sort.
-                        if let Some(r) = ramp_ref(&start)
-                            && let Ok((_, j)) = ramp_move(r, usize::from(i), pos)
-                            && let Ok(j) = u16::try_from(j)
-                        {
-                            self.selected = Some((nodes.clone(), FillHandle::Stop(j)));
-                        }
-                        Self::slot_cmds(&nodes, |node| {
-                            FillCommand::MoveStop(MoveStop {
-                                node,
-                                slot: PaintSlot::Fill,
-                                channel: K::CHANNEL,
-                                index: i,
-                                pos,
-                                drag: None,
-                            })
-                        })
-                    }
-                    _ if is_bitmap(&start) => Self::slot_cmds(&nodes, |node| {
-                        FillCommand::MoveBitmapControl(MoveBitmapControl {
-                            node,
-                            slot: PaintSlot::Fill,
-                            channel: K::CHANNEL,
-                            handle,
-                            to,
-                            lock_aspect: lock,
-                        })
-                    }),
-                    _ => Self::slot_cmds(&nodes, |node| {
-                        FillCommand::MoveControl(MoveFillControl {
-                            node,
-                            slot: PaintSlot::Fill,
-                            channel: K::CHANNEL,
-                            handle,
-                            to,
-                            drag: None,
-                        })
-                    }),
-                };
+                let edits = self.handle_edits(&nodes, &start, handle, to, other, lock);
                 Self::emit(cx, edits);
             }
             Some(Drag::New {
@@ -810,6 +739,73 @@ impl<K: FillKind> FillLikeTool<K> {
             Some(Drag::New { to: None, .. }) | None => {}
         }
         cx.requests.overlay_changed = true;
+    }
+
+    /// The commands that move `handle` of the set `nodes` (whose fill is
+    /// `start`) to `to` — and `other` with it under an aspect lock — as a
+    /// drag's release or a nudge commits them. Keeps a moved stop
+    /// selected across a re-sort.
+    fn handle_edits(
+        &mut self,
+        nodes: &[NodeId],
+        start: &FillGeometry<K::S>,
+        handle: FillHandle,
+        to: Point,
+        other: Option<(FillHandle, Point)>,
+        lock: bool,
+    ) -> Vec<FillCommand> {
+        let move_to = |node, handle, to| {
+            FillCommand::MoveControl(MoveFillControl {
+                node,
+                slot: PaintSlot::Fill,
+                channel: K::CHANNEL,
+                handle,
+                to,
+                drag: None,
+            })
+        };
+        match handle {
+            FillHandle::Stop(i) => {
+                let Some((a, b)) = xarast_doc::fill_edit::fill_arm(start) else {
+                    return Vec::new();
+                };
+                let pos = xarast_doc::fill_edit::arm_position(a, b, to);
+                // Keep hold of the stop across a re-sort.
+                if let Some(r) = ramp_ref(start)
+                    && let Ok((_, j)) = ramp_move(r, usize::from(i), pos)
+                    && let Ok(j) = u16::try_from(j)
+                {
+                    self.selected = Some((nodes.to_vec(), FillHandle::Stop(j)));
+                }
+                Self::slot_cmds(nodes, |node| {
+                    FillCommand::MoveStop(MoveStop {
+                        node,
+                        slot: PaintSlot::Fill,
+                        channel: K::CHANNEL,
+                        index: i,
+                        pos,
+                        drag: None,
+                    })
+                })
+            }
+            _ if is_bitmap(start) => Self::slot_cmds(nodes, |node| {
+                FillCommand::MoveBitmapControl(MoveBitmapControl {
+                    node,
+                    slot: PaintSlot::Fill,
+                    channel: K::CHANNEL,
+                    handle,
+                    to,
+                    lock_aspect: lock,
+                })
+            }),
+            _ => nodes
+                .iter()
+                .flat_map(|&node| {
+                    std::iter::once(move_to(node, handle, to))
+                        .chain(other.map(|(h, p)| move_to(node, h, p)))
+                })
+                .collect(),
+        }
     }
 
     fn on_click(
@@ -874,6 +870,153 @@ impl<K: FillKind> FillLikeTool<K> {
         self.selected = None;
         cx.requests.overlay_changed = true;
     }
+}
+
+/// `g` with `handle` moved to `to` (and `other` with it, an aspect lock),
+/// exactly as the commands [`FillLikeTool::handle_edits`] makes will
+/// write it; `None` when the fill has no such handle.
+fn moved_fill<S: Stop>(
+    g: &FillGeometry<S>,
+    handle: FillHandle,
+    to: Point,
+    other: Option<(FillHandle, Point)>,
+    lock: bool,
+) -> Option<FillGeometry<S>> {
+    let mut g = g.clone();
+    if is_bitmap(&g) {
+        move_bitmap_control(&mut g, handle, to, lock).ok()?;
+        return Some(g);
+    }
+    move_control(&mut g, handle, to).ok()?;
+    if let Some((h, p)) = other {
+        move_control(&mut g, h, p).ok()?;
+    }
+    Some(g)
+}
+
+/// The point a handle turns about under Constrain: the arm's other end, a
+/// centre, or the three/four-colour origin. `None` for a handle that moves
+/// on its own (a centre, a three/four-colour origin, a perspective
+/// corner), which Constrain keeps on an axis instead.
+fn handle_anchor<S: Stop>(g: &FillGeometry<S>, handle: FillHandle) -> Option<Point> {
+    Some(match (g, handle) {
+        (FillGeometry::Linear { start, .. }, FillHandle::End) => *start,
+        (FillGeometry::Linear { end, .. }, FillHandle::Start) => *end,
+        (
+            FillGeometry::Radial { centre, .. }
+            | FillGeometry::Conical { centre, .. }
+            | FillGeometry::Diamond { centre, .. },
+            FillHandle::Major
+            | FillHandle::Minor
+            | FillHandle::End
+            | FillHandle::Corner1
+            | FillHandle::Corner2,
+        ) => *centre,
+        (
+            FillGeometry::ThreeColour { origin, .. } | FillGeometry::FourColour { origin, .. },
+            FillHandle::End | FillHandle::End2 | FillHandle::End3,
+        ) => *origin,
+        // A bitmap fill's edge handles turn about its centre.
+        (
+            FillGeometry::Bitmap {
+                origin,
+                axis_x,
+                axis_y,
+                persp: None,
+                ..
+            },
+            FillHandle::End | FillHandle::End2,
+        ) => bitmap_virtual_points(*origin, *axis_x, *axis_y)[0],
+        _ => return None,
+    })
+}
+
+/// `to` turned about `anchor` to the nearest multiple of 15°, keeping its
+/// distance.
+fn turn_in_steps(anchor: Point, to: Point) -> Point {
+    let (ax, ay) = anchor.to_f64();
+    let (px, py) = to.to_f64();
+    let (dx, dy) = (px - ax, py - ay);
+    let len = dx.hypot(dy);
+    if len <= 0.0 {
+        return to;
+    }
+    let step = 15f64.to_radians();
+    let a = (dy.atan2(dx) / step).round() * step;
+    Point::from_f64_round(ax + len * a.cos(), ay + len * a.sin())
+}
+
+/// The aspect lock (Adjust) on an axis handle of an elliptical radial or a
+/// diamond fill: the other axis turns with the dragged one, stays at a
+/// right angle to it on the side it was on, and scales by the same ratio
+/// (facts: `Kernel/fillattr.cpp:7249-7310`, `:10146-10200`). Returns the
+/// other handle and its new point. A circular radial fill is locked
+/// already; other fills have no aspect.
+fn aspect_partner<S: Stop>(
+    g: &FillGeometry<S>,
+    handle: FillHandle,
+    to: Point,
+) -> Option<(FillHandle, Point)> {
+    let (centre, dragged, other, other_id) = match (g, handle) {
+        (
+            FillGeometry::Radial {
+                centre,
+                major,
+                minor,
+                aspect_locked: false,
+                ..
+            },
+            FillHandle::Major,
+        ) => (*centre, *major, *minor, FillHandle::Minor),
+        (
+            FillGeometry::Radial {
+                centre,
+                major,
+                minor,
+                aspect_locked: false,
+                ..
+            },
+            FillHandle::Minor,
+        ) => (*centre, *minor, *major, FillHandle::Major),
+        (
+            FillGeometry::Diamond {
+                centre,
+                corner1,
+                corner2,
+                ..
+            },
+            FillHandle::Corner1,
+        ) => (*centre, *corner1, *corner2, FillHandle::Corner2),
+        (
+            FillGeometry::Diamond {
+                centre,
+                corner1,
+                corner2,
+                ..
+            },
+            FillHandle::Corner2,
+        ) => (*centre, *corner2, *corner1, FillHandle::Corner1),
+        _ => return None,
+    };
+    let (cx, cy) = centre.to_f64();
+    let rel = |p: Point| {
+        let (x, y) = p.to_f64();
+        (x - cx, y - cy)
+    };
+    let (ux, uy) = rel(dragged);
+    let (wx, wy) = rel(other);
+    let (tx, ty) = rel(to);
+    let old = ux.hypot(uy);
+    if old <= 0.0 {
+        return None;
+    }
+    let ratio = wx.hypot(wy) / old;
+    // Which side of the dragged axis the other one was on.
+    let side = if ux * wy - uy * wx < 0.0 { -1.0 } else { 1.0 };
+    Some((
+        other_id,
+        Point::from_f64_round(cx - side * ty * ratio, cy + side * tx * ratio),
+    ))
 }
 
 fn ramp_ref<S: Stop>(g: &FillGeometry<S>) -> Option<&Ramp<S>> {

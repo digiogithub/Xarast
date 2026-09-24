@@ -611,3 +611,148 @@ fn an_object_with_no_attribute_of_its_own_previews_as_it_commits() {
     release(&mut s, Point::raw(240_000, 200_000), 10);
     assert!(pixels(&s) == previewed);
 }
+
+// ───────────────────── XARA-T-0220: the follow-ups ─────────────────────
+
+/// Gives every node its own copy of `g` as its fill of `slot`.
+fn set_paint(s: &mut Session, nodes: &[NodeId], slot: PaintSlot, g: &Paint) {
+    s.apply_edit(EditCommand::Fill {
+        edits: nodes
+            .iter()
+            .map(|&node| {
+                FillCommand::SetGeometry(SetFillGeometry {
+                    node,
+                    slot,
+                    value: FillValue::Colour(g.clone()),
+                })
+            })
+            .collect(),
+    })
+    .unwrap();
+}
+
+fn set_fill(s: &mut Session, nodes: &[NodeId], g: &Paint) {
+    set_paint(s, nodes, PaintSlot::Fill, g);
+}
+
+fn ellipse_fill() -> Paint {
+    FillGeometry::Radial {
+        centre: Point::raw(200_000, 200_000),
+        major: Point::raw(240_000, 200_000),
+        minor: Point::raw(200_000, 220_000),
+        aspect_locked: false,
+        persp: None,
+        from: Colour::Direct(RED),
+        to: Colour::Direct(ColourValue::WHITE),
+        ramp: xarast_doc::fill::Ramp::new(),
+    }
+}
+
+fn hold(s: &mut Session, m: Modifiers) {
+    s.apply(Intent::ModifiersChanged(m)).unwrap();
+}
+
+/// Drags with `m` held, checking that nothing is written before the
+/// release, that the release is one step whose render is the preview's,
+/// and that undo is exact. Returns the fill after the release (redone).
+fn locked_drag(s: &mut Session, n: NodeId, from: Point, to: Point, m: Modifiers) -> Paint {
+    let before = s.doc.canonical_digest();
+    let len = s.bus.history().len();
+    hold(s, m);
+    drag_open(s, from, to, 10_000);
+    assert_eq!(s.doc.canonical_digest(), before, "nothing before release");
+    let previewed = pixels(s);
+    release(s, to, 10_100);
+    hold(s, Modifiers::default());
+    assert!(pixels(s) == previewed, "what was previewed is what commits");
+    assert_eq!(s.bus.history().len(), len + 1, "one step");
+    assert_eq!(s.undo_label(), Some("Move Fill Handle"));
+    let after = colour_fill(s, n);
+    s.undo();
+    assert_eq!(s.doc.canonical_digest(), before, "undo is exact");
+    s.redo();
+    after
+}
+
+#[test]
+fn constrain_keeps_a_centre_on_an_axis_and_adjust_locks_the_aspect() {
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    set_fill(&mut s, &nodes, &ellipse_fill());
+    let constrain = Modifiers {
+        constrain: true,
+        ..Modifiers::default()
+    };
+    // The axis lock: a centre dragged mostly right stays on its row.
+    let g = locked_drag(
+        &mut s,
+        n,
+        Point::raw(200_000, 200_000),
+        Point::raw(230_000, 207_000),
+        constrain,
+    );
+    let FillGeometry::Radial {
+        centre,
+        major,
+        minor,
+        ..
+    } = g
+    else {
+        panic!("{g:?}")
+    };
+    assert_eq!(centre.y, Point::raw(0, 200_000).y, "{centre:?}");
+    assert!((centre.x.to_f64() - 230_000.0).abs() < 1_000.0);
+    // The whole fill moved with it.
+    assert_eq!(
+        major - centre,
+        Point::raw(240_000, 200_000) - Point::raw(200_000, 200_000)
+    );
+    assert_eq!(
+        minor - centre,
+        Point::raw(200_000, 220_000) - Point::raw(200_000, 200_000)
+    );
+
+    // The aspect lock: the major axis turned a quarter and stretched by
+    // half; the minor axis turns with it on its side and stretches too.
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    set_fill(&mut s, &nodes, &ellipse_fill());
+    let adjust = Modifiers {
+        adjust: true,
+        ..Modifiers::default()
+    };
+    let g = locked_drag(
+        &mut s,
+        n,
+        Point::raw(240_000, 200_000),
+        Point::raw(200_000, 260_000),
+        adjust,
+    );
+    let FillGeometry::Radial { major, minor, .. } = g else {
+        panic!("{g:?}")
+    };
+    assert!(
+        major.distance_to(Point::raw(200_000, 260_000)) < 1_000.0,
+        "{major:?}"
+    );
+    assert!(
+        minor.distance_to(Point::raw(170_000, 200_000)) < 1_000.0,
+        "{minor:?}"
+    );
+
+    // Without Adjust the minor axis stays where it was.
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    set_fill(&mut s, &nodes, &ellipse_fill());
+    let g = locked_drag(
+        &mut s,
+        n,
+        Point::raw(240_000, 200_000),
+        Point::raw(200_000, 260_000),
+        Modifiers::default(),
+    );
+    let FillGeometry::Radial { minor, .. } = g else {
+        panic!("{g:?}")
+    };
+    assert_eq!(minor, Point::raw(200_000, 220_000));
+}
