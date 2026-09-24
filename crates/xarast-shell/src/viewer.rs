@@ -492,6 +492,13 @@ impl Viewer {
                 PlatformRequest::ShowDialog(xarast_app::Dialog::Align) => {
                     self.workspace.menu().set_align_open(true);
                 }
+                PlatformRequest::ShowDialog(xarast_app::Dialog::Pane(pane)) => {
+                    // F9/F10/F11 or the Window menu: the pane is docked
+                    // again if needed, brought to the front and given the
+                    // keyboard on the next frame.
+                    self.workspace.show_pane(pane);
+                    ctx.request_redraw();
+                }
                 other => tracing::warn!(?other, "platform request not handled"),
             }
         }
@@ -2887,6 +2894,66 @@ mod tests {
                 assert!(y < 40.0, "{title} is not at the top: {y}");
             }
         }
+    }
+
+    #[test]
+    fn the_gallery_keys_and_the_window_menu_show_their_panes() {
+        use crate::input::keyboard::Modifiers;
+        use xarast_app::DockPane;
+        let perform = |v: &mut Viewer| {
+            let _ = with_ctx(|ctx| v.perform_requests(ctx));
+            ui_frames(v, 2);
+        };
+        let mut v = live_viewer();
+        // Window › Photo: the menu item, not the photo panel's tab.
+        activate(&mut v, "Window");
+        let tree = ui_frames(&mut v, 1).expect("accessibility is on");
+        let target = tree
+            .nodes
+            .iter()
+            .find_map(|(id, n)| {
+                (n.role() == egui::accesskit::Role::MenuItem && n.label() == Some("Photo"))
+                    .then_some(*id)
+            })
+            .expect("Window › Photo");
+        send(
+            &mut v,
+            &[ShellEvent::AccessibilityAction(
+                egui::accesskit::ActionRequest {
+                    action: egui::accesskit::Action::Click,
+                    target,
+                    data: None,
+                },
+            )],
+        );
+        ui_frames(&mut v, 2);
+        assert!(!v.workspace.is_pane_showing(DockPane::Photo));
+        perform(&mut v);
+        assert!(v.workspace.is_pane_showing(DockPane::Photo));
+        assert!(!v.workspace.is_pane_showing(DockPane::BitmapGallery));
+
+        for (key, pane) in [
+            (11, DockPane::BitmapGallery),
+            (9, DockPane::ColourGallery),
+            (10, DockPane::Layers),
+        ] {
+            press(&mut v, Key::Named(NamedKey::Function(key)), Modifiers::NONE);
+            perform(&mut v);
+            assert!(v.workspace.is_pane_showing(pane), "F{key}");
+        }
+        assert!(!v.workspace.is_pane_showing(DockPane::Photo));
+
+        // No document is needed to reach a pane.
+        let mut v = empty_viewer();
+        press(&mut v, Key::Named(NamedKey::Function(9)), Modifiers::NONE);
+        assert_eq!(
+            v.requests,
+            [PlatformRequest::ShowDialog(xarast_app::Dialog::Pane(
+                DockPane::ColourGallery
+            ))]
+        );
+        perform(&mut v);
+        assert!(v.workspace.is_pane_showing(DockPane::ColourGallery));
     }
 
     #[test]
