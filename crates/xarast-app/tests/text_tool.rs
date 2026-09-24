@@ -647,3 +647,269 @@ fn a_column_wraps_as_it_is_typed_and_the_caret_follows() {
     let x = primary_caret(&s).x.raw();
     assert!((300_000..=400_000).contains(&x), "{x}");
 }
+
+// ── A story emptied by deletion is removed (XARA-T-0237) ─────────────────
+
+fn stories(s: &Session) -> Vec<NodeId> {
+    s.doc
+        .tree
+        .preorder(s.doc.tree.root())
+        .filter(|&n| matches!(s.doc.tree.kind(n), Some(NodeKind::TextStory(_))))
+        .collect()
+}
+
+fn valid(s: &Session) {
+    let errors = xarast_doc::validate::validate_document(&s.doc).errors;
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn deleting_all_the_text_removes_the_story_in_the_same_undo_step() {
+    let (mut s, story) = fixture();
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    s.apply(Intent::SelectAll).unwrap();
+    input(&mut s, TextInputKind::Delete { word: false }, 1_000);
+    assert!(!s.doc.tree.is_reachable(story), "the empty story is gone");
+    assert!(stories(&s).is_empty());
+    assert_eq!(steps(&s), 1, "no step of its own");
+    assert_eq!(s.undo_label(), Some("Delete Text"));
+    assert_eq!(s.edit.selection().count(), 0, "nothing left selected");
+    // The caret stays where the story began, as a pending one.
+    assert_eq!(
+        s.text_state(),
+        Some(TextEditing::Pending {
+            at: Point::raw(X0, Y0),
+            column: None
+        })
+    );
+    valid(&s);
+    // One undo brings back the story and its text, exactly.
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+    assert!(s.undo_label().is_none());
+    s.apply(Intent::Redo).unwrap();
+    assert!(!s.doc.tree.is_reachable(story));
+}
+
+#[test]
+fn typing_after_the_removal_makes_a_story_in_the_old_ones_place_and_style() {
+    let (mut s, story) = fixture();
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    s.apply(Intent::SelectAll).unwrap();
+    backspace(&mut s, 1_000);
+    type_str(&mut s, "Hi", 2_000);
+    let sel = selection(&s);
+    assert_ne!(sel.story, story);
+    assert_eq!(story_text(&s, sel.story), "Hi\n");
+    match s.doc.tree.kind(sel.story) {
+        Some(NodeKind::TextStory(t)) => {
+            assert_eq!((t.transform.e.raw(), t.transform.f.raw()), (X0, Y0));
+        }
+        other => panic!("{other:?}"),
+    }
+    let st =
+        xarast_doc::StoryText::collect_simple(&s.doc.tree, &s.doc.defaults, sel.story).unwrap();
+    let attrs = &st.runs[0].attrs;
+    assert_eq!(
+        attrs.get(xarast_doc::AttrSlot::TxtFontSize),
+        &AttrValue::FontSize(Mp::new(20_000)),
+        "the old story's size"
+    );
+    match attrs.get(xarast_doc::AttrSlot::TxtFontTypeface) {
+        AttrValue::FontTypeface(t) => assert_eq!(&*t.family, "Noto Sans"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(steps(&s), 2);
+    s.apply(Intent::Undo).unwrap();
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+}
+
+#[test]
+fn a_backspace_burst_that_empties_a_new_story_undoes_in_one_step() {
+    let (mut s, _) = fixture();
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, 300_000, 200_000, 0);
+    type_str(&mut s, "H", 1_000);
+    type_str(&mut s, "i", 1_100);
+    let new = selection(&s).story;
+    let typed = s.doc.canonical_digest();
+    backspace(&mut s, 3_000);
+    backspace(&mut s, 3_100);
+    assert!(!s.doc.tree.is_reachable(new));
+    assert_eq!(steps(&s), 2, "New Text, then one Delete Text");
+    assert_eq!(
+        s.text_state(),
+        Some(TextEditing::Pending {
+            at: Point::raw(300_000, 200_000),
+            column: None
+        })
+    );
+    // Backspace at the pending caret does nothing more.
+    backspace(&mut s, 3_200);
+    assert_eq!(steps(&s), 2);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), typed);
+    assert_eq!(story_text(&s, new), "Hi\n");
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+}
+
+#[test]
+fn a_story_left_with_only_paragraph_breaks_stays_when_the_text_is_left() {
+    // Decided: removal happens at the deletion that empties a story, never
+    // when editing ends, so leaving the text is still no edit (invariant
+    // 11); a story holding only breaks is not empty.
+    let (mut s, _) = fixture();
+    text_tool(&mut s);
+    click(&mut s, 300_000, 200_000, 0);
+    type_str(&mut s, "\n", 1_000);
+    let new = selection(&s).story;
+    assert_eq!(story_text(&s, new), "\n\n");
+    let n = steps(&s);
+    s.apply(Intent::Cancel).unwrap();
+    s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
+    assert!(s.doc.tree.is_reachable(new));
+    assert_eq!(steps(&s), n);
+}
+
+/// A session holding one story on a straight path from (X0, Y0) 200 pt
+/// right, 20 pt Noto Sans "Hi", the story's line width painting the path.
+fn on_path_fixture() -> (Session, NodeId) {
+    xarast_app::fonts::set_shared(fonts());
+    let mut pb = xarast_geom::Path::builder();
+    pb.move_to(Point::raw(X0, Y0))
+        .line_to(Point::raw(X0 + 200_000, Y0));
+    let mut b = skeleton(BuildLimits::default()).unwrap();
+    let story = b
+        .node(NodeKind::TextStory(Box::new(TextStoryNode {
+            layout: xarast_doc::TextLayout::OnPath {
+                reversed: false,
+                tangential: true,
+                left_indent: Mp::ZERO,
+                right_indent: Mp::ZERO,
+                chars: xarast_doc::CharsTransform::default(),
+            },
+            ..TextStoryNode::default()
+        })))
+        .unwrap()
+        .node_id();
+    b.push_scope().unwrap();
+    b.attribute(AttrValue::FontTypeface(Arc::new(TypefaceRef {
+        full_name: Arc::from("Noto Sans"),
+        family: Arc::from("Noto Sans"),
+        panose: None,
+    })))
+    .unwrap();
+    b.attribute(AttrValue::FontSize(Mp::new(20_000))).unwrap();
+    b.attribute(AttrValue::LineWidth(Mp::new(2_000))).unwrap();
+    b.node(NodeKind::Path(Box::new(xarast_doc::PathNode::new(
+        pb.build(),
+    ))))
+    .unwrap();
+    b.node(NodeKind::TextLine(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    for c in "Hi".chars() {
+        b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+    }
+    b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+        .unwrap();
+    b.pop_scope();
+    b.pop_scope();
+    let (doc, _) = b.finish().unwrap();
+    (Session::adopt(DocumentId(1), doc, None), story)
+}
+
+#[test]
+fn emptying_a_story_on_a_path_leaves_the_path_as_a_shape() {
+    let (mut s, story) = on_path_fixture();
+    let before = s.doc.canonical_digest();
+    let layer = s.doc.tree.links(story).parent.unwrap();
+    s.edit.select([story], xarast_app::SelectMode::Replace);
+    text_tool(&mut s);
+    assert_eq!(selection(&s).story, story);
+    s.apply(Intent::SelectAll).unwrap();
+    input(&mut s, TextInputKind::Delete { word: false }, 1_000);
+    assert!(!s.doc.tree.is_reachable(story));
+    let path = s
+        .doc
+        .tree
+        .children(layer)
+        .find(|&n| matches!(s.doc.tree.kind(n), Some(NodeKind::Path(_))))
+        .expect("the path stays, as an ordinary shape");
+    // It still paints with the story's line width.
+    let attrs = xarast_doc::attr::resolve_uncached(&s.doc.tree, path, &s.doc.defaults);
+    assert_eq!(
+        attrs.get(xarast_doc::AttrSlot::LineWidth),
+        &AttrValue::LineWidth(Mp::new(2_000))
+    );
+    // No caret: there is no straight place to put one.
+    assert_eq!(s.text_state(), None);
+    assert_eq!(steps(&s), 1);
+    valid(&s);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+}
+
+#[test]
+fn removing_an_emptied_story_repaints_its_damage_exactly() {
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use xarast_app::render_thread::CpuFrameRenderer;
+    use xarast_app::{FrameReuse, RenderThread, RenderedFrame};
+    const BG: [u8; 4] = [128, 128, 132, 255];
+    const PAGE: [u8; 4] = [255, 255, 255, 255];
+    let t = std::time::Duration::from_secs(60);
+    let thread = || {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let rt = RenderThread::spawn_with(
+            CpuFrameRenderer::new(xarast_render::CpuConfig::deterministic()),
+            Box::new(move || {
+                let _ = tx.lock().map(|t| t.send(()));
+            }),
+        )
+        .unwrap();
+        (rt, rx)
+    };
+    let next = |rt: &RenderThread, w: &mpsc::Receiver<()>| -> RenderedFrame {
+        w.recv_timeout(t).expect("a frame");
+        rt.take_latest().expect("published before the wake")
+    };
+
+    let (mut s, story) = fixture();
+    s.rebuild_scene(None).unwrap();
+    let (mut rt, woken) = thread();
+    rt.submit(s.frame_job(BG, PAGE));
+    let first = next(&rt, &woken);
+
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    s.apply(Intent::SelectAll).unwrap();
+    input(&mut s, TextInputKind::Delete { word: false }, 1_000);
+    assert!(!s.doc.tree.is_reachable(story));
+    s.rebuild_scene(None).unwrap();
+    let job = s.frame_job(BG, PAGE);
+    rt.submit(job.clone());
+    let f = next(&rt, &woken);
+    assert_eq!(f.reuse, FrameReuse::Repainted);
+    assert!(!f.fresh.is_empty());
+    let (mut full, full_woken) = thread();
+    full.submit(job);
+    let whole = next(&full, &full_woken);
+    assert!(whole.surface != first.surface, "the text went");
+    assert!(f.surface == whole.surface, "the repaint is the full frame");
+
+    // Undo repaints the text back.
+    s.apply(Intent::Undo).unwrap();
+    s.rebuild_scene(None).unwrap();
+    rt.submit(s.frame_job(BG, PAGE));
+    let u = next(&rt, &woken);
+    assert_eq!(u.reuse, FrameReuse::Repainted);
+    assert!(u.surface == first.surface, "undo repaints the text exactly");
+}

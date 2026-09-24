@@ -3390,12 +3390,13 @@ mod tests {
         press(&mut v, Key::char('x'), Modifiers::NONE.with_ctrl());
         with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
         assert_eq!(clipboard.text.as_deref(), Some("HelloHello and more"));
-        assert_eq!(
-            caret_story_text(&v),
-            "
-"
-        );
+        // The story it emptied goes with it, in the same step (XARA-T-0237);
+        // the caret waits where the story began.
         let s = v.app.active().unwrap();
+        assert!(matches!(
+            s.text_state(),
+            Some(xarast_app::text_tool::TextEditing::Pending { .. })
+        ));
         assert!(s.doc.tree.contains(square) && s.doc.tree.is_reachable(square));
         assert_eq!(s.undo_label(), Some("Cut"));
     }

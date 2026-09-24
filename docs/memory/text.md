@@ -484,6 +484,65 @@ step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
 
+## Removing an emptied story (XARA-T-0237, as built)
+
+Maintainer's decision (2026-09-24): a story emptied by deletion is removed,
+as the original does, **in the same undo step as the deletion**. Code:
+`xarast-doc/src/text_edit.rs` (`is_story_empty`, `remove_empty_story`,
+`EmptyStory`), `xarast-app/src/ops.rs` (`remove_if_emptied`, called by
+`TypeText`, `DeleteText`, `CutText` and a `PasteText` of nothing),
+`text_tool.rs` (`Emptying`, `after_commands`); tool side: `tools.md`
+decision 70.
+
+Facts about the original (read, not copied): the empty story is removed by
+`OpDeleteTextStory` (`tools/textops.cpp:4266-4300`), which merges itself
+into the previous operation (`PerformMergeProcessing`, `:4363-4366`) — so
+undo brings back story and text together there too. It runs when editing
+*ends*: Esc (`tools/texttool.cpp:1570`), deselecting the tool (`:2403`),
+clicking into another story (`textops.cpp:3893`), creating a new one
+(`:333`). "Empty" there means no `TextChar` (paragraph breaks and tabs do
+not count; `:4321-4350`). A story on a path gives its path back: the
+story's attributes are localised, the path moved next to the story and
+deselected, then the story hidden (`:4281-4298`).
+
+- **Empty = nothing but the final break** (`StoryText::text` is `"\n"`).
+  Stricter than the original's "no characters": removing a story left with
+  only typed paragraph breaks, at the deletion, would pull the caret from
+  under a user still editing it.
+- **When: inside the deleting command**, not when editing ends. Our tool
+  never creates a story before the first character (the pending caret),
+  so the only way to empty one is to delete from it; doing it in that
+  transaction costs no extra step and merges with the Backspace burst
+  (`CoalesceKey` unchanged). A deletion of nothing never removes (an
+  imported empty story stays).
+- **Leaving the text removes nothing** (Esc, a tool switch, a click
+  elsewhere): leaving is not an edit (tools invariant 11). The difference
+  from the original is only a story holding nothing but paragraph breaks,
+  which stays.
+- **The caret afterwards**: pending at the story's origin (matrix
+  translation; column width kept; rotation and shear not kept), carrying
+  the removed text's attributes that differ from the current ones as the
+  pending style (character, paragraph and the text's fill/line colour), so
+  typing on rebuilds the same-looking story on the active layer.
+- **On a path**: the path stays where the story was (z-order), a copy of
+  the path node with, as its own attributes, the non-text attributes it
+  painted with that differ from what it inherits (the story's included) —
+  the same rule as convert to shapes; text attributes are dropped. Editing
+  ends (no caret) and nothing is selected.
+- **Selection**: the removed story is pruned from it; the freed path is
+  not selected.
+- **Damage**: removal is an ordinary node deletion; the walker's text ink
+  goes with the scene, so the repaint is exact (asserted, below).
+
+Tests: `xarast-doc` `text_edit::tests` (2: emptied story removed and one
+undo restores it, story on a path leaves a path that paints the same);
+`xarast-app/tests/text_tool.rs` (6: Select All + Delete removes the story in
+the one "Delete Text" step, pending caret at the origin, undo digest exact;
+typing on rebuilds it in place and style; a Backspace burst emptying a new
+story is one step; a story of only breaks survives leaving; on a path; the
+repaint equals a full render, and its undo the first frame);
+`tests/text_clipboard.rs` `cutting_all_the_text_removes_the_story_in_the_same_step`.
+
 ## IME composition and the text clipboard (T9.4.7–T9.4.8, as built, XARA-T-0224)
 
 Code: `xarast-app/src/text_clip.rs` (`StyledText`, `copy_range`,
@@ -1310,9 +1369,10 @@ first story of a process waits for enumeration when nothing prewarmed
   `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
   embedded-font overlay; ~~golden images of `TextDesigns` with pinned
   fonts (W9.7)~~ (done, XARA-T-0260).
-- Typing leftovers (T9.4.6): a story emptied by deleting all its text stays
-  (the original deletes an empty story when the caret leaves it; doing so
-  here would add an undo step — decide with the maintainer); ~~typed text
+- Typing leftovers (T9.4.6): ~~a story emptied by deleting all its text
+  stays~~ (done, XARA-T-0237: removed in the deletion's own step); a story
+  holding only paragraph breaks is kept when the text is left (the original
+  removes it); ~~typed text
   does not pick up attributes chosen while the caret is up~~ (done,
   XARA-T-0225: the caret's pending style); Unicode line/paragraph
   separators (U+2028/9) type as characters, not breaks.

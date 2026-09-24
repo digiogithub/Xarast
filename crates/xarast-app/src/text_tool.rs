@@ -20,7 +20,11 @@
 //! * **Pending**: a caret where typing *will* create a new story, a point
 //!   story or a column of the dragged width. No story is created until the
 //!   first character is typed (T9.4.6), so leaving the tool never leaves an
-//!   empty story behind and a stray click costs no undo step.
+//!   empty story behind and a stray click costs no undo step. The other way
+//!   round, a deletion or cut that takes all of a story's text removes the
+//!   story in the same undo step (XARA-T-0237) and the caret becomes a
+//!   pending one where the story began, keeping its style; a story on a
+//!   path leaves its path as a shape and editing ends.
 //!
 //! The tool never mutates the document (tools invariant 1): typing and
 //! deleting emit [`EditCommand::TypeText`], [`EditCommand::DeleteText`]
@@ -343,6 +347,74 @@ pub struct TextTool {
     /// A paste at a pending caret creates a story: the caret goes into it
     /// at this offset once it exists.
     adopt: Option<usize>,
+    /// An edit just emitted takes all of a story's text: where the caret
+    /// goes if that removes the story ([`Emptying`]).
+    emptying: Option<Emptying>,
+}
+
+/// A story an edit is about to empty, which the edit then removes
+/// (`text.md`, "Removing an emptied story"): the caret becomes a pending
+/// one where the story began, keeping its style, so typing on makes a new
+/// story that looks like the old one.
+#[derive(Clone, Debug, PartialEq)]
+struct Emptying {
+    story: NodeId,
+    /// The pending caret: the story's origin and column width; `None` for
+    /// a story on a path (its path stays, as a shape, and editing ends).
+    pending: Option<(DocPoint, Option<Mp>)>,
+    /// The attributes of the story's first character that differ from
+    /// what a new story would get.
+    style: Vec<AttrValue>,
+}
+
+impl Emptying {
+    /// `Some` when replacing `range` of the story `v` with `text` leaves it
+    /// without text.
+    fn of(
+        story: NodeId,
+        v: &StoryView,
+        range: &std::ops::Range<usize>,
+        text: &str,
+        doc: &Document,
+        current: &[AttrValue],
+    ) -> Option<Emptying> {
+        if !text.is_empty() || range.start > 0 || range.end < v.map.text().len() || range.is_empty()
+        {
+            return None;
+        }
+        let pending = match v.node.layout {
+            TextLayout::OnPath { .. } => None,
+            TextLayout::InColumn { width, .. } => Some(width),
+            TextLayout::AtPoint => Some(Mp::ZERO),
+        }
+        .map(|w| {
+            let m = v.node.transform;
+            (DocPoint::new(m.e, m.f), (w > Mp::ZERO).then_some(w))
+        });
+        let style =
+            v.st.run_at(0)
+                .and_then(|r| v.st.runs.get(r))
+                .map(|run| {
+                    ALL_TEXT_SLOTS
+                        .into_iter()
+                        .chain(crate::text_clip::PAINT_SLOTS)
+                        .filter_map(|slot| {
+                            let has = run.attrs.get(slot);
+                            let new = current
+                                .iter()
+                                .find(|c| c.slot() == Some(slot))
+                                .unwrap_or_else(|| &**doc.defaults.get(slot));
+                            (has != new).then(|| has.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+        Some(Emptying {
+            story,
+            pending,
+            style,
+        })
+    }
 }
 
 impl TextTool {
@@ -530,11 +602,17 @@ impl TextTool {
         self.set(Some(TextEditing::Pending { at, column }), None, cx);
     }
 
-    /// The size a new story's caret is drawn at: the current font size.
-    fn pending_size(edit: &crate::edit::EditState) -> Mp {
-        edit.current
-            .values()
+    /// The size a new story's caret is drawn at: the pending style's font
+    /// size, else the current one.
+    fn pending_size(&self, edit: &crate::edit::EditState) -> Mp {
+        Self::size_in(&self.pending, edit)
+    }
+
+    /// The font size `first`, else the current attributes, give.
+    fn size_in(first: &[AttrValue], edit: &crate::edit::EditState) -> Mp {
+        first
             .iter()
+            .chain(edit.current.values())
             .find_map(|v| match v {
                 AttrValue::FontSize(s) if s.raw() > 0 => Some(*s),
                 _ => None,
@@ -550,6 +628,7 @@ impl TextTool {
         // A commit arrives as typing: the composition it ends goes.
         self.end_composition(cx);
         self.adopt = None;
+        self.emptying = None;
         if let TextEditing::Pending { at, column } = editing.state {
             if let TextInputKind::Insert(t) = &input.kind {
                 self.start_story(at, column, typed(t), input.time_ms, cx);
@@ -610,6 +689,14 @@ impl TextTool {
             Vec::new()
         };
         let typed_range = range.start..caret;
+        let emptying = Emptying::of(
+            sel.story,
+            &v,
+            &range,
+            &text,
+            cx.doc,
+            cx.edit.current.values(),
+        );
         cx.commands.emit(match kind {
             BurstKind::Typing => EditCommand::TypeText {
                 story: sel.story,
@@ -650,6 +737,7 @@ impl TextTool {
             last_ms: input.time_ms,
             epoch: None,
         });
+        self.emptying = emptying;
         true
     }
 
@@ -732,6 +820,7 @@ impl TextTool {
             return false;
         };
         self.end_composition(cx);
+        self.emptying = None;
         match (editing.state, op) {
             (TextEditing::Pending { .. }, TextClipOp::Cut) => {}
             (TextEditing::Pending { at, column }, TextClipOp::Paste(text)) => {
@@ -754,10 +843,24 @@ impl TextTool {
                 self.adopt = Some(caret);
             }
             (TextEditing::Story(_), op) => {
-                let Some((sel, _)) = self.current(cx.doc) else {
+                let Some((sel, v)) = self.current(cx.doc) else {
                     return true;
                 };
                 let range = sel.range();
+                let emptied = |text: &str| {
+                    Emptying::of(
+                        sel.story,
+                        &v,
+                        &range,
+                        text,
+                        cx.doc,
+                        cx.edit.current.values(),
+                    )
+                };
+                let emptying = match &op {
+                    TextClipOp::Cut => emptied(""),
+                    TextClipOp::Paste(t) => emptied(&t.text),
+                };
                 let caret = match op {
                     TextClipOp::Cut if sel.is_caret() => return true,
                     TextClipOp::Cut => {
@@ -791,6 +894,7 @@ impl TextTool {
                     None,
                     cx,
                 );
+                self.emptying = emptying;
             }
         }
         true
@@ -1294,7 +1398,7 @@ impl Tool for TextTool {
             GestureEvent::DragEnd { to, .. } => match self.drag.take() {
                 Some(Drag::Column { from, .. }) => {
                     let width = (to.x.to_f64() - from.x.to_f64()).abs();
-                    let size = Self::pending_size(cx.edit);
+                    let size = Self::size_in(&[], cx.edit);
                     let left = from.x.min(to.x);
                     let top = from.y.max(to.y);
                     if width < MIN_COLUMN_PX * cx.device_px() {
@@ -1333,7 +1437,7 @@ impl Tool for TextTool {
         }
         match self.editing.map(|e| e.state) {
             Some(TextEditing::Pending { at, column }) => {
-                let size = Self::pending_size(view.edit);
+                let size = self.pending_size(view.edit);
                 let (ascent, descent) = (size.mul_ratio(4, 5), size.mul_ratio(1, 5));
                 let from = DocPoint::new(at.x, at.y.saturating_sub(descent));
                 let to = DocPoint::new(at.x, at.y.saturating_add(ascent));
@@ -1389,7 +1493,7 @@ impl Tool for TextTool {
     fn text_caret(&self, view: ToolView<'_>) -> Option<(DocPoint, DocPoint)> {
         match self.editing.map(|e| e.state)? {
             TextEditing::Pending { at, .. } => {
-                let size = Self::pending_size(view.edit);
+                let size = self.pending_size(view.edit);
                 Some((
                     DocPoint::new(at.x, at.y.saturating_sub(size.mul_ratio(1, 5))),
                     DocPoint::new(at.x, at.y.saturating_add(size.mul_ratio(4, 5))),
@@ -1569,6 +1673,28 @@ impl Tool for TextTool {
     }
 
     fn after_commands(&mut self, doc: &Document, created: Option<NodeId>) {
+        if let Some(e) = self.emptying.take()
+            && !doc.tree.is_reachable(e.story)
+            && matches!(self.editing, Some(Editing { state: TextEditing::Story(s), .. }) if s.story == e.story)
+        {
+            // The edit emptied the story and removed it: the caret stays
+            // where the story began, as a pending one with its style, so
+            // typing on makes a new story that looks the same. Nothing to
+            // join: the next key starts its own step.
+            self.burst = None;
+            self.adopt = None;
+            self.editing = e.pending.map(|(at, column)| Editing {
+                state: TextEditing::Pending { at, column },
+                goal_x: None,
+            });
+            self.pending = if self.editing.is_some() {
+                e.style
+            } else {
+                Vec::new()
+            };
+            self.moved = self.moved.wrapping_add(1);
+            return;
+        }
         if let Some(caret) = self.adopt.take() {
             // The story a paste at a pending caret created: the caret goes
             // on in it, after the pasted text.
