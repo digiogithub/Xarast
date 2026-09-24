@@ -12,6 +12,7 @@
 //! | [`raster`] | PNG, JPEG and WebP through the deterministic CPU rasteriser |
 //! | [`pdf`] | PDF 1.7, vector, with the fidelity ladder (T11.4) |
 //! | [`svg`] | SVG 1.1: the `.xarast` profile's mapper in its interchange dialect (W11.3) |
+//! | [`photo`] | Photo adjustments baked into pixels: the one translation from `PhotoOps` to `xarast_image::photo` (W10.6) |
 //! | [`fidelity`] | Colour fidelity across formats (W11.5): what the document holds that no output carries |
 //! | [`report`] | [`ExportReport`], [`Compromise`], [`ExportError`] |
 //!
@@ -39,6 +40,7 @@ pub mod jpeg;
 pub mod model;
 pub mod options;
 pub mod pdf;
+pub mod photo;
 pub mod png;
 pub mod raster;
 pub mod registry;
