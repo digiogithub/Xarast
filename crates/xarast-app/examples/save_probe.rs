@@ -1,6 +1,7 @@
 //! Times the application's save path on real files: what the interface
 //! thread pays (the snapshot) and what the save thread pays (restore,
-//! thumbnail, write), as File › Save runs it.
+//! thumbnail, text placement, write), as File › Save runs it. The last
+//! row leaves the text placer out, to show what placing text costs.
 //!
 //! ```text
 //! cargo run --release -p xarast-app --example save_probe -- FILE.xar|FILE.xarast… OUT_DIR
@@ -25,11 +26,16 @@ fn main() {
         let open = t.elapsed();
         let name = file.file_stem().unwrap_or_default().to_string_lossy();
         let target = out.join(format!("{name}.xarast"));
-        for (label, thumb) in [("with thumbnail", true), ("no thumbnail", false)] {
+        for (label, thumb, text) in [
+            ("with thumbnail", true, true),
+            ("no thumbnail", false, true),
+            ("no thumbnail, no text placer", false, false),
+        ] {
             let t = Instant::now();
             let job = s.save_job(SaveKind::Document, &target).expect("job");
             let snapshot = t.elapsed();
             let job = if thumb { job } else { job.without_thumbnail() };
+            let job = if text { job } else { job.without_text_placer() };
             let t = Instant::now();
             let outcome = job.run();
             let run = t.elapsed();
@@ -54,7 +60,13 @@ fn main() {
         let direct = xarast_format::save(
             &s.doc,
             &out.join("direct.xarast"),
-            &xarast_format::SaveOptions::default(),
+            &xarast_format::SaveOptions {
+                svg: xarast_format::svg::SvgOptions {
+                    text: Some(xarast_app::svg_text::placer()),
+                    ..xarast_format::svg::SvgOptions::default()
+                },
+                ..xarast_format::SaveOptions::default()
+            },
         )
         .expect("direct save");
         println!(
