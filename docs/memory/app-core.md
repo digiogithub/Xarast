@@ -424,6 +424,60 @@ reason the walker *reports*, which is its own test.
     * Measured over the corpus: repainted frames rasterise 4 % of the
       pixels a full frame would (`perf.md`, "An edit repaints its damage").
 
+41. **The render thread never waits for an evicted bitmap base**
+    (XARA-T-0281). `CpuFrameRenderer::default()` samples with
+    `MissingLevels::Substitute` (`render.md`, "Pixel memory budget"): a
+    level that needs its base back from a spill file or a decode is drawn
+    from the best resident one instead. After each frame the worker asks
+    the job's images which were substituted during it
+    (`ImageRef::substituted_since` against `substitution_tick()` read
+    before the frame) and sends them to a helper thread
+    (`xarast-rematerialise`, started on first use, stopped at shutdown)
+    that calls `ImageRef::rematerialise`. For a `Final`, the images'
+    `image_damage` is added to `Kept::inexact` and the frame goes out
+    with `exact == false`. When the helper reports the batch done
+    (`State::rematerialised >= generation`), nothing newer waits and the
+    kept frame is still that one, the worker re-runs the kept job under a
+    generation of its own: `reuse::plan` turns it into the ordinary
+    `Plan::Repaint` of `inexact` (or a full frame when that is over half
+    the view), so the shell's tiles take it like any edit repaint.
+    * **Generations moved into `Shared`** (`AtomicU64`) so the worker can
+      allocate one; `RenderThread::next_generation` is no longer `const`.
+      The shell's `frame.generation > shown` rule and the scheduler's
+      `presented` both accept the repair as the newer frame.
+    * **The repair samples with `Materialise`**
+      (`FrameRenderer::set_missing_levels`, a defaulted trait method that
+      returns the policy it replaces), so it is exact even if the budget
+      evicted a base again between the helper and the repair. That is the
+      only place the render thread may still read a base, and only under a
+      budget too small to hold one frame's images (a limit of 0 in the
+      tests); a real budget finds them resident.
+    * **A `Draft` is not repaired** — its `Final` follows — but its bases
+      are brought back all the same, so the `Final` usually finds them.
+    * `RenderStats::substituted` counts frames that drew substitutes,
+      `repaired` the worker's own repairs.
+    * Tested on the corpus (`tests/pixel_budget.rs`,
+      `the_render_thread_never_reads_a_base_back_and_converges`): Groucho2
+      and leafgirl, Draft zoomed out then Final, under a budget with every
+      base spilled; every base read is the helper's, leafgirl's Final is
+      repaired, and the settled frame equals the unlimited budget's.
+
+42. **A session's walkers decode each bitmap once between them**
+    (XARA-T-0281). `Session` owns a `DecodedImages` (`src/decoded.rs`) and
+    every walker it makes shares it: its own, `Session::scene_walker()`
+    (`build_scene`, the CLI's `SessionSource`), `headless::render`, and
+    the save thread's thumbnail (`SaveJob::with_decoded_images`, set by
+    `Session::save_job`; `thumbnail::thumbnail_png_with`). The key is the
+    resource's identity — the addresses of its `pixels` and `original`
+    `Arc`s, which the entry holds, plus its declared size and the pixel
+    budget — so an edited (copy-on-write) resource misses. Entries whose
+    resource left the document are dropped on the next registration.
+    Registration stays in document order whatever the cache held, so ids
+    and scenes are unchanged. `SceneWalker::reset` keeps the cache (it is
+    the document's, not the walker's). Walkers built with
+    `SceneWalker::new()` elsewhere (tests, the corpus tools) decode for
+    themselves as before.
+
 ---
 
 ## Saving (XARA-US-0084)
@@ -580,6 +634,10 @@ placer (XARA-T-0259, 2026-09-24, ext4, load ≈ 3): ProbeX16 UI thread
     whole-pixel pan plus an edit, say) needs the damage moved with the
     pixels first. `tests/edit_damage.rs` in the shell checks every frame
     and the tiles against a full render byte for byte.
+17. **A frame drawn from substitutes is never published as exact.** The
+    worker adds the substituted images' `image_damage` to the kept
+    frame's `inexact` before publishing (decision 41); a presenter that
+    settles on `exact` would otherwise keep proxy pixels for good.
 12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
     `InfobarEdit` (typed `InfobarValue`), `AutoScroll`,
     `SetCurrentAttribute`; pointer intents now drive the `ToolMachine`,
