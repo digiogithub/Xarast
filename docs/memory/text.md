@@ -1311,6 +1311,23 @@ re-save bytes (59/59 render and bytes); corpus export-check TextCurve svg
    refused in one format is refused in all. Subsets are a function of the
    face bytes and the glyph or character set only (byte-identical
    re-saves depend on it).
+8. **In an `xarast-app` test binary, every test installs the pinned fonts
+   (`fonts::set_shared`) before it opens a session or touches anything
+   that calls `fonts::shared()`** (XARA-T-0294). `shared()` is a
+   process-wide `OnceLock`: the first caller wins, and with
+   `XARAST_FONT_DIR` unset it picks the *system* fonts. Opening a session
+   already calls it (`Session::adopt` fits the view to the page, and
+   `viewport.rs` measures text stories with `fonts::document`). One test
+   installing the pinned set while its siblings only opened sessions made
+   the winner depend on scheduling: `text_path_caret`'s session caret
+   drifted ≈ 1,300 mp (system Noto Sans vs the pinned subset) from a caret
+   map built with the pinned fonts, 158/200 runs under 48 CPU hogs, 0/60
+   idle. The pattern that holds: one helper per binary that caches the
+   pinned `Arc` in a `OnceLock`, calls `set_shared` and **asserts**
+   `Arc::ptr_eq(&shared(), &pinned)`, called first by every test (see
+   `tests/text_path_caret.rs::fonts`). Ignoring `set_shared`'s `bool` hides
+   exactly this failure. Not a production race: the shell uses `shared()`
+   everywhere and it is fixed once per process.
 
 ## Test fonts (pinned set)
 
@@ -1398,6 +1415,11 @@ first story of a process waits for enumeration when nothing prewarmed
   curvature at each position): it departs from the original by up to 5.8
   advances on the fixtures (above). Do not reopen it for fidelity; only
   as an opt-in style.
+- **Chasing a test's text drift in async re-materialisation, gallery
+  decode or the `for_document` overlay cache** (XARA-T-0294): the ≈ 1,300 mp
+  caret flake was the process-wide `fonts::shared()` being claimed with the
+  system fonts by a sibling test (invariant 8). Check that first; forcing
+  `fonts::shared()` before `set_shared` reproduces it deterministically.
 - **Offsetting each line along each point's own normal** looks nicer but
   is not what the original does (one start-normal vector per line).
 
