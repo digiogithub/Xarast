@@ -1502,9 +1502,9 @@ Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
 - **PDF** rasterises an effect whole, alone (`Target::Effect`, from its
   push to its pop, over transparency), and skips what it wraps:
   `Compromise::Rasterised` "a live effect (feather) has no PDF
-  equivalent". **SVG** still writes only `xarast:feather` (baking the
-  `feMorphology`/`feGaussianBlur` chain is C10, XARA-T-0317): an
-  external viewer draws the object unfeathered.
+  equivalent". **SVG** (both dialects) draws it with a filter since
+  XARA-T-0317: disc-like erosion, Gaussian σ = r/2, the profile as an
+  alpha table (`export.md`, "Feathers in SVG"; feathers svg 20.15 → 2.00).
 - **Cost** (`benches/render.rs`, group `effects`): disc blur r = 20 px over 1024² **5.9 ms** (budget ≤ 12 ms), Gaussian σ = 10 px 6.0 ms, erosion r = 20 px 5.7 ms, a 512² frame with one 40 pt feather 3.6 ms (release, this machine, other agents building). The
   corpus render (release, 100 %, warm): Groucho2 50 → 129 ms, feathers
   5 → 26 ms, Watch4 58 → 60 ms; every effect renders its region twice

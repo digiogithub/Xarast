@@ -81,6 +81,7 @@ same code. What Interchange changes, and where:
 | Background | none | `SvgOptions::background` → a `<rect>` over the viewBox, first in the body | `assemble` |
 | Ids | stable, the identity model | kept; `minify` drops those nothing refers to (`url(#…)`, `href="#…"`, `inkscape:current-layer`) plus comments and indentation | `interchange::project` |
 | Baked content | `xarast:generated` | unmarked (the attribute goes with the rest) | projection |
+| Feathers (XARA-T-0317) | `xarast:feather` + `filter="url(#f…)"` to a `<filter xarast:filter="feather">` | the same filter, unmarked | `Emitter::own_feather`, `svg/effect.rs` |
 
 **Why a projection pass instead of an `if` at every write.** The
 parametric layer is ~290 emission sites across `emit.rs`, `paint.rs`,
@@ -165,6 +166,58 @@ behind `SvgOptions::dialect`; that list is the table above.
   Heights differ by one row on some files (resvg rounds the height up).
   Scripts: scratch only; automated since by `cargo xtask export-check`
   (next section).
+
+### Feathers in SVG (XARA-T-0317, 2026-09-24)
+
+A feather's owner (`xarast-format.md`, "Feathers are written on their
+owner") carries `filter="url(#f…)"` to a filter derived from the model in
+`svg/effect.rs`, in **both** dialects: a `.xarast` opened in a browser
+shows its feathers too. The chain, in the owner's user space (points),
+with `r` = size/2:
+
+1. `SourceAlpha` moved into the colour channels (`feColorMatrix`, A = 1);
+2. eroded by four rectangles `(r cos φ, r sin φ)`, φ = 11.25°, 33.75°,
+   56.25°, 78.75° (`feMorphology`), combined with `feBlend mode="darken"`
+   (a per-channel minimum over opaque inputs): erosion by a union is the
+   minimum of the erosions, and the union reaches 0.98 r–r in every
+   direction, i.e. a disc;
+3. moved back into alpha, `feGaussianBlur` σ = r/2 (the interchange
+   stand-in for the renderer's disc of radius r, `blur::sigma_for_disc_radius`);
+4. the profile as a 33-entry `feFuncA` table, `1 − P(1 − a)` (the renderer
+   profiles transparency), omitted for the identity;
+5. `feComposite in="SourceGraphic" operator="in"`.
+
+`color-interpolation-filters="sRGB"`. Region: `userSpaceOnUse`, the
+subtree's geometry grown by twice its widest *visible* stroke, the size
+and 1 pt (`Emitter::effect_region`); a placed image with a `transform`
+uses `objectBoundingBox` −10 %/120 % and per-axis radii in its unit
+square; a subtree with text uses its box ± 50 %. The report counts them
+in `Stats::effects_baked` → `Simplified { "feathers drawn by an SVG
+filter (a Gaussian blur for the disc blur)" }`; `NotRendered
+"feathering"` is left for a feathered text run only.
+
+**Measured** (72 dpi, paper, mean |Δ| against our PNG; Chrome = headless
+`google-chrome --screenshot` of the SVG at the PNG's size, scratch
+script, the method of `xarast-format.md`):
+
+| File | before | box erosion only | disc union (shipped) |
+|---|---:|---:|---:|
+| feathers, resvg | 20.15 | 5.06 | **2.00** |
+| feathers, Chrome | 20.00 | 4.27 | **1.63** |
+| Groucho2, resvg | 5.71 | 3.12 | **2.01** |
+| Groucho2, Chrome | 5.71 | 2.56 | **1.49** |
+| Watch4, resvg / Chrome | 1.43 / 1.45 | 1.17 / 1.06 | **1.13 / 1.06** |
+
+**Filter, not a raster.** The filter alone is under the default 4 in both
+renderers, stays vector (resolution-independent, as the renderer is) and
+needs no renderer in `xarast-format`, so the `.xarast` base SVG gets it
+too at no cost. No raster-mask fallback was built; if an effect ever
+needs one, the hook belongs beside `SvgOptions::derived_bitmaps`
+(export-only, supplied by `xarast-io`), and a raster must never go into
+the Native dialect (a save does not render). What is left in the
+residual: the Gaussian's tails versus the disc's hard support (a thin
+feathered line fades a little more in SVG), and the renderer's soft
+erosion at antialiased edges.
 
 ## Colour fidelity and regression (W11.5, W11.6, XARA-US-0060)
 
@@ -253,7 +306,7 @@ PDF), each with a limit and a reason in `export-limits-corpus.txt`:
 |---|---|
 | Bake ladder: conical/diamond/multi-colour fills | Fill Types simple (~~svg 19.7~~ 1.9 since XARA-US-0043, pdf 7.2), WATCH2 ~~svg 16.5~~ 0.7, WATCH (~~svg 5.1~~ 2.4, pdf 4.8) — SVG now bakes them into geometry (`xarast-format` `svg/bake.rs`, `xarast-format.md`) |
 | Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
-| Feathers drawn by us, unfeathered in SVG (XARA-US-0068, 2026-09-24) | feathers svg 20.15, Groucho2 svg 5.71 — the writer records `xarast:feather` only; limits 23.2 / 6.6 until the filter is baked (XARA-T-0317). PDF rasterises each feather whole: feathers pdf 1.69, Groucho2 2.04 |
+| ~~Feathers drawn by us, unfeathered in SVG~~ | feathers svg ~~20.15~~ **2.00**, Groucho2 svg ~~5.71~~ **2.01**, Watch4 1.43 → 1.13 since XARA-T-0317 (the feather is a filter, "Feathers in SVG" below); the limits 23.2 / 6.6 are gone. PDF rasterises each feather whole: feathers pdf 1.69, Groucho2 2.04 |
 | ~~Feathering as a blur~~ | SoftShadow ~~svg 4.1~~ **1.20** since XARA-T-0256: the excess was its four-colour Bleach transparencies, drawn flat; they are baked as masks now (`render.md`, "Meshes tile mirrored"); the limit is gone |
 | ~~Text on a path written straight in SVG~~ | TextCurve ~~svg 16.3~~ **3.06** since XARA-T-0252 (T9.5.6: each character placed and turned on the path, `x`/`y`/`rotate`), pdf 1.55; the limit is gone. What is left is the rainbow gradient on the text, written in the spread frame (`xarast-format.md`, text leftovers) |
 | Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) — superseded by the row below since T11.4.7; `--text outlines` still gives these |
@@ -609,7 +662,18 @@ with it.
 - **PNG never carries both `sRGB` and `iCCP`** (`with_icc_profile` removes
   the former).
 
+- **A derived filter's region comes from what the file says.** Never
+  from cached bounds or the inherited line width of an unstroked
+  element: those differ between an imported document and the same one
+  read back, and a re-save stops being byte-identical (caught by
+  `svg_roundtrip` on Groucho2 and feathers, 0.5 pt off).
+
 ## Dead ends (do not retry)
+
+- **A feather as one `feMorphology`**: it erodes by a rectangle, √2 r
+  deep on a diagonal edge, so stars and curves fade too early (feathers
+  svg 5.06, Chrome 4.27). The four-rectangle union with `darken` is the
+  fix (2.00 / 1.63).
 
 - **`png` crate for interlaced output**: sets the IHDR interlace bit over
   non-interlaced data, producing corrupt files.
