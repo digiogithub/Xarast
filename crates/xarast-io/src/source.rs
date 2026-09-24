@@ -109,6 +109,18 @@ pub trait ExportSource {
     fn svg_text_placer(&self) -> Option<xarast_format::svg::Placer> {
         None
     }
+
+    /// A copy of the document with text stories replaced by their glyph
+    /// outlines (the application's "Convert to shapes", applied to the
+    /// copy): every story when `all`, otherwise only the stories drawn
+    /// with a face whose licence (`OS/2.fsType`) forbids embedding it
+    /// (T9.6.5). Returns the copy and the families of those refusing
+    /// faces. `None` when no story would change, or the source cannot lay
+    /// text out: exporters then write the document as it is.
+    fn text_as_outlines(&self, all: bool) -> Option<(xarast_doc::Document, Vec<Arc<str>>)> {
+        let _ = all;
+        None
+    }
 }
 
 /// A prebuilt scene with a fixed area: tests, benchmarks, and callers that

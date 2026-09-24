@@ -486,6 +486,39 @@ pub(crate) fn story_outlines(
     Some((runs, layout_text(&st).to_owned()))
 }
 
+/// The families of the faces `story` is drawn with whose licence
+/// (`OS/2.fsType`) forbids embedding them, each once; empty when every face
+/// may be embedded or `story` is not a story.
+pub(crate) fn story_refused_faces(
+    fonts: &FontService,
+    doc: &xarast_doc::Document,
+    story: NodeId,
+) -> Vec<Arc<str>> {
+    let Some(NodeKind::TextStory(node)) = doc.tree.kind(story) else {
+        return Vec::new();
+    };
+    let mut stack = xarast_doc::attr::resolve_inherited(&doc.tree, story, &doc.defaults);
+    let Some(st) = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
+        Arc::new(a.value.clone())
+    }) else {
+        return Vec::new();
+    };
+    let (_, layout, _) = lay_story(fonts, &doc.tree, &st, node);
+    let db = fonts.db();
+    let mut out: Vec<Arc<str>> = Vec::new();
+    for line in &layout.lines {
+        for run in &line.runs {
+            if db.embedding_denied(run.face)
+                && let Some(info) = db.face_info(run.face)
+                && !out.contains(&info.family)
+            {
+                out.push(info.family);
+            }
+        }
+    }
+    out
+}
+
 /// The document-space box a story's lines occupy (advance boxes, not ink),
 /// or an empty rectangle when it holds no text. `attrs` is the state in
 /// force at the story, as for [`StoryText::collect`].

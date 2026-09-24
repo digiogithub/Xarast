@@ -30,7 +30,9 @@ use xarast_format::ResourceIndex;
 use xarast_format::svg::{self as fsvg, BitmapLinker, SvgDialect};
 
 use crate::model::{Background, ExportRequest};
-use crate::options::{FormatId, FormatOptions, PngColour, PngDepth, SvgOptions, SvgResources};
+use crate::options::{
+    FormatId, FormatOptions, PngColour, PngDepth, SvgOptions, SvgResources, TextOutput,
+};
 use crate::png::{PngHeader, encode_png, with_icc_profile};
 use crate::raster::AtomicFile;
 use crate::registry::{Capabilities, Exporter};
@@ -90,6 +92,14 @@ impl Exporter for SvgExporter {
             id: FormatId::Svg.name().to_owned(),
             reason: "SVG export maps the document, and this source has only a scene",
         })?;
+        // Text as outlines: every story (`TextOutput::Outlines`), or only
+        // the stories drawn with a face whose licence forbids embedding
+        // (T9.6.5), on a copy the application converts.
+        let outlined = src.text_as_outlines(o.text == TextOutput::Outlines);
+        let (doc, refused): (&xarast_doc::Document, &[Arc<str>]) = match &outlined {
+            Some((d, f)) => (d, f),
+            None => (doc, &[]),
+        };
         let area = req.bled(src.resolve_area(&req.area)?)?;
         if progress.cancelled() {
             return Err(ExportError::Cancelled);
@@ -167,6 +177,14 @@ impl Exporter for SvgExporter {
             report
                 .compromises
                 .retain(|c| !matches!(c, Compromise::FontNotEmbedded { .. }));
+            for family in refused {
+                report.compromises.push(Compromise::FontNotEmbedded {
+                    family: Arc::clone(family),
+                    reason: "its licence (OS/2 fsType) forbids embedding; its text is \
+                             written as outlines"
+                        .into(),
+                });
+            }
             for f in out.fonts.iter().filter(|f| f.not_embedded.is_some()) {
                 let c = Compromise::FontNotEmbedded {
                     family: Arc::clone(&f.face.family),

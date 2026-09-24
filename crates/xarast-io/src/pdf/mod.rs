@@ -53,7 +53,9 @@ use xarast_render::{
 };
 
 use crate::model::{Background, ExportRequest};
-use crate::options::{BlendFidelity, FormatId, FormatOptions, PDF_RASTERISE_DPI, PdfOptions};
+use crate::options::{
+    BlendFidelity, FormatId, FormatOptions, PDF_RASTERISE_DPI, PdfOptions, TextOutput,
+};
 use crate::raster::AtomicFile;
 use crate::registry::{Capabilities, Exporter};
 use crate::report::{Compromise, ExportError, ExportReport};
@@ -261,6 +263,7 @@ pub fn write_pdf(
     let text = built
         .text
         .as_ref()
+        .filter(|_| o.text == TextOutput::Text)
         .map(|t| PdfText::new(t, &mut w, &mut compromises));
     let mut tx = Translator {
         w,

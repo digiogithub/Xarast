@@ -20,7 +20,7 @@ use xarast_format::svg::Placer;
 use xarast_geom::{Matrix, Mp, Point, Rect, Vector};
 use xarast_io::{
     Compromise, ExportArea, ExportError, ExportRequest, ExportSource, Exporter, FormatOptions,
-    NoProgress, PdfExporter, PdfOptions, SourceScene, SvgExporter, SvgOptions,
+    NoProgress, PdfExporter, PdfOptions, SourceScene, SvgExporter, SvgOptions, TextOutput,
 };
 use xarast_render::{RenderQuality, Scene};
 
@@ -158,6 +158,10 @@ impl ExportSource for Src {
             &self.fonts,
         )))))
     }
+
+    fn text_as_outlines(&self, all: bool) -> Option<(Document, Vec<Arc<str>>)> {
+        xarast_app::convert::text_as_outlines(&self.doc, &self.fonts, all)
+    }
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -265,31 +269,100 @@ fn pdf_text_is_text_in_embedded_subsets_except_where_the_licence_forbids() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn svg(src: &Src, dir: &Path, text: TextOutput) -> (String, Vec<(String, String)>) {
+    let dest = dir.join("a.svg");
+    let req = ExportRequest::new(
+        FormatOptions::Svg(SvgOptions {
+            text,
+            ..SvgOptions::default()
+        }),
+        dest.clone(),
+    );
+    let report = SvgExporter.export(src, &req, &NoProgress).unwrap();
+    let refused = report
+        .compromises
+        .iter()
+        .filter_map(|c| match c {
+            Compromise::FontNotEmbedded { family, reason } => {
+                Some((family.to_string(), reason.to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    (std::fs::read_to_string(&dest).unwrap(), refused)
+}
+
 #[test]
-fn svg_export_embeds_woff2_subsets_and_reports_only_the_refused_face() {
+fn svg_export_embeds_woff2_subsets_and_outlines_the_refused_face() {
     let src = Src {
         doc: sample(),
         fonts: fonts(),
     };
     let dir = scratch("svg");
-    let dest = dir.join("a.svg");
-    let req = ExportRequest::new(FormatOptions::Svg(SvgOptions::default()), dest.clone());
-    let report = SvgExporter.export(&src, &req, &NoProgress).unwrap();
-    let svg = std::fs::read_to_string(&dest).unwrap();
-    assert_eq!(svg.matches("@font-face{").count(), 1, "one face embedded");
-    assert!(svg.contains("font-family:'Noto Sans';font-weight:400;font-style:normal;"));
-    assert!(svg.contains("src:url(data:font/woff2;base64,d09GMg"));
-    assert!(!svg.contains("xarast:"));
-    let refused: Vec<_> = report
-        .compromises
-        .iter()
-        .filter_map(|c| match c {
-            Compromise::FontNotEmbedded { family, .. } => Some(family.to_string()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(refused, [RESTRICTED], "{:?}", report.compromises);
+    let (text_svg, refused) = svg(&src, &dir, TextOutput::Text);
+    assert_eq!(
+        text_svg.matches("@font-face{").count(),
+        1,
+        "one face embedded"
+    );
+    assert!(text_svg.contains("font-family:'Noto Sans';font-weight:400;font-style:normal;"));
+    assert!(text_svg.contains("src:url(data:font/woff2;base64,d09GMg"));
+    assert!(!text_svg.contains("xarast:"));
+    // T9.6.5: the story in the refused face is its glyph outlines; the
+    // three others stay live text.
+    assert_eq!(text_svg.matches("<text").count(), 3, "{text_svg}");
+    assert!(!text_svg.contains("Licensed elsewhere"));
+    assert!(text_svg.contains("Xarast embeds fonts"));
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0].0, RESTRICTED);
+    assert!(refused[0].1.contains("outlines"), "{}", refused[0].1);
     assert!(SvgExporter.capabilities().embeds_fonts);
+    // The document itself is untouched.
+    let stories = src
+        .doc
+        .tree
+        .preorder(src.doc.tree.root())
+        .filter(|n| matches!(src.doc.tree.kind(*n), Some(NodeKind::TextStory(_))))
+        .count();
+    assert_eq!(stories, 4);
+
+    // Text as outlines: no text, no fonts, nothing to report.
+    let (outlined, refused) = svg(&src, &dir, TextOutput::Outlines);
+    assert!(!outlined.contains("<text"));
+    assert!(!outlined.contains("@font-face"));
+    assert!(refused.is_empty(), "{refused:?}");
+    assert!(outlined.matches("<path").count() >= 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pdf_text_as_outlines_embeds_nothing() {
+    let src = Src {
+        doc: sample(),
+        fonts: fonts(),
+    };
+    let dir = scratch("pdf-outlines");
+    let dest = dir.join("o.pdf");
+    let req = ExportRequest::new(
+        FormatOptions::Pdf(PdfOptions {
+            compress: false,
+            text: TextOutput::Outlines,
+            ..PdfOptions::default()
+        }),
+        dest.clone(),
+    );
+    let report = PdfExporter.export(&src, &req, &NoProgress).unwrap();
+    let s = String::from_utf8_lossy(&std::fs::read(&dest).unwrap()).into_owned();
+    assert!(!s.contains("/Font"), "no font at all");
+    assert!(!s.contains(" Tj"));
+    assert!(
+        !report
+            .compromises
+            .iter()
+            .any(|c| matches!(c, Compromise::FontNotEmbedded { .. })),
+        "{:?}",
+        report.compromises
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

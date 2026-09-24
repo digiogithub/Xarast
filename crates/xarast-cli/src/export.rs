@@ -6,6 +6,7 @@
 //! `.xar` is refused with the permanent reason of architecture §3.5.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use xarast_app::viewport::{drawing_or_page_rect, page_rect, spread_rect};
@@ -15,8 +16,8 @@ use xarast_geom::{Mp, Point, Rect};
 use xarast_io::{
     Background, BlendFidelity, Compromise, ExportArea, ExportError, ExportRequest, ExportSizing,
     ExportSource, FormatId, FormatOptions, NoProgress, PDF_RASTERISE_DPI, PngColour,
-    PngCompression, PngDepth, Registry, SourceScene, Subsampling, SvgResources, WebPMode,
-    XAR_EXPORT_REFUSAL,
+    PngCompression, PngDepth, Registry, SourceScene, Subsampling, SvgResources, TextOutput,
+    WebPMode, XAR_EXPORT_REFUSAL,
 };
 use xarast_render::{RenderQuality, Scene};
 
@@ -64,6 +65,11 @@ PDF (one vector page the size of the area; --dpi and pixels do not apply)
                          with its backdrop; native: Stained Glass as Multiply,
                          Bleach as Screen
     --no-compress        leave the streams readable
+
+PDF and SVG
+    --text T             text (default): live text, fonts embedded as subsets
+                         where their licence (fsType) allows, outlines where
+                         it does not; outlines: every story as glyph outlines
 
 SVG (plain SVG 1.1 for browsers and Inkscape; the viewBox is the area)
     --resources R        inline (default): images as data: URIs;
@@ -183,6 +189,7 @@ struct FormatFlags {
     resources: Option<SvgResources>,
     minify: bool,
     pretty: bool,
+    text: Option<TextOutput>,
 }
 
 impl FormatFlags {
@@ -232,6 +239,7 @@ impl FormatFlags {
                 p.rasterise_dpi = self.raster_dpi.unwrap_or(p.rasterise_dpi);
                 p.blend_fidelity = self.blend.unwrap_or(p.blend_fidelity);
                 p.compress = !self.no_compress;
+                p.text = self.text.unwrap_or(p.text);
             }
             FormatOptions::Svg(v) => {
                 if png_only || jpeg_only || self.quality.is_some() {
@@ -240,7 +248,11 @@ impl FormatFlags {
                 v.resources = self.resources.unwrap_or(v.resources);
                 v.minify = self.minify;
                 v.pretty = self.pretty;
+                v.text = self.text.unwrap_or(v.text);
             }
+        }
+        if self.text.is_some() && !matches!(id, FormatId::Pdf | FormatId::Svg) {
+            return Err("--text is a PDF and SVG option".into());
         }
         let svg_only = self.resources.is_some() || self.minify || self.pretty;
         if svg_only && id != FormatId::Svg {
@@ -384,6 +396,13 @@ pub fn parse(argv: &[String]) -> Result<ExportArgs, String> {
                     }
                 });
             }
+            "--text" => {
+                f.text = Some(match it.value(&arg)?.as_str() {
+                    "text" => TextOutput::Text,
+                    "outlines" => TextOutput::Outlines,
+                    other => return Err(format!("--text: `{other}` is not text or outlines")),
+                });
+            }
             "--minify" => f.minify = true,
             "--pretty" => f.pretty = true,
             "--quiet" | "-q" => quiet = true,
@@ -521,6 +540,10 @@ impl ExportSource for SessionSource<'_> {
             compromises,
             text,
         })
+    }
+
+    fn text_as_outlines(&self, all: bool) -> Option<(xarast_doc::Document, Vec<Arc<str>>)> {
+        xarast_app::convert::text_as_outlines(&self.session.doc, &xarast_app::fonts::shared(), all)
     }
 
     fn document(&self) -> Option<&xarast_doc::Document> {
@@ -775,5 +798,34 @@ mod tests {
         };
         assert_eq!(p.colour, PngColour::Palette { max_colours: 16 });
         assert_eq!(p.bit_depth, PngDepth::Sixteen);
+    }
+
+    #[test]
+    fn text_output_is_a_pdf_and_svg_option() {
+        for (out, want) in [
+            ("x.pdf", "outlines"),
+            ("x.svg", "outlines"),
+            ("x.svg", "text"),
+        ] {
+            let a = parse(&argv(&["a.xar", "-o", out, "--text", want])).unwrap();
+            let got = match a.request.options {
+                FormatOptions::Pdf(p) => p.text,
+                FormatOptions::Svg(s) => s.text,
+                _ => panic!("pdf or svg"),
+            };
+            let want = if want == "text" {
+                TextOutput::Text
+            } else {
+                TextOutput::Outlines
+            };
+            assert_eq!(got, want);
+        }
+        let a = parse(&argv(&["a.xar", "-o", "x.pdf"])).unwrap();
+        let FormatOptions::Pdf(p) = a.request.options else {
+            panic!("pdf");
+        };
+        assert_eq!(p.text, TextOutput::Text, "text is the default");
+        assert!(parse(&argv(&["a.xar", "-o", "x.png", "--text", "outlines"])).is_err());
+        assert!(parse(&argv(&["a.xar", "-o", "x.pdf", "--text", "curves"])).is_err());
     }
 }

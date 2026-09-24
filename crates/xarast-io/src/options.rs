@@ -248,10 +248,25 @@ pub enum BlendFidelity {
     Exact,
 }
 
+/// How vector formats write text (phase 11 `TextOutput`; T11.3.4,
+/// T11.4.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextOutput {
+    /// Live text in its fonts, embedded as subsets where the face's
+    /// licence (`OS/2.fsType`) allows; a story drawn with a face that
+    /// forbids it is written as its glyph outlines and reported.
+    #[default]
+    Text,
+    /// Every story as its glyph outlines, no fonts at all: exactly what
+    /// Xarast draws, not selectable.
+    Outlines,
+}
+
 /// PDF options.
 ///
-/// Text, image policy and output intent are added with T11.4.7–T11.4.9;
-/// the struct is `#[serde(default)]`, so hints written now still read.
+/// Image policy and output intent are added with T11.4.8–T11.4.9; the
+/// struct is `#[serde(default)]`, so hints written now still read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PdfOptions {
@@ -264,6 +279,8 @@ pub struct PdfOptions {
     pub blend_fidelity: BlendFidelity,
     /// FlateDecode every stream. Off only to read the content streams.
     pub compress: bool,
+    /// Text as text in embedded subset fonts (the default) or outlines.
+    pub text: TextOutput,
 }
 
 /// The range [`PdfOptions::rasterise_dpi`] accepts.
@@ -277,6 +294,7 @@ impl Default for PdfOptions {
             rasterise_dpi: 300,
             blend_fidelity: BlendFidelity::Exact,
             compress: true,
+            text: TextOutput::Text,
         }
     }
 }
@@ -295,8 +313,8 @@ pub enum SvgResources {
 
 /// SVG options (W11.3).
 ///
-/// Text is written as text in the fonts the document names (fonts are
-/// not embedded yet: T11.3.4); numbers are the profile's exact three
+/// Text is written as text with its fonts embedded as WOFF2 subsets
+/// (T11.3.4), or as outlines; numbers are the profile's exact three
 /// decimals of a point (T11.3.5 adds fewer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -307,6 +325,8 @@ pub struct SvgOptions {
     pub minify: bool,
     /// Indent one space per level, for reading and diffs.
     pub pretty: bool,
+    /// Text as text with embedded fonts (the default) or outlines.
+    pub text: TextOutput,
 }
 
 /// One entry per format.
@@ -397,11 +417,13 @@ mod tests {
                 rasterise_dpi: 150,
                 blend_fidelity: BlendFidelity::PreferNative,
                 compress: false,
+                text: TextOutput::Outlines,
             }),
             FormatOptions::Svg(SvgOptions {
                 resources: SvgResources::Sidecar,
                 minify: true,
                 pretty: false,
+                text: TextOutput::Outlines,
             }),
             FormatOptions::default(),
         ];

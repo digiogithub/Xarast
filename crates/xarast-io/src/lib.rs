@@ -54,7 +54,7 @@ pub use model::{
 pub use options::{
     BlendFidelity, FormatId, FormatOptions, JpegOptions, PDF_RASTERISE_DPI, PdfOptions, PdfVersion,
     PngColour, PngCompression, PngDepth, PngOptions, Subsampling, SvgOptions, SvgResources,
-    WebPMode, WebPOptions,
+    TextOutput, WebPMode, WebPOptions,
 };
 pub use pdf::PdfExporter;
 pub use raster::{JpegExporter, PngExporter, WebPExporter};
