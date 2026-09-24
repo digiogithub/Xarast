@@ -1185,6 +1185,24 @@ under "CI gates"), any other walker evaluates on its walk. The ≤ 33 ms
 slider-latency budget is met by the proxy preview of XARA-T-0301. The materialisation threshold of T10.6.6 (250 ms of
 regeneration) is not measured yet (XARA-T-0302).
 
+## Phase 13 — live effects: blur and feathers (XARA-US-0068, 2026-09-24)
+
+`cargo bench -p xarast-render --bench render -- effects`, release, the
+reference machine with other agents building:
+
+| Bench | Budget (phase 13) | Measured |
+|---|---|---:|
+| `effects/disc_r20_1024` (disc blur, r = 20 px, 1024² alpha, CPU) | ≤ 12 ms | **5.9 ms** |
+| `effects/gaussian_s10_1024` | — | 6.0 ms |
+| `effects/erode_r20_1024` (a feather's erosion) | — | 5.7 ms |
+| `effects/feather_40pt_frame_512` (one feathered square, whole frame) | — | 3.6 ms |
+
+Corpus, `xarast-cli render`, 100 %, warm: Groucho2 **50 → 129 ms**
+(63 feathers), feathers.xar 5 → 26 ms, Watch4 58 → 60 ms. An effect is
+recomputed on every frame and repaint that reaches it — colour and
+silhouette passes, an erosion and a blur — until the layer cache lands
+(XARA-T-0314).
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape

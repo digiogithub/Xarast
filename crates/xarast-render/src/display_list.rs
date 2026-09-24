@@ -21,6 +21,7 @@ use xarast_geom::{FillRule, StrokeStyle};
 
 use crate::blend::{BlendFamily, TranspSource, Transparency};
 use crate::cache::CacheKey;
+use crate::effect::LayerEffect;
 use crate::paint::{GradMapping, ImageId, Paint};
 use crate::path::PathRef;
 use crate::precision::Transform2D;
@@ -190,6 +191,21 @@ pub enum DrawCmd {
         /// Where it goes.
         bounds: DeviceRect,
     },
+    /// Begin a live effect: everything up to the matching
+    /// [`DrawCmd::PopEffect`] is rendered offscreen and the effect applied
+    /// to it ([`crate::effect`]).
+    PushEffect {
+        /// Index of the scene op holding the effect.
+        op: u32,
+        /// Index of the document-to-device transform it is sized under.
+        xf: u32,
+        /// The device bounds of what it wraps, as the build kept it (the
+        /// union of the wrapped commands' bounds). Structural for
+        /// [`DrawCmd::bounds`], like a clip.
+        content: DeviceRect,
+    },
+    /// End the innermost live effect.
+    PopEffect,
 }
 
 impl DrawCmd {
@@ -203,7 +219,11 @@ impl DrawCmd {
             | DrawCmd::Image { bounds, .. }
             | DrawCmd::PushLayer { bounds, .. }
             | DrawCmd::CachedSurface { bounds, .. } => Some(*bounds),
-            DrawCmd::PushClip { .. } | DrawCmd::PopClip | DrawCmd::PopLayer { .. } => None,
+            DrawCmd::PushClip { .. }
+            | DrawCmd::PopClip
+            | DrawCmd::PopLayer { .. }
+            | DrawCmd::PushEffect { .. }
+            | DrawCmd::PopEffect => None,
         }
     }
 
@@ -310,6 +330,17 @@ pub enum DrawItem<'a> {
         /// Where it goes.
         bounds: DeviceRect,
     },
+    /// Begin a live effect.
+    PushEffect {
+        /// The effect.
+        effect: &'a LayerEffect,
+        /// Document to device where it applies: its sizes scale with it.
+        xf: Transform2D,
+        /// The device bounds of what it wraps.
+        content: DeviceRect,
+    },
+    /// End the innermost live effect.
+    PopEffect,
     /// A command whose indices do not resolve. [`DisplayList::build`] never
     /// produces one; a backend skips it.
     Invalid,
@@ -354,7 +385,7 @@ impl DisplayList {
     /// stream.
     #[must_use]
     pub fn build(scene: &Scene, view: &ViewParams, dirty: &DirtyRect) -> Arc<DisplayList> {
-        let clip_to = match dirty.0 {
+        let mut clip_to = match dirty.0 {
             Some(d) => d.intersection(view.viewport),
             None => view.viewport,
         };
@@ -376,6 +407,12 @@ impl DisplayList {
         let mut xf_stack: Vec<u32> = vec![0];
         // The open `PushLayer` ops, so that each pop finds its push in O(1).
         let mut layer_stack: Vec<u32> = Vec::new();
+        // The open effects: the push's command index, the bounds of what
+        // it wraps so far, and the clip in force outside it. Inside an
+        // effect the clip grows by the effect's reach, beyond the viewport
+        // too: a kept pixel needs every input its kernel reads
+        // (`crate::effect`, "Exactness under repaint").
+        let mut effect_stack: Vec<(usize, DeviceRect, DeviceRect)> = Vec::new();
         let mut bounds = DeviceRect::EMPTY;
         let mut needs_dst_read = false;
         // The current transform, cached: the stack only moves on groups.
@@ -448,6 +485,36 @@ impl DisplayList {
                         needs_dst_read: dst,
                     });
                 }
+                SceneOp::PushEffect(effect) => {
+                    let reach = effect.reach_px(xf.max_scale());
+                    effect_stack.push((cmds.len(), DeviceRect::EMPTY, clip_to));
+                    clip_to = clip_to.inflated(reach);
+                    doc_window = window_in_document(culled, clip_to, xf);
+                    cmds.push(DrawCmd::PushEffect {
+                        op: op_i,
+                        xf: xf_i,
+                        content: DeviceRect::EMPTY,
+                    });
+                }
+                SceneOp::PopEffect => {
+                    if let Some((at, content, outer)) = effect_stack.pop() {
+                        if let Some(DrawCmd::PushEffect { content: c, op, .. }) = cmds.get_mut(at) {
+                            *c = content;
+                            // An effect may draw beyond what it wraps.
+                            if let Some(SceneOp::PushEffect(e)) = ops.get(*op as usize) {
+                                bounds =
+                                    bounds.union(content.inflated(e.growth_px(xf.max_scale())));
+                            }
+                        }
+                        clip_to = outer;
+                        doc_window = window_in_document(culled, clip_to, xf);
+                        // What it wraps counts towards the enclosing one.
+                        if let Some(top) = effect_stack.last_mut() {
+                            top.1 = top.1.union(content);
+                        }
+                    }
+                    cmds.push(DrawCmd::PopEffect);
+                }
                 SceneOp::PopLayer => {
                     // The matching push is named on the pop so that a
                     // backend never has to look backwards.
@@ -469,6 +536,9 @@ impl DisplayList {
                         continue;
                     }
                     bounds = bounds.union(b);
+                    if let Some(top) = effect_stack.last_mut() {
+                        top.1 = top.1.union(b);
+                    }
                     let dst_read = transparency.needs_dst_read();
                     needs_dst_read |= dst_read;
                     cmds.push(DrawCmd::Fill {
@@ -496,6 +566,9 @@ impl DisplayList {
                         continue;
                     }
                     bounds = bounds.union(b);
+                    if let Some(top) = effect_stack.last_mut() {
+                        top.1 = top.1.union(b);
+                    }
                     let dst_read = transparency.needs_dst_read();
                     needs_dst_read |= dst_read;
                     cmds.push(DrawCmd::Stroke {
@@ -519,6 +592,9 @@ impl DisplayList {
                         continue;
                     }
                     bounds = bounds.union(b);
+                    if let Some(top) = effect_stack.last_mut() {
+                        top.1 = top.1.union(b);
+                    }
                     let dst_read = transparency.needs_dst_read();
                     needs_dst_read |= dst_read;
                     let m = idx(mappings.len());
@@ -768,6 +844,15 @@ impl DisplayList {
                 let (node, key) = *self.cached.get(slot as usize)?;
                 DrawItem::CachedSurface { node, key, bounds }
             }
+            DrawCmd::PushEffect { op, xf, content } => match self.op(op)? {
+                SceneOp::PushEffect(effect) => DrawItem::PushEffect {
+                    effect,
+                    xf: self.xf_of(xf)?,
+                    content,
+                },
+                _ => return None,
+            },
+            DrawCmd::PopEffect => DrawItem::PopEffect,
         })
     }
 

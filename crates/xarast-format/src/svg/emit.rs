@@ -716,6 +716,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
                     s
                 });
                 self.stats.groups += 1;
+                self.own_feather(n, &mut el);
                 self.container(n, el, prelude);
             }
             NodeKind::ClipView(cv) => self.clipview(n, cv.mode),
@@ -994,6 +995,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
         el.ink = true;
         let (bounds, filled, stroked, mut known) = build(self, &mut el);
         self.paint(&mut el, bounds, filled, stroked, &mut known);
+        self.own_feather(n, &mut el);
         self.names(n, &mut known);
         if has_kids {
             self.attrs.pop_scope();
@@ -1492,6 +1494,31 @@ impl<'d, 'b> Emitter<'d, 'b> {
         self.extras(el);
     }
 
+    /// Writes `xarast:feather` when `n` owns a feather: a `Feather`
+    /// attribute child with a size above zero. The owner is what is
+    /// feathered, as one unit; its descendants inherit the value in the
+    /// attribute stack but are not feathered again, so they do not write
+    /// it (a reader would make each of them an owner).
+    fn own_feather(&mut self, n: NodeId, el: &mut El) {
+        let owned = self
+            .doc
+            .tree
+            .children(n)
+            .find_map(|c| match self.doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) => match &a.value {
+                    AttrValue::Feather { size, profile } if size.raw() > 0 => {
+                        Some((*size, *profile))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            });
+        if let Some((size, profile)) = owned {
+            el.a("xarast:feather", feather_text(size, profile));
+            self.stats.effects_approximated += 1;
+        }
+    }
+
     /// The attributes SVG has no property for: written only when they
     /// differ from the default, as `xarast:` attributes.
     fn extras(&mut self, el: &mut El) {
@@ -1536,18 +1563,15 @@ impl<'d, 'b> Emitter<'d, 'b> {
             el.a("xarast:brush", b.name.to_string());
             self.stats.strokes_approximated += 1;
         }
-        if let AttrValue::Feather { size, profile } = a.get(AttrSlot::Feather)
+        // A feather belongs to the node that carries it and is drawn once,
+        // over that node's whole subtree (XARA-US-0068), so objects and
+        // containers write it only when they own it (`own_feather`). A
+        // text run still writes the state in force: runs have no owner.
+        if el.tag == "tspan"
+            && let AttrValue::Feather { size, profile } = a.get(AttrSlot::Feather)
             && size.raw() > 0
         {
-            el.a(
-                "xarast:feather",
-                format!(
-                    "{} {} {}",
-                    mp(i64::from(size.raw())),
-                    f64s(profile.bias, 6),
-                    f64s(profile.gain, 6)
-                ),
-            );
+            el.a("xarast:feather", feather_text(*size, *profile));
             self.stats.effects_approximated += 1;
         }
         for (slot, name) in [
@@ -1682,6 +1706,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
         } else if clip_child.is_some() {
             self.stats.clips_unsupported += 1;
         }
+        self.own_feather(n, &mut el);
         let tag = el.tag;
         self.open_container(Some(n), el);
         self.body.push('>');
@@ -1726,6 +1751,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             RegenState::Dirty => el.a("xarast:regen", "dirty"),
             RegenState::Deferred => el.a("xarast:regen", "deferred"),
         }
+        self.own_feather(n, &mut el);
         self.container(n, el, prelude);
     }
 
@@ -2449,4 +2475,14 @@ pub(crate) fn palette_xml(doc: &Document, ids: &HashMap<ColourId, String>) -> St
     }
     s.push_str("</xarast:palette>");
     s
+}
+
+/// A feather as `xarast:feather` writes it: size in points, bias, gain.
+fn feather_text(size: xarast_geom::Mp, profile: xarast_geom::BiasGain) -> String {
+    format!(
+        "{} {} {}",
+        mp(i64::from(size.raw())),
+        f64s(profile.bias, 6),
+        f64s(profile.gain, 6)
+    )
 }

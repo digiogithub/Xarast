@@ -379,8 +379,75 @@ fn cache_threshold(c: &mut Criterion) {
     g.finish();
 }
 
+/// Phase 13's shared blur: the budget row "disc blur, radius 20 px,
+/// 1024 × 1024 alpha, CPU ≤ 12 ms", its Gaussian, the soft erosion a
+/// feather adds, and a feathered 512 × 512 frame end to end.
+fn effects(c: &mut Criterion) {
+    use xarast_render::blur::{Kernel, blur_plane, erode_plane};
+    let mut g = c.benchmark_group("effects");
+    g.sample_size(20);
+    let (w, h) = (1024usize, 1024usize);
+    let plane: Vec<u8> = (0..w * h)
+        .map(|i| {
+            if (i % w) / 64 % 2 == (i / w) / 64 % 2 {
+                255
+            } else {
+                0
+            }
+        })
+        .collect();
+    for (name, k) in [
+        ("disc_r20_1024", Kernel::Disc { radius_px: 20.0 }),
+        ("gaussian_s10_1024", Kernel::Gaussian { sigma_px: 10.0 }),
+    ] {
+        g.bench_function(name, |b| {
+            let mut p = plane.clone();
+            b.iter(|| {
+                p.copy_from_slice(&plane);
+                blur_plane(black_box(&mut p), w, h, k);
+            });
+        });
+    }
+    g.bench_function("erode_r20_1024", |b| {
+        let mut p = plane.clone();
+        b.iter(|| {
+            p.copy_from_slice(&plane);
+            erode_plane(black_box(&mut p), w, h, 20.0);
+        });
+    });
+    let mut scene = Scene::new();
+    {
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        b.push_effect(xarast_render::LayerEffect::Feather {
+            size: 40_000.0,
+            profile: xarast_render::Profile::IDENTITY,
+        });
+        b.fill(
+            SceneNodeId(1),
+            &rect_path(64.0, 64.0, 448.0, 448.0),
+            FillRule::NonZero,
+            Paint::Solid(Rgba8::BLACK),
+        );
+        b.pop_effect();
+        b.finish().expect("balanced");
+    }
+    let dl = DisplayList::build(&scene, &view(512, 512), &DirtyRect::NONE);
+    let res = Resolver::new();
+    let mut target = Surface::new(512, 512);
+    let mut backend = CpuBackend::new(CpuConfig::interactive());
+    g.bench_function("feather_40pt_frame_512", |b| {
+        b.iter(|| {
+            backend
+                .render(black_box(&dl), &res, &mut target)
+                .expect("renders")
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
+    effects,
     full_frame,
     incremental,
     display_list,

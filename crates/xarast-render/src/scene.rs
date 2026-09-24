@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use xarast_geom::{FillRule, StrokeStyle};
 
 use crate::blend::Transparency;
+use crate::effect::LayerEffect;
 use crate::paint::{GradMapping, ImageId, Paint};
 use crate::path::PathRef;
 use crate::precision::Transform2D;
@@ -149,6 +150,8 @@ pub(crate) enum SceneOp {
         transparency: Transparency,
     },
     PopLayer,
+    PushEffect(LayerEffect),
+    PopEffect,
     Fill {
         id: SceneNodeId,
         path: PathRef,
@@ -195,8 +198,8 @@ pub struct Scene {
     /// One entry per op: what a culled build needs to reject it without
     /// reading the op itself. See [`Cull`].
     pub(crate) cull: Vec<Cull>,
-    nodes: HashMap<SceneNodeId, NodeInfo>,
-    quality: RenderQuality,
+    pub(crate) nodes: HashMap<SceneNodeId, NodeInfo>,
+    pub(crate) quality: RenderQuality,
 }
 
 /// A culling entry, kept apart from its op.
@@ -328,6 +331,8 @@ pub struct SceneStats {
     pub layers: usize,
     /// Number of clips.
     pub clips: usize,
+    /// Number of live effects ([`SceneBuilder::push_effect`]).
+    pub effects: usize,
 }
 
 impl SceneStats {
@@ -344,6 +349,7 @@ enum Frame {
     Clip,
     Transparency,
     Layer,
+    Effect,
 }
 
 /// Records a scene. The walker in `xarast-app` drives this.
@@ -489,6 +495,25 @@ impl<'a> SceneBuilder<'a> {
         self.push(SceneOp::PopLayer, Cull::Visit);
     }
 
+    /// Opens a live effect: everything until the matching pop is rendered
+    /// offscreen at the view's resolution, the effect is applied to it,
+    /// and the result is composited in its place ([`crate::effect`]).
+    pub fn push_effect(&mut self, effect: LayerEffect) {
+        self.push(SceneOp::PushEffect(effect), Cull::Visit);
+        self.stack.push(Frame::Effect);
+        self.stats.effects += 1;
+    }
+
+    /// Closes the innermost live effect.
+    pub fn pop_effect(&mut self) {
+        if self.stack.pop() != Some(Frame::Effect) {
+            self.error
+                .get_or_insert(SceneError::Underflow { kind: "effect" });
+            return;
+        }
+        self.push(SceneOp::PopEffect, Cull::Visit);
+    }
+
     /// Emits a filled path.
     pub fn fill(&mut self, id: SceneNodeId, path: &PathRef, rule: FillRule, paint: Paint) {
         let transparency = self.current_transparency();
@@ -579,6 +604,7 @@ impl<'a> SceneBuilder<'a> {
                     Frame::Clip => "clip",
                     Frame::Transparency => "transparency",
                     Frame::Layer => "layer",
+                    Frame::Effect => "effect",
                 },
                 count: self.stack.len(),
             });

@@ -39,6 +39,9 @@ pub enum Target {
     /// A layer: the scene op of its `PushLayer`, which its `PopLayer`
     /// names.
     Layer(u32),
+    /// A live effect and everything it wraps: the scene op of its
+    /// `PushEffect`.
+    Effect(u32),
 }
 
 /// A rendered object, ready to place.
@@ -245,18 +248,42 @@ fn select(cmds: &[DrawCmd], target: Target, backdrop: bool) -> Option<Vec<DrawCm
         (Target::Layer(l), DrawCmd::PopLayer { layer, .. }) => *layer == l,
         _ => false,
     };
+    if let Target::Effect(op) = target {
+        // From the push to its pop: the effect is drawn from what it
+        // wraps, never from the objects before it.
+        let start = cmds
+            .iter()
+            .position(|c| matches!(c, DrawCmd::PushEffect { op: o, .. } if *o == op))?;
+        let mut depth = 0usize;
+        let mut out = Vec::new();
+        for c in &cmds[start..] {
+            out.push(*c);
+            match c {
+                DrawCmd::PushEffect { .. } => depth += 1,
+                DrawCmd::PopEffect => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
     if !backdrop {
         return match target {
             Target::Op(_) => cmds.iter().find(|c| is_target(c)).map(|c| vec![*c]),
             // A layer alone is its commands from the push to the pop; a
             // layer is only ever rasterised with its backdrop.
-            Target::Layer(_) => None,
+            Target::Layer(_) | Target::Effect(_) => None,
         };
     }
     #[derive(Clone, Copy)]
     enum Open {
         Clip,
         Layer,
+        Effect,
     }
     let mut out = Vec::new();
     let mut open: Vec<Open> = Vec::new();
@@ -266,7 +293,8 @@ fn select(cmds: &[DrawCmd], target: Target, backdrop: bool) -> Option<Vec<DrawCm
         match c {
             DrawCmd::PushClip { .. } => open.push(Open::Clip),
             DrawCmd::PushLayer { .. } => open.push(Open::Layer),
-            DrawCmd::PopClip | DrawCmd::PopLayer { .. } => {
+            DrawCmd::PushEffect { .. } => open.push(Open::Effect),
+            DrawCmd::PopClip | DrawCmd::PopLayer { .. } | DrawCmd::PopEffect => {
                 open.pop();
             }
             _ => {}
@@ -288,6 +316,7 @@ fn select(cmds: &[DrawCmd], target: Target, backdrop: bool) -> Option<Vec<DrawCm
                 blend: BlendFamily::Mix,
                 layer: u32::MAX,
             },
+            Open::Effect => DrawCmd::PopEffect,
         });
     }
     Some(out)

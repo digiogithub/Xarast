@@ -64,7 +64,7 @@ What is **not** in it, and who owns it:
 |---|---|
 | The WGSL compositing pass, ping-pong destination reads, GPU tile planner | **Deferred** by the GPU decision (XARA-US-0011); trigger in XARA-T-0051 |
 | Presenting the canvas through `GpuTileCache` | built here (`gpu` feature); **wired** into the shell by XARA-T-0050 (`xarast-shell/src/tiles.rs`, see "The tiles in the viewer") |
-| Blur, shadow, feather, bevel, contour, blend, mould | Phase 13; `push_layer`/`pop_layer` and the offscreen machinery they need exist here |
+| Shadow, bevel, contour, blend, mould | Phase 13 (XARA-US-0069..0071). The shared offscreen pipeline and blur exist and feathers draw through them (XARA-US-0068, "Live effects: the offscreen pipeline") |
 | Fractal (plasma, clouds) generation | Phase 13; `Paint::Fractal` exists and refuses to rasterise until materialised |
 | Dither styles, sub-32 bpp output, CMYK separation, UCR/GCR | Deferred (`research/03 §3.9` M8) |
 | Glyph rasterisation | Phase 9; this crate renders glyph outlines if handed paths |
@@ -1403,6 +1403,113 @@ way round when the two hues straddle red, so a graduated Hue shows a
 sharp notch where the source's hue wraps (`mesh4_hue_graduated`'s right
 arm); whether CDraw does the same is one of the VM questions.
 
+### Live effects: the offscreen pipeline (XARA-US-0068, phase 13 A/B, 2026-09-24)
+
+Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
+`layer.rs`, `effect.rs`; the effect pass lives in `backend/cpu.rs`.
+
+- **An effect is a scene push, rendered in device space per frame.**
+  `SceneBuilder::push_effect(LayerEffect)` / `pop_effect` wrap content
+  like a layer. The display list emits `DrawCmd::PushEffect { op, xf,
+  content }` / `PopEffect` (`content` = the union of the wrapped
+  commands' bounds, patched in at the pop; structural for
+  `DrawCmd::bounds`, so the GPU tile planner puts it in every bin like a
+  clip). Before its bands, the CPU backend renders every outermost
+  effect that reaches the area (`materialise` → `render_effect`): the
+  wrapped commands into an offscreen premultiplied buffer over
+  `keep ⊕ reach` (keep = content ⊕ growth ∩ area), twice when the effect
+  needs a silhouette, applies the effect, and the bands composite the
+  result (premultiplied source-over, under the enclosing clips and into
+  the enclosing layer) and skip what it wraps. Nested effects are
+  rendered by their parent's pass. Nothing is baked into the document:
+  zoom in and the feather is recomputed at the new resolution.
+- **Why per frame and not a cached bitmap in the scene:** a bitmap made
+  at one zoom and resampled at another is the fidelity loss phase 13
+  exists to avoid, and the scene is view-independent. The cost is that
+  an effect is recomputed on every frame and every repaint that reaches
+  it (no layer cache yet: B9, XARA-T-0314).
+- **Exactness under repaint (invariant 23).** A pixel an effect keeps
+  depends only on the view and the scene, never on the draw area:
+  (1) coverage inside the region starts at a left edge fixed by the view
+  and the effect chain (`left = min(parent_left, viewport.x0) − reach`),
+  not at the region's corner, exactly as a frame's primitives start at
+  x = 0 (invariant 15; `render_band` and `rasterise_clip` take `left`,
+  0 for a frame); (2) region rows start on the frame's band grid, and the
+  2-row guard already makes band tops invisible; (3) the region reaches
+  `LayerEffect::reach_px` beyond the kept pixels in every direction,
+  **beyond the viewport too**, and the display list keeps wrapped
+  primitives within `clip ⊕ reach` (the clip grows at a push, is
+  restored at the pop); (4) `scene_damage` inflates the damage of any
+  change under an effect by the sum of the enclosing effects' reach
+  (`Work::pad`, `leaf_bounds`' pad stack; `image_damage` too). An
+  object crossing the view's edge is therefore *not* feathered at the
+  edge (`effect_feather_beyond_view`). Pinned by the corpus-wide
+  determinism tests (draw area, band height, threads) over the eight
+  `effect_*` cases, and by the damage property, which now pushes
+  feathers; removing the damage pad fails it within 2 000 cases
+  (mutation-checked).
+- **`blur.rs`.** `Kernel::Disc { radius_px }` (what we render with) and
+  `Kernel::Gaussian { sigma_px }` (SVG's), `sigma_for_disc_radius` = r/2
+  (`research/06 §6.8.1`), `MAX_RADIUS_PX` = 100 (the original's
+  ceiling; clamped, the reduced-resolution render above it is
+  XARA-T-0315). The disc is `dx² + dy² ≤ r²` **centred on a pixel**: no
+  half-pixel shift for any radius (the original uses an integer
+  diameter and compensates an even one elsewhere). Disc sums use per-row
+  prefix sums and a rounded mean (the original truncates through a
+  ≤ 0x800-entry table; ±1 level, invisible). The Gaussian quantises its
+  weights to sum to exactly 2¹⁶ with a `u16` intermediate. Both are
+  integer arithmetic, rows in parallel, thread-count independent
+  (tested). `erode_plane` is a soft minimum filter (a pixel loses one
+  level per level of coverage its disc lacks); `profile_table` applies a
+  bias/gain to a transparency plane (0 opaque, 255 clear).
+- **`layer.rs`** (B1–B3): `LayerTarget { bounds, pixel_width, content,
+  pixels }`, `LayerContent::{Colour, Alpha, Silhouette}`,
+  `render_subtree_to_layer(backend, scene, group, view, res,
+  LayerRequest { pad_px, content, clip }, cancelled)`: the group's op
+  range under its ancestors' transforms (not their clips, layers or
+  effects), tile-aware (`clip`: a tile of the layer is exactly that part
+  of the whole) and cancellable per band. **Silhouette** = every paint
+  opaque black under Mix at level 0, images with their own alpha,
+  layers composited plainly: the original cuts feathers and shadows from
+  the object's *outline*, not from how transparent it is, so a
+  half-transparent feathered object keeps its own transparency in the
+  middle instead of vanishing (`effect_feather_transparent`).
+- **Feather** (`LayerEffect::Feather { size, profile }`, `size` in
+  document units): the original's feather is a **diameter**: it strokes
+  the outline `size` wide (white) over the filled silhouette (black) and
+  blurs the result by a disc of `size / 2`, so the fade runs from fully
+  opaque `size` inside the outline to clear at the outline, and nothing
+  grows (`Kernel/fthrattr.cpp`, `CreateSilhouetteBitmap`; facts only).
+  Ours: silhouette → `erode_plane(r)` → disc blur `r` → profile → colour
+  × mask, with `r = size·scale/2` capped at 100 px; `reach` = 2·⌊r⌋ + 1,
+  `growth` 0. Not reproduced: the 0.75 px gap-closing outer contour
+  (`DEFAULT_GAP_TOLERANCE_MP`) and the grey outline ramp the original
+  uses below two pixels; above the 200 px diameter the original renders
+  the silhouette at a lower resolution and scales it, we clamp.
+- **Against the embedded previews** (T-0248 method: 60 dpi page render,
+  registered crop, mean |Δ|; `feathers.xar` is the feather sampler):
+  | File | Before | After |
+  |---|---:|---:|
+  | feathers (9 feathers: five profiles, a bitmap, a shape, a line, a group) | 19.52 | **3.20** |
+  | Groucho2 (63 feathers, but 98 shadows stripped and the bitmap frame missing) | 43.12 | 43.89 |
+  | Watch4 (3 small feathers) | 13.36 | 13.38 |
+  `feathers.xar` goes from the worst match class to one of the best; in
+  the "before" render its five stars were drawn at their unfeathered
+  size, visibly larger than the preview's. Groucho2 is dominated by the
+  shadows and the frame it cannot draw yet (XARA-US-0069); its feathers
+  are soft now, which the preview agrees with locally but not in the
+  mean.
+- **PDF** rasterises an effect whole, alone (`Target::Effect`, from its
+  push to its pop, over transparency), and skips what it wraps:
+  `Compromise::Rasterised` "a live effect (feather) has no PDF
+  equivalent". **SVG** still writes only `xarast:feather` (baking the
+  `feMorphology`/`feGaussianBlur` chain is C10, XARA-T-0317): an
+  external viewer draws the object unfeathered.
+- **Cost** (`benches/render.rs`, group `effects`): disc blur r = 20 px over 1024² **5.9 ms** (budget ≤ 12 ms), Gaussian σ = 10 px 6.0 ms, erosion r = 20 px 5.7 ms, a 512² frame with one 40 pt feather 3.6 ms (release, this machine, other agents building). The
+  corpus render (release, 100 %, warm): Groucho2 50 → 129 ms, feathers
+  5 → 26 ms, Watch4 58 → 60 ms; every effect renders its region twice
+  (colour and silhouette) plus an erosion and a blur, every frame.
+
 ---
 
 ## Invariants that must not be broken
@@ -1505,6 +1612,17 @@ arm); whether CDraw does the same is one of the VM questions.
     identity. Nothing that runs on the render thread outside a sampler
     may produce a pending base either: compare with
     `eq_without_producing`, never `==`.
+23. **An effect's pixels never depend on the draw area.** Its region
+    renders from a left edge fixed by the view and the effect chain, on
+    the frame's band grid, `reach` beyond what it keeps (beyond the
+    viewport too); the display list keeps wrapped primitives within
+    `clip ⊕ reach`; `scene_damage` pads changes under an effect by its
+    reach. Clamping the region to the viewport feathers every object at
+    the view's edge; starting coverage at the region's corner moves
+    pixels by 1/255 between a repaint and a frame.
+24. **Effects are cut from the silhouette, not from alpha.** A feather or
+    a shadow of a transparent object is shaped by its outline; using its
+    alpha makes a half-transparent object feather to nothing.
 ---
 
 ## Dead ends (do not retry)
@@ -1608,6 +1726,9 @@ arm); whether CDraw does the same is one of the VM questions.
 | 21 | ~~Mesh fills ignore `Repeat`; mesh transparencies are flat means~~. **Done 2026-09-24**: see "Meshes tile mirrored" | done (XARA-T-0256) |
 | 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
 | 23 | ~~Re-materialisation of an evicted base is synchronous on the render thread~~. **Done 2026-09-24** (XARA-T-0281), and since XARA-T-0304 the helper no longer holds the image's lock while it decodes | done |
+| 25 | Offscreen effect cache (B9): an effect is recomputed on every frame and repaint that reaches it; key by (content hash, quantised pixel width, quality, variant), share the Phase 4 budget | XARA-T-0314 |
+| 26 | Blur radius above the 100 px ceiling: render the silhouette at a reduced resolution and scale up, as the original does for feathers (B7) | XARA-T-0315 |
+| 27 | GPU blur (B6): not needed while the GPU only composites CPU tiles; lands with the WGSL pass | XARA-T-0051 |
 | 24 | ~~`RampMapping::Sin` ignored; `ClipViewMode::Outside` dropped~~. **Done 2026-09-24**: `RampEase` (above) and the walker's outside clip (`app-core.md` decision 34); the renderer still clips only to a path's inside, on purpose | done (XARA-US-0017) |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 

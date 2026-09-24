@@ -49,8 +49,8 @@ use xarast_doc::{
 };
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Rect, StrokeStyle, Vector};
 use xarast_render::{
-    CacheHint, ContentHash, DeviceRect, FnSource, ImageId, ImageRef, LevelBuf, PathRef,
-    PixelBudget, PixelSource, RenderQuality, Resolver, Scene, SceneBuilder, SceneError,
+    CacheHint, ContentHash, DeviceRect, FnSource, ImageId, ImageRef, LayerEffect, LevelBuf,
+    PathRef, PixelBudget, PixelSource, RenderQuality, Resolver, Scene, SceneBuilder, SceneError,
     SceneNodeId, SceneStats, Transparency,
 };
 use xarast_text::FontSubstitution;
@@ -95,6 +95,9 @@ pub struct WalkStats {
     pub text_on_path_pending: usize,
     /// Live effects skipped: regeneration is Phase 13.
     pub live_pending: usize,
+    /// Live effects drawn through the renderer's offscreen pipeline:
+    /// feathers (phase 13).
+    pub effects: usize,
     /// Quick shapes — stars and polygons — with no cached path, so
     /// nothing to draw. Generating a path from the parameters is
     /// Phase 7.
@@ -227,6 +230,11 @@ struct Frame {
     clip: bool,
     /// The child that supplied the clipping path and must not be painted.
     clip_child: Option<NodeId>,
+    /// A live effect (a feather) wraps the node: popped last.
+    effect: bool,
+    /// The culling rectangle outside the node, when the effect widened it
+    /// for the node's subtree.
+    outer_clip: Option<Option<Rect>>,
 }
 
 impl SceneWalker {
@@ -456,7 +464,7 @@ impl SceneWalker {
         self.text_ink = Rect::EMPTY;
         self.painted_text.clear();
 
-        let clip = dirty.map(|d| doc_rect_of(vp, d));
+        let mut clip = dirty.map(|d| doc_rect_of(vp, d));
         let mut b = SceneBuilder::begin(scene, quality);
         let mut attrs = AttrStack::with_defaults(&doc.defaults);
         let mut frames: Vec<Frame> = Vec::new();
@@ -542,9 +550,18 @@ impl SceneWalker {
                         }
                     }
                     if story {
+                        let feather = own_feather(doc, node, overrides.get(&node).map(|o| &*o.0));
+                        let feathered = feather.is_some();
+                        if let Some(effect) = feather {
+                            b.push_effect(effect);
+                            self.stats.effects += 1;
+                        }
                         self.paint_story_path(doc, edit, node, &mut attrs, quality, &mut b);
                         let preedit = preview.text.as_ref().filter(|t| t.story == node);
                         self.paint_story(doc, node, preedit, &mut attrs, quality, &mut b);
+                        if feathered {
+                            b.pop_effect();
+                        }
                         walk.control(xarast_doc::Descend::Skip);
                         if previewed && preview_xf.is_some() {
                             b.pop_group();
@@ -581,7 +598,25 @@ impl SceneWalker {
                         attrs.push(Arc::clone(v));
                         self.scope = mix64(self.scope, *fp);
                     }
-                    frames.push(self.open(doc, parent, &attrs, &mut b));
+                    // A feather wraps the node's whole subtree, its own ink
+                    // included: pushed before the node's group or clip.
+                    let feather = own_feather(doc, parent, overrides.get(&parent).map(|o| &*o.0));
+                    let feathered = feather.is_some();
+                    let mut outer_clip = None;
+                    if let Some(effect) = feather {
+                        // Everything within the feather's reach of the
+                        // area shapes the pixels kept.
+                        if let (Some(c), LayerEffect::Feather { size, .. }) = (clip, &effect) {
+                            outer_clip = Some(clip);
+                            clip = Some(c.inflated(Mp::from_f64_round(*size)));
+                        }
+                        b.push_effect(effect);
+                        self.stats.effects += 1;
+                    }
+                    let mut f = self.open(doc, parent, &attrs, &mut b);
+                    f.effect = feathered;
+                    f.outer_clip = outer_clip;
+                    frames.push(f);
                 }
                 WalkEvent::LeaveScope { parent } => {
                     self.draft_ramps = overrides.contains_key(&parent);
@@ -598,6 +633,12 @@ impl SceneWalker {
                         }
                         if f.clip {
                             b.pop_clip();
+                        }
+                        if f.effect {
+                            b.pop_effect();
+                        }
+                        if let Some(outer) = f.outer_clip {
+                            clip = outer;
                         }
                     }
                     attrs.pop_scope();
@@ -961,6 +1002,8 @@ impl SceneWalker {
             group: false,
             clip: false,
             clip_child: None,
+            effect: false,
+            outer_clip: None,
         };
         match doc.tree.kind(node) {
             Some(NodeKind::Group(_)) => {
@@ -1998,6 +2041,50 @@ fn is_culled(doc: &Document, node: NodeId, clip: Rect, attrs: &AttrStack) -> boo
         None => xarast_doc::bounds::compute_bounds_with(&doc.tree, node, attrs.stroke_extent()),
     };
     !b.is_empty() && !b.intersects(clip)
+}
+
+/// The feather `node` applies to itself and its subtree: its own
+/// `Feather` attribute (a child), or the preview's override of the slot.
+///
+/// Inherited feathers are ignored on purpose. The attribute stack would
+/// hand a group's feather to every descendant, but the original feathers
+/// the node that carries it, as one offscreen unit (`research/02 §6.12`),
+/// not each object under it again.
+fn own_feather(doc: &Document, node: NodeId, preview: Option<&AttrValue>) -> Option<LayerEffect> {
+    if matches!(
+        doc.tree.kind(node),
+        Some(
+            NodeKind::Document(_)
+                | NodeKind::Chapter
+                | NodeKind::Spread(_)
+                | NodeKind::Page(_)
+                | NodeKind::Layer(_)
+                | NodeKind::Attr(_)
+        ) | None
+    ) {
+        return None;
+    }
+    let value = match preview {
+        Some(v @ AttrValue::Feather { .. }) => Some(v),
+        _ => doc
+            .tree
+            .children(node)
+            .find_map(|c| match doc.tree.kind(c) {
+                Some(NodeKind::Attr(a)) if matches!(a.value, AttrValue::Feather { .. }) => {
+                    Some(&a.value)
+                }
+                _ => None,
+            }),
+    };
+    match value {
+        Some(AttrValue::Feather { size, profile }) if size.raw() > 0 => {
+            Some(LayerEffect::Feather {
+                size: size.to_f64(),
+                profile: *profile,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// A device rectangle mapped back into document space, rounded outwards.

@@ -857,6 +857,7 @@ name = "xarast-color"
 version = "0.0.1"
 dependencies = [
  "slotmap",
+ "smallvec",
  "thiserror",
 ]
 

@@ -17,6 +17,7 @@ use xarast_geom::{Cap, DashPattern, FillRule, Join, Mp, Path, Point, Rect, Strok
 use crate::backend::cpu::Resolver;
 use crate::blend::{ALL_FAMILIES, BlendFamily, TranspSource, Transparency};
 use crate::display_list::ViewParams;
+use crate::effect::LayerEffect;
 use crate::paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, GradMapping, GradRamp, GradShape, ImageRef, MappingKind,
     Paint, Repeat,
@@ -1341,6 +1342,168 @@ pub fn fill_blend_cases() -> Vec<Case> {
     out
 }
 
+fn feather(size_pt: f64, profile: Profile) -> LayerEffect {
+    LayerEffect::Feather {
+        size: size_pt * f64::from(Mp::PER_PT),
+        profile,
+    }
+}
+
+fn ellipse_path(cx: f64, cy: f64, r: f64) -> PathRef {
+    // Four cubic quarters, the usual 0.5523 handle.
+    let k = 0.552_284_75 * r;
+    let mut b = Path::builder();
+    b.move_to(pt(cx + r, cy));
+    b.cubic_to(pt(cx + r, cy + k), pt(cx + k, cy + r), pt(cx, cy + r));
+    b.cubic_to(pt(cx - k, cy + r), pt(cx - r, cy + k), pt(cx - r, cy));
+    b.cubic_to(pt(cx - r, cy - k), pt(cx - k, cy - r), pt(cx, cy - r));
+    b.cubic_to(pt(cx + k, cy - r), pt(cx + r, cy - k), pt(cx + r, cy));
+    b.close();
+    PathRef::new(b.build())
+}
+
+/// Live effects through the offscreen pipeline (phase 13): 8 cases.
+///
+/// Each exercises something the pipeline has to get right beyond the blur
+/// itself: the silhouette (a transparent object is feathered by its shape,
+/// not its alpha), content beyond the viewport (no fade at the view's
+/// edge), nesting, an enclosing clip and layer, the profile, and the
+/// radius ceiling.
+fn effect_cases() -> Vec<Case> {
+    type Draw = fn(&mut SceneBuilder<'_>);
+    let cases: [(&str, Draw); 8] = [
+        ("effect_feather_square", |b| {
+            b.push_effect(feather(16.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(16.0, 16.0, 80.0, 80.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(30, 30, 30)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_feather_star_profile", |b| {
+            b.push_effect(feather(12.0, Profile::new(0.6, 0.3)));
+            b.fill(
+                SceneNodeId(10),
+                &star_path(),
+                FillRule::NonZero,
+                Paint::Solid(rgb(240, 200, 40)),
+            );
+            b.stroke(
+                SceneNodeId(11),
+                &star_path(),
+                StrokeStyle {
+                    width: Mp::from_pt(3.0),
+                    ..StrokeStyle::default()
+                },
+                Paint::Solid(rgb(120, 40, 20)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_feather_transparent", |b| {
+            // Half transparent: the mask comes from the shape, so the
+            // middle keeps the object's own transparency and nothing more.
+            b.push_effect(feather(20.0, Profile::IDENTITY));
+            b.push_transparency(Transparency::flat(BlendFamily::Mix, 128));
+            b.fill(
+                SceneNodeId(10),
+                &ellipse_path(48.0, 48.0, 36.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(20, 20, 160)),
+            );
+            b.pop_transparency();
+            b.pop_effect();
+        }),
+        ("effect_feather_beyond_view", |b| {
+            // Extends past the top left: the view's edge is not the
+            // object's, so the corner stays opaque.
+            b.push_effect(feather(16.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(-40.0, -40.0, 60.0, 60.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(160, 20, 60)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_feather_nested", |b| {
+            b.push_effect(feather(10.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(8.0, 8.0, 70.0, 70.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(40, 140, 60)),
+            );
+            b.push_effect(feather(24.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(11),
+                &ellipse_path(60.0, 60.0, 30.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(250, 250, 250)),
+            );
+            b.pop_effect();
+            b.pop_effect();
+        }),
+        ("effect_feather_clipped", |b| {
+            b.push_clip(&rect_path(0.0, 0.0, 60.0, 96.0), FillRule::NonZero);
+            b.push_effect(feather(14.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &ellipse_path(48.0, 48.0, 34.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(10, 10, 10)),
+            );
+            b.pop_effect();
+            b.pop_clip();
+        }),
+        ("effect_feather_in_layer", |b| {
+            b.push_layer(
+                LayerKind::DestinationReading,
+                Transparency::flat(BlendFamily::StainedGlass, 64),
+            );
+            b.push_effect(feather(18.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(12.0, 20.0, 84.0, 76.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(250, 160, 20)),
+            );
+            b.pop_effect();
+            b.pop_layer();
+        }),
+        ("effect_feather_ceiling", |b| {
+            // 240 pt: a 120 px radius, clamped to 100 px.
+            b.push_effect(feather(240.0, Profile::IDENTITY));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(-150.0, -150.0, 246.0, 246.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(0, 0, 0)),
+            );
+            b.pop_effect();
+        }),
+    ];
+    cases
+        .into_iter()
+        .map(|(name, draw)| {
+            let mut scene = Scene::new();
+            {
+                let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+                backdrop(&mut b);
+                draw(&mut b);
+                b.finish().expect("balanced");
+            }
+            Case {
+                name: name.to_string(),
+                scene,
+                resolver: Resolver::new(),
+                view: view(),
+            }
+        })
+        .collect()
+}
+
 /// Every case in the feature corpus.
 ///
 /// At least 120, which is the phase's gate; the exact count is asserted by
@@ -1359,6 +1522,7 @@ pub fn all_cases() -> Vec<Case> {
     out.extend(resampling_cases());
     out.extend(aa_cases());
     out.extend(structure_cases());
+    out.extend(effect_cases());
     out
 }
 

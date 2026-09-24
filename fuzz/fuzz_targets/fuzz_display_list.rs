@@ -108,6 +108,9 @@ enum Step {
     PopTransparency,
     PushLayer(u8, TranspSel),
     PopLayer,
+    /// A feather: size in points, bias, gain.
+    PushFeather(f32, f32, f32),
+    PopFeather,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -299,6 +302,9 @@ impl Ctx {
                         1 => Filter::Bilinear,
                         _ => Filter::HighQuality,
                     },
+                    // Luminance read straight as the level (XARA-T-0307
+                    // added the level ramp; the fuzzer never built one).
+                    ramp: None,
                 },
             },
         }
@@ -351,6 +357,7 @@ fn assert_balanced(dl: &DisplayList) {
     enum Open {
         Clip,
         Layer,
+        Effect,
     }
     let mut stack = Vec::new();
     for c in dl.commands() {
@@ -360,6 +367,10 @@ fn assert_balanced(dl: &DisplayList) {
             DrawCmd::PopClip => assert_eq!(stack.pop(), Some(Open::Clip), "unmatched PopClip"),
             DrawCmd::PopLayer { .. } => {
                 assert_eq!(stack.pop(), Some(Open::Layer), "unmatched PopLayer");
+            }
+            DrawCmd::PushEffect { .. } => stack.push(Open::Effect),
+            DrawCmd::PopEffect => {
+                assert_eq!(stack.pop(), Some(Open::Effect), "unmatched PopEffect");
             }
             _ => {}
         }
@@ -467,6 +478,15 @@ fuzz_target!(|input: Input| {
                     b.push_layer(kind, ctx.transparency(t));
                 }
                 Step::PopLayer => b.pop_layer(),
+                Step::PushFeather(size, bias, gain) => {
+                    b.push_effect(xarast_render::LayerEffect::Feather {
+                        // Up to 100 pt, which at the fuzzed scales spans
+                        // the whole range up to the 100 px ceiling.
+                        size: f64::from(size.abs() % 100.0) * 1000.0,
+                        profile: Profile::new(f64::from(*bias), f64::from(*gain)),
+                    });
+                }
+                Step::PopFeather => b.pop_effect(),
             }
         }
         b.finish()

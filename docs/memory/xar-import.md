@@ -624,7 +624,7 @@ shadows) of the 59 files, for clip and mask constructs:
 |---|---|---|---|
 | `TAG_CLIPVIEWCONTROLLER` / `TAG_CLIPVIEW` / `TAG_CLIPVIEW_PATH` (4084/4085/4137) | **0** | — | mapped since XARA-T-0306 (finding 17); 4137 is never written |
 | Bitmap transparency (171), a bitmap used as a mask | 3 | JagSS100 simple, scope3 simple | renders (XARA-T-0171), with its levels and mode since XARA-T-0307 (finding 18) |
-| `TAG_FEATHER` (4086), a soft-edge mask | 75 | Groucho2 63, feathers 9, Watch4 3 | imported as an attribute, drawn unfeathered (Phase 13) |
+| `TAG_FEATHER` (4086), a soft-edge mask | 75 | Groucho2 63, feathers 9, Watch4 3 | imported as an attribute; **drawn feathered** since XARA-US-0068 (finding 19) |
 | Shadow (4050) / bevel (4052) / contour (4066) controllers | 98 / 22 / 4 | Groucho2, Girard_simple, SoftShadow, Watch4, testimp1 | live objects, Phase 13 |
 | Perspective / envelope moulds (108 / 107) | 129 / 68 | Watch4, ProbeX16, scope3 simple, TextCurve, testimp1 | live objects, Phase 13 |
 
@@ -723,6 +723,46 @@ render, registered crop, mean |Δ|):
 The car's shadow in JagSS100 was a near-black band; it is now the
 original's light grey. Corpus export check: 59 files, 118 comparisons, 0
 failures (qpdf not installed locally).
+
+### 19. Feathers are drawn; the other effect tags are still opaque (XARA-US-0068, 2026-09-24)
+
+Phase 13's shared offscreen pipeline (`render.md`, "Live effects: the
+offscreen pipeline") has its first consumer: `TAG_FEATHER` (4086), which
+this importer has always mapped onto `AttrSlot::Feather` (size in mp,
+bias, gain; decoder `decode.rs`). **The importer did not change**: the
+walker (`xarast-app`) wraps every node that *owns* a feather attribute
+with a size above zero — the attribute is its child — in a renderer
+effect, and ignores the inherited value on purpose, so a feathered group
+is feathered once, as a unit (`research/02 §6.12`).
+`tests/xar_feathers.rs` in `xarast-app` pins it on synthetic records
+(a feathered square fades from clear at its outline to opaque one
+feather-size in; a plain square keeps its edge; a feathered group has no
+fade at the seam between its members).
+
+Corpus: 75 records in three files, owned by 56 paths, 13 groups, 5 quick
+shapes and 1 bitmap (none on text or inside a live object).
+Against the previews (T-0248's method): `feathers.xar` 19.52 → **3.20**
+mean |Δ|; Groucho2 43.1 → 43.9 and Watch4 13.4 → 13.4, both dominated
+by what is still missing.
+
+What is **still not handled**, unchanged by this story, with the story
+that owns it:
+
+| Tags | Records | Owner |
+|---|---:|---|
+| 4050, 4051 shadow controller / shadow (atomic: the whole subtree, source objects included, is stripped) | 98 controllers | XARA-US-0069 (C9) |
+| 4052–4057 bevel (atomic) | 22 controllers | XARA-US-0069 (D7) |
+| 4066, 4067 contour (atomic) | 4 controllers | XARA-US-0070 (E7) |
+| 105, 106, 4060–4062, 4072–4074 blend | 1 976 records | XARA-US-0070 (F9) |
+| 107–110, 4012 mould | 197 controllers | XARA-US-0071 (G10) |
+| 4127 feather effect (the effect-stack form) | 0 in the corpus | XARA-US-0069 |
+
+Fidelity limits accepted for feathers: the disc is centred on a pixel
+(the original's integer diameter shifts even sizes by half a pixel and
+compensates), the normalisation rounds instead of truncating, the
+0.75 px gap-closing contour and the sub-2 px grey ramp are not
+reproduced, and a radius above 100 px is clamped rather than rendered at
+reduced resolution (`render.md` TODO 26).
 
 ## Dead ends (do not retry)
 

@@ -9,8 +9,8 @@ use xarast_render::backend::cpu::Resolver;
 use xarast_render::blend::{ALL_FAMILIES, Transparency};
 use xarast_render::golden::digest;
 use xarast_render::{
-    CpuBackend, CpuConfig, DirtyRect, DisplayList, LayerKind, Paint, PathRef, RenderQuality, Scene,
-    SceneBuilder, SceneError, SceneNodeId, Surface, Transform2D, ViewParams,
+    CpuBackend, CpuConfig, DirtyRect, DisplayList, LayerEffect, LayerKind, Paint, PathRef,
+    RenderQuality, Scene, SceneBuilder, SceneError, SceneNodeId, Surface, Transform2D, ViewParams,
 };
 
 /// One randomly generated drawing step.
@@ -25,6 +25,9 @@ enum Step {
     PopClip,
     PushTransparency(usize, u8),
     PopTransparency,
+    /// A feather of this many points (phase 13's offscreen pipeline).
+    PushFeather(f64),
+    PopFeather,
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -39,6 +42,8 @@ fn step() -> impl Strategy<Value = Step> {
         Just(Step::PopClip),
         (0usize..12, any::<u8>()).prop_map(|(f, t)| Step::PushTransparency(f, t)),
         Just(Step::PopTransparency),
+        (0.0f64..12.0).prop_map(Step::PushFeather),
+        Just(Step::PopFeather),
     ]
 }
 
@@ -124,6 +129,20 @@ fn record(steps: &[Step]) -> (Scene, Result<(), SceneError>) {
                     }
                     _ => raw_ok = false,
                 },
+                Step::PushFeather(size) => {
+                    b.push_effect(LayerEffect::Feather {
+                        size: size * 1000.0,
+                        profile: xarast_render::Profile::IDENTITY,
+                    });
+                    depth.push(s.clone());
+                }
+                Step::PopFeather => match depth.last() {
+                    Some(Step::PushFeather(..)) => {
+                        depth.pop();
+                        b.pop_effect();
+                    }
+                    _ => raw_ok = false,
+                },
             }
         }
         if !depth.is_empty() {
@@ -135,6 +154,7 @@ fn record(steps: &[Step]) -> (Scene, Result<(), SceneError>) {
                 Step::PushLayer(..) => b.pop_layer(),
                 Step::PushClip(..) => b.pop_clip(),
                 Step::PushTransparency(..) => b.pop_transparency(),
+                Step::PushFeather(..) => b.pop_effect(),
                 _ => unreachable!("only pushes are recorded as open"),
             }
         }
@@ -172,7 +192,8 @@ enum Edit {
     Remove(usize),
     /// Insert a fill.
     Insert(usize, f64, f64, f64, u8),
-    /// Change a layer's or a transparency scope's family and value.
+    /// Change a layer's or a transparency scope's family and value, or a
+    /// feather's size.
     Restyle(usize, usize, u8),
 }
 
@@ -225,12 +246,14 @@ fn apply_edit(steps: &[Step], e: &Edit) -> Vec<Step> {
             out.remove(i % n);
         }
         Edit::Insert(i, x, y, s, c) => out.insert(i % (n + 1), Step::Fill(x, y, s, c)),
-        Edit::Restyle(i, f, t) => {
-            if let Step::PushLayer(a, b) | Step::PushTransparency(a, b) = &mut out[i % n] {
+        Edit::Restyle(i, f, t) => match &mut out[i % n] {
+            Step::PushLayer(a, b) | Step::PushTransparency(a, b) => {
                 *a = f;
                 *b = t;
             }
-        }
+            Step::PushFeather(size) => *size = f64::from(t) / 16.0,
+            _ => {}
+        },
     }
     out
 }

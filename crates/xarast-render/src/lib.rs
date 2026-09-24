@@ -61,15 +61,18 @@
 
 pub mod backend;
 pub mod blend;
+pub mod blur;
 pub mod cache;
 pub mod compose;
 pub mod corpus;
 pub mod damage;
 pub mod display_list;
+pub mod effect;
 pub mod export;
 pub mod golden;
 #[doc(hidden)]
 pub mod gpu_test_lock;
+pub mod layer;
 pub mod paint;
 pub mod path;
 pub mod pixel_budget;
@@ -88,6 +91,7 @@ pub use blend::{
     ALL_FAMILIES, BlendFamily, BlendLut, BlendLuts, LumaWeights, TranspSource, Transparency,
     build_blend_lut,
 };
+pub use blur::{Kernel, MAX_RADIUS_PX, blur_plane, erode_plane, sigma_for_disc_radius};
 pub use cache::{
     AdmissionPolicy, CacheKey, CacheStats, CachedSurface, RenderCache, scale_step, step_scale,
 };
@@ -97,6 +101,8 @@ pub use compose::{
 };
 pub use damage::{Damage, image_damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
+pub use effect::LayerEffect;
+pub use layer::{LayerContent, LayerRequest, LayerTarget, render_subtree_to_layer};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
     GradRamp, GradShape, ImageId, ImageRef, ImageRegistry, MappingKind, MeshLevels, Paint,
