@@ -149,6 +149,9 @@ pub struct Viewer {
     save_dialog: Option<PortalRequestId>,
     /// SIGINT/SIGTERM/SIGHUP, from the handler thread.
     signals: crate::signals::SignalWatch,
+    /// A thread the process cannot run without (the render thread) died
+    /// of a panic: shut down as for a signal (XARA-US-0064 F3).
+    fatal: xarast_app::crash::FatalWatch,
     /// The save thread and the signal handler can wake the loop.
     wakers_set: bool,
     /// The recovery question has been asked (or is not to be).
@@ -221,6 +224,7 @@ impl Viewer {
             title_stale: false,
             save_dialog: None,
             signals: crate::signals::SignalWatch::inert(),
+            fatal: xarast_app::crash::FatalWatch::new(),
             wakers_set: false,
             recovery_offered: false,
             autosave_due: None,
@@ -260,6 +264,24 @@ impl Viewer {
     #[must_use]
     pub fn with_signals(mut self, signals: crate::signals::SignalWatch) -> Viewer {
         self.signals = signals;
+        self
+    }
+
+    /// Autosaves and exits when `fatal` is raised: the binary passes
+    /// `FatalWatch::global()`, which the render thread raises if a panic
+    /// escapes it. Tests pass their own.
+    #[must_use]
+    pub fn with_fatal_watch(mut self, fatal: xarast_app::crash::FatalWatch) -> Viewer {
+        self.fatal = fatal;
+        self
+    }
+
+    /// What the start of the session found: a crash to report before the
+    /// recovery question, and whether safe mode is on
+    /// (`xarast_app::crash::begin_session`).
+    #[must_use]
+    pub fn with_startup_check(mut self, check: &xarast_app::crash::StartupCheck) -> Viewer {
+        self.app = std::mem::take(&mut self.app).with_startup_check(check);
         self
     }
 
@@ -499,6 +521,10 @@ impl Viewer {
                     self.workspace.show_pane(pane);
                     ctx.request_redraw();
                 }
+                PlatformRequest::EnterSafeMode => {
+                    ctx.request_safe_mode();
+                    ctx.request_redraw();
+                }
                 other => tracing::warn!(?other, "platform request not handled"),
             }
         }
@@ -557,10 +583,22 @@ impl Viewer {
             let waker = ctx.waker();
             self.app.set_save_waker(Box::new(move || waker.wake()));
             self.signals.set_waker(ctx.waker());
+            let waker = ctx.waker();
+            self.fatal.set_waker(Box::new(move || waker.wake()));
         }
         if self.signals.requested() {
             let n = self.app.emergency_shutdown();
             tracing::info!(autosaved = n, "signal: autosaved and released every lock");
+            ctx.exit();
+            return;
+        }
+        if self.fatal.raised() {
+            let n = self.app.emergency_shutdown();
+            tracing::error!(
+                thread = self.fatal.thread().as_deref().unwrap_or("?"),
+                autosaved = n,
+                "a worker thread panicked: autosaved and released every lock"
+            );
             ctx.exit();
             return;
         }
@@ -1331,6 +1369,19 @@ impl Viewer {
                 redraw = true;
             }
             ShellEvent::AccessibilityDeactivated => self.egui.disable_accesskit(),
+            ShellEvent::GpuRebuilt(r) => {
+                self.message = Some(match r.cause {
+                    crate::gpu_errors::RebuildCause::Lost { .. } => format!(
+                        "The graphics device was lost and has been restarted \
+                         ({}); nothing was lost",
+                        r.renderer
+                    ),
+                    crate::gpu_errors::RebuildCause::SafeMode => {
+                        format!("Safe mode: {}", r.renderer)
+                    }
+                });
+                redraw = true;
+            }
             ShellEvent::GpuError(report) => {
                 // Already logged and being recovered from by the shell;
                 // the status bar says so rather than the window vanishing.
@@ -1950,6 +2001,19 @@ fn document_view(
     }
 }
 
+/// A panic on the interface thread unwinds through the event loop and
+/// drops the viewer on its way out: save what can be saved, as a signal
+/// would (XARA-US-0064 F3). The crash report was written by the panic hook
+/// before the unwinding began.
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        if std::thread::panicking() && !self.app.docs.is_empty() {
+            let n = self.app.emergency_shutdown();
+            eprintln!("xarast: autosaved {n} document(s) after a panic");
+        }
+    }
+}
+
 impl ShellApp for Viewer {
     fn on_event(&mut self, event: ShellEvent, ctx: &mut ShellCtx<'_>) {
         self.ppp = ctx.scale().pixels_per_point();
@@ -1968,6 +2032,7 @@ impl ShellApp for Viewer {
     }
 
     fn on_frame(&mut self, ctx: &mut ShellCtx<'_>) -> FrameRequest {
+        xarast_app::crash::force_panic_point("ui");
         if !self.to_open.is_empty() {
             self.open_queued();
         }
@@ -3836,6 +3901,82 @@ mod tests {
         assert_eq!(entries.len(), 1, "one autosave kept for recovery");
         assert!(entries[0].path().join("snapshot.xarast").is_file());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- Crashes (XARA-US-0064) -----------------------------------------
+
+    #[test]
+    fn a_fatal_worker_panic_autosaves_the_work_and_exits() {
+        let dir = scratch("fatal");
+        let (v, _) = viewer_with_square();
+        let fatal = xarast_app::crash::FatalWatch::new();
+        let mut v = v.with_fatal_watch(fatal.clone());
+        v.app = std::mem::take(&mut v.app)
+            .with_autosave(dir.clone(), xarast_app::autosave::AutosavePolicy::default());
+        let (exit, _) = with_ctx(|ctx| v.housekeeping(ctx));
+        assert!(!exit);
+        fatal.raise("xarast-render");
+        let (exit, _) = with_ctx(|ctx| v.housekeeping(ctx));
+        assert!(exit);
+        assert!(v.app.docs.is_empty());
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "one autosave kept for recovery");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_panic_on_the_interface_thread_autosaves_while_unwinding() {
+        let dir = scratch("unwind");
+        let (mut v, _) = viewer_with_square();
+        v.app = std::mem::take(&mut v.app)
+            .with_autosave(dir.clone(), xarast_app::autosave::AutosavePolicy::default());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _viewer = v;
+            panic!("a bug in an interface frame");
+        }));
+        assert!(r.is_err());
+        let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().collect();
+        assert_eq!(entries.len(), 1, "the modified document was autosaved");
+        assert!(entries[0].path().join("snapshot.xarast").is_file());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn choosing_safe_mode_after_a_crash_reaches_the_shell() {
+        let check = xarast_app::crash::StartupCheck {
+            crashed: 1,
+            recent_crashes: 1,
+            report: Some(PathBuf::from("/state/xarast/crashes/crash-1-2.toml")),
+            safe_mode: xarast_app::crash::SafeMode::Offered,
+        };
+        let mut v = Viewer::new(Vec::new()).with_startup_check(&check);
+        let _ = with_ctx(|ctx| v.housekeeping(ctx));
+        let prompt = v.app.prompt().expect("the crash is reported").clone();
+        assert!(prompt.offers(xarast_app::PromptAnswer::SafeMode));
+        assert!(v.ui_model(1.0).prompt.is_some(), "the interface shows it");
+        let intent = v
+            .ui_intent(
+                UiCommand::AnswerPrompt(xarast_app::PromptAnswer::SafeMode),
+                1.0,
+            )
+            .unwrap();
+        v.apply(vec![intent]);
+        let mut asked = false;
+        let (exit, _) = with_ctx(|ctx| {
+            v.perform_requests(ctx);
+            asked = ctx.frame.safe_mode;
+        });
+        assert!(!exit);
+        assert!(asked, "the shell was asked to rebuild in safe mode");
+        assert!(v.app.safe_mode());
+        v.handle(&ShellEvent::GpuRebuilt(crate::gpu_errors::DeviceRebuilt {
+            renderer: "CPU · llvmpipe (Vulkan), software".to_owned(),
+            cause: crate::gpu_errors::RebuildCause::SafeMode,
+        }));
+        assert_eq!(
+            v.message.as_deref(),
+            Some("Safe mode: CPU · llvmpipe (Vulkan), software")
+        );
     }
 
     // ---- Placing bitmaps by drop and paste (XARA-T-0272) ---------------

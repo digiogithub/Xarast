@@ -264,6 +264,10 @@ pub struct ShellConfig {
     /// Latency probing: present without vsync and wait for the GPU after
     /// each frame, so that [`PresentTiming::gpu_done`] is measured.
     pub probe: bool,
+    /// Safe mode (`--safe-mode`, or forced after a crash loop): a software
+    /// adapter where there is one, and CPU canvas composition whatever
+    /// [`ShellConfig::renderer`] says (XARA-US-0064 F5).
+    pub safe_mode: bool,
 }
 
 impl Default for ShellConfig {
@@ -275,6 +279,7 @@ impl Default for ShellConfig {
             exit_after_frames: None,
             renderer: RendererPreference::Auto,
             probe: false,
+            safe_mode: false,
         }
     }
 }
@@ -403,28 +408,91 @@ impl ShellError {
 
 /// Initialises tracing from the `XARAST_LOG` environment variable.
 ///
+/// Every event that passes the filter is also kept, redacted, for the next
+/// crash report (`xarast_app::crash::record_log_line`, the last 200 lines).
+///
 /// Idempotent: calling it twice is harmless, which matters because both the
 /// binary and the self-tests want logging.
 pub fn init_tracing() {
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
     let filter = EnvFilter::try_from_env("XARAST_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(CrashLogLayer)
         .try_init();
 }
 
-/// Installs a panic hook that logs the panic before unwinding.
+/// Copies each log event into the crash report's ring of recent lines.
+struct CrashLogLayer;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CrashLogLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let meta = event.metadata();
+        let mut line = format!("{} {}:", meta.level(), meta.target());
+        event.record(&mut LineVisitor(&mut line));
+        xarast_app::crash::record_log_line(&line);
+    }
+}
+
+/// Writes the fields of an event as `message key=value ...`.
+struct LineVisitor<'a>(&'a mut String);
+
+impl tracing::field::Visit for LineVisitor<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            let _ = write!(self.0, " {value}");
+        } else {
+            let _ = write!(self.0, " {}={value}", field.name());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            let _ = write!(self.0, " {value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
+/// Installs the panic hooks: the crash report first
+/// (`xarast_app::crash::install_panic_hook`, under
+/// `$XDG_STATE_HOME/xarast/crashes/`), then a log line, then the message
+/// Rust itself prints on standard error.
 ///
 /// The event loop swallows a panic in a callback on some backends, which
-/// turns a crash into a silently dead window. Logging first means the report
-/// exists even when the process disappears.
+/// turns a crash into a silently dead window. Writing the report first means
+/// it exists even when the process disappears. The log line names the
+/// thread and the place, not the message: a message built at run time may
+/// carry document text, and the log feeds later reports.
 pub fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        tracing::error!(panic = %info, "xarast panicked");
+        let thread = std::thread::current();
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_default();
+        tracing::error!(
+            thread = thread.name().unwrap_or("unnamed"),
+            location = %location,
+            "xarast panicked"
+        );
         previous(info);
     }));
+    // Installed last so that it runs first.
+    if let Some(dir) = xarast_app::crash::default_dir() {
+        xarast_app::crash::install_panic_hook(dir);
+    }
 }
 
 /// A one-line description of the session, for `--version --verbose` and for

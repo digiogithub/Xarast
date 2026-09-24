@@ -60,6 +60,10 @@ raw-window-handle = { workspace = true }
 xarast-xar = { path = "../xarast-xar" }
 # Colours for the edits of the edit-damage test (`tests/edit_damage.rs`).
 xarast-color = { path = "../xarast-color" }
+# `wgpu`'s no-op backend: a device that runs nothing, for the device-loss
+# tests, which must never touch (let alone lose) a real GPU. Test builds
+# only; the binary never has it.
+wgpu = { workspace = true, features = ["noop"] }
 
 [[bin]]
 name = "xarast"

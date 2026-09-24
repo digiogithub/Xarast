@@ -204,11 +204,11 @@ fn context_map() -> &'static Mutex<BTreeMap<&'static str, String>> {
     CONTEXT.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// Keeps one log line for the next report, redacted and cut to a few
-/// hundred characters; only the last [`LOG_LINES`] are kept. The shell's
+/// Keeps one log line for the next report, redacted, with quoted strings
+/// scrubbed ([`scrub_quoted`]) and cut to a few hundred characters; only the last [`LOG_LINES`] are kept. The shell's
 /// tracing layer calls it for every event it logs.
 pub fn record_log_line(line: &str) {
-    let line = cut(&redact(line.trim_end()), LOG_LINE_CHARS);
+    let line = cut(&scrub_quoted(&redact(line.trim_end())), LOG_LINE_CHARS);
     let mut ring = log_ring().lock().unwrap_or_else(PoisonError::into_inner);
     if ring.len() == LOG_LINES {
         ring.pop_front();

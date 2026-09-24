@@ -392,6 +392,12 @@ impl Painter {
         self.ppp = frame.pixels_per_point.max(0.01);
     }
 
+    /// Hands over the interface meshes and scale, for a painter on a new
+    /// device (a device-loss rebuild).
+    pub(crate) fn take_ui(&mut self) -> (Vec<egui::ClippedPrimitive>, f32) {
+        (std::mem::take(&mut self.ui), self.ppp)
+    }
+
     fn screen(&self, device: &wgpu::Device, w: f32, h: f32) -> wgpu::BindGroup {
         let data: Vec<u8> = [w, h, 0.0, 0.0]
             .iter()
@@ -539,9 +545,121 @@ fn scissor(clip: egui::Rect, ppp: f32, target: [u32; 2]) -> Option<[u32; 4]> {
     (x1 > x0 && y1 > y0).then(|| [x0, y0, x1 - x0, y1 - y0])
 }
 
+/// A CPU copy of every interface texture, kept by applying each frame's
+/// deltas: what a painter on a new device is filled from after the old
+/// device was lost (XARA-US-0064 F2).
+///
+/// `egui` sends a texture once and then only patches it, so a new device
+/// cannot ask it for the font atlas again. Keeping the images costs their
+/// size in memory (a few megabytes: the atlas and the gallery thumbnails)
+/// and buys a rebuild that needs nothing from the application.
+#[derive(Debug, Default)]
+pub(crate) struct TextureLedger {
+    images: HashMap<egui::TextureId, (egui::ColorImage, egui::TextureOptions)>,
+}
+
+impl TextureLedger {
+    /// Applies one frame's uploads and frees, in the order the painter
+    /// does. A patch outside its texture is skipped, as the painter skips
+    /// it.
+    pub(crate) fn apply(&mut self, delta: &egui::TexturesDelta) {
+        for (id, d) in &delta.set {
+            let egui::ImageData::Color(image) = &d.image;
+            match d.pos {
+                None => {
+                    self.images.insert(*id, ((**image).clone(), d.options));
+                }
+                Some([x, y]) => {
+                    let Some((whole, _)) = self.images.get_mut(id) else {
+                        continue;
+                    };
+                    let [w, h] = image.size;
+                    let [ww, wh] = whole.size;
+                    if x + w > ww || y + h > wh || image.pixels.len() != w * h {
+                        continue;
+                    }
+                    for row in 0..h {
+                        let at = (y + row) * ww + x;
+                        whole.pixels[at..at + w]
+                            .copy_from_slice(&image.pixels[row * w..(row + 1) * w]);
+                    }
+                }
+            }
+        }
+        for id in &delta.free {
+            self.images.remove(id);
+        }
+    }
+
+    /// Every texture, whole: the delta that fills a new painter.
+    pub(crate) fn replay(&self) -> egui::TexturesDelta {
+        let mut set: Vec<(egui::TextureId, egui::epaint::ImageDelta)> = self
+            .images
+            .iter()
+            .map(|(id, (image, options))| {
+                (*id, egui::epaint::ImageDelta::full(image.clone(), *options))
+            })
+            .collect();
+        set.sort_by_key(|(id, _)| match id {
+            egui::TextureId::Managed(n) => (0, *n),
+            egui::TextureId::User(n) => (1, *n),
+        });
+        egui::TexturesDelta {
+            set,
+            free: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn image(w: usize, h: usize, v: u8) -> egui::ColorImage {
+        egui::ColorImage::new([w, h], vec![egui::Color32::from_gray(v); w * h])
+    }
+
+    #[test]
+    fn the_ledger_replays_patched_textures_whole_and_forgets_freed_ones() {
+        let (atlas, thumb) = (egui::TextureId::Managed(0), egui::TextureId::User(3));
+        let opts = egui::TextureOptions::LINEAR;
+        let mut ledger = TextureLedger::default();
+        ledger.apply(&egui::TexturesDelta {
+            set: vec![
+                (atlas, egui::epaint::ImageDelta::full(image(4, 3, 0), opts)),
+                (thumb, egui::epaint::ImageDelta::full(image(2, 2, 9), opts)),
+            ],
+            free: Vec::new(),
+        });
+        // A patch, one out of bounds (skipped), then a free.
+        ledger.apply(&egui::TexturesDelta {
+            set: vec![
+                (
+                    atlas,
+                    egui::epaint::ImageDelta::partial([1, 1], image(2, 2, 200), opts),
+                ),
+                (
+                    atlas,
+                    egui::epaint::ImageDelta::partial([3, 2], image(2, 2, 100), opts),
+                ),
+            ],
+            free: vec![thumb],
+        });
+        let replay = ledger.replay();
+        assert!(replay.free.is_empty());
+        assert_eq!(replay.set.len(), 1);
+        let (id, delta) = &replay.set[0];
+        assert_eq!(*id, atlas);
+        assert_eq!(delta.pos, None, "whole, not a patch");
+        let egui::ImageData::Color(img) = &delta.image;
+        let grey: Vec<u8> = img.pixels.iter().map(|c| c.r()).collect();
+        #[rustfmt::skip]
+        assert_eq!(grey, [
+            0, 0, 0, 0,
+            0, 200, 200, 0,
+            0, 200, 200, 0,
+        ]);
+    }
 
     #[test]
     fn scissors_are_clamped_to_the_target_and_empty_ones_dropped() {

@@ -855,6 +855,36 @@ impl Compositor {
             v.origin = origin;
         }
     }
+
+    /// What a compositor on a new device needs to show the same picture:
+    /// the last frame and the view, both in memory. The tiles themselves
+    /// die with the device; the new store is refilled from the frame
+    /// (XARA-US-0064 F2).
+    pub(crate) fn into_carry(self) -> CanvasCarry {
+        CanvasCarry {
+            last: self.last,
+            view: self.view,
+        }
+    }
+
+    /// Takes over a lost compositor's picture.
+    pub(crate) fn adopt(&mut self, carry: CanvasCarry) {
+        if let Some(view) = carry.view {
+            self.set_view(view);
+        }
+        if let Some(frame) = carry.last {
+            self.accept(frame);
+        }
+    }
+}
+
+/// The canvas as a lost device left it: see [`Compositor::into_carry`].
+#[derive(Debug, Default)]
+pub(crate) struct CanvasCarry {
+    /// The last frame accepted.
+    pub(crate) last: Option<TiledFrame>,
+    /// The view shown.
+    pub(crate) view: Option<CanvasView>,
 }
 
 #[cfg(test)]
@@ -1233,6 +1263,59 @@ mod tests {
             diff.len(),
             &diff[..diff.len().min(8)]
         );
+    }
+
+    /// A device on `wgpu`'s no-op backend: it accepts every call and runs
+    /// nothing, so it needs no GPU, no driver and no GPU lock.
+    fn noop_device() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions::enabled(),
+                ..wgpu::BackendOptions::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("the no-op adapter");
+        let (d, q) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            .expect("a no-op device");
+        (Arc::new(d), Arc::new(q))
+    }
+
+    /// Device loss, simulated: the compositor of the lost device hands its
+    /// picture to one on a new device at the CPU tier (the second rung of
+    /// the loss ladder), which shows the same pixels without a new frame
+    /// from the application.
+    #[test]
+    fn a_lost_device_hands_its_picture_to_a_cpu_compositor_on_a_new_device() {
+        let (d1, q1) = noop_device();
+        let mut old = Compositor::new(d1, q1, true);
+        let t = Transform2D::new([1.5, 0.0, 0.0, 1.5, 2.3, 1.3]);
+        let (w, h) = (300, 200);
+        let f = frame(t, w, h, 1, None, vec![DeviceRect::from_size(w, h)]);
+        let v = view(t, w, h);
+        old.set_view(v);
+        old.accept(f.clone());
+        let carry = old.into_carry();
+
+        let (d2, q2) = noop_device();
+        let mut new = Compositor::new(d2, q2, false);
+        assert_eq!(new.tier(), CanvasTier::Cpu);
+        new.adopt(carry);
+        assert!(new.is_active());
+        let placements = new.planner.placements(&v, new.store.as_ref_dyn());
+        let Store::Cpu(store) = &mut new.store else {
+            panic!("the CPU tier");
+        };
+        let mut shown = Surface::new(w, h);
+        store.compose(&mut shown, &placements, v.backdrop);
+        let diff = (0..h as i32)
+            .flat_map(|y| (0..w as i32).map(move |x| (x, y)))
+            .filter(|&(x, y)| shown.pixel(x, y) != f.surface.pixel(x, y))
+            .count();
+        assert_eq!(diff, 0, "the carried picture differs");
     }
 
     #[test]
