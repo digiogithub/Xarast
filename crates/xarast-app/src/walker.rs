@@ -143,6 +143,9 @@ pub struct SceneWalker {
     /// The union of the text the last walk drew, document space: text has
     /// no cached bounds, so whoever needs the ink extent adds this.
     text_ink: Rect,
+    /// The text runs the last walk painted, with their glyphs: what an
+    /// exporter embedding fonts needs besides the outlines.
+    painted_text: Vec<xarast_io::TextRun>,
     /// The attribute-scope fingerprint in force at the node being painted:
     /// a fold of the tag and content revision of every attribute node
     /// pushed in the enclosing scopes, in order. See [`content_hash`].
@@ -182,6 +185,21 @@ impl SceneWalker {
     #[must_use]
     pub fn font_substitutions(&self) -> &[FontSubstitution] {
         &self.substitutions
+    }
+
+    /// The text the last walk painted: each run's outline path (the one in
+    /// the scene's ops) with the glyphs it is made of, and the font
+    /// database they come from. `None` when the walk drew no text.
+    #[must_use]
+    pub fn scene_text(&self) -> Option<xarast_io::SceneText> {
+        if self.painted_text.is_empty() {
+            return None;
+        }
+        let fonts = self.fonts.as_ref()?;
+        Some(xarast_io::SceneText {
+            fonts: Arc::clone(fonts.db()),
+            runs: self.painted_text.clone(),
+        })
     }
 
     /// The ramps and images the last scene refers to.
@@ -301,6 +319,7 @@ impl SceneWalker {
         self.resolver.begin_frame();
         self.stats = WalkStats::default();
         self.text_ink = Rect::EMPTY;
+        self.painted_text.clear();
 
         let clip = dirty.map(|d| doc_rect_of(vp, d));
         let mut b = SceneBuilder::begin(scene, quality);
@@ -795,6 +814,11 @@ impl SceneWalker {
         }
         let id = scene_id(doc, node);
         for run in &geom.runs {
+            self.painted_text.push(xarast_io::TextRun {
+                path: run.path.clone(),
+                glyphs: Arc::clone(&run.glyphs),
+                decoration: run.decoration.clone(),
+            });
             let a = &run.attrs;
             if let AttrValue::Fill(xarast_doc::fill::FillGeometry::Bitmap { image, .. }) =
                 a.get(AttrSlot::FillGeometry)

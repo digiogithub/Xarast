@@ -40,6 +40,41 @@ pub trait TextPlacer: Send + Sync {
     /// per `TextLine` at the story's origin).
     fn place(&self, doc: &Document, story: NodeId, attrs: &mut AttrStack)
     -> Option<StoryPlacement>;
+
+    /// The font file to embed for `face` (one of the faces a
+    /// [`StoryPlacement`] listed), covering `chars`: every character the
+    /// document draws with it (`research/06 §6.7` rules 2–3). `None`: this
+    /// placer embeds no fonts.
+    fn font_file(&self, face: &PlacedFace, chars: &[char]) -> Option<FontFile> {
+        let _ = (face, chars);
+        None
+    }
+}
+
+/// A face placed text is drawn with, as a browser should know it for
+/// `@font-face`. Ordered, so the rules come out in a fixed order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PlacedFace {
+    /// The face's own family name.
+    pub family: Arc<str>,
+    /// CSS weight (400 regular, 700 bold).
+    pub weight: u16,
+    /// Italic or oblique.
+    pub italic: bool,
+    /// The placer's own name for the face, stable for one write.
+    pub key: u64,
+}
+
+/// What [`TextPlacer::font_file`] gives for a face.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FontFile {
+    /// A WOFF2 file holding (at least) the characters asked for.
+    Woff2(Arc<[u8]>),
+    /// The face's licence (`OS/2.fsType`) forbids embedding it: no file,
+    /// and its runs say `xarast:font-embed="denied"`.
+    Denied(Arc<str>),
+    /// Embedding failed for another reason (why).
+    Unavailable(Arc<str>),
 }
 
 /// A laid-out story, reduced to what the SVG base needs.
@@ -61,6 +96,15 @@ pub struct StoryPlacement {
     /// about its position, in degrees counter-clockwise (y up). Items not
     /// listed do not turn.
     pub rotations: HashMap<NodeId, f64>,
+    /// The faces the story is drawn with, each with the characters drawn
+    /// with it, for the embedded fonts (`research/06 §6.7` rule 2).
+    pub faces: Vec<(PlacedFace, String)>,
+    /// For each character item, the index in `faces` of the face its
+    /// glyphs are drawn with.
+    pub char_faces: HashMap<NodeId, usize>,
+    /// Families (as the document names them) whose face refuses embedding:
+    /// their runs carry `xarast:font-embed="denied"` (rule 3).
+    pub denied: Vec<Arc<str>>,
 }
 
 /// A shared [`TextPlacer`] in [`super::SvgOptions`], compared by identity.
@@ -107,13 +151,16 @@ pub(crate) fn generic_family(panose: Option<[u8; 10]>) -> &'static str {
 /// The attributes a run's start tag carries for its text attributes, in
 /// the order written: the SVG properties a browser uses, then the twins
 /// (`research/06 §6.7`). `substitute` is the family the application used
-/// instead of the requested one, when it had to.
+/// instead of the requested one, when it had to. `denied` are the
+/// requested families whose face refuses embedding (the faces actually
+/// drawn with join the chain per run, [`chain_with`]).
 ///
 /// Every value here is resolved from `a`; a reader rebuilds the model's
 /// values from these alone (`read/build/ink.rs`).
 pub(crate) fn run_text_attrs(
     a: &AttrStack,
     substitutes: &[(Arc<str>, Arc<str>)],
+    denied: &[Arc<str>],
 ) -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::with_capacity(8);
     let (family, full, panose) = match a.get(AttrSlot::TxtFontTypeface) {
@@ -139,12 +186,16 @@ pub(crate) fn run_text_attrs(
         .find(|(from, _)| **from == *family)
         .map(|(_, to)| Arc::clone(to));
     let mut chain = String::new();
-    for f in [Some(&family), substitute.as_ref()].into_iter().flatten() {
+    let mut named: Vec<String> = Vec::new();
+    let first = [Some(&family), substitute.as_ref()];
+    for f in first.into_iter().flatten() {
         let f = f.replace(['\'', '"', ';', '\\'], "");
-        if !f.trim().is_empty() {
+        let f = f.trim();
+        if !f.is_empty() && !named.iter().any(|n| n == f) {
             chain.push('\'');
-            chain.push_str(f.trim());
+            chain.push_str(f);
             chain.push_str("', ");
+            named.push(f.to_owned());
         }
     }
     chain.push_str(generic_family(panose));
@@ -177,6 +228,9 @@ pub(crate) fn run_text_attrs(
     }
     if let Some(s) = &substitute {
         out.push(("xarast:font-substitute", s.to_string()));
+    }
+    if denied.contains(&family) {
+        out.push(("xarast:font-embed", "denied".into()));
     }
     if drawn != size {
         out.push(("xarast:size", mp(size)));
@@ -266,4 +320,93 @@ pub(crate) fn features_text(f: &[xarast_doc::FeatureSetting]) -> String {
         .map(|s| format!("{}:{}", s.tag_str(), s.value))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A `font-family` chain with `families` inserted after its first name
+/// (the family the document asks for), each once.
+pub(crate) fn chain_with(chain: &str, families: &[&str]) -> String {
+    // Split at the commas outside quotes: a quoted family may hold one.
+    let mut names: Vec<&str> = Vec::new();
+    let (mut start, mut quoted_run) = (0usize, false);
+    for (i, c) in chain.char_indices() {
+        match c {
+            '\'' => quoted_run = !quoted_run,
+            ',' if !quoted_run => {
+                names.push(chain[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    names.push(chain[start..].trim());
+    let mut out: Vec<String> = Vec::with_capacity(names.len() + families.len());
+    let quoted = |f: &str| {
+        let f = f.replace(['\'', '"', ';', '\\'], "");
+        format!("'{}'", f.trim())
+    };
+    let push = |n: String, out: &mut Vec<String>| {
+        if n != "''" && !out.contains(&n) {
+            out.push(n);
+        }
+    };
+    let mut rest = names.iter();
+    if let Some(first) = rest.next() {
+        push((*first).to_owned(), &mut out);
+    }
+    for f in families {
+        push(quoted(f), &mut out);
+    }
+    for n in rest {
+        push((*n).to_owned(), &mut out);
+    }
+    out.join(", ")
+}
+
+/// The `@font-face` rule for an embedded face whose file is at `href` (a
+/// package path or a `data:` URI; neither holds a quote or a parenthesis).
+pub(crate) fn font_face_rule(face: &PlacedFace, href: &str) -> String {
+    let family = face
+        .family
+        .replace(['\'', '"', ';', '\\', '{', '}', '<', '>', '&'], "");
+    format!(
+        "@font-face{{font-family:'{}';font-weight:{};font-style:{};src:url({}) format('woff2');}}",
+        family.trim(),
+        face.weight,
+        if face.italic { "italic" } else { "normal" },
+        href
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn faces_join_the_chain_after_the_family_asked_for() {
+        assert_eq!(
+            chain_with(
+                "'Arial', 'Noto Sans', sans-serif",
+                &["Noto Sans Hebrew", "Noto Sans"]
+            ),
+            "'Arial', 'Noto Sans Hebrew', 'Noto Sans', sans-serif"
+        );
+        // A quoted family holding a comma stays one name.
+        assert_eq!(chain_with("'A, B', serif", &["C"]), "'A, B', 'C', serif");
+        assert_eq!(chain_with("sans-serif", &["X"]), "sans-serif, 'X'");
+    }
+
+    #[test]
+    fn a_font_face_rule_names_the_face_and_its_file() {
+        let face = PlacedFace {
+            family: Arc::from("Noto Sans"),
+            weight: 700,
+            italic: true,
+            key: 3,
+        };
+        assert_eq!(
+            font_face_rule(&face, "resources/fonts/b3-0.woff2"),
+            "@font-face{font-family:'Noto Sans';font-weight:700;font-style:italic;\
+             src:url(resources/fonts/b3-0.woff2) format('woff2');}"
+        );
+    }
 }

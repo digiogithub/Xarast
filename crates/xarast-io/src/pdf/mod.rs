@@ -25,11 +25,20 @@
 //! [`writer`]; the T11.4.1 spike that chose it is in
 //! `docs/memory/export.md`.
 //!
-//! Text is whatever the scene holds: glyph outlines, drawn as paths
-//! (embedded subset fonts are T11.4.7).
+//! Text is drawn **as text** when the source says which outlines are text
+//! (`SourceScene::text`, T11.4.7): each face used is embedded once as a
+//! subset `CIDFont` with a `ToUnicode` map, so the text is selectable and
+//! searchable. A run painted with a flat colour or a gradient is shown in
+//! that font (the gradient through a text clip); anything else (bitmap
+//! fills, rasterised transparency, variable-font instances, an underline
+//! under non-opaque paint) is drawn as before — outlines or pixels — with
+//! the same glyphs as invisible text on top. A face whose `fsType` forbids
+//! embedding is never embedded: its text stays outlines and the report
+//! carries `FontNotEmbedded` (`pdf/text.rs`).
 
 pub mod rasterise;
 pub mod shading;
+mod text;
 pub mod writer;
 
 use std::sync::Arc;
@@ -44,7 +53,9 @@ use xarast_render::{
 };
 
 use crate::model::{Background, ExportRequest};
-use crate::options::{BlendFidelity, FormatId, FormatOptions, PDF_RASTERISE_DPI, PdfOptions};
+use crate::options::{
+    BlendFidelity, FormatId, FormatOptions, PDF_RASTERISE_DPI, PdfOptions, TextOutput,
+};
 use crate::raster::AtomicFile;
 use crate::registry::{Capabilities, Exporter};
 use crate::report::{Compromise, ExportError, ExportReport};
@@ -52,7 +63,10 @@ use crate::source::{ExportSource, Progress, SourceScene, Stage};
 
 use rasterise::{Rasteriser, Target};
 use shading::{Shaded, paint_gradient, paint_opacity};
-use writer::{Blend, Canvas, Cap, DocInfo, GState, Join, LineStyle, PageBoxes, PdfWriter, Rule};
+use text::PdfText;
+use writer::{
+    Blend, Canvas, Cap, DocInfo, GState, Join, LineStyle, PageBoxes, PdfWriter, Rule, TextMode,
+};
 
 /// The largest page side, in points: PDF 1.7's implementation limit
 /// (Annex C), 200 inches. A larger export is refused rather than written
@@ -155,8 +169,9 @@ impl Exporter for PdfExporter {
             alpha: true,
             // One page per export until page selection lands (T11.4.9).
             multipage: false,
-            // Glyphs are outlines until T11.4.7.
-            embeds_fonts: false,
+            // Subset fonts with ToUnicode maps (T11.4.7), where the face's
+            // licence allows.
+            embeds_fonts: true,
             has_dpi: false,
             lossy: false,
             deterministic: true,
@@ -243,14 +258,22 @@ pub fn write_pdf(
         Background::Transparent => Background::Paper.clear_colour(paper, false),
         bg => bg.clear_colour(paper, false),
     };
+    let mut w = PdfWriter::new(o.compress);
+    let mut compromises = Vec::new();
+    let text = built
+        .text
+        .as_ref()
+        .filter(|_| o.text == TextOutput::Text)
+        .map(|t| PdfText::new(t, &mut w, &mut compromises));
     let mut tx = Translator {
-        w: PdfWriter::new(o.compress),
+        w,
         dl: &dl,
         built,
         o: *o,
         canvases: vec![Canvas::new()],
         frames: Vec::new(),
-        compromises: Vec::new(),
+        compromises,
+        text,
         raster: Rasteriser::new(
             &built.scene,
             &built.resolver,
@@ -360,6 +383,8 @@ struct Translator<'a> {
     canvases: Vec<Canvas>,
     frames: Vec<Frame>,
     compromises: Vec<Compromise>,
+    /// The text behind the scene's outlines, when the source gave it.
+    text: Option<PdfText>,
     raster: Rasteriser<'a>,
     page: kurbo::Rect,
     /// The page has no background, so backdrops are rendered on the paper.
@@ -468,17 +493,31 @@ impl Translator<'_> {
             ) => {
                 self.touch(bounds);
                 let op = DisplayList::op_of(cmd).unwrap_or(u32::MAX);
-                self.fill(
-                    node,
-                    op,
-                    path.bez(),
-                    rule,
-                    paint,
-                    xf,
-                    transparency,
-                    bounds,
-                    cancelled,
-                )?;
+                let run = self.text.as_ref().and_then(|t| t.run_of(path));
+                match run {
+                    Some(run) => self.fill_text(
+                        run,
+                        node,
+                        op,
+                        path.bez(),
+                        paint,
+                        xf,
+                        transparency,
+                        bounds,
+                        cancelled,
+                    )?,
+                    None => self.fill(
+                        node,
+                        op,
+                        path.bez(),
+                        rule,
+                        paint,
+                        xf,
+                        transparency,
+                        bounds,
+                        cancelled,
+                    )?,
+                }
             }
             (
                 DrawItem::Stroke {
@@ -505,6 +544,10 @@ impl Translator<'_> {
                     bounds,
                     cancelled,
                 )?;
+                // Stroked-only text: still selectable, as invisible text.
+                if let Some(run) = self.text.as_ref().and_then(|t| t.run_of(path)) {
+                    self.invisible_text(run, xf);
+                }
             }
             (
                 DrawItem::Image {
@@ -763,10 +806,129 @@ impl Translator<'_> {
             }
         };
         let page_path = xf.to_affine() * path.clone();
-        self.paint_area(node, op, &page_path, pdf_rule, paint, t, bounds, cancelled)
+        self.paint_area(
+            node, op, &page_path, pdf_rule, paint, t, bounds, None, cancelled,
+        )
+        .map(|_| ())
     }
 
-    /// Paints `paint` over `page_path` (page space) with `rule`.
+    /// A text run's fill: shown in its embedded font when the plan and the
+    /// paint allow, otherwise filled as outlines (or pixels) with the
+    /// glyphs as invisible text over them.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_text(
+        &mut self,
+        run: usize,
+        node: SceneNodeId,
+        op: u32,
+        path: &BezPath,
+        paint: &Paint,
+        xf: Transform2D,
+        t: &Transparency,
+        bounds: DeviceRect,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<(), ExportError> {
+        let Some(plan) = self.text.as_ref().and_then(|x| x.plans.get(run)) else {
+            return self.fill(
+                node,
+                op,
+                path,
+                FillRule::NonZero,
+                paint,
+                xf,
+                t,
+                bounds,
+                cancelled,
+            );
+        };
+        let paintable = matches!(paint, Paint::Solid(_) | Paint::Gradient { .. });
+        // Glyphs and underline are painted apart: fine while the paint is
+        // opaque and plain, a double coat where they overlap otherwise.
+        let plain = match paint {
+            Paint::Solid(c) => c.a == 255,
+            _ => true,
+        } && t.family == BlendFamily::Mix
+            && matches!(t.source, TranspSource::Flat(0));
+        if !(plan.native && paintable && (plan.decoration.is_none() || plain)) {
+            self.fill(
+                node,
+                op,
+                path,
+                FillRule::NonZero,
+                paint,
+                xf,
+                t,
+                bounds,
+                cancelled,
+            )?;
+            self.invisible_text(run, xf);
+            return Ok(());
+        }
+        let m = xf.to_affine();
+        let area = TextArea {
+            glyphs: plan
+                .glyphs
+                .iter()
+                .map(|g| (g.font, g.cid, (m * g.em).as_coeffs()))
+                .collect(),
+            decoration: plan.decoration.as_ref().map(|d| m * (**d).clone()),
+        };
+        let page_path = m * path.clone();
+        let drawn = self.paint_area(
+            node,
+            op,
+            &page_path,
+            Rule::NonZero,
+            paint,
+            t,
+            bounds,
+            Some(&area),
+            cancelled,
+        )?;
+        match drawn {
+            Painted::AsText => {
+                if let Some(x) = self.text.as_mut()
+                    && let Some(d) = x.done.get_mut(run)
+                {
+                    *d = true;
+                }
+            }
+            Painted::Otherwise => self.invisible_text(run, xf),
+            Painted::Nothing => {}
+        }
+        Ok(())
+    }
+
+    /// The run's glyphs as invisible text (rendering mode 3), once per
+    /// run: what makes text drawn as outlines or pixels selectable.
+    fn invisible_text(&mut self, run: usize, xf: Transform2D) {
+        let Some(x) = self.text.as_mut() else {
+            return;
+        };
+        if x.done.get(run).copied().unwrap_or(true) {
+            return;
+        }
+        x.done[run] = true;
+        let m = xf.to_affine();
+        let glyphs: Vec<_> = x.plans[run]
+            .glyphs
+            .iter()
+            .map(|g| (g.font, g.cid, (m * g.em).as_coeffs()))
+            .collect();
+        if glyphs.is_empty() {
+            return;
+        }
+        let cv = self.canvas();
+        cv.begin_text(TextMode::Invisible);
+        for (font, cid, em) in glyphs {
+            cv.glyph(font, em, cid);
+        }
+        cv.end_text();
+    }
+
+    /// Paints `paint` over `page_path` (page space) with `rule`, or, with
+    /// `text`, over its glyphs and decoration (`page_path` then only
+    /// bounds the paint).
     #[allow(clippy::too_many_arguments)]
     fn paint_area(
         &mut self,
@@ -777,17 +939,19 @@ impl Translator<'_> {
         paint: &Paint,
         t: &Transparency,
         bounds: DeviceRect,
+        text: Option<&TextArea>,
         cancelled: &(dyn Fn() -> bool + Sync),
-    ) -> Result<(), ExportError> {
+    ) -> Result<Painted, ExportError> {
         let alpha = match paint {
             Paint::Solid(c) => c.a,
             _ => 255,
         };
         let gs = match self.state_for(node, alpha, t, bounds) {
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(Painted::Nothing),
             Ok(Some(gs)) => gs,
             Err((backdrop, reason)) => {
-                return self.rasterise(node, Target::Op(op), bounds, backdrop, &reason, cancelled);
+                self.rasterise(node, Target::Op(op), bounds, backdrop, &reason, cancelled)?;
+                return Ok(Painted::Otherwise);
             }
         };
         match paint {
@@ -798,12 +962,27 @@ impl Translator<'_> {
                     cv.gstate(g);
                 }
                 cv.fill_rgb([c.r, c.g, c.b]);
-                cv.path(page_path);
-                cv.fill(rule);
+                match text {
+                    Some(a) => {
+                        a.show(cv, TextMode::Fill);
+                        if let Some(d) = &a.decoration {
+                            cv.path(d);
+                            cv.fill(Rule::NonZero);
+                        }
+                    }
+                    None => {
+                        cv.path(page_path);
+                        cv.fill(rule);
+                    }
+                }
                 if gs.is_some() {
                     cv.restore();
                 }
-                Ok(())
+                Ok(if text.is_some() {
+                    Painted::AsText
+                } else {
+                    Painted::Otherwise
+                })
             }
             Paint::Gradient {
                 shape,
@@ -813,29 +992,63 @@ impl Translator<'_> {
             } => {
                 let bbox = page_path.bounding_box();
                 // Paint into a scratch canvas first: a gradient that turns
-                // out to need rasterising must leave no trace.
+                // out to need rasterising must leave no trace. Text clips
+                // with its glyphs (mode 7), then its decoration clips a
+                // second coat.
                 let mut scratch = Canvas::new();
-                scratch.save();
-                if let Some(g) = gs {
-                    scratch.gstate(g);
+                let mut out = Shaded::Exact;
+                let mut coats: Vec<Option<&BezPath>> = Vec::new();
+                match text {
+                    Some(a) => {
+                        coats.push(None);
+                        if let Some(d) = &a.decoration {
+                            coats.push(Some(d));
+                        }
+                    }
+                    None => coats.push(Some(page_path)),
                 }
-                scratch.path(page_path);
-                scratch.clip(rule);
-                let out = paint_gradient(
-                    &mut self.w,
-                    &mut scratch,
-                    *shape,
-                    *mapping,
-                    *repeat,
-                    ramp,
-                    &self.built.resolver.ramps,
-                    bbox,
-                );
-                scratch.restore();
+                for coat in coats {
+                    scratch.save();
+                    if let Some(g) = gs {
+                        scratch.gstate(g);
+                    }
+                    match (coat, text) {
+                        (Some(p), None) => {
+                            scratch.path(p);
+                            scratch.clip(rule);
+                        }
+                        (Some(p), Some(_)) => {
+                            scratch.path(p);
+                            scratch.clip(Rule::NonZero);
+                        }
+                        (None, Some(a)) => a.show(&mut scratch, TextMode::Clip),
+                        (None, None) => {}
+                    }
+                    let o = paint_gradient(
+                        &mut self.w,
+                        &mut scratch,
+                        *shape,
+                        *mapping,
+                        *repeat,
+                        ramp,
+                        &self.built.resolver.ramps,
+                        bbox,
+                    );
+                    scratch.restore();
+                    match o {
+                        Shaded::Rasterise(_) => {
+                            out = o;
+                            break;
+                        }
+                        Shaded::Approximated(_) => out = o,
+                        Shaded::Exact => {}
+                    }
+                }
                 match out {
                     Shaded::Rasterise(reason) => {
                         let backdrop = t.family != BlendFamily::Mix;
-                        self.rasterise(node, Target::Op(op), bounds, backdrop, &reason, cancelled)
+                        self.rasterise(node, Target::Op(op), bounds, backdrop, &reason, cancelled)?;
+                        Ok(Painted::Otherwise)
                     }
                     other => {
                         if let Shaded::Approximated(what) = other {
@@ -845,7 +1058,11 @@ impl Translator<'_> {
                             });
                         }
                         self.canvas().append(scratch);
-                        Ok(())
+                        Ok(if text.is_some() {
+                            Painted::AsText
+                        } else {
+                            Painted::Otherwise
+                        })
                     }
                 }
             }
@@ -858,7 +1075,8 @@ impl Translator<'_> {
                     backdrop,
                     "a bitmap fill (PDF image embedding is T11.4.8)",
                     cancelled,
-                )
+                )?;
+                Ok(Painted::Otherwise)
             }
         }
     }
@@ -964,8 +1182,37 @@ impl Translator<'_> {
             paint,
             t,
             bounds,
+            None,
             cancelled,
         )
+        .map(|_| ())
+    }
+}
+
+/// What [`Translator::paint_area`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Painted {
+    /// Painted through the glyphs of an embedded font.
+    AsText,
+    /// Painted some other way (a path, pixels).
+    Otherwise,
+    /// Nothing to paint (fully transparent, or the None blend).
+    Nothing,
+}
+
+/// A run's glyphs and decoration in page space.
+struct TextArea {
+    glyphs: Vec<(writer::Resource, u16, [f64; 6])>,
+    decoration: Option<BezPath>,
+}
+
+impl TextArea {
+    fn show(&self, cv: &mut Canvas, mode: TextMode) {
+        cv.begin_text(mode);
+        for (font, cid, m) in &self.glyphs {
+            cv.glyph(*font, *m, *cid);
+        }
+        cv.end_text();
     }
 }
 

@@ -51,14 +51,15 @@ mod text;
 pub mod xml;
 
 pub use read::{ReadOptions, SvgRead, SvgReadError, normal_form, read_svg};
-pub use text::{Placer, StoryPlacement, TextPlacer};
+pub use text::{FontFile, PlacedFace, Placer, StoryPlacement, TextPlacer};
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use xarast_doc::resources::ImageFormat;
 use xarast_doc::{BitmapId, Document, NodeKind};
 
-use crate::resource::{ResourceIndex, ResourceKind, resource_path};
+use crate::resource::{ResourceId, ResourceIndex, ResourceKind, resource_path};
 
 /// The SVG namespace.
 pub const NS_SVG: &str = "http://www.w3.org/2000/svg";
@@ -269,8 +270,26 @@ pub struct Stats {
     pub paint_classes: usize,
     /// Pass 5: elements (ink or `<g>`) whose paint is a class.
     pub paint_classed: usize,
+    /// Faces embedded as WOFF2 with an `@font-face` rule
+    /// (`research/06 §6.7` rule 2).
+    pub fonts_embedded: usize,
+    /// Faces not embedded because their licence forbids it (rule 3).
+    pub fonts_denied: usize,
+    /// Faces that could not be embedded for another reason.
+    pub fonts_failed: usize,
     /// Size of the SVG text in bytes.
     pub bytes: usize,
+}
+
+/// What became of one face the text is drawn with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontOutcome {
+    /// The face.
+    pub face: PlacedFace,
+    /// `None` when embedded; otherwise why not.
+    pub not_embedded: Option<Arc<str>>,
+    /// Whether it was refused by its licence (`fsType`).
+    pub denied: bool,
 }
 
 /// The result of [`write_svg`].
@@ -284,6 +303,9 @@ pub struct SvgDocument {
     pub foreign_count: usize,
     /// The preservation digest of those items (`xarast:foreign-digest`).
     pub foreign_digest: [u8; 32],
+    /// Every face the placed text is drawn with, in `@font-face` order,
+    /// and whether it was embedded.
+    pub fonts: Vec<FontOutcome>,
 }
 
 /// The package entry a bitmap resource is written as.
@@ -413,6 +435,51 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
     let mut e = emit::Emitter::new(doc, frame, opts, &mut href);
     e.document();
     e.styler.plan();
+    // The embedded fonts: one WOFF2 file and one `@font-face` rule per
+    // face, with every character the document draws in it.
+    let mut font_css = String::new();
+    let mut fonts = Vec::new();
+    // Stored once the emitter (which borrows the index through the bitmap
+    // closure) is gone; the name is the content hash's either way.
+    let mut font_files: Vec<Arc<[u8]>> = Vec::new();
+    if let Some(placer) = e.placer.clone() {
+        for (face, chars) in std::mem::take(&mut e.fonts) {
+            let chars: Vec<char> = chars.into_iter().collect();
+            let (not_embedded, denied) = match placer.0.font_file(&face, &chars) {
+                None => continue,
+                Some(FontFile::Woff2(bytes)) => {
+                    let href = if opts.dialect == SvgDialect::Interchange {
+                        Some(format!("data:font/woff2;base64,{}", xml::base64(&bytes)))
+                    } else {
+                        let path =
+                            resource_path(ResourceKind::Font, ResourceId::of(&bytes), "woff2");
+                        font_files.push(bytes);
+                        Some(path)
+                    };
+                    match href {
+                        Some(h) => {
+                            font_css.push_str(&text::font_face_rule(&face, &h));
+                            font_css.push('\n');
+                            (None, false)
+                        }
+                        None => (Some(Arc::from("the resource could not be stored")), false),
+                    }
+                }
+                Some(FontFile::Denied(why)) => (Some(why), true),
+                Some(FontFile::Unavailable(why)) => (Some(why), false),
+            };
+            match (&not_embedded, denied) {
+                (None, _) => e.stats.fonts_embedded += 1,
+                (Some(_), true) => e.stats.fonts_denied += 1,
+                (Some(_), false) => e.stats.fonts_failed += 1,
+            }
+            fonts.push(FontOutcome {
+                face,
+                not_embedded,
+                denied,
+            });
+        }
+    }
     let mut stats = std::mem::take(&mut e.stats);
     stats.defs_deduplicated = e.defs.hits;
     stats.paint_hoisted = e.styler.stats.hoisted;
@@ -420,8 +487,11 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
     stats.paint_classed = e.styler.stats.classed;
     let digest: [u8; 32] = e.foreign_hash.finalize().into();
     let count = e.foreign_count;
-    let svg = assemble(&e, doc, view, opts, count, &digest);
+    let svg = assemble(&e, doc, view, opts, count, &digest, &font_css);
     drop(e);
+    for bytes in font_files {
+        let _ = resources.insert(ResourceKind::Font, "woff2", bytes);
+    }
     let svg = if opts.dialect == SvgDialect::Interchange {
         let (svg, p) = interchange::project(&svg, opts.minify);
         stats.private_elements = p.elements;
@@ -438,6 +508,7 @@ pub fn write_svg(doc: &Document, resources: &mut ResourceIndex, opts: &SvgOption
         stats,
         foreign_count: count,
         foreign_digest: digest,
+        fonts,
     }
 }
 
@@ -458,6 +529,7 @@ fn assemble(
     opts: &SvgOptions,
     foreign_count: usize,
     digest: &[u8; 32],
+    font_css: &str,
 ) -> String {
     use num::{f64s, mp};
     use xml::{attr, push_text_escaped};
@@ -518,6 +590,11 @@ fn assemble(
         s.push_str("</dc:source>");
     }
     s.push_str("</cc:Work></rdf:RDF></metadata>\n<defs>\n");
+    if !font_css.is_empty() {
+        s.push_str("<style type=\"text/css\">\n");
+        s.push_str(font_css);
+        s.push_str("</style>\n");
+    }
     let style = e.styler.style_element();
     if !style.is_empty() {
         s.push_str(&style);

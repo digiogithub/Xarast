@@ -134,3 +134,59 @@ pub(crate) fn convert_nodes(
     }
     Ok(out)
 }
+
+/// A copy of `doc` with text stories replaced by their glyph outlines, as
+/// "Convert to editable shapes" would (on the copy; `doc` is untouched):
+/// every story when `all`, otherwise only the stories drawn with a face
+/// whose licence (`OS/2.fsType`) forbids embedding it — the export
+/// fallback of T9.6.5. Returns the copy and the families of those
+/// refusing faces, sorted; `None` when no story was converted.
+#[must_use]
+pub fn text_as_outlines(
+    doc: &xarast_doc::Document,
+    fonts: &FontService,
+    all: bool,
+) -> Option<(xarast_doc::Document, Vec<Arc<str>>)> {
+    // Node ids do not survive a restore: everything below reads the copy.
+    let mut copy = xarast_doc::Document::new_empty();
+    copy.restore(&doc.snapshot());
+    let doc = &copy;
+    let stories: Vec<NodeId> = doc
+        .tree
+        .preorder(doc.tree.root())
+        .filter(|n| matches!(doc.tree.kind(*n), Some(NodeKind::TextStory(_))))
+        .collect();
+    let mut families: Vec<Arc<str>> = Vec::new();
+    let mut pick: Vec<NodeId> = Vec::new();
+    for s in stories {
+        if all {
+            pick.push(s);
+            continue;
+        }
+        let refused = crate::text::story_refused_faces(fonts, doc, s);
+        if !refused.is_empty() {
+            pick.push(s);
+            for f in refused {
+                if !families.contains(&f) {
+                    families.push(f);
+                }
+            }
+        }
+    }
+    if pick.is_empty() {
+        return None;
+    }
+    let mut tx = Tx::begin(&mut copy);
+    let mut changed = false;
+    for s in pick {
+        let Some((runs, text)) = crate::text::story_outlines(fonts, tx.doc(), s) else {
+            continue;
+        };
+        if xarast_doc::convert_story_to_shapes(&mut tx, s, &runs, &text).is_ok() {
+            changed = true;
+        }
+    }
+    let _ = tx.commit(LABEL);
+    families.sort();
+    changed.then_some((copy, families))
+}

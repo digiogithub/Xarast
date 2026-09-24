@@ -52,12 +52,12 @@ validated, and how `.xar → .xarast → png` conversions are benchmarked.
 | `xarast-geom` | Points, rects, matrices, paths, flattening, stroke-to-path, boolean ops, millipoint fixed-point type | `kurbo`, `lyon_algorithms` |
 | `xarast-color` | Colour models (RGB/CMYK/HSV/grey), named and indexed colours, tints/shades/links, conversion | — |
 | `xarast-doc` | Node arena, attribute model, layers/pages/spreads, resource table, command/undo log | `xarast-geom`, `xarast-color` |
-| `xarast-text` | Font database, shaping, paragraph layout, text on a path | `parley`, `fontique`, `skrifa`, ICU4X segmentation, `unicode-bidi` |
+| `xarast-text` | Font database, shaping, paragraph layout, text on a path, font embedding (`fsType`, subsets, WOFF2) | `parley`, `fontique`, `skrifa`, ICU4X segmentation, `unicode-bidi`, `subsetter`, `brotli` |
 | `xarast-image` | Image decode/encode, resampling, colour management, bitmap resources | `image`, `zune-*`, `jpeg-decoder` |
 | `xarast-render` | Scene, display list, tiling, CPU backend, compositor, blend modes, GPU tile compositing | `xarast-geom`, `vello_cpu`, `wgpu` (feature `gpu`) |
 | `xarast-xar` | `.xar` reader: record layer, decompression, tree builder, model mapping | `xarast-doc`, `flate2` |
 | `xarast-format` | `.xarast` container: ZIP, SVG profile read/write, resource dedup, round-trip preservation | `xarast-doc`, `zip`, `quick-xml` |
-| `xarast-io` | Import/export filters: SVG, PNG, JPEG, WebP, PDF | `xarast-doc`, `xarast-image` |
+| `xarast-io` | Import/export filters: SVG, PNG, JPEG, WebP, PDF | `xarast-doc`, `xarast-image`, `xarast-text` (embedded fonts in PDF) |
 | `xarast-app` | Tools, selection, viewport, command bus, preferences, document session | all of the above |
 | `xarast-ui` | Panels, galleries, dialogs, canvas widget, on-canvas handle overlays | `xarast-app`, `egui` |
 | `xarast-shell` | Window, event loop, GPU surface, tablet input, portals, clipboard, DnD | `winit`, `wgpu`, `accesskit` |

@@ -26,18 +26,31 @@ SoftShadow svg 4.8
 # (Text on a path: SVG places and turns each character on the path since
 # T9.5.6, XARA-T-0252: TextCurve 16.27 -> 3.06, under the default now.)
 
-# Small text (5-9 px glyphs at 72 dpi) drawn as filled outlines: Poppler
-# and Ghostscript both paint thin features darker than our coverage
-# antialiasing. At 8x the same PDF is within 2.5/255 of our export, so the
-# geometry is right; this is the renderers' small-shape policy.
-TextJust pdf 15.8
+# Small text (5-9 px glyphs at 72 dpi). Since T11.4.7 (XARA-T-0228) PDF
+# text is live text in embedded subset fonts, so the viewers rasterise the
+# glyphs with their own font engines (FreeType in Poppler, Ghostscript's
+# own), which paint small text darker than our coverage antialiasing -
+# more so than the filled outlines PDF used to carry (TextJust 13.7 ->
+# 18.4, SimpleText 8.6 -> 13.3, measured 2026-09-24). Stripping the
+# TrueType hinting tables changes nothing measurable (Poppler does not
+# hint). At 8x the glyphs land where our export draws them (SimpleText
+# 3.4/255 with Ghostscript); `--text outlines` gives back the outline
+# numbers. This is the renderers' text policy, not geometry.
+TextJust pdf 21.1
+SimpleText pdf 15.2
+Paragraph pdf 12.5
 ScaleTest2 pdf 11
-SimpleText pdf 9.8
+FontChangesInText pdf 10.8
+SuperSub pdf 10.3
+embeddedFonts pdf 9.8
+ManualKern pdf 8.8
 ScaleTest pdf 8.5
-Paragraph pdf 7.8
-FontChangesInText pdf 7.7
-SuperSub pdf 6.6
-Rotated pdf 6.3
-ManualKern pdf 5.8
-Tracking pdf 5.4
+Rotated pdf 8.1
+Tracking pdf 7.6
+GardenPlan pdf 7.0
+hebrew pdf 6.7
+BaselineShift pdf 6.3
 ProbeX16 pdf 4.8
+Kerning pdf 4.7
+LineSpacing pdf 4.6
+AngledText pdf 4.2

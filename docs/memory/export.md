@@ -16,7 +16,11 @@ mapper in its `Interchange` dialect (section "SVG" below). Round 4
 harness** (section "Colour fidelity and regression" below). Batch export
 (T11.1.6), export hints in the document (T11.1.5), palette quantisation
 (T11.2.8), AVIF (T11.2.7) and the dialog (T11.1.8, XARA-T-0192) are not
-built yet.
+built yet. Round 5 (2026-09-24, XARA-T-0228 + XARA-T-0233 + XARA-T-0245):
+**fonts** — PDF text is live text in embedded subset fonts with
+`ToUnicode`, SVG embeds WOFF2 subsets, `--text outlines` for both, and
+faces whose `fsType` forbids embedding become outlines (section "Fonts"
+below).
 
 | Piece | Where |
 |---|---|
@@ -32,6 +36,9 @@ built yet.
 | `PdfExporter`, `plan_page`, the command translator and the ladder | `crates/xarast-io/src/pdf/mod.rs` |
 | `PdfWriter` façade (the only code naming `pdf-writer`) | `crates/xarast-io/src/pdf/writer.rs` |
 | Gradients → shadings, graduated transparency → soft-mask content | `crates/xarast-io/src/pdf/shading.rs` |
+| Text runs → embedded `CIDFont`s, `ToUnicode`, text operators | `crates/xarast-io/src/pdf/text.rs`, `PdfWriter::font`, `Canvas::{begin_text, glyph, end_text}` |
+| `SceneText`, `TextRun`, `ExportGlyph`; `ExportSource::text_as_outlines` | `crates/xarast-io/src/source.rs` |
+| `TextOutput` (`--text text\|outlines`) | `crates/xarast-io/src/options.rs` |
 | Ladder step 3: object / backdrop rasters | `crates/xarast-io/src/pdf/rasterise.rs`, `DisplayList::with_commands`, `export::ListRasteriser` |
 | `PdfOptions`, `PdfVersion`, `BlendFidelity` | `crates/xarast-io/src/options.rs` |
 | `SvgExporter`, the bitmap linker, the report mapping | `crates/xarast-io/src/svg.rs` |
@@ -112,8 +119,10 @@ behind `SvgOptions::dialect`; that list is the table above.
   only reflected or sheared characters, or no text placer); the writer
   counts per kind, not
   per object, hence a new variant rather than `Approximated { node }`.
-  Every first `font-family` the file names is a **`FontNotEmbedded`**
-  (T11.3.4, XARA-T-0233). `pixels` is the area in points, `dpi` 72,
+  Fonts are embedded (T11.3.4, "Fonts" below): `FontNotEmbedded` names
+  only a face that was not (its licence refuses it, so its stories are
+  outlines; or subsetting failed); without a text placer every family
+  is still reported. `pixels` is the area in points, `dpi` 72,
   `commands` the elements written, `render_time` the mapping.
 - CLI: `--format svg` / `-o x.svg`, `--resources inline|sidecar`,
   `--minify`, `--pretty`; `--background` works (paper/colour → the rect).
@@ -232,7 +241,15 @@ PDF), each with a limit and a reason in `export-limits-corpus.txt`:
 | Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
 | Feathering as a blur | SoftShadow svg 4.1 |
 | ~~Text on a path written straight in SVG~~ | TextCurve ~~svg 16.3~~ **3.06** since XARA-T-0252 (T9.5.6: each character placed and turned on the path, `x`/`y`/`rotate`), pdf 1.55; the limit is gone. What is left is the rainbow gradient on the text, written in the spread frame (`xarast-format.md`, text leftovers) |
-| Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) |
+| Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) — superseded by the row below since T11.4.7; `--text outlines` still gives these |
+| Small text as live text in embedded fonts (T11.4.7, re-measured 2026-09-24) | TextJust 18.4, SimpleText 13.3, Paragraph 10.9, ScaleTest2 9.4, FontChangesInText 9.4, SuperSub 8.9, embeddedFonts 8.6, ManualKern 7.7, ScaleTest 7.1, Rotated 7.0, Tracking 6.6, GardenPlan 6.1, hebrew 5.8, BaselineShift 5.5, ProbeX16 4.4, Kerning 4.1 (all pdf; limits = +15 %, LineSpacing 3.97 and AngledText 3.66 given headroom too) |
+
+Corpus after the fonts round (system fonts, release): 59/59 each format,
+SVG median 0.70 (unchanged; hebrew.svg 0.55), PDF best-of-two median 2.19;
+`export-check --limits` passes (0 failures) with the limits above. All 59
+PDFs open in Poppler and Ghostscript with no message; 20 carry fonts, 29
+fonts in all, every one embedded, subset and with `ToUnicode` (`pdffonts`).
+Two runs are byte-identical (32 text-file PDFs and SVGs compared).
 
 Small text: Poppler and Ghostscript both paint thin glyph features darker
 than our coverage AA; rendered at 8× and compared at 8×, TextJust's PDF is
@@ -293,7 +310,11 @@ the ladder most needs (the sampled ramp and the meshes). The façade in
 | Layers (`PushLayer`) with flat Mix | transparency-group form XObject, `/I` unless `Plain`, `ca` on the `Do` | native |
 | Layers with other transparency | rasterise the whole layer with backdrop | rasterise |
 | Bitmap fills, placed images | — | rasterise (XARA-T-0229) |
-| Text | the walker's glyph outlines, as paths | native paths; embedded fonts are XARA-T-0228 |
+| Text, flat fill | `BT 0 Tr … Tj ET` in an embedded subset `CIDFont`, one `Tm` per glyph | native (T11.4.7) |
+| Text, gradient fill | glyphs as a text clip (`7 Tr`), then the shading | native |
+| Text the ladder cannot paint as text (bitmap fill, rasterised transparency, variable instance, underline under non-opaque paint) | the outlines (or pixels) as before, plus the glyphs as invisible text (`3 Tr`) | selectable |
+| Text in a face whose `fsType` forbids embedding | the walker's glyph outlines, no text | reported `FontNotEmbedded` |
+| Underline | filled rectangles next to the text | native |
 
 **Blend families.** Not measured yet (T11.4.6, XARA-T-0227): so `Exact`
 is the default and every non-Mix family is rasterised with its backdrop.
@@ -350,6 +371,60 @@ row), nor are Contrast, Brightness, Bevel.
 - The 59-file corpus (`--background paper`): 59/59 exported, 121 MB,
   6.5 s render in release; Poppler and Ghostscript read all 59 with no
   message. `qpdf` is not installed on this machine (XARA-T-0230).
+
+## Fonts (T11.3.4, T11.4.7, T9.6.5; XARA-T-0228/0233/0245, as built)
+
+One embedding layer for every format: `xarast_text::embed`
+(`docs/memory/text.md`, "Font embedding": the `fsType` table, the
+subsetter, our WOFF2 writer). This section is what the exporters do
+with it.
+
+- **The glyphs behind the outlines (PDF).** The scene only holds
+  outlines, so `SourceScene` gained `text: Option<SceneText>`: per painted
+  run, its outline `PathRef` (the very allocation the `Fill`/`Stroke` ops
+  hold), its `ExportGlyph`s (face, glyph id, font-units → document
+  transform with faux italic, whether a variable instance, the cluster's
+  text on its first glyph) and its underline. The walker fills it
+  (`SceneWalker::scene_text`); `SceneSource` gives `None` (text stays
+  outlines). The translator finds a run from an op by the **address of
+  the path's `Arc<Path>`** — no render-crate change, and a display list
+  built from the scene points at the same allocation.
+- **Fonts first, then the page.** `PdfText::new` subsets every face the
+  runs use once, with every glyph any run draws, in order of first use
+  (not `FaceId` order, which depends on what the process laid out
+  before), and writes `Type0` → `CIDFont` (`CIDFontType2` + `FontFile2`
+  with `Length1`, or `CIDFontType0` + `FontFile3 /CIDFontType0C`),
+  `Identity-H`, `W` widths, a descriptor (`Flags` symbolic, italic, fixed
+  pitch; `StemV` 80, not in fonts) and a `ToUnicode` CMap (CID → the
+  cluster text of the first run that used the glyph). Subset tag: six
+  letters from an FNV hash of the program, so the same subset has the
+  same name.
+- **Painting.** One `Tm` per glyph (em square → page), `Tf` size 1 only
+  when the font changes: no advance arithmetic of the viewer's can move a
+  glyph. Flat fill → `0 Tr`; gradient → `7 Tr` then the shading code in a
+  scratch canvas (a second coat for the underline's clip); anything else
+  the ladder already handles (bitmap fills, rasterised transparency),
+  a variable instance, or an underline under translucent or blended
+  paint (glyphs and bar painted apart would double up where they touch)
+  keeps its old path and gets the glyphs once as **invisible text** so
+  it stays selectable; a stroke-only run too. A refused face is never
+  written: outlines, `FontNotEmbedded` once per family.
+- **SVG.** The writer embeds (see `xarast-format.md`, "Embedded fonts");
+  the exporter asks the source for `text_as_outlines(false)` first — a
+  copy of the document where stories drawn with a refused face are
+  converted to shapes by the application (`xarast_app::convert::
+  text_as_outlines`, the convert-to-shapes geometry, so they render
+  exactly as the text did) — and reports those families.
+- **`TextOutput`** (`PdfOptions::text`, `SvgOptions::text`, CLI
+  `--text text|outlines`, serde `text`/`outlines`): `Outlines` ignores
+  `SceneText` in PDF and converts every story in SVG (no `<text>`, no
+  `@font-face`, no `FontNotEmbedded`). TextDesigns + TextCurve with
+  `--text outlines`, system fonts: SVG 0.55–2.17 (TextCurve 0.57, was
+  3.06 as live text), PDF the old outline numbers.
+- **`Capabilities::embeds_fonts`** is true for PDF and SVG.
+- **Extraction** (`pdftotext`): every story's text comes back; manual
+  kerns and wide tracking read as spaces ("l i n e s") because Poppler
+  infers word breaks from gaps — the text itself is right.
 
 ## Decisions taken (and why)
 
@@ -481,6 +556,9 @@ row), nor are Contrast, Brightness, Bevel.
   are a function of document order only.
 - **PDF: only `pdf/writer.rs` names `pdf-writer`.** Everything else speaks
   `Canvas`/`Resource`/`GState`.
+- **PDF text: every font used is embedded and subset**, with `ToUnicode`,
+  or the text is outlines and the report says `FontNotEmbedded`. Never
+  a font reference without its program.
 - **PDF numbers never carry `NaN`** (`writer::num` writes zero); geometry
   is passed in page points or path-local document units, never absolute
   millipoints, so the `f32` the file holds keeps 0.001 pt.
@@ -530,6 +608,11 @@ row), nor are Contrast, Brightness, Bevel.
   pixel and mis-strokes `Broken Butt Cap`'s degenerate cap (12.6/255 where
   Ghostscript gives 0.97). `export-check` renders with both and takes the
   better; a read failure in either still fails.
+- **Stripping the TrueType hinting tables to bring PDF text closer to
+  our antialiasing**: SimpleText at 72 dpi Poppler 15.00 → 15.00, gs
+  13.25 → 12.19. Poppler does not hint; the gap is its glyph rasteriser.
+  Not worth the worse text in viewers that do hint.
+- **`ttf2woff2` for WOFF2**: refuses CFF (`OTTO`) fonts (see text.md).
 - **`pdftoppm -r 72` for a size-exact comparison**: it rounds the page up
   (277 × 181 for a 276.25 pt page); use `-scale-to-x/-scale-to-y`.
 - **Comparing Poppler renders of placed images pixel for pixel**: Poppler
@@ -553,13 +636,14 @@ row), nor are Contrast, Brightness, Bevel.
   each `.xar` (render TODO 5; the original itself cannot run here).
 - `qpdf --check` has never run on this machine (not installed): the first
   CI `export` job is its first run over our PDFs.
-- SVG follow-ups: XARA-T-0233 (fonts: WOFF2 subset or outlines),
-  XARA-T-0234 (precision), XARA-T-0235 (`Reference` resources, physical
+- SVG follow-ups: ~~XARA-T-0233 (fonts: WOFF2 subset or outlines)~~
+  (done, "Fonts"), XARA-T-0234 (precision), XARA-T-0235 (`Reference` resources, physical
   size, full minify); XARA-T-0236 (resvg check and comparison in CI) is
   done by XARA-US-0060; the
   shared bake ladder is XARA-T-0102 (profile).
 - PDF follow-ups: XARA-T-0227 (bitmap transparency, ramp alpha, layer
-  masks, per-family ΔE), XARA-T-0228 (embedded subset fonts), XARA-T-0229
+  masks, per-family ΔE), ~~XARA-T-0228 (embedded subset fonts)~~ (done,
+  "Fonts"), XARA-T-0229
   (images: DCT passthrough), XARA-T-0230 (multi-page, XMP, output intent;
   its `qpdf`-in-CI part is done by XARA-US-0060), XARA-T-0232 (ladder cost and file size). XARA-T-0231 is
   done: the raster exporters now honour `cap_end` and the dash offset as

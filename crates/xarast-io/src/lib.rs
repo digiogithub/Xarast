@@ -54,11 +54,14 @@ pub use model::{
 pub use options::{
     BlendFidelity, FormatId, FormatOptions, JpegOptions, PDF_RASTERISE_DPI, PdfOptions, PdfVersion,
     PngColour, PngCompression, PngDepth, PngOptions, Subsampling, SvgOptions, SvgResources,
-    WebPMode, WebPOptions,
+    TextOutput, WebPMode, WebPOptions,
 };
 pub use pdf::PdfExporter;
 pub use raster::{JpegExporter, PngExporter, WebPExporter};
 pub use registry::{Capabilities, Exporter, Registry, XAR_EXPORT_REFUSAL};
 pub use report::{Compromise, ExportError, ExportReport};
-pub use source::{CancelFlag, ExportSource, NoProgress, Progress, SceneSource, SourceScene, Stage};
+pub use source::{
+    CancelFlag, ExportGlyph, ExportSource, NoProgress, Progress, SceneSource, SceneText,
+    SourceScene, Stage, TextRun,
+};
 pub use svg::SvgExporter;

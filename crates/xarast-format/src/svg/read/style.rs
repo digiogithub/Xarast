@@ -131,6 +131,12 @@ impl Stylesheet {
             }
             let selectors = rest.get(..open).unwrap_or_default();
             let body = rest.get(open.saturating_add(1)..close).unwrap_or_default();
+            // `@font-face` (the embedded fonts, `research/06 §6.7` rule 2)
+            // is for browsers; the model's fonts come from the runs.
+            if selectors.trim_start().starts_with("@font-face") {
+                rest = rest.get(close.saturating_add(1)..).unwrap_or_default();
+                continue;
+            }
             let decls = declarations(body);
             for sel in selectors.split(',') {
                 let sel = sel.trim();
@@ -286,5 +292,16 @@ mod tests {
         let (q, _) = compute(dom.elem(4).unwrap(), &g, &sheet);
         assert_eq!(q.get("fill"), Some("#0f0"));
         assert_eq!(q.get("opacity"), None);
+    }
+
+    #[test]
+    fn font_face_rules_are_skipped_quietly() {
+        let mut sheet = Stylesheet::default();
+        sheet.add(
+            "@font-face{font-family:'Noto Sans';font-weight:400;font-style:normal;\
+             src:url(data:font/woff2;base64,d09GMg==) format('woff2');}\n.c1{fill:#f00}",
+        );
+        assert_eq!(sheet.unsupported, 0);
+        assert!(sheet.knows_all("c1"));
     }
 }

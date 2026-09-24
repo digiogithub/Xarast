@@ -1058,7 +1058,7 @@ impl Nf<'_> {
     /// paint projected as for any ink element.
     fn run_style(&mut self) -> String {
         let mut s = String::new();
-        for (k, v) in crate::svg::text::run_text_attrs(&self.attrs, &[]) {
+        for (k, v) in crate::svg::text::run_text_attrs(&self.attrs, &[], &[]) {
             let _ = write!(s, "{k}={v:?} ");
         }
         let paint = self.paint(None, true, true, false);

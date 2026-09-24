@@ -12,12 +12,15 @@
 //!   arc length ([`PathFit`]).
 //! * [`FontDb::glyph_outline`] — cached glyph outlines as `kurbo::BezPath`,
 //!   what the renderer and convert-to-shapes draw.
+//! * [`embed`] — font embedding: the `OS/2.fsType` rights, WOFF2 subsets
+//!   for `.xarast` and SVG, subset font programs for PDF.
 //!
 //! Nothing outside this crate names a `parley`, `fontique` or `skrifa` type:
 //! the whole Linebender text stack is pre-1.0 and sits behind this API.
 //!
 //! See `docs/phases/phase-09-text.md` and `docs/memory/text.md`.
 
+pub mod embed;
 pub mod font;
 mod layout;
 pub mod metrics;
@@ -27,6 +30,7 @@ pub mod segment;
 mod shape;
 pub mod style;
 
+pub use embed::{EmbedError, EmbedRights, Embedding, PdfFont, ProgramFormat, WebFont};
 pub use font::{
     FaceData, FaceId, FaceInfo, FontDb, FontDbOptions, FontError, FontMatch, FontSubstitution,
     GenericName, ScriptTag, SubstitutionReason, Synthesis,

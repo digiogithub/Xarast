@@ -590,6 +590,56 @@ warning; the digest reported "rewritten, nothing lost" (Inkscape's
 spelling changes the fragment text). What does not survive yet: its
 `namedview` view state and `<metadata>` additions (XARA-T-0112).
 
+## Embedded fonts (`research/06 §6.7` rules 2–3, XARA-T-0218, as built)
+
+What phase 9 asks this note to record: the subsetting choice, the
+`fsType` handling and the fallback chain actually emitted. The subsets
+come from `xarast_text::embed` (`docs/memory/text.md`, "Font
+embedding"); this crate only places them.
+
+- **Contract.** `TextPlacer` gained `font_file(&PlacedFace, &[char]) ->
+  Option<FontFile>` (defaulted to `None`: a placer that embeds nothing),
+  and `StoryPlacement` gained `faces` (each `PlacedFace { family, weight,
+  italic, key }` with the characters it draws), `char_faces` (face index
+  per character item) and `denied`. The writer never sees a font.
+- **Collection and files.** `Emitter::text` merges every story's `faces`
+  into `Emitter::fonts` (`BTreeMap<PlacedFace, BTreeSet<char>>`); after
+  the walk `write_svg` asks the placer for each face's file with every
+  character the document draws in it. Native: the WOFF2 goes into the
+  resource index as `resources/fonts/b3-<hash32>.woff2` (STORED, the
+  policy's `font/woff2` row), inserted after the emitter is dropped (the
+  bitmap closure holds the index) under the path the content hash gives.
+  Interchange: `data:font/woff2;base64,…`. One `@font-face{font-family:
+  'Family';font-weight:W;font-style:S;src:url(…) format('woff2');}` per
+  face, in `PlacedFace` order, in a `<style>` of its own first in
+  `<defs>` (before the paint classes' `<style>`).
+- **The family chain** (rule 4): the family asked for, first and quoted
+  (the reader's key, unchanged), then **the families of the faces this
+  run's characters are drawn with** (from `char_faces`, `text::chain_with`
+  — fallback faces included, e.g. `'Arial', 'Noto Sans Hebrew', …`), then
+  the substitute, then the generic from PANOSE. Per run, not per story:
+  resvg takes the first family that exists and falls back from there, so
+  a story-wide list put an installed Noto Sans (no Hebrew) before the
+  embedded Hebrew face (hebrew.svg 32.5 → 0.45 once per run). The
+  quote-aware split keeps a family with a comma whole.
+- **`fsType`** (rule 3): a face the licence refuses gets no file
+  (`FontFile::Denied`, `Stats::fonts_denied`, `SvgDocument::fonts`
+  outcome), and every run whose *requested* family resolves to such a
+  face carries `xarast:font-embed="denied"`. Criterion 13 of US-0050 is
+  `xarast-app/tests/font_embedding.rs`: unzip, one `.woff2` (not the
+  refused face's: decoded, its `fsType` allows embedding), one mark.
+- **Reading.** `Stylesheet::add` skips `@font-face` blocks silently (no
+  "unsupported selector" warning); `xarast:font-embed` is a run twin the
+  reader ignores; the resources stay in the index and are re-inserted,
+  same bytes, on the next save. So the normal form is unchanged and a
+  re-save is byte-identical — fresh (`save_to`) and through raw copies
+  (`save_opened_to`); the corpus round trip (59/59 model, bytes, render)
+  and `app_save` (59/59) pass with embedding on.
+- **`meta.xml`**: `xarast:fonts="N"` in `<xarast:statistics>`, written
+  only when N > 0 so documents without text keep their pinned bytes.
+- The reader does **not** register embedded fonts (a subset must never
+  back editing; a per-document font overlay does not exist yet).
+
 ## The `SvgDialect` seam (phase 11 W11.3, XARA-US-0058)
 
 `SvgOptions::dialect` is the one parameter separating the `.xarast`
@@ -919,9 +969,10 @@ the file means", not crashes; each input is now a unit test in
   autosave place text as `xarast-cli convert` does; see "App save places
   text" below); a gradient or bitmap fill on
   text is written in the spread frame, so browsers misplace it under the
-  story's transform (the twin is exact); fonts are not embedded
-  (`@font-face`/WOFF2, §6.7 rule 2) and no generic family is guessed from
-  a name without PANOSE.
+  story's transform (the twin is exact); ~~fonts are not embedded~~
+  (done, XARA-T-0218, "Embedded fonts" above); no generic family is
+  guessed from a name without PANOSE; no stable `xarast:font-id` /
+  `xarast:font-ref` twin yet (rule 1 asks for an id).
 - ~~Doc model has no per-node foreign-baggage container~~ — done,
   XARA-T-0089 (`docs/memory/document-model.md` decision 32).
 - ~~F6.4 lock UX + signals, F6.5 autosave, F6.7 recovery scan~~ — done in

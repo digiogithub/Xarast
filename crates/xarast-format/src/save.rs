@@ -192,6 +192,9 @@ pub fn meta_xml(doc: &Document, stats: &Stats, generator: &str) -> String {
     attr(&mut s, "xarast:layers", &stats.layers.to_string());
     attr(&mut s, "xarast:objects", &stats.elements.to_string());
     attr(&mut s, "xarast:bitmaps", &stats.bitmaps.to_string());
+    if stats.fonts_embedded > 0 {
+        attr(&mut s, "xarast:fonts", &stats.fonts_embedded.to_string());
+    }
     attr(
         &mut s,
         "xarast:colours",

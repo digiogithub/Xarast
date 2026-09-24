@@ -27,6 +27,8 @@ skrifa = { workspace = true }
 unicode-bidi = { workspace = true }
 icu_segmenter = { workspace = true }
 icu_properties = { workspace = true }
+subsetter = { workspace = true }
+brotli = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

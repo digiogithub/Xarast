@@ -27,6 +27,7 @@ use xarast_text::{
 };
 
 use crate::fonts::FontService;
+use xarast_io::ExportGlyph;
 
 /// A story ready to paint: one outline per attribute run.
 #[derive(Debug, Clone)]
@@ -55,6 +56,10 @@ pub(crate) struct RunGeometry {
     pub path: PathRef,
     /// The attributes the run paints with.
     pub attrs: ResolvedAttrs,
+    /// The glyphs `path` is made of, for exporters that embed fonts.
+    pub glyphs: Arc<[ExportGlyph]>,
+    /// The underline bars `path` also holds, document space.
+    pub decoration: Option<Arc<BezPath>>,
 }
 
 /// The shaper's input for a story: style runs, paragraph styles, manual
@@ -306,6 +311,11 @@ pub(crate) fn build_story(
     // Faux italic and bold: what the matched face lacks, per style run.
     let mut synth: HashMap<usize, Option<f64>> = HashMap::new();
     let mut paths: Vec<BezPath> = vec![BezPath::new(); input.runs.len()];
+    // What each path is made of: its glyphs and its underline.
+    let mut placed: Vec<Vec<ExportGlyph>> = vec![Vec::new(); input.runs.len()];
+    let mut decor: Vec<BezPath> = vec![BezPath::new(); input.runs.len()];
+    // Clusters whose text is already on a glyph.
+    let mut spoken: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut glyphs = 0usize;
     // Glyphs with ink that are not the missing-glyph box: a story whose
     // visible text has none could not be drawn.
@@ -329,8 +339,16 @@ pub(crate) fn build_story(
                     .map(|deg| f64::from(deg).to_radians().tan())
             });
             let upem = db.units_per_em(run.face);
+            let variable = run.coords.iter().any(|c| *c != 0);
             for g in &run.glyphs {
                 glyphs += 1;
+                let text: Arc<str> = if spoken.insert(g.cluster) {
+                    line.cluster_at(g.cluster)
+                        .and_then(|c| st.text.get(c.range.clone()))
+                        .map_or_else(|| Arc::from(""), Arc::from)
+                } else {
+                    Arc::from("")
+                };
                 let Some(outline) = db.glyph_outline_normalized(run.face, g.id, &run.coords) else {
                     continue;
                 };
@@ -350,6 +368,15 @@ pub(crate) fn build_story(
                 for el in outline.elements() {
                     target.push(xf * *el);
                 }
+                if let Some(p) = placed.get_mut(run.style) {
+                    p.push(ExportGlyph {
+                        face: run.face,
+                        id: g.id,
+                        transform: xf,
+                        variable,
+                        text,
+                    });
+                }
             }
             if input.runs[run.style].underline && !run.glyphs.is_empty() {
                 // Position and thickness are the usual typographic defaults
@@ -357,10 +384,12 @@ pub(crate) fn build_story(
                 // thick): the original's own values come from the font.
                 let size = run.size.to_f64();
                 let y = line.baseline_y.to_f64() - size * 0.1;
+                let under = &mut decor[run.style];
                 let mut bar = |x0: f64, x1: f64, xf: Affine| {
                     let rect = kurbo::Rect::new(x0, y - size * 0.05, x1, y);
                     for el in rect.path_elements(0.1) {
                         target.push(xf * el);
+                        under.push(xf * el);
                     }
                 };
                 if fit.is_some() {
@@ -405,11 +434,15 @@ pub(crate) fn build_story(
     }
     let runs = paths
         .into_iter()
+        .zip(placed)
+        .zip(decor)
         .zip(&st.runs)
-        .filter(|(p, _)| !p.elements().is_empty())
-        .map(|(p, r)| RunGeometry {
+        .filter(|(((p, _), _), _)| !p.elements().is_empty())
+        .map(|(((p, g), d), r)| RunGeometry {
             path: PathRef::new(Path::from_bez_path(&p).0),
             attrs: r.attrs.clone(),
+            glyphs: Arc::from(g),
+            decoration: (!d.elements().is_empty()).then(|| Arc::new(d)),
         })
         .collect();
     StoryGeometry {
@@ -451,6 +484,39 @@ pub(crate) fn story_outlines(
         })
         .collect();
     Some((runs, layout_text(&st).to_owned()))
+}
+
+/// The families of the faces `story` is drawn with whose licence
+/// (`OS/2.fsType`) forbids embedding them, each once; empty when every face
+/// may be embedded or `story` is not a story.
+pub(crate) fn story_refused_faces(
+    fonts: &FontService,
+    doc: &xarast_doc::Document,
+    story: NodeId,
+) -> Vec<Arc<str>> {
+    let Some(NodeKind::TextStory(node)) = doc.tree.kind(story) else {
+        return Vec::new();
+    };
+    let mut stack = xarast_doc::attr::resolve_inherited(&doc.tree, story, &doc.defaults);
+    let Some(st) = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
+        Arc::new(a.value.clone())
+    }) else {
+        return Vec::new();
+    };
+    let (_, layout, _) = lay_story(fonts, &doc.tree, &st, node);
+    let db = fonts.db();
+    let mut out: Vec<Arc<str>> = Vec::new();
+    for line in &layout.lines {
+        for run in &line.runs {
+            if db.embedding_denied(run.face)
+                && let Some(info) = db.face_info(run.face)
+                && !out.contains(&info.family)
+            {
+                out.push(info.family);
+            }
+        }
+    }
+    out
 }
 
 /// The document-space box a story's lines occupy (advance boxes, not ink),

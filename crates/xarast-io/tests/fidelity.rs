@@ -35,6 +35,7 @@ impl ExportSource for DocSource {
             scene: Scene::new(),
             resolver: Resolver::default(),
             compromises: Vec::new(),
+            text: None,
         })
     }
 

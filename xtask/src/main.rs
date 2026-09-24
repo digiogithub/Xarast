@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod export_check;
+mod fonts;
 
 /// Icon sizes required by the freedesktop icon theme specification, plus the
 /// 512 that AppImage thumbnailers prefer.
@@ -130,6 +131,11 @@ fn svg_render(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     options.fontdb_mut().load_system_fonts();
+    options.fontdb = fonts::with_embedded(
+        &options.fontdb,
+        &String::from_utf8_lossy(&svg),
+        source.parent(),
+    );
     let tree = resvg::usvg::Tree::from_data(&svg, &options)?;
     let size = tree.size();
     let width: u32 = match args.get(2) {

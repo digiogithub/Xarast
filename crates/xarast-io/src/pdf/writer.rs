@@ -27,8 +27,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 
 use kurbo::{BezPath, PathEl};
-use pdf_writer::types::{BlendMode, FunctionShadingType, LineCapStyle, LineJoinStyle, MaskType};
-use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, TextStr};
+use pdf_writer::types::{
+    BlendMode, CidFontType, FontFlags, FunctionShadingType, LineCapStyle, LineJoinStyle, MaskType,
+    SystemInfo, TextRenderingMode, UnicodeCmap,
+};
+use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 
 /// Sanitises a coordinate: finite `f64` to `f32`, anything else to zero.
 fn num(v: f64) -> f32 {
@@ -50,6 +53,8 @@ pub enum ResourceKind {
     Shading,
     /// An image or form XObject, painted with `Do`.
     XObject,
+    /// A font, selected with `Tf`.
+    Font,
 }
 
 /// A named resource: its kind and its object number, which also makes
@@ -66,6 +71,7 @@ impl Resource {
             ResourceKind::GState => 'G',
             ResourceKind::Shading => 'S',
             ResourceKind::XObject => 'X',
+            ResourceKind::Font => 'F',
         };
         format!("{p}{}", self.id)
     }
@@ -174,6 +180,30 @@ pub struct LineStyle {
     pub dash: (Vec<f64>, f64),
 }
 
+/// How text between [`Canvas::begin_text`] and [`Canvas::end_text`] is
+/// rendered (`Tr`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextMode {
+    /// Filled with the current fill colour (mode 0).
+    Fill,
+    /// Not painted at all, but selectable and searchable (mode 3).
+    Invisible,
+    /// Added to the clipping path at `ET` (mode 7).
+    Clip,
+}
+
+/// A subset font to embed: the program and what its dictionaries say.
+#[derive(Debug, Clone, Copy)]
+pub struct FontSpec<'a> {
+    /// The font program and metrics (`xarast_text::embed`).
+    pub font: &'a xarast_text::PdfFont,
+    /// The six-letter subset tag of the `BaseFont` name (`ABCDEF+Name`).
+    pub tag: &'a str,
+    /// The text each glyph (by CID, which is the subset's glyph id) stands
+    /// for, for the `ToUnicode` map.
+    pub to_unicode: &'a BTreeMap<u16, String>,
+}
+
 /// A content stream under construction, with the resources it uses.
 pub struct Canvas {
     /// Content already flushed by [`Canvas::append`].
@@ -181,6 +211,8 @@ pub struct Canvas {
     content: Content,
     used: BTreeSet<Resource>,
     depth: usize,
+    /// The font set in the open text object, if any.
+    text_font: Option<Resource>,
 }
 
 impl std::fmt::Debug for Canvas {
@@ -208,6 +240,7 @@ impl Canvas {
             content: Content::new(),
             used: BTreeSet::new(),
             depth: 0,
+            text_font: None,
         }
     }
 
@@ -387,6 +420,36 @@ impl Canvas {
     pub fn xobject(&mut self, r: Resource) {
         self.used.insert(r);
         self.content.x_object(Name(r.name().as_bytes()));
+    }
+
+    /// `BT` and the rendering mode. Every glyph until [`Canvas::end_text`]
+    /// is placed by its own text matrix.
+    pub fn begin_text(&mut self, mode: TextMode) {
+        self.content.begin_text();
+        self.text_font = None;
+        self.content.set_text_rendering_mode(match mode {
+            TextMode::Fill => TextRenderingMode::Fill,
+            TextMode::Invisible => TextRenderingMode::Invisible,
+            TextMode::Clip => TextRenderingMode::Clip,
+        });
+    }
+
+    /// One glyph of a font from [`PdfWriter::font`]: `m` maps the glyph's
+    /// em square (1 unit = 1 em) to the current user space.
+    pub fn glyph(&mut self, font: Resource, m: [f64; 6], cid: u16) {
+        if self.text_font != Some(font) {
+            self.used.insert(font);
+            self.content.set_font(Name(font.name().as_bytes()), 1.0);
+            self.text_font = Some(font);
+        }
+        self.content.set_text_matrix(m.map(num));
+        self.content.show(Str(&cid.to_be_bytes()));
+    }
+
+    /// `ET`.
+    pub fn end_text(&mut self) {
+        self.content.end_text();
+        self.text_font = None;
     }
 
     /// Closes every open `q`, then hands the stream and its resources over.
@@ -794,6 +857,120 @@ impl PdfWriter {
         SoftMask(self.group(canvas, bbox, true).id)
     }
 
+    /// Embeds a subset font as a `Type0` font over a `CIDFont` (identity
+    /// encoding, CID = subset glyph id), with its program, descriptor,
+    /// widths and `ToUnicode` map.
+    pub fn font(&mut self, spec: &FontSpec<'_>) -> Resource {
+        let f = spec.font;
+        let type0 = self.alloc();
+        let cid_font = self.alloc();
+        let descriptor = self.alloc();
+        let file = self.alloc();
+        let cmap_id = self.alloc();
+        let base = format!("{}+{}", spec.tag, f.postscript_name);
+        let cff = f.format == xarast_text::ProgramFormat::Cff;
+        let system = SystemInfo {
+            registry: Str(b"Adobe"),
+            ordering: Str(b"Identity"),
+            supplement: 0,
+        };
+
+        self.pdf
+            .type0_font(type0)
+            .base_font(Name(base.as_bytes()))
+            .encoding_predefined(Name(b"Identity-H"))
+            .descendant_font(cid_font)
+            .to_unicode(cmap_id);
+
+        {
+            let mut c = self.pdf.cid_font(cid_font);
+            c.subtype(if cff {
+                CidFontType::Type0
+            } else {
+                CidFontType::Type2
+            });
+            c.base_font(Name(base.as_bytes()));
+            c.system_info(system);
+            c.font_descriptor(descriptor);
+            c.default_width(0.0);
+            if !cff {
+                c.cid_to_gid_map_predefined(Name(b"Identity"));
+            }
+            c.widths()
+                .consecutive(0, f.widths.iter().map(|w| num(f64::from(*w))));
+            c.finish();
+        }
+
+        let mut flags = FontFlags::SYMBOLIC;
+        if f.monospace {
+            flags |= FontFlags::FIXED_PITCH;
+        }
+        if f.italic {
+            flags |= FontFlags::ITALIC;
+        }
+        {
+            let mut d = self.pdf.font_descriptor(descriptor);
+            d.name(Name(base.as_bytes()))
+                .flags(flags)
+                .bbox(Rect::new(f.bbox[0], f.bbox[1], f.bbox[2], f.bbox[3]))
+                .italic_angle(f.italic_angle)
+                .ascent(f.ascent)
+                .descent(f.descent)
+                .cap_height(f.cap_height)
+                // Not in the font; the usual value for regular text.
+                .stem_v(80.0);
+            if cff {
+                d.font_file3(file);
+            } else {
+                d.font_file2(file);
+            }
+            d.finish();
+        }
+
+        let (bytes, packed) = self.pack(&f.program);
+        {
+            let mut s = self.pdf.stream(file, &bytes);
+            if packed {
+                s.filter(Filter::FlateDecode);
+            }
+            if cff {
+                s.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
+            } else {
+                s.pair(
+                    Name(b"Length1"),
+                    i32::try_from(f.program.len()).unwrap_or(i32::MAX),
+                );
+            }
+            s.finish();
+        }
+
+        let mut cmap = UnicodeCmap::new(
+            Name(b"Xarast-UCS"),
+            SystemInfo {
+                registry: Str(b"Adobe"),
+                ordering: Str(b"UCS"),
+                supplement: 0,
+            },
+        );
+        for (cid, text) in spec.to_unicode {
+            if !text.is_empty() {
+                cmap.pair_with_multiple(*cid, text.chars());
+            }
+        }
+        let data = cmap.finish();
+        let (bytes, packed) = self.pack(data.as_slice());
+        let mut s = self.pdf.cmap(cmap_id, &bytes);
+        if packed {
+            s.filter(Filter::FlateDecode);
+        }
+        s.finish();
+
+        Resource {
+            kind: ResourceKind::Font,
+            id: type0.get(),
+        }
+    }
+
     /// Adds a page drawing `canvas`.
     pub fn page(&mut self, canvas: Canvas, boxes: PageBoxes) {
         let (content, used) = canvas.finish();
@@ -867,6 +1044,12 @@ fn write_resources(res: &mut pdf_writer::writers::Resources<'_>, used: &BTreeSet
     if of(ResourceKind::XObject).next().is_some() {
         let mut d = res.x_objects();
         for r in of(ResourceKind::XObject) {
+            d.pair(Name(r.name().as_bytes()), Ref::new(r.id));
+        }
+    }
+    if of(ResourceKind::Font).next().is_some() {
+        let mut d = res.fonts();
+        for r in of(ResourceKind::Font) {
             d.pair(Name(r.name().as_bytes()), Ref::new(r.id));
         }
     }
