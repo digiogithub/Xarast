@@ -23,8 +23,8 @@ leafgirl svg 11
 leafgirl pdf 10.8
 TestBitmapFill pdf 6.5
 
-# Feathering is approximated by an SVG blur.
-SoftShadow svg 4.8
+# (SoftShadow: its four-colour Bleach transparencies are baked as masks
+# since XARA-T-0256: svg 4.1 -> 1.20, under the default now.)
 
 # (Text on a path: SVG places and turns each character on the path since
 # T9.5.6, XARA-T-0252: TextCurve 16.27 -> 3.06, under the default now.)
