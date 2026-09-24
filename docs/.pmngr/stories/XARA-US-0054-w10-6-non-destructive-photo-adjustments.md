@@ -2,12 +2,12 @@
 id: XARA-US-0054
 type: story
 title: W10.6 — Non-destructive photo adjustments
-status: in_progress
+status: in_review
 parent: XARA-EP-0011
 author: mcp
 labels: [phase-10, image]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-24T12:44:12Z
+updated: 2026-09-24T13:34:22Z
 started: 2026-09-24T12:44:12Z
 ---
 

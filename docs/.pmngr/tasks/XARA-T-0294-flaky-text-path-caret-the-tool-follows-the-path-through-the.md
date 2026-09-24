@@ -2,12 +2,13 @@
 id: XARA-T-0294
 type: task
 title: "Flaky: text_path_caret the_tool_follows_the_path_through_the_session failed once in a workspace run"
-status: todo
+status: in_progress
 priority: high
 author: mcp
 labels: [text, test]
 created: 2026-09-24T12:06:55Z
-updated: 2026-09-24T13:17:53Z
+updated: 2026-09-24T13:26:40Z
+started: 2026-09-24T13:26:40Z
 ---
 
 ## Description
