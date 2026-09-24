@@ -2,12 +2,13 @@
 id: XARA-T-0222
 type: task
 title: "T8.5.5 — golden images: fill shape × blend mode × flat/graduated"
-status: backlog
+status: in_progress
 parent: XARA-US-0040
 author: mcp
 labels: [phase-8, render]
 created: 2026-09-23T21:18:03Z
-updated: 2026-09-23T21:18:03Z
+updated: 2026-09-24T12:38:55Z
+started: 2026-09-24T12:38:55Z
 ---
 
 ## Description
