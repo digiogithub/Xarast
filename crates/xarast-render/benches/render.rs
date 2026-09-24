@@ -245,10 +245,9 @@ fn images(c: &mut Criterion) {
         let mut res = Resolver::new();
         let img = res.images.insert(noisy_image(n, n));
         // The pyramid is built once per image, outside the timing.
-        let _ = res
-            .images
-            .get(img)
-            .map(xarast_render::ImageRef::level_count);
+        if let Some(i) = res.images.get(img) {
+            i.prepare();
+        }
         let mp = f64::from(Mp::PER_PT);
         let mapping = GradMapping::Affine {
             a: Point64::new(0.0, 0.0),
@@ -285,7 +284,10 @@ fn images(c: &mut Criterion) {
         // A fresh image each time: the pyramid is cached per image.
         b.iter_batched(
             || xarast_render::ImageRef::new(2048, 2048, base.level(0).data.to_vec()),
-            |img| black_box(img.level_count()),
+            |img| {
+                img.prepare();
+                black_box(img)
+            },
             criterion::BatchSize::LargeInput,
         );
     });

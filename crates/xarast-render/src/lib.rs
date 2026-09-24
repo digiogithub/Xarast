@@ -72,10 +72,12 @@ pub mod golden;
 pub mod gpu_test_lock;
 pub mod paint;
 pub mod path;
+pub mod pixel_budget;
 pub mod precision;
 pub mod ramp;
 pub mod resample;
 pub mod scene;
+pub mod spill;
 pub mod stroke_cull;
 pub mod surface;
 pub mod tiling;
@@ -100,6 +102,10 @@ pub use paint::{
     GradRamp, GradShape, ImageId, ImageRef, ImageRegistry, MappingKind, Paint, PaintError, Repeat,
 };
 pub use path::PathRef;
+pub use pixel_budget::{
+    BudgetConfig, BudgetStats, FnSource, LevelBuf, PROXY_CAP, PROXY_DEFAULT, PixelBudget,
+    PixelSource,
+};
 pub use precision::{Point64, Tile, TileLocal, Transform2D, round_device};
 pub use ramp::{
     EffectSpace, Profile, RampCache, RampId, RampLength, Stop, TranspStop, build_ramp,

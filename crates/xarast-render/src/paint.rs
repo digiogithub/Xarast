@@ -20,13 +20,15 @@
 //! enumeration is unchanged, so the gradient matrix still has its 6 × 4 × 2
 //! cells.
 
-use std::sync::{Arc, OnceLock};
+use std::fmt;
+use std::sync::Arc;
 
 use xarast_color::Rgba8;
 
+use crate::pixel_budget::{ImageStore, LevelBuf, PixelBudget, PixelSource};
 use crate::precision::Point64;
 use crate::ramp::{Profile, RampCache, RampId};
-use crate::resample::{ImageSampler, Level, MipLevel};
+use crate::resample::ImageSampler;
 
 /// The five gradient geometries plus the two meshes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -480,32 +482,65 @@ impl ImageId {
 /// A decoded, straight (non-premultiplied) RGBA8 image.
 ///
 /// Decoding is Phase 10's; this crate only samples what it is handed. The
-/// mip pyramid a minified sample needs is built on first use and shared by
-/// every clone (`resample`); equality looks at the pixels only.
-#[derive(Debug, Clone)]
+/// pixels live in a store shared by every clone: the base and its mip
+/// pyramid, each level resident or not under a [`PixelBudget`]
+/// (`pixel_budget`, W10.5). A level that was evicted comes back byte for
+/// byte when it is sampled again, so nothing a caller can observe depends
+/// on the budget. Equality looks at the pixels only.
+#[derive(Clone)]
 pub struct ImageRef {
     width: u32,
     height: u32,
-    data: Arc<Vec<u8>>,
-    mips: Arc<OnceLock<Vec<MipLevel>>>,
+    store: Arc<ImageStore>,
+}
+
+impl fmt::Debug for ImageRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ImageRef")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PartialEq for ImageRef {
     fn eq(&self, other: &ImageRef) -> bool {
-        self.width == other.width && self.height == other.height && self.data == other.data
+        self.width == other.width
+            && self.height == other.height
+            && (Arc::ptr_eq(&self.store, &other.store) || self.level(0).data == other.level(0).data)
     }
 }
 
 impl Eq for ImageRef {}
 
 impl ImageRef {
-    /// Wraps straight RGBA8 pixel data.
+    /// Wraps straight RGBA8 pixel data, under the process-wide budget
+    /// ([`PixelBudget::global`]) and with no source: if evicted, the base
+    /// is spilled to disk.
     ///
     /// # Panics
     ///
     /// Panics if `data` is not exactly `width * height * 4` bytes.
     #[must_use]
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> ImageRef {
+        ImageRef::with_budget(width, height, data, PixelBudget::global(), None)
+    }
+
+    /// Wraps straight RGBA8 pixel data under `budget`. `source`, when
+    /// given, must reproduce `data` exactly; it is how an evicted base
+    /// comes back (otherwise, or when it is not cheap, a spill file is).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `data` is not exactly `width * height * 4` bytes.
+    #[must_use]
+    pub fn with_budget(
+        width: u32,
+        height: u32,
+        data: Vec<u8>,
+        budget: &Arc<PixelBudget>,
+        source: Option<Arc<dyn PixelSource>>,
+    ) -> ImageRef {
         assert_eq!(
             data.len(),
             width as usize * height as usize * 4,
@@ -514,8 +549,7 @@ impl ImageRef {
         ImageRef {
             width,
             height,
-            data: Arc::new(data),
-            mips: Arc::new(OnceLock::new()),
+            store: ImageStore::new(width, height, data, budget, source),
         }
     }
 
@@ -531,49 +565,51 @@ impl ImageRef {
         self.height
     }
 
-    fn mips(&self) -> &[MipLevel] {
-        self.mips
-            .get_or_init(|| crate::resample::build_pyramid(self.width, self.height, &self.data))
-    }
-
     /// How many levels the image has, the base included: `1 +
-    /// ⌈log2(max(w, h))⌉`. Builds the pyramid on first call.
+    /// ⌈log2(max(w, h))⌉`. Builds nothing.
     #[must_use]
     pub fn level_count(&self) -> usize {
-        if self.width == 0 || self.height == 0 {
-            return 1;
-        }
-        1 + self.mips().len()
+        self.store.level_count()
     }
 
-    /// Whether the pyramid has been built.
+    /// Whether any reduced level has been built.
     #[must_use]
     pub fn has_pyramid(&self) -> bool {
-        self.mips.get().is_some()
+        self.store.has_pyramid()
+    }
+
+    /// Builds the whole pyramid now. The walker calls it on its decode
+    /// threads so that the first minified frame does not pay for it on
+    /// the render thread (T10.5.2).
+    pub fn prepare(&self) {
+        self.store.prepare();
+    }
+
+    /// The proxy level: this one and every smaller level are never
+    /// evicted once built (`pixel_budget`, "The proxy rule").
+    #[must_use]
+    pub fn proxy_level(&self) -> usize {
+        self.store.proxy_level()
+    }
+
+    /// Which levels are resident in memory now, base first.
+    #[must_use]
+    pub fn resident_levels(&self) -> Vec<bool> {
+        self.store.resident()
     }
 
     /// One level: 0 is the image itself, each next one half the size,
-    /// averaged in linear light; a level past the last is the last. The
-    /// pyramid is built here, on first use of a level above 0.
+    /// averaged in linear light; a level past the last is the last. Made
+    /// resident (built, re-read or re-decoded) if it is not.
     #[must_use]
-    pub fn level(&self, i: usize) -> Level<'_> {
-        let base = Level {
-            width: self.width,
-            height: self.height,
-            data: &self.data,
-        };
-        if i == 0 || self.width == 0 || self.height == 0 {
-            return base;
-        }
-        let mips = self.mips();
-        match mips.get(i - 1).or(mips.last()) {
-            Some(m) => Level {
-                width: m.width,
-                height: m.height,
-                data: &m.data,
-            },
-            None => base,
-        }
+    pub fn level(&self, i: usize) -> LevelBuf {
+        self.store.pin(i, i, false).swap_remove(0)
+    }
+
+    /// Levels `lo..=hi`, clamped to the pyramid, pinned for one primitive
+    /// that draws the image (which may grow its proxy).
+    pub(crate) fn pin_levels(&self, lo: usize, hi: usize) -> Vec<LevelBuf> {
+        self.store.pin(lo, hi, true)
     }
 
     /// Reads one texel with the given repeat mode applied to both axes.
@@ -622,6 +658,11 @@ impl ImageRegistry {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.images.is_empty()
+    }
+
+    /// Every image, in id order.
+    pub fn iter(&self) -> impl Iterator<Item = &ImageRef> {
+        self.images.iter()
     }
 }
 
