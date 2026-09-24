@@ -13,13 +13,24 @@
 //!   and paints only the backdrop into the border a zoom-out uncovers. It
 //!   is blurry and incomplete by design; the `Final` that follows
 //!   re-rasterises everything.
-//! * **Anything else** — a new scene, a resize, a colour change, a
-//!   rotation — is a full frame.
+//! * **Edit** — a new scene at the same view is compared with the kept
+//!   frame's scene ([`xarast_render::scene_damage`]) and only the
+//!   rectangles whose pixels may differ are rasterised over the kept
+//!   pixels (XARA-T-0221). A `Final` also redraws whatever the kept frame
+//!   still holds at `Draft` quality.
+//! * **Anything else** — a resize, a colour change, a rotation, an edit
+//!   during a pan or a zoom, an edit that damages most of the view — is a
+//!   full frame.
 //!
 //! Everything here is a pure function of a kept frame and a job, which is
 //! what makes the policy testable without a thread.
 
-use xarast_render::{DeviceRect, RenderQuality, Surface, Transform2D, ViewParams, scroll_surface};
+use std::sync::Arc;
+
+use xarast_render::{
+    DeviceRect, RenderQuality, Resolver, Scene, Surface, Transform2D, ViewParams, scene_damage,
+    scroll_surface,
+};
 
 use crate::render_thread::FrameJob;
 use crate::session::DocumentId;
@@ -29,19 +40,34 @@ use crate::session::DocumentId;
 /// `scale * centre`, so a whole-pixel pan comes back a few ulps off.
 const WHOLE_PIXEL_EPS: f64 = 1e-3;
 
+/// An edit's damage is repainted in at most this many rectangles. Each one
+/// builds a culled display list, which scans the scene's culling entries
+/// (1–2 ms at 100 000 objects, `docs/memory/perf.md`).
+pub(crate) const MAX_REPAINT_RECTS: usize = 4;
+
+/// Above this fraction of the viewport, an edit's damage is drawn as a
+/// full frame instead: the full frame is interruptible column by column,
+/// and a repaint of most of the view saves little.
+const MAX_REPAINT_FRACTION: f64 = 0.5;
+
 /// The frame the worker keeps after publishing a copy of it.
 #[derive(Debug)]
 pub(crate) struct Kept {
     pub doc: DocumentId,
     pub scene_epoch: u64,
+    /// The scene and resolver the pixels were drawn from, so that the
+    /// next scene can be compared with it.
+    pub scene: Arc<Scene>,
+    pub resolver: Arc<Resolver>,
     pub background: [u8; 4],
-    pub page_colour: Option<[u8; 4]>,
+    pub page: Option<(DeviceRect, [u8; 4])>,
     /// The view the pixels really show, which for a snapped `Draft` pan is
     /// not quite the view that was asked for.
     pub view: ViewParams,
-    /// Every pixel is what a full `Final` rasterisation of `view` would
-    /// produce. Only such a frame may be reused by a `Final` job.
-    pub final_exact: bool,
+    /// A rectangle holding every pixel that is not what a full `Final`
+    /// rasterisation of `view` would produce: empty for an exact frame.
+    /// A `Final` job may reuse pixels outside it only.
+    pub inexact: DeviceRect,
     pub surface: Surface,
     /// The generation the frame was published as.
     pub generation: u64,
@@ -49,8 +75,16 @@ pub(crate) struct Kept {
     pub covered: DeviceRect,
 }
 
+impl Kept {
+    /// Every pixel is what a full `Final` rasterisation of `view` would
+    /// produce.
+    pub fn final_exact(&self) -> bool {
+        self.inexact.is_empty()
+    }
+}
+
 /// How to produce a job's frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Plan {
     /// Rasterise everything.
     Full,
@@ -59,6 +93,10 @@ pub(crate) enum Plan {
     Scroll { dx: i32, dy: i32, view: ViewParams },
     /// Resample the kept pixels to the job's view (`Draft` only).
     Rescale,
+    /// Keep the kept pixels and rasterise these rectangles over them: a
+    /// new scene at the same view, or a `Final` over a partly `Draft`
+    /// frame. Empty when the new scene draws the same picture.
+    Repaint { rects: Vec<DeviceRect> },
 }
 
 fn same(a: f64, b: f64) -> bool {
@@ -75,15 +113,20 @@ pub(crate) fn plan(kept: Option<&Kept>, job: &FrameJob) -> Plan {
         return Plan::Full;
     };
     if k.doc != job.doc
-        || k.scene_epoch != job.scene_epoch
         || k.background != job.background
-        || k.page_colour != job.page.map(|(_, c)| c)
+        || k.page.map(|(_, c)| c) != job.page.map(|(_, c)| c)
         || k.view.viewport != job.view.viewport
         || !same(k.view.dpi, job.view.dpi)
     {
         return Plan::Full;
     }
     let draft = job.view.quality == RenderQuality::Draft;
+    if let Some(p) = repaint(k, job, draft) {
+        return p;
+    }
+    if k.scene_epoch != job.scene_epoch {
+        return Plan::Full;
+    }
     let (a, b) = (coeffs(k.view.transform), coeffs(job.view.transform));
     let same_linear = (0..4).all(|i| same(a[i], b[i]));
     if !same_linear {
@@ -110,7 +153,7 @@ pub(crate) fn plan(kept: Option<&Kept>, job: &FrameJob) -> Plan {
     if whole {
         // The exact view. A `Final` job needs the kept pixels to be exact
         // `Final` pixels too; a `Draft` takes whatever is there.
-        if draft || k.final_exact {
+        if draft || k.final_exact() {
             return Plan::Scroll {
                 dx: ix,
                 dy: iy,
@@ -135,6 +178,52 @@ pub(crate) fn plan(kept: Option<&Kept>, job: &FrameJob) -> Plan {
             ..job.view
         },
     }
+}
+
+/// The plan for a job at exactly the kept frame's view: repaint what the
+/// new scene changed (and, for a `Final`, what is still `Draft`), or a
+/// full frame when that is most of the view. `None` when the view moved,
+/// or when nothing is owed at all, for [`plan`] to decide as before.
+fn repaint(k: &Kept, job: &FrameJob, draft: bool) -> Option<Plan> {
+    // Bit-identical: the kept pixels were drawn at this very transform, and
+    // an edit does not move the view.
+    if coeffs(k.view.transform) != coeffs(job.view.transform)
+        || k.page != job.page
+        || k.covered != job.view.viewport
+    {
+        return None;
+    }
+    let mut rects = if k.scene_epoch == job.scene_epoch {
+        Vec::new()
+    } else {
+        match scene_damage(
+            (&k.scene, &k.resolver),
+            (&job.scene, &job.resolver),
+            &job.view,
+            MAX_REPAINT_RECTS,
+        ) {
+            Some(d) => d.rects,
+            None => return Some(Plan::Full),
+        }
+    };
+    if !draft && !k.inexact.is_empty() {
+        rects.push(k.inexact);
+    }
+    if rects.is_empty() {
+        // Same picture: a new epoch reuses every pixel; the same epoch is
+        // the scroll by nothing it always was.
+        return (k.scene_epoch != job.scene_epoch).then_some(Plan::Repaint { rects });
+    }
+    let rects = xarast_render::damage::coalesce(rects, MAX_REPAINT_RECTS);
+    let area: u64 = rects.iter().map(|r| r.area()).sum();
+    // Areas of a viewport are far below 2^52, so the conversion is exact.
+    #[allow(clippy::cast_precision_loss, reason = "pixel counts < 2^52")]
+    let too_big = area as f64 > MAX_REPAINT_FRACTION * job.view.viewport.area() as f64;
+    Some(if too_big {
+        Plan::Full
+    } else {
+        Plan::Repaint { rects }
+    })
 }
 
 /// Moves the kept pixels, returning the strips that are now exposed.
@@ -301,10 +390,16 @@ mod tests {
         Kept {
             doc: DocumentId(1),
             scene_epoch: 4,
+            scene: Arc::default(),
+            resolver: Arc::default(),
             background: [1, 2, 3, 255],
-            page_colour: Some([255; 4]),
+            page: Some((DeviceRect::EMPTY, [255; 4])),
             view: v,
-            final_exact,
+            inexact: if final_exact {
+                DeviceRect::EMPTY
+            } else {
+                v.viewport
+            },
             surface: Surface::new(100, 80),
             generation: 1,
             covered: v.viewport,
@@ -393,7 +488,8 @@ mod tests {
         let k = kept(view(0.01, 10.0, 20.0, Final), true);
         let base = job(view(0.01, 10.0, 20.0, Draft));
         assert_eq!(plan(None, &base), Plan::Full);
-        let mut j = base.clone();
+        // A new scene during a pan.
+        let mut j = job(view(0.01, 13.0, 20.0, Draft));
         j.scene_epoch = 5;
         assert_eq!(plan(Some(&k), &j), Plan::Full);
         let mut j = base.clone();
@@ -410,6 +506,44 @@ mod tests {
             plan(Some(&k), &job(view(0.01, 110.0, 20.0, Draft))),
             Plan::Full
         );
+    }
+
+    #[test]
+    fn a_new_scene_at_the_same_view_repaints_only_what_changed() {
+        let k = kept(view(0.01, 10.0, 20.0, Final), true);
+        // The same (empty) picture under a new epoch: nothing to draw.
+        let mut j = job(view(0.01, 10.0, 20.0, Final));
+        j.scene_epoch = 5;
+        assert_eq!(plan(Some(&k), &j), Plan::Repaint { rects: Vec::new() });
+        // A page that moved is not something the scenes know about.
+        j.page = Some((DeviceRect::new(0, 0, 5, 5), [255; 4]));
+        assert_eq!(plan(Some(&k), &j), Plan::Full);
+    }
+
+    #[test]
+    fn a_final_over_a_partly_draft_frame_repaints_the_draft_part() {
+        let mut k = kept(view(0.01, 10.0, 20.0, Draft), true);
+        k.inexact = DeviceRect::new(10, 10, 30, 20);
+        let j = job(view(0.01, 10.0, 20.0, Final));
+        assert_eq!(
+            plan(Some(&k), &j),
+            Plan::Repaint {
+                rects: vec![k.inexact]
+            }
+        );
+        // A Draft at the same view owes nothing.
+        let d = job(view(0.01, 10.0, 20.0, Draft));
+        assert_eq!(
+            plan(Some(&k), &d),
+            Plan::Scroll {
+                dx: 0,
+                dy: 0,
+                view: d.view
+            }
+        );
+        // Mostly Draft: a full frame.
+        k.inexact = DeviceRect::new(0, 0, 90, 80);
+        assert_eq!(plan(Some(&k), &j), Plan::Full);
     }
 
     #[test]
