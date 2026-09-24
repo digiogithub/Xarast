@@ -166,6 +166,10 @@ enum Edit {
     AddSpread(u8),
     /// Give a node foreign baggage, clear it, or mark it (XARA-T-0089).
     Foreign(u8, u8),
+    /// Place a bitmap object under a node (the commit refuses bad parents).
+    AddBitmap(u8),
+    /// `SetPhotoOps` on a bitmap object: crop and orient move its placement.
+    Photo(u8, u8),
 }
 
 fn edit_strategy() -> impl Strategy<Value = Edit> {
@@ -180,6 +184,8 @@ fn edit_strategy() -> impl Strategy<Value = Edit> {
         (0u8..64, any::<bool>()).prop_map(|(a, v)| Edit::SetActive(a, v)),
         (0u8..64).prop_map(Edit::AddSpread),
         (0u8..64, 0u8..4).prop_map(|(a, k)| Edit::Foreign(a, k)),
+        (0u8..64).prop_map(Edit::AddBitmap),
+        (0u8..64, 0u8..5).prop_map(|(a, k)| Edit::Photo(a, k)),
     ]
 }
 
@@ -278,8 +284,90 @@ impl Command for EditCommand {
                     ),
                 }
             }
+            Edit::AddBitmap(a) => {
+                // Only a layer takes an ink object, so pick among layers.
+                let layers: Vec<NodeId> = ids
+                    .iter()
+                    .copied()
+                    .filter(|n| matches!(tx.doc().tree.kind(*n), Some(NodeKind::Layer(_))))
+                    .collect();
+                let (Some(anchor), Some((image, _))) =
+                    (pick(&layers, a), tx.doc().resources.bitmaps().next())
+                else {
+                    return Ok(());
+                };
+                let n = tx.create(NodeKind::Bitmap(Box::new(crate::kind::BitmapNode {
+                    image,
+                    origin: Point::raw(0, 64_000),
+                    major: Vector::raw(64_000, 0),
+                    minor: Vector::raw(0, -64_000),
+                    photo_ops: Default::default(),
+                })))?;
+                tx.attach(n, anchor, Attach::LastChild)
+            }
+            Edit::Photo(a, k) => {
+                use crate::photo::{PhotoOp, PhotoOps, PhotoOrient, PixelRect, SetPhotoOps};
+                let bitmaps: Vec<NodeId> = ids
+                    .iter()
+                    .copied()
+                    .filter(|n| matches!(tx.doc().tree.kind(*n), Some(NodeKind::Bitmap(_))))
+                    .collect();
+                let Some(node) = pick(&bitmaps, a) else {
+                    return Ok(());
+                };
+                let ops = match k {
+                    0 => vec![],
+                    1 => vec![PhotoOp::Brightness(0.25)],
+                    2 => vec![PhotoOp::Orient(PhotoOrient::CW)],
+                    3 => vec![PhotoOp::Crop(PixelRect {
+                        x: 8,
+                        y: 4,
+                        width: 32,
+                        height: 40,
+                    })],
+                    _ => vec![
+                        PhotoOp::Orient(PhotoOrient {
+                            turns: 3,
+                            flip: true,
+                        }),
+                        PhotoOp::Crop(PixelRect {
+                            x: 0,
+                            y: 16,
+                            width: 48,
+                            height: 16,
+                        }),
+                    ],
+                };
+                SetPhotoOps {
+                    node,
+                    ops: PhotoOps { ops },
+                    master: Some((64, 64)),
+                    label: "Adjust Photo",
+                }
+                .run(tx)
+            }
         }
     }
+}
+
+/// [`fixture`] plus one bitmap resource for [`Edit::AddBitmap`] to place.
+fn edit_fixture() -> crate::tests::Fixture {
+    let mut f = fixture();
+    f.doc
+        .resources
+        .insert_bitmap(crate::resources::BitmapResource {
+            name: Arc::from("photo"),
+            info: crate::resources::BitmapInfo {
+                width: 64,
+                height: 64,
+                ..Default::default()
+            },
+            pixels: Arc::new(crate::resources::BitmapData::default()),
+            original: None,
+            procedural: None,
+            transparent_index: None,
+        });
+    f
 }
 
 proptest! {
@@ -297,7 +385,7 @@ proptest! {
     fn undo_and_redo_round_trip_byte_for_byte(
         edits in prop::collection::vec(edit_strategy(), 0..60)
     ) {
-        let mut f = fixture();
+        let mut f = edit_fixture();
         let mut bus = CommandBus::new();
         let start = f.doc.canonical_digest();
         for e in edits {
@@ -329,7 +417,7 @@ proptest! {
                 Err(EditError::LimitExceeded("deliberate"))
             }
         }
-        let mut f = fixture();
+        let mut f = edit_fixture();
         let before = f.doc.canonical_digest();
         let ids: Vec<NodeId> = f.doc.tree.preorder(f.doc.tree.root()).collect();
         let mut bus = CommandBus::new();
@@ -474,7 +562,7 @@ proptest! {
     ) {
         use std::collections::{HashMap, HashSet};
 
-        let mut f = fixture();
+        let mut f = edit_fixture();
         let mut bus = CommandBus::with_budget(budget);
         let mut digests: HashMap<u64, _> = HashMap::new();
         digests.insert(bus.history().state_serial(), f.doc.canonical_digest());
