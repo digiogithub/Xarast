@@ -108,7 +108,9 @@ behind `SvgOptions::dialect`; that list is the table above.
   outline-less quick shapes, unsupported clips, unknown `.xar` records,
   arrowheads, feathering) and the new **`Compromise::Simplified { what,
   count }`** (approximated fills, perspective, contrast/brightness blends,
-  variable-width strokes, text on a path); the writer counts per kind, not
+  variable-width strokes, text on a path left straight — since XARA-T-0252
+  only reflected or sheared characters, or no text placer); the writer
+  counts per kind, not
   per object, hence a new variant rather than `Approximated { node }`.
   Every first `font-family` the file names is a **`FontNotEmbedded`**
   (T11.3.4, XARA-T-0233). `pixels` is the area in points, `dpi` 72,
@@ -219,16 +221,17 @@ behind `SvgOptions::dialect`; that list is the table above.
 ### Measured (2026-09-24, 72 dpi, paper)
 
 Fixtures: colour-sheet svg 0.49 / pdf 0.50; features 0.23 / 0.87;
-synthetic 1.65 / 3.53 (gs; Poppler 8.9). Corpus: 59/59 each format; SVG
-median 0.73, PDF best-of-two median 1.98; 20 file/format pairs above 4,
-each with a limit and a reason in `export-limits-corpus.txt`:
+synthetic 1.65 / 3.53 (gs; Poppler 8.9). Corpus (re-measured after
+XARA-T-0252): 59/59 each format; SVG median 0.70, PDF best-of-two median
+1.98; **17 file/format pairs above 4** (2 SVG: leafgirl, SoftShadow; 15
+PDF), each with a limit and a reason in `export-limits-corpus.txt`:
 
 | Cause | Files (format: mean) |
 |---|---|
 | Bake ladder: conical/diamond/multi-colour fills | Fill Types simple (~~svg 19.7~~ 1.9 since XARA-US-0043, pdf 7.2), WATCH2 ~~svg 16.5~~ 0.7, WATCH (~~svg 5.1~~ 2.4, pdf 4.8) — SVG now bakes them into geometry (`xarast-format` `svg/bake.rs`, `xarast-format.md`) |
 | Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
 | Feathering as a blur | SoftShadow svg 4.1 |
-| Text on a path written straight in SVG (T9.5.6, XARA-T-0252 open) | TextCurve svg 16.3 (pdf 1.55 follows the path) — appeared when XARA-US-0048 made the PNG follow the path; drop the limit once the base SVG writes `<textPath>` |
+| ~~Text on a path written straight in SVG~~ | TextCurve ~~svg 16.3~~ **3.06** since XARA-T-0252 (T9.5.6: each character placed and turned on the path, `x`/`y`/`rotate`), pdf 1.55; the limit is gone. What is left is the rainbow gradient on the text, written in the spread frame (`xarast-format.md`, text leftovers) |
 | Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) |
 
 Small text: Poppler and Ghostscript both paint thin glyph features darker
