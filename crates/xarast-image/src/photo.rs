@@ -258,19 +258,41 @@ pub fn evaluate(
     }
     let lut = recipe.lut.as_ref().filter(|l| !l.is_identity());
     if lut.is_some() || !recipe.mix.is_empty() {
-        for px in img.as_chunks_mut::<4>().0 {
-            if let Some(Lut([r, g, b])) = lut {
-                px[0] = r[usize::from(px[0])];
-                px[1] = g[usize::from(px[1])];
-                px[2] = b[usize::from(px[2])];
+        let pass = |chunk: &mut [u8]| {
+            for px in chunk.as_chunks_mut::<4>().0 {
+                if let Some(Lut([r, g, b])) = lut {
+                    px[0] = r[usize::from(px[0])];
+                    px[1] = g[usize::from(px[1])];
+                    px[2] = b[usize::from(px[2])];
+                }
+                for m in &recipe.mix {
+                    m.apply(px);
+                }
             }
-            for m in &recipe.mix {
-                m.apply(px);
-            }
+        };
+        // Every pixel is independent, so bands on scoped threads give the
+        // same bytes as one pass.
+        let threads = std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(img.len() / (PARALLEL_BAND_PIXELS * 4))
+            .max(1);
+        if threads == 1 {
+            pass(&mut img);
+        } else {
+            let band = (img.len() / 4).div_ceil(threads) * 4;
+            std::thread::scope(|scope| {
+                for chunk in img.chunks_mut(band) {
+                    scope.spawn(move || pass(chunk));
+                }
+            });
         }
     }
     Some((iw as u32, ih as u32, img))
 }
+
+/// The fewest pixels a thread of [`evaluate`]'s pixel pass is given:
+/// below it a thread costs more to start than it saves.
+const PARALLEL_BAND_PIXELS: usize = 1 << 17;
 
 fn rotate_180(img: &mut [u8]) {
     let n = img.len() / 4;
