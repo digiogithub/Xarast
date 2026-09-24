@@ -573,6 +573,8 @@ Numbered after phase 9's decisions because the colour bar landed later.
 | `default_bitmap_attrs`, `bitmap_node_centred`, `PlaceBitmap` | `xarast-doc/src/bitmap_place.rs` | done (T10.3.6) |
 | `Intent::ImportImage` (drop), `Intent::PasteImage` (clipboard picture), `Session::place_image`, `place` module (decode once, store, natural size, `bitmap_pixels`) | `place.rs`, `app.rs`, `session.rs`, `intent.rs` | done (T10.3.8) |
 | Shell: image files in a drop are placed at the drop point; Paste falls back to the clipboard's picture | `xarast-shell/src/viewer.rs` | done |
+| Bitmap gallery model: entries (uses, memory, colour space), thumbnails off-thread, Place, Delete unused, drag → bitmap fill or placement (`Intent::BitmapGallery`) | `bitmap_gallery.rs`; `xarast-doc` `bitmap_usage`, `remove_unused_bitmap`, `bitmap_key` | done (XARA-US-0055, T10.7.1–T10.7.3) |
+| File › Import… (`AppCommand::Import`, `Intent::ShowImportDialog`), background imports with progress and cancel (`import.rs`, `Intent::CancelImports`), file-list paste (`place::image_paths_in_text`) | `import.rs`, `place.rs`, `app.rs`, `command.rs` | done (T10.7.4, T10.7.5) |
 
 Tests: `tests/bitmap_fill.rs` (6: handle positions and arms; an edge drag
 previews without writing, commits one "Move Fill Handle" step
@@ -592,6 +594,23 @@ picture is one undo step; our own copy wins over a picture) and
 `tests/bitmap_damage.rs` (2: every preview frame and the commit of a
 bitmap fill drag, and a placement, repaint only their object and match a
 full render byte for byte).
+
+XARA-US-0055 added `tests/bitmap_gallery.rs` (9: uses through place,
+group, ungroup, delete and undo, Delete refused while used or held by the
+history and outside the history when it works; a gallery drop on an
+object is one exact "Set Fill" step at natural size centred on the
+bounds; on empty canvas or on a bitmap object it places, one exact
+"Place Bitmap" step each; a cancelled or off-canvas drag changes nothing;
+thumbnails arrive; a background import lands on its drop point in
+document space after a pan, one exact step; a cancelled import places
+nothing; a file manager's copy imports each file; File › Import… asks
+only with a document), unit tests in `import.rs` (3), `bitmap_gallery.rs`
+(3), `place.rs` (+1) and `xarast-doc` (1: usage split, guarded removal);
+shell viewer tests (3: the Import chooser and its answer, Ctrl+V of a
+file list beats a picture, a gallery drag mapped to the canvas point)
+and `tests/bitmap_damage.rs` (+2: a gallery drop as a fill repaints only
+its object, as a placement only where it lands; a drag in flight
+repaints nothing).
 
 64. **Bitmap fill handles are virtual points** (facts:
     `Kernel/opgrad.cpp:3701-3747`, `Kernel/fillattr.cpp:14041-14215`).
@@ -653,6 +672,49 @@ full render byte for byte).
     and a point off the canvas means "the view's centre". Paste asks the
     clipboard for a picture only when its text is neither our own copy nor
     SVG and no text caret is up; our copy therefore always wins.
+70. **A gallery bitmap dropped on the canvas** (XARA-US-0055; facts
+    `Kernel/sgbitmap.cpp:428-583`): on an object that is **not** a bitmap
+    object (the drop pick, `Picker::pick_drop`, leaf mode) it becomes
+    that object's own **bitmap fill** — `SetFillGeometry` on the fill
+    slot, one "Set Fill" step — at the bitmap's natural size centred on
+    the object's bounds, upright: origin = centre − half the size,
+    `axis_x` along +x, `axis_y` along +y (`Kernel/fillattr.cpp:14259-14330`,
+    the default for a fill with no points), tiling unset (= repeat), the
+    image's own horizontal dpi. On a bitmap object or on empty canvas it
+    is **placed** as a new bitmap object centred on the drop point
+    (`Session::place_resource`, "Place Bitmap"). Off the canvas nothing
+    happens. The drag lives in `Session::bitmap_drag`, changes nothing
+    before the drop and is resolved again at the drop, like a colour drag.
+    Not done: the original's Ctrl-drop on empty canvas, which sets the
+    page background; and Ctrl ("inside") versus a group (XARA-T-0292).
+71. **The gallery's uses** are `xarast_doc::bitmap_usage`: references
+    (bitmap objects, fill and transparency attributes) from the live tree
+    are `live`, from nodes only the history retains `retained`. Grouping
+    and ungrouping keep the count (only attributes and bitmap objects
+    count, not groups). **Delete is for a bitmap nothing refers to, the
+    history included** (`remove_unused_bitmap`); like insertion it is
+    outside the history (decision 68; XARA-T-0283), because an
+    unreferenced resource draws nothing and the save sweep drops it
+    anyway. The view is cached per document on (history serial,
+    `resources_rev`, the bitmap ids), so a frame does not walk the arena.
+72. **Background imports** (T10.7.5): a file over
+    `import::INLINE_IMPORT_BYTES` (1 MiB) is read in 256 KiB chunks and
+    decoded on its own thread; progress is bytes read (the first half of
+    the bar) then "decoding" (a decode reports nothing). The drop point
+    is converted to **document space when the import starts**, so a pan
+    before it lands does not move it; it lands in the document it was
+    started in, one "Import Bitmap" step. Cancel drops the job at once;
+    a read stops at the next chunk, a decode under way runs out under its
+    own deadline and is discarded. `AppState::with_inline_import_limit(0)`
+    sends everything to the background (tests).
+73. **Pasting a file manager's copy imports the files**
+    (`place::image_paths_in_text`): the text must be a file list — every
+    line a `file://` URI (empty or `localhost` host, percent-decoded) or
+    an absolute path, after an optional `copy`/`cut` line and `#`
+    comments — and only its image files are imported, each one step, in
+    the view's centre. Ordinary text never reads as a list. Our own copy
+    still wins. File › Import… (Ctrl+Shift+I; Ctrl+I is the original's
+    image slicer) raises the same `ImportImage` per chosen file.
 
 ## Provisional values (observe in the VM before trusting)
 
@@ -737,11 +799,12 @@ full render byte for byte).
 - [ ] `image/svg+xml` and PNG flavours on the clipboard (needs a
       data-control / X11 selection writer beside `arboard`); Inkscape
       paste checked manually per release. Pasting a *picture* is done
-      (decision 68); pasting a copied image *file* (a file manager's
-      `text/uri-list`) is not.
-- [ ] Dropping a bitmap on an object to make it that object's bitmap fill
-      (the original's bitmap drag), and the gallery's drag-to-place, belong
-      with the bitmap gallery (XARA-US-0055).
+      (decision 68), and so is a copied image *file* when the clipboard's
+      text carries the list (decision 73).
+- [x] Dropping a gallery bitmap on an object (bitmap fill) or on the
+      canvas (placement) — decision 70. Open: Ctrl-drop as the page
+      background, and a dropped *file* on an object (the file drop still
+      always places).
 - [ ] Guide properties dialog; Delete all guides has no menu item yet;
       snapping of the shape editor's nodes (W6) and of guide drags.
 - [ ] Clone (Ctrl+K), duplicate-offset preference, Paste attributes.

@@ -30,9 +30,12 @@ the corpus test.
 - **Tag-68 PNG alpha is transparency** (2026-09-23): `decode_xar_bitmap(68)`
   inverts it and `xar::normalise_xar_png` rewrites such a file as a
   standard PNG, which the importer does. See "The `.xar` wrappings".
+- The bitmap gallery, File › Import…, background imports and file-list
+  paste (XARA-US-0055) — see "Bitmap gallery, import UX and the
+  colour-space slot".
 - Not yet: `xarast-doc` still has its own `BitmapResource` (SHA-256 over
-  pixels + original; XARA-T-0156). Encoders (T10.2.5), photo ops and the
-  gallery are later workstreams. The pyramid (XARA-US-0052) and the pixel
+  pixels + original; XARA-T-0156). Encoders (T10.2.5) and photo ops are
+  later workstreams. The pyramid (XARA-US-0052) and the pixel
   budget (XARA-US-0053) were built in `xarast-render`; see below.
 
 ### Corpus census (all 59 files, `tests/corpus.rs`)
@@ -320,6 +323,44 @@ Decisions in `tools.md` 64–69; what matters on this side:
   natural size is read from the oriented layout — consistent, but not
   checked against a real rotated file.
 
+### Bitmap gallery, import UX and the colour-space slot (XARA-US-0055)
+
+Decisions in `tools.md` 70–73 and `ui.md` (bitmap gallery section,
+decisions 29 and 42); what matters on this side:
+
+- **Thumbnails** (`xarast-app/src/bitmap_gallery.rs`, T10.7.3): one
+  background thread, started on the first request, fed resources by
+  channel; each is decoded as the walker decodes it (native pixels as
+  they are; an encoded original through the façade, or tag 71 with its
+  palette, 65, 69 — a copy of the walker's dispatch, kept apart so the
+  walker, being reworked for XARA-T-0281, is not touched) under
+  `DecodeLimits::default()`, then box-filtered over alpha-weighted
+  colour to ≤ 64 px on the longer side, never enlarged. A panicking
+  decoder is a failed thumbnail. Keyed by the resource's **content hash**
+  (`DocumentResources::bitmap_key`, the SHA-256 kept from insertion — no
+  re-hashing), shared by every document, **in memory only**: the disk
+  cache T10.7.3 asks for is XARA-T-0289, and so is measuring the
+  100-thumbnails-in-1.5 s budget.
+- **Background decode** (`import.rs`, T10.7.5): files over 1 MiB are
+  read in 256 KiB chunks on a thread and decoded there with
+  `place::image_from_bytes` — the same decode, limits and storage rule
+  as an inline import. A cancelled job's thread stops at the next chunk
+  or finishes its decode under the decode's own deadline; its result is
+  dropped.
+- **Colour space (W10.8)**: T10.8.1 (sniffing), T10.8.3 (the assumed
+  flag) and T10.8.4 (the single `to_working_space` choke point, a no-op
+  plus `ColourSpaceNotConverted`) were already in round 1. Every import
+  goes through `decode`, so through the choke point. The gallery
+  **reports** each bitmap's colour space from a header probe ("sRGB",
+  "sRGB (assumed)", "ICC profile (not converted)", "grey, gamma γ"); the
+  document's `BitmapInfo` still has no colour-space field. A PNG, JPEG
+  or GIF keeps an embedded ICC profile inside its stored bytes, which the
+  `.xarast` writer emits verbatim, so nothing is lost; a WebP, TIFF, BMP
+  or PNM converted to PNG at placement **loses its profile** (the
+  `xarast-io` encoder writes an `sRGB` chunk and no `iCCP`). T10.8.2 —
+  profiles as document resources under `resources/profiles/` — is open
+  (XARA-T-0291). Replace-bitmap (T10.7.6) is XARA-T-0290.
+
 ### Pixel memory budget (XARA-US-0053, 2026-09-24)
 
 The budget itself lives in `xarast-render` (`pixel_budget.rs`,
@@ -385,3 +426,8 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - `DecodeLimits::max_frames` is informational: every decoder already takes
   the first frame only.
+- Bitmap gallery (XARA-US-0055): thumbnails on disk and the thumbnail
+  budget (XARA-T-0289); Replace and Save a copy (XARA-T-0290); ICC
+  profiles as resources and through the placement PNG conversion
+  (XARA-T-0291); one decode dispatch for the walker and the thumbnailer
+  once XARA-T-0281 has landed.
