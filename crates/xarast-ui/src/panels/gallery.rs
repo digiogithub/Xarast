@@ -126,11 +126,13 @@ impl ColourGallery {
                 .map_or_else(String::new, |s| s.name.clone())
         };
         ui.horizontal_wrapped(|ui| {
-            if ui
+            // The buttons say "New", "Edit", …; their accessible names say
+            // what they act on, and stay distinct from the Edit menu's.
+            let new = ui
                 .button("New")
-                .on_hover_text("Make a named colour from the colour editor's colour")
-                .clicked()
-            {
+                .on_hover_text("Make a named colour from the colour editor's colour");
+            a11y::set_label(ui.ctx(), new.id, "New named colour");
+            if new.clicked() {
                 ctx.out
                     .push(UiCommand::ColourEditor(ColourEditorOp::NewNamed(
                         fresh_name(all),
@@ -139,6 +141,7 @@ impl ColourGallery {
             let edit = ui
                 .add_enabled(chosen.is_some(), egui::Button::new("Edit"))
                 .on_hover_text("Edit the chosen colour in the colour editor");
+            a11y::set_label(ui.ctx(), edit.id, "Edit the chosen colour");
             if edit.clicked()
                 && let Some(id) = chosen
             {
@@ -148,6 +151,7 @@ impl ColourGallery {
                     )));
             }
             let rename = ui.add_enabled(chosen.is_some(), egui::Button::new("Rename"));
+            a11y::set_label(ui.ctx(), rename.id, "Rename the chosen colour");
             if rename.clicked()
                 && let Some(id) = chosen
             {
@@ -156,6 +160,7 @@ impl ColourGallery {
             let delete = ui
                 .add_enabled(chosen.is_some(), egui::Button::new("Delete"))
                 .on_hover_text("Delete the chosen colour: objects using it keep their look");
+            a11y::set_label(ui.ctx(), delete.id, "Delete the chosen colour");
             if delete.clicked()
                 && let Some(id) = chosen
             {
