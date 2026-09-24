@@ -187,6 +187,29 @@ pub enum Intent {
         /// As in [`Intent::Paste`].
         in_place: bool,
     },
+    /// The shell's answer to [`PlatformRequest::ReadClipboard`] when the
+    /// clipboard holds a picture rather than text (phase 10, T10.3.8): it
+    /// is placed as a bitmap object at its natural size in the middle of
+    /// the view, one undo step ("Paste").
+    PasteImage {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+        /// `width × height` straight RGBA8 pixels.
+        rgba: std::sync::Arc<[u8]>,
+    },
+    /// Place an image file as a bitmap object at its natural size (phase
+    /// 10, T10.3.8): a file dropped on the canvas. Centred on `at` (canvas
+    /// device pixels), or in the view when the platform did not say where;
+    /// one undo step ("Import Bitmap"). A file that is not an image Xarast
+    /// decodes is refused with a notice and changes nothing.
+    ImportImage {
+        /// The file.
+        path: std::path::PathBuf,
+        /// Where it was dropped, in canvas device pixels.
+        at: Option<crate::geometry::DevicePoint>,
+    },
     /// `Esc`: cancel the gesture in flight, or, when there is none,
     /// select nothing (`research/04 §4.1`).
     Cancel,

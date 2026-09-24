@@ -194,7 +194,10 @@ fn an_edge_drag_previews_then_commits_one_exact_undo_step() {
     assert_eq!(s.bus.history().len(), 1);
     assert_eq!(s.undo_label(), Some("Move Fill Handle"));
     let committed = pixels(&s);
-    assert!(preview == committed, "the preview is what the commit renders");
+    assert!(
+        preview == committed,
+        "the preview is what the commit renders"
+    );
     // The centre stayed; the dragged handle landed where it was dropped.
     let (o, x, y) = corners(&fill(&s, n));
     let [c, mx, _] = bitmap_virtual_points(o, x, y);
@@ -212,12 +215,20 @@ fn an_edge_drag_previews_then_commits_one_exact_undo_step() {
 fn the_centre_moves_the_whole_fill_and_esc_leaves_nothing() {
     let (mut s, n, _) = fixture();
     let digest = s.doc.canonical_digest();
-    drag_open(&mut s, Point::raw(200_000, 200_000), Point::raw(210_000, 190_000));
+    drag_open(
+        &mut s,
+        Point::raw(200_000, 200_000),
+        Point::raw(210_000, 190_000),
+    );
     s.apply(Intent::Cancel).unwrap();
     assert_eq!(s.doc.canonical_digest(), digest);
     assert!(s.bus.history().is_empty());
 
-    drag_open(&mut s, Point::raw(200_000, 200_000), Point::raw(210_000, 190_000));
+    drag_open(
+        &mut s,
+        Point::raw(200_000, 200_000),
+        Point::raw(210_000, 190_000),
+    );
     release(&mut s, Point::raw(210_000, 190_000));
     assert_eq!(
         corners(&fill(&s, n)),
@@ -308,13 +319,17 @@ fn resolution_and_natural_size_resize_about_the_centre() {
     // 4 px across 80 pt: 3.6 dpi.
     assert_eq!(dpi_field(&s), Some(4.0));
     let digest = s.doc.canonical_digest();
-    s.apply(Intent::ToolAction(ToolAction::NaturalSize)).unwrap();
+    s.apply(Intent::ToolAction(ToolAction::NaturalSize))
+        .unwrap();
     assert_eq!(s.undo_label(), Some("Natural Size"));
     // 4 × 2 px at 96 dpi: 3 × 1.5 pt, about the same centre.
     let (o, x, y) = corners(&fill(&s, n));
     assert_eq!(o.distance_to(x), 3_000.0);
     assert_eq!(o.distance_to(y), 1_500.0);
-    assert_eq!(bitmap_virtual_points(o, x, y)[0], Point::raw(200_000, 200_000));
+    assert_eq!(
+        bitmap_virtual_points(o, x, y)[0],
+        Point::raw(200_000, 200_000)
+    );
     assert_eq!(dpi_field(&s), Some(96.0));
     s.apply(Intent::InfobarEdit {
         field: InfobarField::BitmapDpi,

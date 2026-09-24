@@ -409,6 +409,23 @@ impl AppState {
     }
 
     /// Reports a paste that did nothing.
+    /// Places an image in the active document (phase 10, T10.3.8), or
+    /// says why it cannot.
+    fn place_image(
+        &mut self,
+        img: Result<crate::place::ImageToPlace, crate::place::PlaceError>,
+        at: Option<crate::geometry::DevicePoint>,
+        label: &'static str,
+    ) -> Result<Changed, SessionError> {
+        match img {
+            Err(e) => Ok(self.paste_notice(&format!("Could not place the image: {e}"))),
+            Ok(img) => match self.active_mut() {
+                Some(s) => s.place_image(img, at, label),
+                None => Ok(Changed::empty()),
+            },
+        }
+    }
+
     fn paste_notice(&mut self, message: &str) -> Changed {
         self.diagnostics.push(DiagnosticEntry {
             severity: Severity::Info,
@@ -691,6 +708,21 @@ impl AppState {
                 Ok(Changed::empty())
             }
             Intent::PasteText { text, in_place } => self.paste_text(text, in_place),
+            Intent::PasteImage {
+                width,
+                height,
+                rgba,
+            } => {
+                let img = crate::place::image_from_rgba(width, height, &rgba);
+                self.place_image(img, None, "Paste")
+            }
+            Intent::ImportImage { path, at } => {
+                if self.active.is_none() {
+                    return Ok(Changed::empty());
+                }
+                let img = crate::place::image_from_file(&path);
+                self.place_image(img, at, "Import Bitmap")
+            }
             Intent::Save => Ok(match self.active {
                 Some(id) => self.save_document(id, None),
                 None => Changed::empty(),
