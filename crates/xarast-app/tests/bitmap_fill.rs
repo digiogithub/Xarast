@@ -149,7 +149,7 @@ fn handles(s: &Session) -> Vec<(Point, HandleShape)> {
     s.overlay()
         .into_iter()
         .filter_map(|o| match o {
-            OverlayShape::Handle { at, shape } => Some((at.into(), shape)),
+            OverlayShape::Handle { at, shape } => Some((at, shape)),
             _ => None,
         })
         .collect()
