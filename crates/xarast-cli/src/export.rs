@@ -514,10 +514,12 @@ impl ExportSource for SessionSource<'_> {
                 used: f.used.clone(),
             }
         }));
+        let text = walker.scene_text();
         Ok(SourceScene {
             scene,
             resolver: walker.into_resolver(),
             compromises,
+            text,
         })
     }
 

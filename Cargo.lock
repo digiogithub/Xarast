@@ -5800,6 +5800,7 @@ dependencies = [
  "xarast-geom",
  "xarast-image",
  "xarast-render",
+ "xarast-text",
 ]
 
 [[package]]

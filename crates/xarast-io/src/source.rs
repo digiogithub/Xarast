@@ -7,9 +7,12 @@
 //! every exporter consumes it. The export dialog and `xarast-cli export`
 //! therefore drive the same code.
 
+use std::sync::Arc;
+
 use xarast_color::Rgba8;
 use xarast_geom::Rect;
-use xarast_render::{RenderQuality, Resolver, Scene};
+use xarast_render::{PathRef, RenderQuality, Resolver, Scene};
+use xarast_text::{FaceId, FontDb};
 
 use crate::model::ExportArea;
 use crate::report::{Compromise, ExportError};
@@ -23,6 +26,50 @@ pub struct SourceScene {
     pub resolver: Resolver,
     /// What the build could not draw, for the report.
     pub compromises: Vec<Compromise>,
+    /// The glyphs behind the text the scene draws as outlines, for
+    /// formats that embed fonts (PDF, T11.4.7). `None`: text stays
+    /// outlines.
+    pub text: Option<SceneText>,
+}
+
+/// The text of a scene: each story run the scene fills as one outline
+/// path, with the glyphs that path is made of.
+#[derive(Debug, Clone)]
+pub struct SceneText {
+    /// The database the glyphs' faces belong to.
+    pub fonts: Arc<FontDb>,
+    /// The runs, in the order the scene paints them.
+    pub runs: Vec<TextRun>,
+}
+
+/// One run of glyphs the scene draws as a single outline path.
+#[derive(Debug, Clone)]
+pub struct TextRun {
+    /// The path the scene fills (and strokes) for the run: the very
+    /// allocation its `Fill` / `Stroke` ops hold, which is how an exporter
+    /// finds the run behind an op.
+    pub path: PathRef,
+    /// The glyphs, in the order the layout placed them.
+    pub glyphs: Arc<[ExportGlyph]>,
+    /// What the path holds besides the glyphs (the underline), in the
+    /// path's space.
+    pub decoration: Option<Arc<kurbo::BezPath>>,
+}
+
+/// One placed glyph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportGlyph {
+    /// Its face.
+    pub face: FaceId,
+    /// Its glyph id in the face.
+    pub id: u32,
+    /// Font units (y up) to the path's space: what drew its outline.
+    pub transform: kurbo::Affine,
+    /// Drawn at a variation instance other than the face's default.
+    pub variable: bool,
+    /// The characters the glyph stands for: its cluster's text on the
+    /// cluster's first glyph, empty on the others.
+    pub text: Arc<str>,
 }
 
 /// A document as an exporter sees it.
@@ -95,6 +142,7 @@ impl ExportSource for SceneSource<'_> {
             scene: self.scene.clone(),
             resolver: self.resolver.clone(),
             compromises: Vec::new(),
+            text: None,
         })
     }
 }
