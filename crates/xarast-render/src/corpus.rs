@@ -891,6 +891,7 @@ fn resampling_cases() -> Vec<Case> {
                 },
                 repeat: Repeat::Repeat,
                 filter: Filter::HighQuality,
+                ramp: None,
             },
         });
         b.fill(

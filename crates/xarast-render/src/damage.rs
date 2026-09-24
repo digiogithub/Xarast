@@ -513,7 +513,12 @@ fn paint_refs(p: &Paint, f: &mut impl FnMut(Ref)) {
 fn transparency_refs(t: &Transparency, f: &mut impl FnMut(Ref)) {
     match &t.source {
         TranspSource::Gradient { ramp, .. } => f(Ref::Ramp(*ramp)),
-        TranspSource::Image { image, .. } => f(Ref::Image(*image)),
+        TranspSource::Image { image, ramp, .. } => {
+            f(Ref::Image(*image));
+            if let Some(ramp) = ramp {
+                f(Ref::Ramp(*ramp));
+            }
+        }
         TranspSource::Flat(_) | TranspSource::Mesh { .. } => {}
     }
 }

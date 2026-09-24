@@ -1280,9 +1280,11 @@ impl<'a> LevelSampler<'a> {
                 mapping,
                 repeat,
                 filter,
+                ramp,
             } => (
                 None,
-                None,
+                ramp.and_then(|r| res.transparency_ramps.get(r.index() as usize))
+                    .map(Vec::as_slice),
                 res.images.get(*image).and_then(|img| {
                     crate::resample::ImageSampler::with_missing(
                         img, *mapping, *repeat, *filter, None, missing,
@@ -1326,8 +1328,15 @@ impl<'a> LevelSampler<'a> {
                     return 0;
                 };
                 // The original reads the transparency out of the luminance
-                // of the tile pattern, sampled like a colour image.
-                LumaWeights::BT601.luma(img.sample(p))
+                // of the tile pattern, sampled like a colour image, and
+                // maps it through its start..end table.
+                let luma = LumaWeights::BT601.luma(img.sample(p));
+                match self.table {
+                    Some(table) if !table.is_empty() => {
+                        table[crate::paint::ramp_index(f64::from(luma) / 255.0, table.len())]
+                    }
+                    _ => luma,
+                }
             }
         }
     }

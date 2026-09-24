@@ -296,6 +296,11 @@ pub enum TranspSource {
         repeat: Repeat,
         /// How it is sampled, as for a colour image fill.
         filter: crate::paint::Filter,
+        /// Maps the sampled luminance onto a level: a transparency ramp
+        /// (held by the caller, as for [`TranspSource::Gradient`]) indexed
+        /// by luminance / 255, so black takes the ramp's start level and
+        /// white its end. `None` reads the luminance as the level.
+        ramp: Option<RampId>,
     },
 }
 
