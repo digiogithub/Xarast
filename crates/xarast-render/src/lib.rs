@@ -101,7 +101,7 @@ pub use compose::{
 };
 pub use damage::{Damage, image_damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
-pub use effect::LayerEffect;
+pub use effect::{LayerEffect, ShadowEffect};
 pub use layer::{LayerContent, LayerRequest, LayerTarget, render_subtree_to_layer};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,

@@ -275,6 +275,26 @@ pub fn erode_plane(plane: &mut [u8], width: usize, height: usize, radius_px: f32
     plane.copy_from_slice(&out);
 }
 
+/// Dilates an 8-bit coverage plane by a disc, softly: the dual of
+/// [`erode_plane`]. A pixel takes the coverage summed over the disc around
+/// it, capped at full, so it is fully covered when any full pixel lies
+/// within the disc, and an antialiased edge moves outwards by the radius
+/// while staying antialiased. A glow grows its silhouette with it before
+/// blurring (`research/02 §6.9`). Outside the plane counts as uncovered.
+pub fn dilate_plane(plane: &mut [u8], width: usize, height: usize, radius_px: f32) {
+    if width == 0 || height == 0 || plane.len() != width * height {
+        return;
+    }
+    let disc = Disc::new(radius_px);
+    if disc.extent == 0 {
+        return;
+    }
+    let out = disc_sums(plane, width, height, &disc, |sum| {
+        u8::try_from(sum.min(255)).unwrap_or(u8::MAX)
+    });
+    plane.copy_from_slice(&out);
+}
+
 /// Half the width of the Gaussian's support: three standard deviations,
 /// rounded up.
 fn gaussian_half_width(sigma_px: f32) -> u32 {

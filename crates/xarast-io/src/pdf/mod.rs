@@ -458,15 +458,33 @@ impl Translator<'_> {
             // A live effect is pixels the renderer computes (a feather's
             // blurred mask): PDF has nothing that draws it, so it is
             // rasterised whole, alone, and what it wraps is skipped.
-            (DrawItem::PushEffect { content, .. }, DrawCmd::PushEffect { op, .. }) => {
+            // A shadow draws beyond what it wraps: the image covers its
+            // growth too.
+            (
+                DrawItem::PushEffect {
+                    effect,
+                    xf,
+                    content,
+                },
+                DrawCmd::PushEffect { op, .. },
+            ) => {
                 self.in_effect = 1;
-                self.touch(content);
+                let area = content.inflated(effect.growth_px(xf.max_scale()));
+                self.touch(area);
+                let reason = match effect {
+                    xarast_render::LayerEffect::Feather { .. } => {
+                        "a live effect (feather) has no PDF equivalent"
+                    }
+                    xarast_render::LayerEffect::Shadow(_) => {
+                        "a live effect (shadow) has no PDF equivalent"
+                    }
+                };
                 self.rasterise(
                     SceneNodeId(0),
                     Target::Effect(op),
-                    content,
+                    area,
                     false,
-                    "a live effect (feather) has no PDF equivalent",
+                    reason,
                     cancelled,
                 )?;
             }

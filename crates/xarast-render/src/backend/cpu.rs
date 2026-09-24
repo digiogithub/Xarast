@@ -631,7 +631,14 @@ fn render_effect(
     } else {
         None
     };
-    effect.apply(&mut colour, silhouette.as_deref(), w, h, scale);
+    effect.apply_at(
+        &mut colour,
+        silhouette.as_deref(),
+        w,
+        h,
+        xf,
+        (region.x0, region.y0),
+    );
     Some(EffectLayer {
         rect: region,
         pixels: colour,

@@ -30,7 +30,11 @@
 //!
 //! [`LayerTarget`]: crate::layer::LayerTarget
 
+use rayon::prelude::*;
+use xarast_color::Rgba8;
+
 use crate::blur::{self, Kernel, MAX_RADIUS_PX};
+use crate::precision::Transform2D;
 use crate::ramp::Profile;
 
 /// One effect the renderer applies to the content it wraps.
@@ -52,6 +56,203 @@ pub enum LayerEffect {
         /// The fade's bias/gain.
         profile: Profile,
     },
+    /// A wall, floor or glow shadow drawn beneath the content it wraps
+    /// (`research/02 §6.9`, `research/03 §2.9`).
+    Shadow(Box<ShadowEffect>),
+}
+
+/// A shadow, in document units: the content's silhouette, grown (a glow),
+/// moved by [`map`](Self::map) (a wall's offset, a floor's squash and
+/// shear), blurred by a disc of half the penumbra, shaped by the profile
+/// and flooded with the colour, under the content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowEffect {
+    /// Where the silhouette goes, as a document-space affine
+    /// `[a, b, c, d, e, f]` (`kurbo`'s order).
+    pub map: [f64; 6],
+    /// How far [`map`](Self::map) moves any point of the content, in
+    /// document units: the offscreen region must reach that far.
+    pub displacement: f64,
+    /// A glow's growth before the blur, in document units; 0 otherwise.
+    pub spread: f64,
+    /// The penumbra: the blur's diameter, in document units.
+    pub blur: f64,
+    /// The profile as the file stores it; its bias is negated when it is
+    /// applied, as the original's shadow does.
+    pub profile: Profile,
+    /// The shadow's colour; its alpha is the opacity where the shadow is
+    /// densest (the darkness).
+    pub colour: Rgba8,
+}
+
+impl ShadowEffect {
+    /// The blur radius in device pixels: half the penumbra, capped at
+    /// the original's 100 px.
+    #[must_use]
+    pub fn radius_px(&self, scale: f64) -> f32 {
+        LayerEffect::feather_radius_px(self.blur, scale)
+    }
+
+    /// The glow's growth in device pixels, capped like a blur radius.
+    #[must_use]
+    pub fn spread_px(&self, scale: f64) -> f32 {
+        LayerEffect::feather_radius_px(self.spread * 2.0, scale)
+    }
+
+    fn reach_px(&self, scale: f64) -> i32 {
+        let blur = Kernel::Disc {
+            radius_px: self.radius_px(scale),
+        }
+        .reach();
+        let spread = Kernel::Disc {
+            radius_px: self.spread_px(scale),
+        }
+        .reach();
+        let d = self.displacement * scale;
+        let moved = if d.is_finite() && d > 0.0 {
+            // Clamped: a displacement past the pixel budget is not a
+            // shadow anyone can see whole.
+            d.ceil().min(f64::from(1 << 20)) as i32
+        } else {
+            0
+        };
+        // Two pixels of slack: the bilinear sample and the antialiased
+        // edge of the moved silhouette.
+        let slack = 2i64;
+        let r = i64::from(moved) + i64::from(blur) + i64::from(spread) + slack;
+        i32::try_from(r).unwrap_or(i32::MAX)
+    }
+
+    /// Draws the shadow beneath `colour`. `origin` is the device position of
+    /// the planes' top-left pixel and `xf` the document-to-device transform.
+    fn apply(
+        &self,
+        colour: &mut [u8],
+        silhouette: &[u8],
+        width: usize,
+        height: usize,
+        xf: Transform2D,
+        origin: (i32, i32),
+    ) {
+        let scale = xf.max_scale();
+        let mut plane = silhouette.to_vec();
+        let spread = self.spread_px(scale);
+        if spread > 0.0 {
+            blur::dilate_plane(&mut plane, width, height, spread);
+        }
+        let map = Transform2D::new(self.map);
+        if map != Transform2D::IDENTITY {
+            // Device → device: a pixel of the shadow takes the silhouette
+            // from where the map brings it from.
+            let back = xf
+                .invert()
+                .zip(map.invert())
+                .map(|(d_inv, m_inv)| d_inv.then(m_inv).then(xf));
+            plane = match back {
+                Some(b) => warp(&plane, width, height, b, origin),
+                // A singular map (a floor of height 0) casts nothing.
+                None => vec![0; plane.len()],
+            };
+        }
+        blur::blur_plane(
+            &mut plane,
+            width,
+            height,
+            Kernel::Disc {
+                radius_px: self.radius_px(scale),
+            },
+        );
+        // The original maps the blurred silhouette's transparency through
+        // the profile with its bias negated.
+        let table = (self.profile != Profile::IDENTITY).then(|| {
+            blur::profile_table(Profile {
+                bias: -self.profile.bias,
+                gain: self.profile.gain,
+            })
+        });
+        let alpha = u32::from(self.colour.a);
+        let rgb = [
+            u32::from(self.colour.r),
+            u32::from(self.colour.g),
+            u32::from(self.colour.b),
+        ];
+        colour
+            .par_chunks_mut(width * 4)
+            .zip(plane.par_chunks(width))
+            .for_each(|(row, mask)| {
+                for (px, m) in row.as_chunks_mut::<4>().0.iter_mut().zip(mask) {
+                    let m = match &table {
+                        Some(t) => 255 - u32::from(t[usize::from(255 - *m)]),
+                        None => u32::from(*m),
+                    };
+                    let sa = (m * alpha + 127) / 255;
+                    if sa == 0 {
+                        continue;
+                    }
+                    let under = 255 - u32::from(px[3]);
+                    if under == 0 {
+                        continue;
+                    }
+                    for (c, s) in px[..3].iter_mut().zip(rgb) {
+                        let s = (s * sa + 127) / 255;
+                        let v = u32::from(*c) + (s * under + 127) / 255;
+                        *c = u8::try_from(v.min(255)).unwrap_or(u8::MAX);
+                    }
+                    let a = u32::from(px[3]) + (sa * under + 127) / 255;
+                    px[3] = u8::try_from(a.min(255)).unwrap_or(u8::MAX);
+                }
+            });
+    }
+}
+
+/// Resamples a coverage plane through `back` (device output → device
+/// input), bilinearly; outside the plane is uncovered. Every output pixel
+/// is a function of its own position alone, so the result does not depend
+/// on how the work is split.
+fn warp(
+    plane: &[u8],
+    width: usize,
+    height: usize,
+    back: Transform2D,
+    origin: (i32, i32),
+) -> Vec<u8> {
+    let c = back.to_affine().as_coeffs();
+    let (ox, oy) = (f64::from(origin.0), f64::from(origin.1));
+    let at = |x: i64, y: i64| -> f64 {
+        if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
+            0.0
+        } else {
+            f64::from(plane[y as usize * width + x as usize])
+        }
+    };
+    let mut out = vec![0u8; plane.len()];
+    out.par_chunks_mut(width.max(1))
+        .enumerate()
+        .for_each(|(j, row)| {
+            let dy = oy + j as f64 + 0.5;
+            for (i, o) in row.iter_mut().enumerate() {
+                let dx = ox + i as f64 + 0.5;
+                let sx = c[0] * dx + c[2] * dy + c[4] - ox - 0.5;
+                let sy = c[1] * dx + c[3] * dy + c[5] - oy - 0.5;
+                if !(sx.is_finite() && sy.is_finite())
+                    || sx < -1.0
+                    || sy < -1.0
+                    || sx > width as f64
+                    || sy > height as f64
+                {
+                    continue;
+                }
+                let (x0, y0) = (sx.floor(), sy.floor());
+                let (fx, fy) = (sx - x0, sy - y0);
+                let (x0, y0) = (x0 as i64, y0 as i64);
+                let v = at(x0, y0) * (1.0 - fx) * (1.0 - fy)
+                    + at(x0 + 1, y0) * fx * (1.0 - fy)
+                    + at(x0, y0 + 1) * (1.0 - fx) * fy
+                    + at(x0 + 1, y0 + 1) * fx * fy;
+                *o = v.round().clamp(0.0, 255.0) as u8;
+            }
+        });
+    out
 }
 
 impl LayerEffect {
@@ -87,15 +288,18 @@ impl LayerEffect {
                 let k = Kernel::Disc { radius_px: r }.reach();
                 i32::try_from(2 * k + 1).unwrap_or(i32::MAX)
             }
+            LayerEffect::Shadow(s) => s.reach_px(scale),
         }
     }
 
     /// How far the effect's output can reach beyond its content, in device
-    /// pixels. A feather draws nothing outside what it wraps.
+    /// pixels. A feather draws nothing outside what it wraps; a shadow
+    /// reaches as far as it moves, grows and blurs.
     #[must_use]
-    pub fn growth_px(&self, _scale: f64) -> i32 {
+    pub fn growth_px(&self, scale: f64) -> i32 {
         match self {
             LayerEffect::Feather { .. } => 0,
+            LayerEffect::Shadow(s) => s.reach_px(scale),
         }
     }
 
@@ -104,7 +308,52 @@ impl LayerEffect {
     #[must_use]
     pub const fn needs_silhouette(&self) -> bool {
         match self {
-            LayerEffect::Feather { .. } => true,
+            LayerEffect::Feather { .. } | LayerEffect::Shadow(_) => true,
+        }
+    }
+
+    /// A short name for reports ("a live effect (shadow) has no PDF
+    /// equivalent").
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match self {
+            LayerEffect::Feather { .. } => "feather",
+            LayerEffect::Shadow(_) => "shadow",
+        }
+    }
+
+    /// Applies the effect to rendered content in device space, in place.
+    ///
+    /// `colour` is premultiplied RGBA8, `silhouette` one coverage byte per
+    /// pixel (every paint opaque), both `width × height`; `xf` is the
+    /// document-to-device transform the effect applies under and `origin`
+    /// the device position of the planes' top-left pixel. A shadow needs
+    /// both (its offset and its floor are document-space geometry); a
+    /// feather only the scale.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "two planes, their size and where they sit"
+    )]
+    pub fn apply_at(
+        &self,
+        colour: &mut [u8],
+        silhouette: Option<&[u8]>,
+        width: usize,
+        height: usize,
+        xf: Transform2D,
+        origin: (i32, i32),
+    ) {
+        match self {
+            LayerEffect::Feather { .. } => {
+                self.apply(colour, silhouette, width, height, xf.max_scale());
+            }
+            LayerEffect::Shadow(s) => {
+                let Some(sil) = silhouette else { return };
+                if sil.len() != width * height || colour.len() != sil.len() * 4 {
+                    return;
+                }
+                s.apply(colour, sil, width, height, xf, origin);
+            }
         }
     }
 
@@ -112,7 +361,9 @@ impl LayerEffect {
     ///
     /// `colour` is premultiplied RGBA8, `silhouette` one coverage byte per
     /// pixel (every paint opaque), both `width × height`. `scale` is device
-    /// pixels per document unit.
+    /// pixels per document unit. A shadow is applied as if the planes sat
+    /// at the device origin under a plain `scale`, with no flip: callers
+    /// that know the view use [`LayerEffect::apply_at`].
     pub fn apply(
         &self,
         colour: &mut [u8],
@@ -149,6 +400,14 @@ impl LayerEffect {
                     }
                 }
             }
+            LayerEffect::Shadow(_) => self.apply_at(
+                colour,
+                silhouette,
+                width,
+                height,
+                Transform2D::scale(scale),
+                (0, 0),
+            ),
         }
     }
 }
@@ -201,5 +460,126 @@ mod tests {
         }
         // Fully opaque by one feather size in.
         assert_eq!(a(32, 40), 255);
+    }
+
+    /// A 40 × 40 square at (20, 20) in an 100 × 100 plane, drawn opaque red
+    /// when `content`, and its silhouette.
+    fn square_planes(content: bool) -> (Vec<u8>, Vec<u8>, usize, usize) {
+        let (w, h) = (100usize, 100usize);
+        let inside = |x: usize, y: usize| (20..60).contains(&x) && (20..60).contains(&y);
+        let sil: Vec<u8> = (0..w * h)
+            .map(|i| if inside(i % w, i / w) { 255 } else { 0 })
+            .collect();
+        let colour: Vec<u8> = sil
+            .iter()
+            .flat_map(|a| if content { [*a, 0, 0, *a] } else { [0; 4] })
+            .collect();
+        (colour, sil, w, h)
+    }
+
+    fn shadow(map: [f64; 6], displacement: f64, spread: f64, blur: f64) -> LayerEffect {
+        LayerEffect::Shadow(Box::new(ShadowEffect {
+            map,
+            displacement,
+            spread,
+            blur,
+            profile: Profile::IDENTITY,
+            colour: Rgba8 {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 128,
+            },
+        }))
+    }
+
+    #[test]
+    fn a_wall_shadow_is_the_silhouette_moved_blurred_and_under_the_content() {
+        let (mut colour, sil, w, h) = square_planes(true);
+        // 10 units right and 10 up in document space; the device flips y.
+        let e = shadow(
+            [1.0, 0.0, 0.0, 1.0, 10.0, 10.0],
+            10.0_f64.hypot(10.0),
+            0.0,
+            4.0,
+        );
+        let xf = Transform2D::new([1.0, 0.0, 0.0, -1.0, 0.0, 100.0]);
+        e.apply_at(&mut colour, Some(&sil), w, h, xf, (0, 0));
+        let px = |x: usize, y: usize| {
+            let i = (y * w + x) * 4;
+            [colour[i], colour[i + 1], colour[i + 2], colour[i + 3]]
+        };
+        // The content is untouched where it is opaque.
+        assert_eq!(px(40, 40), [255, 0, 0, 255]);
+        // Right of and above the square (device up): the shadow, at its
+        // opacity (a disc of radius 2 leaves the middle of a 40 px square
+        // fully covered).
+        assert_eq!(px(65, 25), [0, 0, 128, 128]);
+        // Nothing on the other side.
+        assert_eq!(px(15, 55), [0; 4]);
+        // Blurred: the edge is soft, half covered on the moved outline.
+        let edge = px(69, 25)[3];
+        assert!((40..100).contains(&edge), "{edge}");
+        assert!(e.growth_px(1.0) >= 17, "{}", e.growth_px(1.0));
+        assert_eq!(e.reach_px(1.0), e.growth_px(1.0));
+    }
+
+    #[test]
+    fn a_glow_grows_the_silhouette_before_blurring_it() {
+        let (mut colour, sil, w, h) = square_planes(false);
+        let e = shadow([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0, 6.0, 0.0);
+        e.apply_at(&mut colour, Some(&sil), w, h, Transform2D::IDENTITY, (0, 0));
+        let a = |x: usize, y: usize| colour[(y * w + x) * 4 + 3];
+        assert_eq!(a(40, 40), 128);
+        assert_eq!(a(15, 40), 128, "6 px out of the square");
+        assert_eq!(a(12, 40), 0, "8 px out");
+    }
+
+    #[test]
+    fn a_floor_shadow_is_squashed_towards_the_bottom_edge() {
+        let (mut colour, sil, w, h) = square_planes(false);
+        // Device space is document space here (no flip): the "bottom" of
+        // the square in document terms is y = 20. Half height, no shear.
+        let e = shadow([1.0, 0.0, 0.0, 0.5, 0.0, 10.0], 20.0, 0.0, 0.0);
+        e.apply_at(&mut colour, Some(&sil), w, h, Transform2D::IDENTITY, (0, 0));
+        let a = |x: usize, y: usize| colour[(y * w + x) * 4 + 3];
+        assert_eq!(a(40, 25), 128);
+        assert_eq!(a(40, 38), 128);
+        assert_eq!(a(40, 45), 0, "above half its height");
+    }
+
+    #[test]
+    fn a_singular_floor_casts_nothing_and_a_shadow_without_silhouette_is_left_alone() {
+        let (mut colour, sil, w, h) = square_planes(false);
+        let e = shadow([1.0, 0.0, 0.0, 0.0, 0.0, 20.0], 40.0, 0.0, 2.0);
+        e.apply_at(&mut colour, Some(&sil), w, h, Transform2D::IDENTITY, (0, 0));
+        assert!(colour.iter().all(|v| *v == 0));
+        e.apply_at(&mut colour, None, w, h, Transform2D::IDENTITY, (0, 0));
+        assert!(colour.iter().all(|v| *v == 0));
+    }
+
+    #[test]
+    fn the_profile_bias_is_negated_as_the_original_does() {
+        let run = |bias: f64| {
+            let (mut colour, sil, w, h) = square_planes(false);
+            let LayerEffect::Shadow(mut s) = shadow([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0, 0.0, 16.0)
+            else {
+                unreachable!()
+            };
+            s.profile = Profile::new(bias, 0.0);
+            LayerEffect::Shadow(s).apply_at(
+                &mut colour,
+                Some(&sil),
+                w,
+                h,
+                Transform2D::IDENTITY,
+                (0, 0),
+            );
+            colour[(40 * w + 20) * 4 + 3]
+        };
+        // On the outline the blurred silhouette is half covered; a positive
+        // bias as stored darkens it, a negative one lightens it.
+        let (neg, zero, pos) = (run(-0.5), run(0.0), run(0.5));
+        assert!(neg < zero && zero < pos, "{neg} {zero} {pos}");
     }
 }
