@@ -105,6 +105,11 @@ pub struct UiOutput {
 pub struct UiHost {
     tree: egui_tiles::Tree<Pane>,
     panels: BTreeMap<String, Box<dyn Panel>>,
+    /// The cells of the last default layout, each a list of panel ids:
+    /// where a panel missing from the tree is put back.
+    homes: Vec<Vec<String>>,
+    /// The pane whose tab takes the keyboard focus on the next frame.
+    focus: Option<String>,
 }
 
 impl std::fmt::Debug for UiHost {
@@ -128,6 +133,8 @@ impl UiHost {
         UiHost {
             tree: egui_tiles::Tree::empty("xarast_dock"),
             panels: BTreeMap::new(),
+            homes: Vec::new(),
+            focus: None,
         }
     }
 
@@ -154,6 +161,7 @@ impl UiHost {
     /// tree sits beside, because the canvas must never be dragged into a
     /// tab group and lose the shared surface.
     pub fn set_default_layout(&mut self, order: &[PanelId]) {
+        self.homes = order.iter().map(|id| vec![id.0.to_owned()]).collect();
         let mut tiles = egui_tiles::Tiles::default();
         let children: Vec<_> = order
             .iter()
@@ -169,6 +177,10 @@ impl UiHost {
     /// tabs of that cell with the first one showing. A single panel is a
     /// plain pane, as [`UiHost::set_default_layout`] makes it.
     pub fn set_default_layout_grouped(&mut self, groups: &[&[PanelId]]) {
+        self.homes = groups
+            .iter()
+            .map(|g| g.iter().map(|id| id.0.to_owned()).collect())
+            .collect();
         let mut tiles = egui_tiles::Tiles::default();
         let mut cells = Vec::new();
         for group in groups {
@@ -217,7 +229,131 @@ impl UiHost {
             return false;
         }
         self.tree = state.tree.clone();
+        // A layout saved before a panel existed (the photo panel, say)
+        // must still show it: each registered panel it lacks goes back
+        // to its default cell.
+        let missing: Vec<String> = self
+            .panels
+            .keys()
+            .filter(|id| self.tile_of(id).is_none())
+            .cloned()
+            .collect();
+        for id in missing {
+            self.dock(&id);
+        }
         true
+    }
+
+    /// The tile holding the panel `id`, if the tree has it.
+    fn tile_of(&self, id: &str) -> Option<egui_tiles::TileId> {
+        self.tree.tiles.find_pane(&Pane(id.to_owned()))
+    }
+
+    /// Puts a registered panel missing from the tree back into it: as a
+    /// tab beside a panel of its default cell when one is docked in a tab
+    /// group, otherwise as a new cell at the end of the root container.
+    fn dock(&mut self, id: &str) -> egui_tiles::TileId {
+        let beside = self
+            .homes
+            .iter()
+            .find(|cell| cell.iter().any(|p| p == id))
+            .into_iter()
+            .flatten()
+            .filter(|p| *p != id)
+            .find_map(|p| self.tile_of(p))
+            .and_then(|t| self.tree.tiles.parent_of(t))
+            .filter(|parent| {
+                matches!(
+                    self.tree.tiles.get(*parent),
+                    Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(_)))
+                )
+            });
+        let tile = self.tree.tiles.insert_pane(Pane(id.to_owned()));
+        let parent = match beside {
+            Some(tabs) => Some(tabs),
+            // A column or a grid takes it as one more cell; a tab group or
+            // a lone pane at the root is put in a column with it, so the
+            // panel does not hide behind a tab.
+            None => match self.tree.root {
+                Some(root)
+                    if matches!(
+                        self.tree.tiles.get_container(root),
+                        Some(egui_tiles::Container::Linear(_) | egui_tiles::Container::Grid(_))
+                    ) =>
+                {
+                    Some(root)
+                }
+                Some(root) => {
+                    let column = self.tree.tiles.insert_vertical_tile(vec![root]);
+                    self.tree.root = Some(column);
+                    Some(column)
+                }
+                None => {
+                    self.tree.root = Some(tile);
+                    None
+                }
+            },
+        };
+        if let Some(parent) = parent
+            && let Some(egui_tiles::Tile::Container(c)) = self.tree.tiles.get_mut(parent)
+        {
+            c.add_child(tile);
+        }
+        tile
+    }
+
+    /// Shows the panel `id` and brings it to the front: docked again if
+    /// the layout lacks it, made visible, its tab made the active one in
+    /// every tab group above it, and its tab given the keyboard focus on
+    /// the next frame. Returns `false` for a panel that is not registered.
+    pub fn show(&mut self, id: PanelId) -> bool {
+        if !self.panels.contains_key(id.0) {
+            return false;
+        }
+        let mut child = match self.tile_of(id.0) {
+            Some(tile) => tile,
+            None => self.dock(id.0),
+        };
+        self.tree.tiles.set_visible(child, true);
+        while let Some(parent) = self.tree.tiles.parent_of(child) {
+            self.tree.tiles.set_visible(parent, true);
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+                self.tree.tiles.get_mut(parent)
+            {
+                tabs.set_active(child);
+            }
+            child = parent;
+        }
+        self.focus = Some(id.0.to_owned());
+        true
+    }
+
+    /// Whether the panel `id` is in the tree at all, showing or not.
+    pub fn is_docked(&self, id: PanelId) -> bool {
+        self.tile_of(id.0).is_some()
+    }
+
+    /// Whether the panel `id` is in the tree, visible, and the active tab
+    /// of every tab group above it: what a user sees as "showing".
+    pub fn is_showing(&self, id: PanelId) -> bool {
+        let Some(mut child) = self.tile_of(id.0) else {
+            return false;
+        };
+        loop {
+            if !self.tree.tiles.is_visible(child) {
+                return false;
+            }
+            let Some(parent) = self.tree.tiles.parent_of(child) else {
+                return self.tree.root == Some(child);
+            };
+            if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+                self.tree.tiles.get(parent)
+                && !tabs.is_active(child)
+            {
+                return false;
+            }
+            child = parent;
+        }
     }
 
     /// Runs one frame of the docked panels inside `ui`.
@@ -226,6 +362,7 @@ impl UiHost {
             panels: &mut self.panels,
             ctx,
             output: UiOutput::default(),
+            focus: self.focus.take(),
         };
         self.tree.ui(&mut behavior, ui);
         behavior.output
@@ -236,6 +373,8 @@ struct HostBehavior<'a, 'c> {
     panels: &'a mut BTreeMap<String, Box<dyn Panel>>,
     ctx: &'a mut PanelCtx<'c>,
     output: UiOutput,
+    /// The pane whose tab takes the keyboard focus this frame.
+    focus: Option<String>,
 }
 
 impl egui_tiles::Behavior<Pane> for HostBehavior<'_, '_> {
@@ -268,6 +407,14 @@ impl egui_tiles::Behavior<Pane> for HostBehavior<'_, '_> {
         // (the photo panel beside the bitmap gallery) can be found and
         // chosen without a pointer.
         let title = self.tab_title_for_tile(tiles, tile_id).text().to_owned();
+        // A pane just shown (F9, the Window menu) takes the keyboard on
+        // its tab, so Tab walks straight into it.
+        if let Some(pane) = tiles.get_pane(&tile_id)
+            && self.focus.as_ref() == Some(&pane.0)
+        {
+            button_response.request_focus();
+            self.focus = None;
+        }
         let ctx = button_response.ctx.clone();
         ctx.accesskit_node_builder(button_response.id, |node| {
             node.set_role(egui::accesskit::Role::Tab);
@@ -431,6 +578,85 @@ mod tests {
         assert!(current.load_layout(&saved));
         let out = run_once(&mut current);
         assert_eq!(out.closed, vec!["gone".to_owned()]);
+    }
+
+    fn grouped(ids: &[PanelId], groups: &[&[PanelId]]) -> UiHost {
+        let counter = std::rc::Rc::new(std::cell::Cell::new(0));
+        let mut host = UiHost::new();
+        for id in ids {
+            host.register(Box::new(Probe {
+                id: *id,
+                ran: counter.clone(),
+            }));
+        }
+        host.set_default_layout_grouped(groups);
+        host
+    }
+
+    const LAYERS: PanelId = PanelId("layers");
+    const GALLERY: PanelId = PanelId("gallery");
+    const PHOTO: PanelId = PanelId("photo");
+
+    #[test]
+    fn showing_a_panel_makes_its_tab_the_active_one() {
+        let mut host = grouped(&[LAYERS, GALLERY, PHOTO], &[&[LAYERS], &[GALLERY, PHOTO]]);
+        run_once(&mut host);
+        assert!(host.is_showing(LAYERS));
+        assert!(host.is_showing(GALLERY));
+        assert!(!host.is_showing(PHOTO), "a second tab starts hidden");
+        assert!(host.show(PHOTO));
+        assert!(host.is_showing(PHOTO));
+        assert!(!host.is_showing(GALLERY));
+        run_once(&mut host);
+        assert!(host.is_showing(PHOTO), "and stays in front");
+        assert!(host.show(GALLERY));
+        assert!(host.is_showing(GALLERY));
+        assert!(!host.show(PanelId("never-registered")));
+    }
+
+    #[test]
+    fn showing_a_hidden_panel_makes_it_visible() {
+        let mut host = grouped(&[LAYERS, GALLERY], &[&[LAYERS], &[GALLERY]]);
+        run_once(&mut host);
+        let tile = host.tile_of(GALLERY.0).unwrap();
+        host.tree.tiles.set_visible(tile, false);
+        assert!(!host.is_showing(GALLERY));
+        assert!(host.show(GALLERY));
+        assert!(host.is_showing(GALLERY));
+    }
+
+    #[test]
+    fn a_layout_from_before_a_panel_existed_still_shows_it() {
+        // Saved when only the layers and the gallery existed; the frame
+        // run first wraps each pane in a tab group, as a saved one is.
+        let mut old = grouped(&[LAYERS, GALLERY], &[&[LAYERS], &[GALLERY]]);
+        run_once(&mut old);
+        let saved = old.save_layout();
+
+        let mut now = grouped(&[LAYERS, GALLERY, PHOTO], &[&[LAYERS], &[GALLERY, PHOTO]]);
+        assert!(now.load_layout(&saved));
+        assert!(now.is_docked(PHOTO));
+        // Beside the gallery, as a tab of its group, not showing yet.
+        let parent = |h: &UiHost, id: PanelId| h.tree.tiles.parent_of(h.tile_of(id.0).unwrap());
+        assert_eq!(parent(&now, PHOTO), parent(&now, GALLERY));
+        assert!(now.is_showing(GALLERY));
+        assert!(now.show(PHOTO));
+        let out = run_once(&mut now);
+        assert!(out.closed.is_empty());
+        assert!(now.is_showing(PHOTO));
+    }
+
+    #[test]
+    fn a_panel_with_no_docked_neighbour_goes_to_the_end_of_the_column() {
+        let mut old = grouped(&[LAYERS], &[&[LAYERS]]);
+        run_once(&mut old);
+        let saved = old.save_layout();
+        let mut now = grouped(&[LAYERS, GALLERY], &[&[LAYERS], &[GALLERY]]);
+        assert!(now.load_layout(&saved));
+        assert!(now.is_docked(GALLERY));
+        run_once(&mut now);
+        assert!(now.is_showing(LAYERS));
+        assert!(now.is_showing(GALLERY));
     }
 
     #[test]

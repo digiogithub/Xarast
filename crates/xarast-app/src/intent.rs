@@ -375,6 +375,49 @@ pub enum PlatformRequest {
 pub enum Dialog {
     /// Arrange › Alignment…
     Align,
+    /// A docked pane, shown (re-docked if a layout lacks it) and brought
+    /// to the front: F9, F10, F11 and the Window menu.
+    Pane(DockPane),
+}
+
+/// A pane of the interface's dock, named for the command table: the
+/// core only relays "show this pane" to the interface
+/// ([`PlatformRequest::ShowDialog`] with [`Dialog::Pane`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DockPane {
+    /// The layer gallery (`F10` in the original, `research/04 §4.7`).
+    Layers,
+    /// The colour editor.
+    ColourEditor,
+    /// The colour gallery (`F9`).
+    ColourGallery,
+    /// The bitmap gallery (`F11`).
+    BitmapGallery,
+    /// The photo panel.
+    Photo,
+}
+
+impl DockPane {
+    /// Every pane, in Window-menu order.
+    pub const ALL: [DockPane; 5] = [
+        DockPane::Layers,
+        DockPane::ColourEditor,
+        DockPane::ColourGallery,
+        DockPane::BitmapGallery,
+        DockPane::Photo,
+    ];
+
+    /// The Window-menu label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            DockPane::Layers => "Layers",
+            DockPane::ColourEditor => "Colour editor",
+            DockPane::ColourGallery => "Colour gallery",
+            DockPane::BitmapGallery => "Bitmap gallery",
+            DockPane::Photo => "Photo",
+        }
+    }
 }
 
 bitflags::bitflags! {

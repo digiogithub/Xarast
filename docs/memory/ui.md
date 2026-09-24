@@ -82,7 +82,7 @@ display. Until then, no claim is made about them in either direction.
 
 Full note: [`tools.md`](tools.md). What the interface side owns:
 
-- **Layout**: menu bar (File, **Edit**, View, Help) → **infobar row**
+- **Layout**: menu bar (File, **Edit**, Arrange, View, **Window**, Help) → **infobar row**
   (`toolbar::InfobarRow`, 28 pt, tool name + the tool's described fields,
   lengths in the document unit, typed units parsed, commit on focus loss /
   Enter, Esc abandons) → **tool palette** docked left
@@ -143,7 +143,11 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
 - **Infobar items added**: `Choice` (an `egui::ComboBox`, AccessKit label
   "description: option") and `Real` (an `egui::Slider` over `min..=max`,
   disabled without a value), raising `InfobarValue::Choice(i)` /
-  `InfobarValue::Real(v)`.
+  `InfobarValue::Real(v)`. **No preview/commit split**: every change of
+  a `Real` or `Number` slider is its own `InfobarEdit`, applied at once,
+  so `Esc` mid-drag (checked for XARA-T-0305) commits nothing extra but
+  cannot take back what was applied either. Cancelling needs the drag
+  to be one gesture first — XARA-T-0220's "one undo step per change".
 - **Overlay items added**: `OverlayItem::Arrow` (accent line over a darker
   3-hairline halo, open 9 × 8 px head, no head for a zero-length arm),
   `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);
@@ -182,7 +186,14 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   marker inside the column adds a stop of the kind the infobar's "Tab"
   choice says; a drag that starts on no marker is still a guide pulled out
   of the ruler (`handle_guides` runs after and skips while a marker is
-  held). Shown only for a straight story (no turn, shear or mirror) with a
+  held). **`Esc`** mid-drag (egui reports the stop in the `Esc` frame,
+  `FrameCtx::escape_pressed`): a marker makes no edit, a guide pulled
+  out of a ruler is not added, a guide dragged along the canvas goes back
+  in one `MoveGuide` to where it started (XARA-T-0305). A guide is
+  picked at `press_origin`, not where egui recognises the drag — its
+  6 pt threshold is outside the 4 pt grab, so a quick sideways drag
+  used to miss the guide. The text infobar's own fields are text and
+  combos: nothing to drag. Shown only for a straight story (no turn, shear or mirror) with a
   caret; a point story's band runs from its anchor rightwards.
 
 ### Colour editor (phase 8, XARA-US-0041)
@@ -212,9 +223,22 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   upload or invalidate — the phase's "texture per fixed axis" mitigation
   is not needed.
 - **Interaction**: `PressState` turns a press into `Preview` every frame
-  it is held, `Commit` on release, `Cancel` on `Esc` while held (the rest
-  of that press is ignored). Numbers and derivation sliders: dragged →
-  `Preview`, `drag_stopped` → `Commit`, typed or stepped → `Set`.
+  it is held, `Commit` on release, `Cancel` on `Esc` (the rest of that
+  press is ignored). Numbers and derivation sliders: dragged →
+  `Preview`, `drag_stopped` → `Commit` (preceded by a `Preview` when the
+  release frame moved the value), typed or stepped → `Set`. **`Esc`
+  arrives as the end of the drag** (egui 0.33 drops the drag and the
+  press itself, in the `Esc` frame): both `classify` and
+  `PressState::track` turn an end in a frame with `Esc` pressed into
+  `Cancel` (XARA-T-0305, measured: before the fix the number fields, the
+  tint/shade sliders, the field and the strip all committed). Tests:
+  `tests/colour_editor.rs` (5, kittest pointer drags with and without
+  `Esc`, each drag widget kind).
+- **Sliders are handed the value they show** (`panels::slider_value`):
+  an `egui::Slider` with `fixed_decimals` rounds its value every frame
+  and reports it as changed, so a stored 0.4 tint (40.000000596 %) sent a
+  `Set` each frame. The tint and shade sliders (and the photo panel's)
+  round first.
   A focused field or strip takes the arrow keys (focus-lock filter) at
   1 % a press, 10 % with Shift, each press its own `Set`.
 - **Units** (T8.6.3, `component_specs`): RGB 0–255, hue in degrees,
@@ -282,8 +306,8 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   name ("Paper (tint)"); New / Edit / Rename / Delete act on the chosen
   row (accessible names "New named colour", "Edit the chosen colour", …,
   so none clashes with the Edit menu's "Edit"); double click edits it in
-  the colour editor. `F9` does not show it
-  yet: the dock has no show/focus plumbing (XARA-T-0254).
+  the colour editor. `F9` (or Window › Colour gallery) shows it and
+  brings it to the front (XARA-T-0254, "Showing a pane" below).
 
 ### Bitmap gallery, File › Import… and import progress (phase 10, XARA-US-0055)
 
@@ -321,8 +345,9 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   drag to canvas, `Esc`, File › Import…, Cancel) and unit tests in
   `panels::bitmaps` (2) and `panels::status` (1). An animated progress
   bar never settles, so its test uses `run_steps`, not `run`.
-- **F11 does not show the gallery yet**: the same missing dock show/focus
-  plumbing as F9 (XARA-T-0254; tracked for the gallery in XARA-T-0292).
+- **F11** (or Window › Bitmap gallery) shows the gallery and brings its
+  tab in front of the photo panel's (XARA-T-0254, which closes that item
+  of XARA-T-0292).
 
 ### Photo panel (phase 10, T10.6.8, XARA-T-0301)
 
@@ -370,9 +395,47 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   drag (previews then exactly one `Commit`, no `Set`), `Esc` mid-drag
   (`Cancel`, nothing after it), the read-only unknown chain, the
   empty states, and the tab in the workspace.
-- **Not done**: no F-key or menu entry shows the pane (the dock
-  show/focus plumbing, XARA-T-0254); a saved layout from before this
-  panel does not contain it until the layout is reset.
+- **Shown** by Window › Photo (no key: the original has no photo
+  panel); a saved layout from before this panel gets it back as a tab
+  beside the bitmap gallery (XARA-T-0254).
+- The sliders are handed their rounded value (`panels::slider_value`):
+  a Brightness of 0.2 or a Gamma of 1.3 used to send a `Set` every
+  frame. A crop field whose drag `Esc` ends applies nothing.
+
+### Showing a pane: F9, F10, F11 and the Window menu (XARA-T-0254)
+
+- **Command**: `AppCommand::ShowPane(DockPane)` (`xarast-app`;
+  `DockPane::{Layers, ColourEditor, ColourGallery, BitmapGallery,
+  Photo}`) → `Intent::ShowDialog(Dialog::Pane(p))` →
+  `PlatformRequest::ShowDialog(Dialog::Pane(p))`, the alignment panel's
+  route. The shell calls `Workspace::show_pane(p)` and redraws. Keys are
+  the original's gallery keys (`research/04 §4.7`): **F9** colour gallery,
+  **F10** layers, **F11** bitmap gallery; the colour editor and the
+  photo panel have none (the command table test allows exactly those
+  two to be keyless). No pane needs a document.
+- **Window menu** (between View and Help): one item per `DockPane::ALL`,
+  label + key, enabled with or without a document.
+- **`UiHost::show(id)`**: docks the panel again if the tree lacks it,
+  makes it and every ancestor visible, makes it the active tab of every
+  tab group above it, and asks for its **tab** to take the keyboard on
+  the next frame (`HostBehavior::on_tab_button` → `request_focus`), so a
+  Tab key walks into the pane. `is_showing` is that state (docked,
+  visible, active tab all the way up); `is_docked` only "in the tree".
+- **Re-docking** (`UiHost::dock`): the host remembers the cells of the
+  last default layout (`homes`). A missing panel goes in as a tab beside
+  a docked panel of its home cell when that one sits in a tab group;
+  otherwise it becomes a new cell of the root column (a root that is a
+  tab group or a lone pane is first put in a column, so the panel does
+  not hide behind a tab). `load_layout` re-docks every registered panel
+  the saved tree lacks: **a layout saved before a panel existed still
+  shows it**. The shell does not persist the layout yet; the rule lives
+  in the host so it holds when it does.
+- Tests: `panel::tests` (4: tab activation, hidden → visible, a layout
+  from before the photo panel, a panel with no docked neighbour),
+  `tests/menus.rs` (Window lists every pane with its key and raises
+  `ShowPane`; `show_pane` brings the tab to the front and focuses it),
+  `viewer::tests::the_gallery_keys_and_the_window_menu_show_their_panes`
+  (Window › Photo, F11, F9, F10 through the shell; F9 with no document).
 
 ## Panels and canvas
 
@@ -397,13 +460,13 @@ integration) in about a tenth of a second.
 | `panels::photo` | The photo panel: the selected bitmap's chain, tone and levels sliders (previewed live, one step per drag), orientation, crop, reset (XARA-T-0301) |
 | `colour_field` | The editor's field/strip meshes, axes per model, component ranges and units, press tracking |
 | `panels::status` | Coordinates in the document's unit, zoom, quality, cache pressure, renderer tier |
-| `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState` |
+| `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState`; `show`/`is_showing` and re-docking of panels a layout lacks (XARA-T-0254) |
 | `theme` | Dark and light token sets, density, WCAG-asserted contrast, live scheme change |
 | `scale` | The one `Scale` of a frame, hairline and edge snapping, device rectangles |
 | `units` | `10mm`, `1in`, `3p6`, `12mm + 3pt`, bumps, formatting that round-trips |
 | `a11y` | Names and roles for what egui does not name itself |
 | `density` | The spike probe, shared by the example, the bench and the tests |
-| `menus` | `AppMenu`: the in-window File/View/Help menu bar, the About box, and `empty_state` (Open… + recent files) (XARA-US-0082) |
+| `menus` | `AppMenu`: the in-window File/Edit/Arrange/View/Window/Help menu bar, the About box, and `empty_state` (Open… + recent files) (XARA-US-0082) |
 
 **Stubbed or absent on purpose:** the command palette, the problem list
 (needs the diagnostics feed), the galleries other than colour and bitmap, and
@@ -575,8 +638,19 @@ invent them.
   For a slider the `drag_stopped` comes in the **`Esc` frame itself**
   (egui 0.33, measured in the photo panel's kittest): a classifier that
   maps `drag_stopped` to "commit" commits a cancelled drag. Check
-  `key_pressed(Escape)` on that frame (`panels::photo`). The colour
-  editor's `classify` does not yet (XARA-T-0305).
+  `key_pressed(Escape)` on that frame (`panels::photo`,
+  `panels::colour`, the canvas's ruler and guide drags). The same holds
+  for `is_pointer_button_down_on`: it goes false in the `Esc` frame, so
+  a press tracker that commits "on release" must check `Esc` there too
+  (`colour_field::PressState`). Every drag widget has a kittest or
+  frame-level `Esc` test now (XARA-T-0305).
+- **Handing an `egui::Slider` with `fixed_decimals` an unrounded
+  value.** With the default clamping it rounds the value every frame and
+  reports `changed()`: a `Set` per frame. Round first
+  (`panels::slider_value`).
+- **Picking a guide at `pointer` on `drag_started`.** The drag is
+  recognised past egui's 6 pt threshold, already outside the 4 pt grab.
+  Use `press_origin` (as the text ruler does).
 - **Querying a menu item by its visible text in kittest.** The status bar
   also says "100 %"; use `get_by_role_and_label(Role::MenuItem, …)`.
 - **Minor ruler tick values from `index / subdivisions` plus
@@ -587,7 +661,10 @@ invent them.
 ### Open TODOs
 
 - [x] **Photo panel** (phase 10 T10.6.8, XARA-T-0301): done, see
-  "Photo panel" above. Open: a menu/F-key to show it (XARA-T-0254).
+  "Photo panel" above; Window › Photo shows it (XARA-T-0254).
+- [ ] The other galleries' keys (`Shift+F9` fonts, `F12` lines, …) wait
+  for their panels. Persisting the dock layout in preferences is not
+  wired in the shell; `load_layout` already re-docks new panels.
 - Re-measure P3, P7, P9 and the presented halves of P2 and P4 on hardware
   with a display; until then they stay "unmeasured" in this note.
 - `egui_kittest` **image** snapshots (phase criterion 17) need the `wgpu`

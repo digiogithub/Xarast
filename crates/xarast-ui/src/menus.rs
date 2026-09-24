@@ -12,8 +12,8 @@
 
 use std::path::Path;
 
-use xarast_app::AppCommand;
 use xarast_app::structure::{AlignSpec, AlignTarget, AxisAlign, ZOrder};
+use xarast_app::{AppCommand, DockPane};
 
 use crate::model::{CommandSink, UiCommand, UiModel};
 use crate::theme::ThemeTokens;
@@ -107,6 +107,13 @@ impl AppMenu {
                     (AppCommand::SnapToObjects, snap.objects),
                 ] {
                     toggle_item(ui, model, c, on, out);
+                }
+            });
+            // Every docked pane, shown and brought to the front: the way
+            // back to one that was dragged away or sits behind a tab.
+            ui.menu_button("Window", |ui| {
+                for pane in DockPane::ALL {
+                    command_item(ui, model, AppCommand::ShowPane(pane), out);
                 }
             });
             ui.menu_button("Help", |ui| {

@@ -339,3 +339,60 @@ fn the_workspace_docks_the_panel_as_a_tab_beside_the_bitmap_gallery() {
     h.run();
     h.get_by_role_and_label(slider, "Brightness");
 }
+
+#[test]
+fn a_chain_the_sliders_round_is_shown_without_a_command() {
+    // 0.2 and 1.3 are not exact in `f32`: a slider rounding them to the
+    // decimals it shows used to report a change, a `Set`, every frame.
+    let chain = PhotoOps {
+        ops: vec![
+            PhotoOp::Brightness(0.2),
+            PhotoOp::Contrast(-0.33),
+            PhotoOp::Gamma(1.3),
+        ],
+    };
+    let m = model(view(chain));
+    let commands = RefCell::new(Vec::new());
+    let mut h = harness(&m, &commands);
+    for _ in 0..3 {
+        h.run();
+    }
+    assert!(ops_of(&commands).is_empty(), "{:?}", ops_of(&commands));
+}
+
+fn drag_field(h: &mut Harness<'_>, name: &str, escape_midway: bool) {
+    let start = h.get_by_label(name).rect().center();
+    h.hover_at(start);
+    h.run();
+    h.drag_at(start);
+    h.run();
+    for step in 1..=6 {
+        if escape_midway && step == 4 {
+            h.key_press(egui::Key::Escape);
+            h.run();
+        }
+        h.hover_at(start + egui::vec2(8.0 * step as f32, 0.0));
+        h.run();
+    }
+    h.drop_at(start + egui::vec2(48.0, 0.0));
+    h.run();
+}
+
+#[test]
+fn a_crop_field_drag_sets_once_on_release_and_esc_drops_it() {
+    let m = model(view(PhotoOps::new()));
+    let commands = RefCell::new(Vec::new());
+    let mut h = harness(&m, &commands);
+    drag_field(&mut h, "Crop left", false);
+    let ops = ops_of(&commands);
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let PhotoPanelOp::Set(chain) = &ops[0] else {
+        panic!("{ops:?}");
+    };
+    assert!(chain.crop().is_some_and(|r| r.x > 0), "{chain:?}");
+
+    let commands = RefCell::new(Vec::new());
+    let mut h = harness(&m, &commands);
+    drag_field(&mut h, "Crop left", true);
+    assert!(ops_of(&commands).is_empty(), "{:?}", ops_of(&commands));
+}

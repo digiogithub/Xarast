@@ -212,3 +212,69 @@ fn help_about_names_the_licence_and_disclaims_affiliation() {
     drop(h);
     assert!(commands.into_inner().is_empty(), "About raises no command");
 }
+
+#[test]
+fn window_lists_every_pane_with_its_gallery_key_even_with_no_document() {
+    use xarast_app::DockPane;
+    for pane in DockPane::ALL {
+        let model = empty();
+        let commands = RefCell::new(Vec::new());
+        let mut h = harness(&model, &commands, 1.0);
+        h.get_by_label("Window").click();
+        h.run();
+        let item = h.get_by_role_and_label(MENU_ITEM, pane.label());
+        let key = match pane {
+            DockPane::ColourGallery => Some("F9"),
+            DockPane::Layers => Some("F10"),
+            DockPane::BitmapGallery => Some("F11"),
+            DockPane::ColourEditor | DockPane::Photo => None,
+        };
+        assert_eq!(item.accesskit_node().data().keyboard_shortcut(), key);
+        item.click();
+        h.run();
+        drop(h);
+        assert_eq!(
+            commands.into_inner(),
+            vec![UiCommand::App(AppCommand::ShowPane(pane))],
+            "{pane:?}"
+        );
+    }
+}
+
+#[test]
+fn showing_a_pane_brings_its_tab_to_the_front_and_gives_it_the_keyboard() {
+    use std::rc::Rc;
+    use xarast_app::DockPane;
+    let model = with_document();
+    let workspace = Rc::new(RefCell::new(Workspace::new()));
+    let w = workspace.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 1000.0))
+        .build(move |ctx| {
+            let _ = w.borrow_mut().ui(ctx, &model, Scale::new(1.0), &[]);
+        });
+    h.run();
+    // The photo panel is the second tab of the bitmap gallery's cell.
+    assert!(workspace.borrow().is_pane_showing(DockPane::BitmapGallery));
+    assert!(!workspace.borrow().is_pane_showing(DockPane::Photo));
+    assert!(workspace.borrow_mut().show_pane(DockPane::Photo));
+    h.run();
+    assert!(workspace.borrow().is_pane_showing(DockPane::Photo));
+    assert!(!workspace.borrow().is_pane_showing(DockPane::BitmapGallery));
+    let tab = h.get_by_role_and_label(egui::accesskit::Role::Tab, "Photo");
+    assert!(
+        tab.accesskit_node().is_focused(),
+        "the tab has the keyboard"
+    );
+    // And back: F11's pane.
+    assert!(workspace.borrow_mut().show_pane(DockPane::BitmapGallery));
+    h.run();
+    assert!(workspace.borrow().is_pane_showing(DockPane::BitmapGallery));
+    let tab = h.get_by_role_and_label(egui::accesskit::Role::Tab, "Bitmap gallery");
+    assert!(tab.accesskit_node().is_focused());
+    for pane in DockPane::ALL {
+        assert!(workspace.borrow_mut().show_pane(pane));
+        h.run();
+        assert!(workspace.borrow().is_pane_showing(pane), "{pane:?}");
+    }
+}

@@ -118,6 +118,13 @@ impl FrameCtx<'_> {
             0.0
         }
     }
+
+    /// Whether `Esc` was pressed this frame. egui ends a drag by itself on
+    /// `Esc` and reports `drag_stopped` in that same frame, so a release
+    /// that is really a cancel is told apart by this (XARA-T-0305).
+    fn escape_pressed(&self) -> bool {
+        self.ui.input(|i| i.key_pressed(egui::Key::Escape))
+    }
 }
 
 /// Who turns wheel, pinch, pan-drag and view keys into navigation.
@@ -145,6 +152,9 @@ pub enum CanvasNavigation {
 #[derive(Debug, Default)]
 pub struct CanvasWidget {
     dragging_guide: Option<usize>,
+    /// Where the guide being dragged sat when the drag began, so `Esc`
+    /// can put it back.
+    guide_origin: Option<Mp>,
     creating_guide: Option<Axis>,
     /// The text ruler to show on the horizontal ruler this frame.
     text_ruler: Option<xarast_app::TextRuler>,
@@ -353,7 +363,11 @@ impl CanvasWidget {
         }
         if let Some(marker) = self.text_marker {
             if response.drag_stopped() {
-                if let Some(p) = pointer {
+                // egui ends a drag by itself on `Esc` and reports the stop
+                // in that frame: the marker goes back, no edit is made.
+                if !f.escape_pressed()
+                    && let Some(p) = pointer
+                {
                     let (lx, ly) = f.local(p);
                     // More than a strip's depth below the ruler: off it.
                     if let Some((field, value)) = geo.release(marker, lx, ly > depth) {
@@ -390,8 +404,10 @@ impl CanvasWidget {
         let mut interacting = false;
         let local = |p: egui::Pos2| f.local(p);
 
+        // Where the press was, not where egui recognised the drag (past
+        // its 6 pt threshold): that is already outside a guide's 4 pt grab.
         if response.drag_started()
-            && let Some(p) = pointer
+            && let Some(p) = f.ui.input(|i| i.pointer.press_origin()).or(pointer)
         {
             let (lx, ly) = local(p);
             if doc.show_rulers && lx < 0.0 && ly >= 0.0 {
@@ -400,19 +416,26 @@ impl CanvasWidget {
                 self.creating_guide = Some(Axis::Horizontal);
             } else {
                 self.dragging_guide = guide_at(&doc.guides, &doc.view, lx, ly);
+                self.guide_origin = self
+                    .dragging_guide
+                    .and_then(|i| doc.guides.get(i))
+                    .map(|g| g.position);
             }
         }
+        // A stop in the frame `Esc` was pressed is egui cancelling the
+        // drag, not the user letting go.
+        let cancelled = response.drag_stopped() && f.escape_pressed();
 
         if let Some(axis) = self.creating_guide {
             interacting = true;
-            if response.drag_stopped()
-                && let Some(p) = pointer
-            {
-                let (lx, ly) = local(p);
-                if let GuideDragOutcome::Move(position) =
-                    resolve_guide_drag(axis, &doc.view, lx, ly, -ruler)
-                {
-                    out.push(UiCommand::AddGuide(Guide { axis, position }));
+            if response.drag_stopped() {
+                if !cancelled && let Some(p) = pointer {
+                    let (lx, ly) = local(p);
+                    if let GuideDragOutcome::Move(position) =
+                        resolve_guide_drag(axis, &doc.view, lx, ly, -ruler)
+                    {
+                        out.push(UiCommand::AddGuide(Guide { axis, position }));
+                    }
                 }
                 self.creating_guide = None;
             }
@@ -423,9 +446,20 @@ impl CanvasWidget {
             interacting = true;
             let Some(guide) = doc.guides.get(index) else {
                 self.dragging_guide = None;
+                self.guide_origin = None;
                 return interacting;
             };
-            if let Some(p) = pointer {
+            if cancelled {
+                // The moves already made are put back in one more move.
+                if let Some(origin) = self.guide_origin
+                    && origin != guide.position
+                {
+                    out.push(UiCommand::MoveGuide {
+                        index,
+                        position: origin,
+                    });
+                }
+            } else if let Some(p) = pointer {
                 let (lx, ly) = local(p);
                 match resolve_guide_drag(guide.axis, &doc.view, lx, ly, -ruler) {
                     GuideDragOutcome::Move(position) if response.dragged() => {
@@ -439,6 +473,7 @@ impl CanvasWidget {
             }
             if response.drag_stopped() {
                 self.dragging_guide = None;
+                self.guide_origin = None;
             }
         }
         interacting
@@ -1031,5 +1066,75 @@ mod tests {
         };
         let (r, _) = frame(&doc, &mut widget, input_with(vec![]), &ctx);
         assert!(!r.rect_device.is_empty());
+    }
+
+    #[test]
+    fn esc_during_a_guide_drag_puts_the_guide_back() {
+        // egui ends the drag itself on `Esc` and reports the stop in that
+        // frame. The moves already made are undone by one move back to
+        // where the guide started (XARA-T-0305).
+        let ctx = egui::Context::default();
+        let mut widget = CanvasWidget::new();
+        let origin = Mp::from_mm(50.0);
+        let mut doc = DocumentView {
+            guides: vec![Guide::vertical(origin)],
+            ..Default::default()
+        };
+        let region = frame(&doc, &mut widget, input_with(vec![]), &ctx)
+            .0
+            .rect_points;
+        let at = |doc: &DocumentView, dx: f32| {
+            let x = doc.view.doc_to_view_x(origin) as f32 + dx;
+            egui::pos2(region.min.x + x, region.min.y + 200.0)
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let escape = egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let start = at(&doc, 0.0);
+        let steps = vec![
+            vec![egui::Event::PointerMoved(start)],
+            vec![button(start, true)],
+            vec![egui::Event::PointerMoved(at(&doc, 20.0))],
+            vec![egui::Event::PointerMoved(at(&doc, 40.0))],
+            vec![escape],
+            vec![egui::Event::PointerMoved(at(&doc, 60.0))],
+            vec![button(at(&doc, 60.0), false)],
+            vec![],
+        ];
+        let mut all = Vec::new();
+        for events in steps {
+            let (_, out) = frames(&doc, &mut widget, &ctx, vec![input_with(events)]);
+            // Apply the moves, as the application would.
+            for c in out.commands() {
+                if let UiCommand::MoveGuide { index, position } = c {
+                    doc.guides[*index].position = *position;
+                }
+                all.push(c.clone());
+            }
+        }
+        assert!(
+            all.iter().any(|c| matches!(c, UiCommand::MoveGuide { .. })),
+            "the guide was dragged: {all:?}"
+        );
+        assert_eq!(
+            all.last(),
+            Some(&UiCommand::MoveGuide {
+                index: 0,
+                position: origin
+            }),
+            "{all:?}"
+        );
+        assert_eq!(doc.guides[0].position, origin);
+        assert!(!widget.is_dragging_guide());
     }
 }
