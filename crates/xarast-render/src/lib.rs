@@ -108,8 +108,8 @@ pub use pixel_budget::{
 };
 pub use precision::{Point64, Tile, TileLocal, Transform2D, round_device};
 pub use ramp::{
-    EffectSpace, Profile, RampCache, RampId, RampLength, Stop, TranspStop, build_ramp,
-    build_transparency_ramp,
+    EffectSpace, Profile, RampCache, RampEase, RampId, RampLength, Stop, TranspStop, build_ramp,
+    build_ramp_eased, build_transparency_ramp, build_transparency_ramp_eased,
 };
 pub use scene::{
     CacheHint, ContentHash, LayerKind, RenderQuality, Scene, SceneBuilder, SceneError, SceneNodeId,
