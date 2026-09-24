@@ -115,7 +115,7 @@ pub use palette::{
 };
 pub use resources::{
     ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, DashId, DocumentResources,
-    ImageFormat, OriginalEncoded, ProceduralSource, ResourceRef, collect_unused,
+    EmbeddedFont, ImageFormat, OriginalEncoded, ProceduralSource, ResourceRef, collect_unused,
 };
 pub use snapshot::Snapshot;
 pub use structure::{

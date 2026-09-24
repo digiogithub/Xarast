@@ -443,6 +443,16 @@ impl DocumentBuilder {
         self.doc.resources.insert_bitmap(res)
     }
 
+    /// Registers a face the document carries for display.
+    pub fn define_font(&mut self, font: crate::resources::EmbeddedFont) -> bool {
+        let len = font.data.len();
+        let new = self.doc.resources.insert_font(font);
+        if new {
+            self.bytes += len;
+        }
+        new
+    }
+
     /// Registers a dash pattern.
     pub fn define_dash(&mut self, d: xarast_geom::DashPattern) -> DashId {
         self.doc.resources.insert_dash(d)

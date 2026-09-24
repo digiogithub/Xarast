@@ -403,6 +403,7 @@ pub(crate) fn build(
         }
     }
     r.b.meta(meta);
+    r.embedded_fonts();
 
     // The root's own id and foreign attributes.
     let root_node = r.b.current_scope().ok_or(SvgReadError::NotSvg)?;
@@ -552,7 +553,51 @@ pub(crate) fn build(
     })
 }
 
+/// The largest embedded font file the reader keeps.
+const MAX_FONT_BYTES: usize = 32 << 20;
+
 impl<'d> Reader<'d, '_, '_> {
+    /// The faces the `@font-face` rules embed (`research/06 §6.7` rule 2),
+    /// into the document's resources for display. A file that is missing
+    /// is a warning; the text then draws with the machine's fonts, as it
+    /// would without the rule.
+    fn embedded_fonts(&mut self) {
+        let rules = std::mem::take(&mut self.sheet.font_faces);
+        for rule in rules {
+            let bytes: Option<Arc<[u8]>> = if rule.src.starts_with("resources/") {
+                (self.fetch)(&rule.src).filter(|b| b.len() <= MAX_FONT_BYTES)
+            } else if rule.src.starts_with("data:") {
+                rule.src
+                    .split_once(";base64,")
+                    .and_then(|(_, b)| parse::base64(b, MAX_FONT_BYTES))
+                    .map(Arc::from)
+            } else {
+                // A font outside the package is not ours to load.
+                continue;
+            };
+            match bytes {
+                Some(data) => {
+                    self.b.define_font(xarast_doc::EmbeddedFont {
+                        family: Arc::from(rule.family.as_str()),
+                        weight: rule.weight,
+                        italic: rule.italic,
+                        data,
+                    });
+                }
+                None => self.diag(
+                    Severity::Warning,
+                    DiagCode::DanglingReference,
+                    format!(
+                        "the embedded font of {:?} is missing from the package; \
+                         the machine's fonts are used",
+                        rule.family
+                    ),
+                    0,
+                ),
+            }
+        }
+    }
+
     /// Children of `<defs>` the reader does not consume: kept on `bag`.
     fn unknown_defs(&mut self, defs: &'d Elem, position: u32, bag: &mut ForeignBaggage) {
         for c in &defs.children {

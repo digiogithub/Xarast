@@ -87,6 +87,99 @@ pub(crate) struct Stylesheet {
     pub unsupported: usize,
     /// The palette twins of each class, from `<xarast:paint-class>`.
     twins: Vec<(String, Option<String>, Option<String>)>,
+    /// The `@font-face` rules, in source order.
+    pub font_faces: Vec<FontFaceRule>,
+}
+
+/// One `@font-face` rule: the embedded fonts of `research/06 §6.7`
+/// rule 2, as the writer declares them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FontFaceRule {
+    /// `font-family`, unquoted.
+    pub family: String,
+    /// `font-weight` as a number (`normal` 400, `bold` 700).
+    pub weight: u16,
+    /// `font-style` is `italic` or `oblique`.
+    pub italic: bool,
+    /// The first `url(…)` of `src`, unquoted.
+    pub src: String,
+}
+
+impl FontFaceRule {
+    /// Reads a rule's declarations. `None` without a family or a `url()`,
+    /// or with a weight CSS does not allow.
+    fn parse(body: &str) -> Option<FontFaceRule> {
+        let unquote = |v: &str| {
+            let v = v.trim();
+            let v = v
+                .strip_prefix('\'')
+                .and_then(|x| x.strip_suffix('\''))
+                .or_else(|| v.strip_prefix('"').and_then(|x| x.strip_suffix('"')))
+                .unwrap_or(v);
+            v.trim().to_owned()
+        };
+        let mut family = None;
+        let mut weight = 400u16;
+        let mut italic = false;
+        let mut src = None;
+        // Not `declarations`: a `data:` URI may hold a `;`.
+        for d in split_declarations(body) {
+            let Some((k, v)) = d.split_once(':') else {
+                continue;
+            };
+            let v = v.trim();
+            match k.trim().to_ascii_lowercase().as_str() {
+                "font-family" => family = Some(unquote(v)),
+                "font-weight" => {
+                    weight = match v {
+                        "normal" => 400,
+                        "bold" => 700,
+                        n => n.parse::<u16>().ok().filter(|w| (1..=1000).contains(w))?,
+                    };
+                }
+                "font-style" => italic = v == "italic" || v.starts_with("oblique"),
+                "src" => {
+                    let start = v.find("url(")?.saturating_add(4);
+                    let rest = v.get(start..)?;
+                    let end = rest.find(')')?;
+                    src = Some(unquote(rest.get(..end)?));
+                }
+                _ => {}
+            }
+        }
+        let family = family.filter(|f| !f.is_empty())?;
+        let src = src.filter(|s| !s.is_empty())?;
+        Some(FontFaceRule {
+            family,
+            weight,
+            italic,
+            src,
+        })
+    }
+}
+
+/// Splits a declaration block at the `;` outside parentheses and quotes.
+fn split_declarations(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0u32;
+    let mut quote: Option<char> = None;
+    let mut start = 0usize;
+    for (i, c) in s.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth = depth.saturating_add(1),
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ';') if depth == 0 => {
+                out.push(s.get(start..i).unwrap_or_default());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s.get(start..).unwrap_or_default());
+    out
 }
 
 /// Splits a declaration block: `a:b; c:d`.
@@ -131,9 +224,13 @@ impl Stylesheet {
             }
             let selectors = rest.get(..open).unwrap_or_default();
             let body = rest.get(open.saturating_add(1)..close).unwrap_or_default();
-            // `@font-face` (the embedded fonts, `research/06 §6.7` rule 2)
-            // is for browsers; the model's fonts come from the runs.
+            // `@font-face`: the embedded fonts (`research/06 §6.7` rule 2).
+            // The runs still name their families; these are files the
+            // application may draw them with where the machine lacks them.
             if selectors.trim_start().starts_with("@font-face") {
+                if let Some(rule) = FontFaceRule::parse(body) {
+                    self.font_faces.push(rule);
+                }
                 rest = rest.get(close.saturating_add(1)..).unwrap_or_default();
                 continue;
             }
@@ -303,5 +400,35 @@ mod tests {
         );
         assert_eq!(sheet.unsupported, 0);
         assert!(sheet.knows_all("c1"));
+        assert_eq!(
+            sheet.font_faces,
+            [FontFaceRule {
+                family: "Noto Sans".into(),
+                weight: 400,
+                italic: false,
+                src: "data:font/woff2;base64,d09GMg==".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn font_face_rules_are_read_tolerantly() {
+        let mut sheet = Stylesheet::default();
+        sheet.add(
+            "@font-face{font-family:\"A B\";font-weight:bold;font-style:oblique 10deg;\
+             src:url('resources/fonts/b3-1.woff2') format('woff2'), local(x)}\
+             @font-face{font-family:'X';font-weight:9999;src:url(a)}\
+             @font-face{font-family:'Y'}\
+             @font-face{src:url(b)}",
+        );
+        assert_eq!(
+            sheet.font_faces,
+            [FontFaceRule {
+                family: "A B".into(),
+                weight: 700,
+                italic: true,
+                src: "resources/fonts/b3-1.woff2".into(),
+            }]
+        );
     }
 }
