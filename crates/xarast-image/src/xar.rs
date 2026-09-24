@@ -243,9 +243,11 @@ pub fn snap_to_palette(pixels: &mut [u8], palette: &[[u8; 3]]) {
     }
     // Matching is on the straight colour; the result is premultiplied back.
     // For the opaque JPEG of tag 71 both steps are the identity. A
-    // direct-mapped cache keyed by the exact colour turns the 256-entry
-    // search into one lookup for every repeated colour.
+    // direct-mapped cache keyed by the exact colour turns the search into
+    // one lookup for every repeated colour; a miss scans only the entries
+    // that can win in the colour's cell (`Nearest`), not the whole palette.
     const EMPTY: u32 = u32::MAX;
+    let mut search = Nearest::new(palette);
     let mut cache = vec![(EMPTY, [0u8; 3]); 1 << 16];
     for px in pixels.as_chunks_mut::<4>().0 {
         let a = px[3];
@@ -261,7 +263,7 @@ pub fn snap_to_palette(pixels: &mut [u8], palette: &[[u8; 3]]) {
         let out = match cache[slot] {
             (k, o) if k == key => o,
             _ => {
-                let o = nearest(palette, rgb);
+                let o = palette[search.index(rgb)];
                 cache[slot] = (key, o);
                 o
             }
@@ -272,25 +274,76 @@ pub fn snap_to_palette(pixels: &mut [u8], palette: &[[u8; 3]]) {
     }
 }
 
-fn nearest(palette: &[[u8; 3]], rgb: [u8; 3]) -> [u8; 3] {
-    let mut best = palette[0];
-    let mut best_d = u32::MAX;
-    for p in palette {
-        let d: u32 = (0..3)
-            .map(|i| {
-                let e = i32::from(rgb[i]) - i32::from(p[i]);
-                e.unsigned_abs() * e.unsigned_abs()
-            })
-            .sum();
-        if d < best_d {
-            best_d = d;
-            best = *p;
-            if d == 0 {
-                break;
-            }
+/// Bits of each channel that pick a cell of [`Nearest`]'s grid.
+const CELL_BITS: u32 = 4;
+
+/// The nearest-entry search of [`snap_to_palette`]. The colour cube is cut
+/// into `16^3` cells, and each cell keeps, built the first time a colour
+/// falls in it, the entries that can be nearest to some colour of the
+/// cell: those no farther from the cell than the farthest point of the
+/// cell is from the entry that is best in the worst case. A query scans
+/// only its cell's list, so the result is exactly the brute-force one,
+/// ties included (an entry at the winning distance is on the list too).
+struct Nearest {
+    palette: Vec<[i32; 3]>,
+    /// Candidate palette indices per cell, ascending.
+    cells: Vec<Option<Box<[u32]>>>,
+}
+
+impl Nearest {
+    fn new(palette: &[[u8; 3]]) -> Self {
+        Self {
+            palette: palette.iter().map(|p| p.map(i32::from)).collect(),
+            cells: vec![None; 1 << (3 * CELL_BITS)],
         }
     }
-    best
+
+    /// The palette index of the entry nearest to `rgb` by squared RGB
+    /// distance, the lowest index on a tie. The palette is not empty.
+    fn index(&mut self, rgb: [u8; 3]) -> usize {
+        let shift = 8 - CELL_BITS;
+        let cell = rgb
+            .iter()
+            .fold(0usize, |acc, &c| acc << CELL_BITS | usize::from(c >> shift));
+        let q = rgb.map(i32::from);
+        let palette = &self.palette;
+        let list = self.cells[cell].get_or_insert_with(|| {
+            let lo = rgb.map(|c| i32::from(c >> shift << shift));
+            candidates(palette, lo, (1 << shift) - 1)
+        });
+        let mut best = (i32::MAX, u32::MAX);
+        for &i in list.iter() {
+            let d = dist2(q, palette[i as usize]);
+            if d < best.0 {
+                best = (d, i);
+            }
+        }
+        best.1 as usize
+    }
+}
+
+fn dist2(a: [i32; 3], b: [i32; 3]) -> i32 {
+    (a[0] - b[0]).pow(2) + (a[1] - b[1]).pow(2) + (a[2] - b[2]).pow(2)
+}
+
+/// The palette entries that can be nearest to a colour in the box
+/// `lo..=lo + span` on each channel, ascending.
+fn candidates(palette: &[[i32; 3]], lo: [i32; 3], span: i32) -> Box<[u32]> {
+    // Squared distance from `p` to the box's nearest and farthest points.
+    let bounds = |p: [i32; 3]| {
+        (0..3).fold((0, 0), |(near, far), c| {
+            let (a, b) = (lo[c], lo[c] + span);
+            let gap = (a - p[c]).max(p[c] - b).max(0);
+            let reach = (p[c] - a).abs().max((p[c] - b).abs());
+            (near + gap * gap, far + reach * reach)
+        })
+    };
+    let bound = palette.iter().map(|&p| bounds(p).1).min().unwrap_or(0);
+    (0u32..)
+        .zip(palette)
+        .filter(|&(_, &p)| bounds(p).0 <= bound)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Inflates a BMPZIP payload, refusing to grow past what the limits allow
@@ -387,6 +440,60 @@ mod tests {
         let mut px = vec![10, 10, 10, 255, 200, 200, 200, 255, 240, 10, 5, 255];
         snap_to_palette(&mut px, &pal);
         assert_eq!(px, vec![0, 0, 0, 255, 255, 255, 255, 255, 250, 0, 0, 255]);
+    }
+
+    /// The first entry at the least squared distance, searched the plain way.
+    fn nearest_reference(palette: &[[u8; 3]], rgb: [u8; 3]) -> [u8; 3] {
+        let dist = |p: &[u8; 3]| -> u32 {
+            (0..3)
+                .map(|i| u32::from(rgb[i].abs_diff(p[i])).pow(2))
+                .sum()
+        };
+        let mut best = palette[0];
+        for p in palette {
+            if dist(p) < dist(&best) {
+                best = *p;
+            }
+        }
+        best
+    }
+
+    #[test]
+    fn the_cell_search_matches_the_plain_one() {
+        // A small LCG: deterministic, no dependency.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        for (size, coarse) in [1usize, 2, 3, 16, 255, 256, 1000, 20_000]
+            .into_iter()
+            .flat_map(|n| [(n, true), (n, false)])
+        {
+            // Coarse entries make duplicates and equal distances occur.
+            let palette: Vec<[u8; 3]> = (0..size)
+                .map(|_| {
+                    [0; 3].map(|_: u8| {
+                        if coarse {
+                            (next() % 8 * 36) as u8
+                        } else {
+                            (next() & 0xFF) as u8
+                        }
+                    })
+                })
+                .collect();
+            let mut search = Nearest::new(&palette);
+            for _ in 0..2000 {
+                let rgb = [0; 3].map(|_: u8| (next() & 0xFF) as u8);
+                assert_eq!(
+                    palette[search.index(rgb)],
+                    nearest_reference(&palette, rgb),
+                    "palette of {size}, colour {rgb:?}"
+                );
+            }
+        }
     }
 
     #[test]

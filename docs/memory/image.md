@@ -165,7 +165,11 @@ a `TooLarge` into a successful decode ("import anyway").
   `max_decoded_bytes + 1 MiB`, then sniff or DIB.
 - Tag 71: reconstruct only when the result is an **opaque JPEG** and the
   palette has 1–256 entries (as the original); nearest squared-RGB entry,
-  lowest index on ties, no dithering, a 64 Ki-entry exact-key cache. Sets
+  lowest index on ties, no dithering, a 64 Ki-entry exact-key cache. A
+  cache miss searches only its colour's cell of a `16^3` grid: each cell
+  lists, built on first use, the entries whose distance to the cell box is
+  ≤ the least worst-case distance of any entry to the box, so the answer
+  (ties included) is the brute-force one (XARA-T-0287). Sets
   `depth = 8`, `palette_entries = n`.
 - Tag 68: a PNG of colour type 4 (grey + alpha) or 6 (RGBA) stores
   **transparency** in its alpha channel, 0 = opaque (facts and
@@ -238,7 +242,8 @@ frame before the walk:
    black box). `is_complete` requires both to be 0.
 6. Cost (release, this machine): the per-file first-walk increase is
    ≤ 38 ms (leafgirl, a 649×430 JPEG8BPP snap; scope3 27 ms); every other
-   bitmap file ≤ 8 ms. Open-to-first-paint in the real window is unchanged
+   bitmap file ≤ 8 ms. Since the cell-grid snap (XARA-T-0287) the worst
+   first walk is Groucho2's 18 ms (`perf.md`). Open-to-first-paint in the real window is unchanged
    within noise (≈ 330–370 ms for the bitmap files, both before and after;
    `perf.md`). Moving decode off the frame path entirely is T10.5.5.
 7. `build_scene(&Session)` makes a fresh walker, so it re-decodes every
@@ -354,6 +359,15 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
   only `decode` counts them.
 - A per-pixel full palette search for tag 71: 358 ms on the corpus's
   2.45 Mpx; the exact-key cache brings it to ≈ 80 ms.
+- For the tag-71 cache misses (XARA-T-0287; Groucho2's 764×512 photograph,
+  125 k misses, snap alone; the JPEG decode itself is ≈ 4 ms more): the
+  256-entry scan ≈ 30 ms; a branch-free packed `(distance << 14 | index)`
+  minimum over SoA lanes ≈ 22 ms (baseline x86-64 has no `pmulld`);
+  entries sorted on the widest channel with a pruned outward walk 17.7 ms
+  (JPEG colours sit far from the palette, so little prunes). The cell
+  grid: 7.8 ms, of which < 0.5 ms builds the ≤ 363 cells a photograph
+  touches (≈ 20 candidates each). A `32^3` grid saves another
+  ~1 ms on the largest image and costs more on the small ones.
 
 ## Open TODOs
 
@@ -369,7 +383,5 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
   re-prepares) every bitmap per call; a per-document decoded-image cache
   is part of XARA-T-0281 (T10.5.5).
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
-- A faster tag-71 snap (k-d tree or a 32³ pre-quantised grid) if a real
-  document is dominated by it.
 - `DecodeLimits::max_frames` is informational: every decoder already takes
   the first frame only.
