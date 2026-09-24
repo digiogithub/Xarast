@@ -313,6 +313,17 @@ impl DocumentResources {
         (self.bitmaps.len(), self.dashes.len(), self.arrows.len())
     }
 
+    /// The deduplication key a bitmap was stored under
+    /// ([`BitmapResource::content_hash`]), kept from its insertion so that
+    /// nobody has to hash its bytes again: the bitmap gallery keys its
+    /// thumbnails on it. `None` for an unknown id.
+    #[must_use]
+    pub fn bitmap_key(&self, id: BitmapId) -> Option<[u8; 32]> {
+        self.bitmap_by_hash
+            .iter()
+            .find_map(|(h, b)| (*b == id).then_some(*h))
+    }
+
     fn retain_bitmaps(&mut self, keep: &std::collections::HashSet<BitmapId>) -> usize {
         let before = self.bitmaps.len();
         self.bitmaps.retain(|id, _| keep.contains(&id));
@@ -361,4 +372,99 @@ pub fn collect_unused(doc: &mut crate::Document) -> usize {
         }
     }
     doc.resources.retain_bitmaps(&keep_bitmaps)
+}
+
+/// How the document uses one bitmap: the bitmap gallery's "uses"
+/// (`phase-10` T10.7.1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct BitmapUsage {
+    /// References from the document as it stands — bitmap objects, and
+    /// fill or transparency attributes — reachable from the root.
+    pub live: u32,
+    /// References from nodes only the undo history still holds (a deleted
+    /// object, an undone placement). While there is one the resource must
+    /// stay: an undo or a redo brings the reference back.
+    pub retained: u32,
+}
+
+impl BitmapUsage {
+    /// Whether anything at all refers to the bitmap, the history included.
+    #[must_use]
+    pub fn in_use(self) -> bool {
+        self.live > 0 || self.retained > 0
+    }
+}
+
+/// Counts every reference to every bitmap, split into the document's own
+/// ([`BitmapUsage::live`]) and the history's ([`BitmapUsage::retained`]).
+/// A bitmap nothing refers to is listed with zero counts. One pass over the
+/// arena plus one over the live tree.
+#[must_use]
+pub fn bitmap_usage(doc: &crate::Document) -> HashMap<BitmapId, BitmapUsage> {
+    let mut out: HashMap<BitmapId, BitmapUsage> = doc
+        .resources
+        .bitmaps()
+        .map(|(id, _)| (id, BitmapUsage::default()))
+        .collect();
+    let live: std::collections::HashSet<crate::tree::NodeId> =
+        doc.tree.preorder(doc.tree.root()).collect();
+    let mut refs = Vec::new();
+    for (id, data) in doc.tree.iter() {
+        refs.clear();
+        refs_of(&data.kind, &mut refs);
+        for r in &refs {
+            if let ResourceRef::Bitmap(b) = r {
+                let u = out.entry(*b).or_default();
+                if live.contains(&id) {
+                    u.live += 1;
+                } else {
+                    u.retained += 1;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Why a bitmap could not be removed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum RemoveBitmapError {
+    /// No such bitmap.
+    #[error("no such bitmap")]
+    Missing,
+    /// Something refers to it: an object, a fill, or a step of the undo
+    /// history.
+    #[error("the bitmap is in use")]
+    InUse(BitmapUsage),
+}
+
+/// Removes one bitmap that nothing refers to — the bitmap gallery's
+/// Delete, which is offered for unused bitmaps only (`phase-10`
+/// acceptance 15). Like [`collect_unused`] it is not an undoable edit: an
+/// unreferenced resource draws nothing, and the save-time sweep would drop
+/// it anyway.
+///
+/// # Errors
+///
+/// [`RemoveBitmapError::InUse`] when an object, an attribute or a node the
+/// history retains still refers to it; the document is then unchanged.
+pub fn remove_unused_bitmap(
+    doc: &mut crate::Document,
+    id: BitmapId,
+) -> Result<(), RemoveBitmapError> {
+    if doc.resources.bitmap(id).is_none() {
+        return Err(RemoveBitmapError::Missing);
+    }
+    let usage = bitmap_usage(doc).get(&id).copied().unwrap_or_default();
+    if usage.in_use() {
+        return Err(RemoveBitmapError::InUse(usage));
+    }
+    let keep: std::collections::HashSet<BitmapId> = doc
+        .resources
+        .bitmaps()
+        .map(|(b, _)| b)
+        .filter(|b| *b != id)
+        .collect();
+    doc.resources.retain_bitmaps(&keep);
+    Ok(())
 }

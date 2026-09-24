@@ -397,6 +397,79 @@ fn collect_unused_keeps_what_a_retained_node_still_references() {
     );
 }
 
+#[test]
+fn bitmap_usage_splits_the_document_from_the_history_and_guards_removal() {
+    use crate::resources::{BitmapUsage, RemoveBitmapError, bitmap_usage, remove_unused_bitmap};
+    let mut f = fixture();
+    let bitmap = |name: &str, byte: u8| BitmapResource {
+        name: Arc::from(name),
+        info: BitmapInfo::default(),
+        pixels: Arc::new(BitmapData {
+            pixels: Arc::from(vec![byte; 4]),
+            palette: Arc::from(Vec::new()),
+        }),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    };
+    let used = f.doc.resources.insert_bitmap(bitmap("used", 1));
+    let idle = f.doc.resources.insert_bitmap(bitmap("idle", 2));
+    assert_eq!(
+        f.doc.resources.bitmap_key(used),
+        Some(f.doc.resources.bitmap(used).unwrap().content_hash())
+    );
+    let node = f
+        .doc
+        .tree
+        .create(NodeKind::Bitmap(Box::new(crate::kind::BitmapNode {
+            image: used,
+            origin: Point::ORIGIN,
+            major: Vector::raw(1, 0),
+            minor: Vector::raw(0, 1),
+        })));
+    f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
+    let u = bitmap_usage(&f.doc);
+    assert_eq!(
+        u[&used],
+        BitmapUsage {
+            live: 1,
+            retained: 0
+        }
+    );
+    assert_eq!(u[&idle], BitmapUsage::default());
+
+    let mut history = History::default();
+    let mut tx = Tx::begin(&mut f.doc);
+    tx.delete(node).unwrap();
+    let t = tx.commit("delete bitmap");
+    history.commit(&mut f.doc, t);
+    assert_eq!(
+        bitmap_usage(&f.doc)[&used],
+        BitmapUsage {
+            live: 0,
+            retained: 1
+        }
+    );
+    assert!(matches!(
+        remove_unused_bitmap(&mut f.doc, used),
+        Err(RemoveBitmapError::InUse(_))
+    ));
+    assert_eq!(remove_unused_bitmap(&mut f.doc, idle), Ok(()));
+    assert!(f.doc.resources.bitmap(idle).is_none());
+    assert_eq!(
+        remove_unused_bitmap(&mut f.doc, idle),
+        Err(RemoveBitmapError::Missing)
+    );
+    history.undo(&mut f.doc);
+    assert_eq!(
+        bitmap_usage(&f.doc)[&used],
+        BitmapUsage {
+            live: 1,
+            retained: 0
+        }
+    );
+}
+
 /// Node ids are kept out of the digest on purpose; this pins that down.
 #[test]
 fn the_digest_ignores_allocation_order() {

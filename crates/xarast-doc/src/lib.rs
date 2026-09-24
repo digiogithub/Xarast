@@ -118,8 +118,9 @@ pub use palette::{
     RenameColour, ReparentColour,
 };
 pub use resources::{
-    ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, DashId, DocumentResources,
-    EmbeddedFont, ImageFormat, OriginalEncoded, ProceduralSource, ResourceRef, collect_unused,
+    ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, BitmapUsage, DashId,
+    DocumentResources, EmbeddedFont, ImageFormat, OriginalEncoded, ProceduralSource,
+    RemoveBitmapError, ResourceRef, bitmap_usage, collect_unused, remove_unused_bitmap,
 };
 pub use snapshot::Snapshot;
 pub use structure::{
