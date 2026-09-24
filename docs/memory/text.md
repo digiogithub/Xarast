@@ -22,7 +22,7 @@ architecture open question 4 is closed (see "Text on a path" below).
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
 | XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
 | XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
-| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
+| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType open (XARA-T-0218), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
 
 Public API (`crates/xarast-text/src/lib.rs`):
 
@@ -424,6 +424,78 @@ aliases used: Liberation Sans/Serif/Mono), Calisto MT, Book Antiqua (→
 Noto Serif via PANOSE), Calligraphic, Margaret, Myriad Web (→ Noto Sans),
 KirbysHand and Swis721 Blk BT (defined in files, never reached a laid-out
 run).
+
+### TextDesigns acceptance gate (W9.7, XARA-T-0260, as built)
+
+`crates/xarast-cli/tests/text_designs.rs`, over the 14 files the corpus
+lock lists under `TextDesigns/` (skips without `XARAST_XAR_CORPUS`):
+
+- **Criterion 3.** `xar-dump --tags` on each file; a row whose name carries
+  the `!` (no decoder) inside 2100-2117, 2200-2204, 2900-2920 or 4200-4207
+  fails. None does.
+- **Criterion 2.** `xarast-cli render <dir> --out-dir <tmp> --zoom 200`
+  with `XARAST_FONT_DIR` = the pinned set: exit 0, `14 rendered (14 with
+  ink)`, no `[not drawn: …]`, and each PNG's
+  `xarast_render::golden::digest` (SHA-256 of size + RGBA) equals the row
+  in `crates/xarast-cli/tests/golden/text_designs.sha256` (gate A, exact).
+  `XARAST_UPDATE_GOLDEN=1` rewrites the file; a mismatch keeps the render
+  in the temp directory and prints its path.
+- **No missing-glyph boxes.** Each story's layout through
+  `text_tool::caret_map(..).layout()` (the walker's own `lay_story`): no
+  glyph id 0 on a non-space, non-control character.
+- **Criterion 12 / T9.7.3** is `xarast-app/tests/xarast_roundtrip.rs`
+  (all 59 files, these 14 included, zero differing pixels).
+
+**Golden policy for corpus renders.** The files are Xara's artwork and
+each carries a bitmap of the original's own rendering, so neither they
+nor our renders of them are committed (the PNG goldens of
+`xarast-render/tests/golden/` are our own synthetic scenes). A corpus
+golden is a **digest plus the size**: derived, small, and exact. It is a
+regression gate only: with the pinned set every family here (Arial, Times
+New Roman, Calisto MT, Book Antiqua, Calligraphic, Margaret, Myriad Web)
+falls to Noto Sans, wider than Arial, so the renders do *not* overlay the
+reference bitmaps. Gating against those (metric-compatible pinned faces,
+gate C) is XARA-T-0262. 200 % rather than 100 % so a sub-point move
+changes pixels; the whole test runs in ≈ 0.5 s (release deps) and the
+render in ≈ 1.2 s debug.
+
+**Tag inventory (T9.7.1)** — text tags per file, from `xar-dump --tags`:
+
+| File | Text tags |
+|---|---|
+| AngledText | 2100 2101 2200 2201 2203 2900 2906 2907 2908 2910 2918 |
+| BaselineShift | 2100 2200 2201 2203 2900 2906 2907 2919 2920 |
+| FontChangesInText | 2100 2200 2201 2203 2900 2906 2907 2919 2920 |
+| Kerning | 2100 2200 2201 2202 2203 2204 2907 |
+| LineSpacing | 2100 2200 2201 2202 2203 2900 2906 2907 2919 2920 |
+| ManualKern | 2100 2200 2201 2203 2204 2900 2906 2907 2919 2920 |
+| Paragraph | 2100 2200 2201 2202 2203 2900 2906 2907 2919 2920 |
+| Rotated | 2101 2200 2201 2202 2203 2204 2900 2903 2904 2905 2906 2907 2916 2917 2918 2919 2920 |
+| SimpleText | 2100 2200 2201 2203 2906 2907 |
+| SuperSub | 2100 2200 2201 2202 2203 2900 2906 2907 2916 2917 2919 2920 |
+| TextJust | 2100 2200 2201 2203 2903 2904 2905 2906 2907 |
+| Tracking | 2100 2200 2201 2202 2203 2900 2906 2907 2918 2919 2920 |
+| embeddedFonts | 2100 2200 2201 2203 2906 2907 |
+| hebrew | 2101 2200 2201 2203 2900 2906 2907 2919 2920 |
+
+Tag names: 2100 STORY_SIMPLE, 2101 STORY_COMPLEX, 2200 LINE, 2201 STRING,
+2202 CHAR, 2203 EOL, 2204 KERN, 2900 LINESPACE_RATIO, 2903/2904/2905
+JUSTIFICATION_CENTRE/RIGHT/FULL, 2906 FONT_SIZE, 2907 FONT_TYPEFACE, 2908
+BOLD_ON, 2910 ITALIC_ON, 2916/2917 SUPERSCRIPT/SUBSCRIPT_ON, 2918
+TRACKING, 2919 ASPECT_RATIO, 2920 BASELINE. Nothing in 4200-4207 occurs.
+Where the phase table's "exercises" column differs from the inventory:
+
+- **Kerning.xar carries manual kerns** (2204, as ManualKern does); its
+  automatic kerning is the story's auto-kern flag, not a tag.
+- **AngledText.xar**: no attribute tag carries character rotation or
+  shear (none exists in 2900-2920); the angles travel in the story
+  records (2100/2101). It also exercises bold, italic and tracking.
+- **Rotated.xar** is the broadest file: every justification, super/sub,
+  tracking and kerns, besides the story matrix.
+- **LineSpacing.xar** uses only the ratio form (2900); no absolute line
+  spacing tag occurs in any of the 14.
+- **embeddedFonts.xar** has no font data (already noted above), so the
+  embedded-face path (criterion 5) is untested by the corpus.
 
 ## Facts about the original's formatter (read, not copied)
 
@@ -924,8 +996,8 @@ first story of a process waits for enumeration when nothing prewarmed
   character still not in the model; the layer bounds cache (when warm)
   ignores text, so `drawing_rect` misses text once `update_bounds` has run;
   `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
-  embedded-font overlay; golden images of `TextDesigns` with pinned fonts
-  (W9.7).
+  embedded-font overlay; ~~golden images of `TextDesigns` with pinned
+  fonts (W9.7)~~ (done, XARA-T-0260).
 - Typing leftovers (T9.4.6): a story emptied by deleting all its text stays
   (the original deletes an empty story when the caret leaves it; doing so
   here would add an undo step — decide with the maintainer); typed text
