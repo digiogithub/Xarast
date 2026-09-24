@@ -26,6 +26,14 @@
 //! is equal to itself; a changed resource misses, gets a new `ImageRef`
 //! with its own pixels, and compares by content.
 //!
+//! # Who files here
+//!
+//! Every walker given the cache, and the bitmap gallery's thumbnail
+//! thread ([`DecodedImages::image_for`]), which decodes through the same
+//! path and under the process-wide budget the session's walkers use. So a
+//! bitmap is decoded once whichever of the two sees it first; two that
+//! miss at the same moment both decode, and the first filed wins.
+//!
 //! # Lifetime
 //!
 //! Entries whose resource is no longer in the document are dropped the
@@ -178,6 +186,32 @@ impl DecodedImages {
                 image,
             });
         e.image.clone()
+    }
+
+    /// The image of `res` under `budget`: the one filed, or else decoded
+    /// now by the walker's decode path ([`crate::walker::ready_image`]) and
+    /// filed, failures included. Blocking; for a worker thread (the
+    /// bitmap gallery's thumbnails, XARA-T-0293). A resource no walker
+    /// would decode (neither native pixels nor an encoded original) is
+    /// `None` and is not filed, so a walker still counts it as pending.
+    /// A panicking decoder is a failed decode, as in the walker.
+    pub(crate) fn image_for(
+        &self,
+        res: &BitmapResource,
+        budget: &Arc<PixelBudget>,
+    ) -> Option<ImageRef> {
+        if !crate::walker::is_decodable(res) {
+            return None;
+        }
+        if let Some(found) = self.get(res, budget) {
+            return found;
+        }
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::walker::ready_image(res, budget)
+        }))
+        .ok()
+        .flatten();
+        self.insert(res, budget, made)
     }
 
     /// Drops every entry whose resource is not among `live`.

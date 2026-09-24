@@ -32,7 +32,9 @@
 //! [`Thumbnails`] makes them on a background thread, keyed by the
 //! resource's content hash, so the same picture in two documents is
 //! thumbnailed once. A thumbnail is at most [`THUMB_PX`] on its longer
-//! side, straight RGBA8.
+//! side, straight RGBA8. Its pixels are the document's decoded image
+//! ([`crate::decoded`]): the gallery decodes nothing the view has
+//! decoded, and the view nothing the gallery has (XARA-T-0293).
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -44,6 +46,9 @@ use xarast_doc::fill_edit::{FillValue, PaintSlot, SetFillGeometry};
 use xarast_doc::{BitmapResource, Document, NodeId, NodeKind};
 use xarast_geom::Point;
 
+use xarast_render::PixelBudget;
+
+use crate::decoded::DecodedImages;
 use crate::fill_tool::FillCommand;
 use crate::geometry::{DevicePoint, DocPoint};
 use crate::intent::Changed;
@@ -454,33 +459,6 @@ pub(crate) fn run(session: &mut Session, op: BitmapGalleryOp) -> Result<Changed,
 
 // ─────────────────────────────── thumbnails ───────────────────────────────
 
-/// Decodes a resource to straight RGBA8, as the walker does: native pixels
-/// as they are, an encoded original through the façade or its `.xar`
-/// wrapping (a JPEG with a palette is tag 71, a BMP tag 65, an unknown
-/// format tag 69).
-fn decode_straight(res: &BitmapResource) -> Option<(u32, u32, Vec<u8>)> {
-    let (w, h) = (res.info.width, res.info.height);
-    let expected = w as usize * h as usize * 4;
-    if expected != 0 && res.pixels.pixels.len() == expected {
-        return Some((w, h, res.pixels.pixels.to_vec()));
-    }
-    use xarast_doc::ImageFormat as F;
-    use xarast_image::xar::decode_xar_bitmap;
-    let o = res.original.as_ref()?;
-    let bytes: &[u8] = &o.bytes;
-    let palette: Vec<[u8; 3]> = res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect();
-    let limits = xarast_image::DecodeLimits::default();
-    let decoded = match o.format {
-        F::Jpeg if !palette.is_empty() => decode_xar_bitmap(71, bytes, &palette, &limits),
-        F::Png | F::Jpeg | F::Gif => xarast_image::decode(bytes, &limits),
-        F::Bmp => decode_xar_bitmap(65, bytes, &[], &limits),
-        F::Unknown => decode_xar_bitmap(69, bytes, &[], &limits),
-    }
-    .ok()?;
-    let d = decoded.data;
-    (d.width > 0 && d.height > 0).then(|| (d.width, d.height, d.to_straight_rgba8()))
-}
-
 /// Shrinks straight RGBA8 to fit [`THUMB_PX`] by a box filter over
 /// alpha-weighted colour, so transparent pixels do not darken the edges.
 #[must_use]
@@ -534,10 +512,24 @@ pub fn shrink(w: u32, h: u32, rgba: &[u8]) -> Thumb {
 }
 
 /// A resource's thumbnail; `None` when it cannot be decoded.
+///
+/// The pixels come from the walker's decode path
+/// ([`crate::walker::ready_image`], the one dispatch over the façade and
+/// the `.xar` wrappings) through `images`, the document's
+/// [`DecodedImages`]: a bitmap the view already decoded is not decoded
+/// again, and one decoded here is filed for the view (XARA-T-0293). The
+/// thumbnail is shrunk from the image's base, the exact bytes the walker
+/// registers, so it is the one a direct decode gives. Blocking: an
+/// evicted base is brought back in place. Call it off the main thread.
 #[must_use]
-pub fn thumbnail(res: &BitmapResource) -> Option<Thumb> {
-    let (w, h, rgba) = decode_straight(res)?;
-    Some(shrink(w, h, &rgba))
+pub fn thumbnail(res: &BitmapResource, images: &DecodedImages) -> Option<Thumb> {
+    let image = images.image_for(res, PixelBudget::global())?;
+    let (w, h) = (image.width(), image.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let base = image.level(0);
+    Some(shrink(w, h, &base.data))
 }
 
 enum Slot {
@@ -546,7 +538,7 @@ enum Slot {
     Failed,
 }
 
-type Job = ([u8; 32], BitmapResource);
+type Job = ([u8; 32], BitmapResource, DecodedImages);
 type Done = ([u8; 32], Option<Thumb>);
 
 /// Thumbnails made off the main thread, cached by content hash for the
@@ -596,10 +588,10 @@ impl Thumbnails {
             let spawned = std::thread::Builder::new()
                 .name("xarast-thumbnails".into())
                 .spawn(move || {
-                    while let Ok((key, res)) = rx.recv() {
+                    while let Ok((key, res, images)) = rx.recv() {
                         // A panicking decoder is a failed thumbnail.
                         let thumb = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            thumbnail(&res)
+                            thumbnail(&res, &images)
                         }))
                         .ok()
                         .flatten();
@@ -637,14 +629,20 @@ impl Thumbnails {
     }
 
     /// The thumbnail for `key`, asking for it when it has not been asked
-    /// for yet.
-    pub fn get(&mut self, key: [u8; 32], res: &BitmapResource) -> Option<Arc<Thumb>> {
+    /// for yet; `images` are the decoded bitmaps of the document `res`
+    /// belongs to ([`crate::Session::decoded_images`]).
+    pub fn get(
+        &mut self,
+        key: [u8; 32],
+        res: &BitmapResource,
+        images: &DecodedImages,
+    ) -> Option<Arc<Thumb>> {
         match self.cache.get(&key) {
             Some(Slot::Ready(t)) => return Some(Arc::clone(t)),
             Some(Slot::Pending | Slot::Failed) => return None,
             None => {}
         }
-        let job = (key, res.clone());
+        let job = (key, res.clone(), images.clone());
         let sent = self.sender().is_some_and(|tx| tx.send(job).is_ok());
         self.cache
             .insert(key, if sent { Slot::Pending } else { Slot::Failed });
@@ -714,7 +712,7 @@ pub fn view(
     let mut entries = cache.entries(session).to_vec();
     for e in &mut entries {
         if let Some(res) = session.doc.resources.bitmap(e.id) {
-            e.thumbnail = thumbs.get(e.key, res);
+            e.thumbnail = thumbs.get(e.key, res, session.decoded_images());
         }
     }
     BitmapGalleryView {

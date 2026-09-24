@@ -573,7 +573,7 @@ impl SceneWalker {
             if self.images.contains_key(&id) || self.failed.contains(&id) {
                 continue;
             }
-            if has_native_pixels(res) || (res.pixels.pixels.is_empty() && res.original.is_some()) {
+            if is_decodable(res) {
                 match self.decoded.as_ref().and_then(|c| c.get(res, &budget)) {
                     Some(image) => found.push((id, image)),
                     None => todo.push((id, res)),
@@ -1008,11 +1008,7 @@ fn decode_all(
     todo: &[(BitmapId, &xarast_doc::BitmapResource)],
     budget: &Arc<PixelBudget>,
 ) -> Vec<(BitmapId, Option<ImageRef>)> {
-    let ready = |res: &xarast_doc::BitmapResource| {
-        let image = make_image(res, budget)?;
-        image.prepare();
-        Some(image)
-    };
+    let ready = |res: &xarast_doc::BitmapResource| ready_image(res, budget);
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(todo.len());
@@ -1046,6 +1042,26 @@ fn decode_all(
         out[i].1 = image;
     }
     out
+}
+
+/// Whether a walker decodes (or copies) `res` at all: native pixels, or
+/// no pixels and an encoded original. Anything else is pending, never
+/// filed as a failure.
+pub(crate) fn is_decodable(res: &xarast_doc::BitmapResource) -> bool {
+    has_native_pixels(res) || (res.pixels.pixels.is_empty() && res.original.is_some())
+}
+
+/// One resource made ready to draw: decoded ([`make_image`]) and with its
+/// mip pyramid built. The one decode path of `.xar` and placed bitmaps:
+/// the walker's batches and the gallery's thumbnails
+/// ([`crate::decoded::DecodedImages::image_for`]) both come here.
+pub(crate) fn ready_image(
+    res: &xarast_doc::BitmapResource,
+    budget: &Arc<PixelBudget>,
+) -> Option<ImageRef> {
+    let image = make_image(res, budget)?;
+    image.prepare();
+    Some(image)
 }
 
 /// One resource as a renderer image under `budget`, with the source an
