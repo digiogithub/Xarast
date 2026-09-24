@@ -2,13 +2,14 @@
 id: XARA-T-0306
 type: task
 title: "Import: map TAG_CLIPVIEWCONTROLLER/TAG_CLIPVIEW (4084/4085) onto NodeKind::ClipView"
-status: backlog
+status: in_progress
 priority: low
 parent: XARA-US-0020
 author: mcp
 labels: [xar, import]
 created: 2026-09-24T15:03:45Z
-updated: 2026-09-24T15:03:45Z
+updated: 2026-09-24T16:08:20Z
+started: 2026-09-24T16:08:20Z
 ---
 
 ## Description

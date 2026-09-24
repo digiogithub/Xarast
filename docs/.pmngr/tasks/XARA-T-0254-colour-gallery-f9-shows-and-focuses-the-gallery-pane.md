@@ -2,12 +2,13 @@
 id: XARA-T-0254
 type: task
 title: "Colour gallery: F9 shows and focuses the gallery pane"
-status: backlog
+status: in_review
 parent: XARA-US-0042
 author: mcp
 labels: [phase-8, ui]
 created: 2026-09-23T23:50:12Z
-updated: 2026-09-23T23:50:12Z
+updated: 2026-09-24T16:43:02Z
+started: 2026-09-24T16:17:19Z
 ---
 
 ## Description
