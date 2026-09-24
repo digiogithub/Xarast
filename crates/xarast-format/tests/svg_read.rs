@@ -1392,3 +1392,49 @@ fn a_jpeg8bpp_palette_survives_as_a_blob_beside_the_jpeg() {
     assert!(!o.diagnostics.is_empty());
     assert!(bitmap_palettes(&o.document).iter().any(Vec::is_empty));
 }
+
+/// A feather belongs to the node that carries it (XARA-US-0068): a
+/// group's comes back on the group, once, not on each member, and a
+/// member's own stays its own. The renderer feathers the owner as one
+/// unit, so moving it to the members would change the picture.
+#[test]
+fn a_feather_comes_back_on_the_node_that_owns_it() {
+    let feather = |size: i32| AttrValue::Feather {
+        size: Mp::new(size),
+        profile: BiasGain::new(0.25, -0.5),
+    };
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.attribute(feather(8_000)).unwrap();
+    b.node(triangle(0, 0)).unwrap();
+    b.node(triangle(40_000, 0)).unwrap();
+    b.push_scope().unwrap();
+    b.attribute(feather(3_000)).unwrap();
+    b.pop_scope();
+    b.pop_scope();
+    let (doc, _) = b.finish().unwrap();
+    let first = package(&doc, SvgOptions::default());
+    let mut o = open(&first);
+    let owners = |d: &Document| -> Vec<(String, i32)> {
+        d.tree
+            .preorder(d.tree.root())
+            .filter_map(|n| match d.tree.kind(n) {
+                Some(NodeKind::Attr(a)) => match &a.value {
+                    AttrValue::Feather { size, .. } => {
+                        let p = d.tree.links(n).parent?;
+                        Some((d.tree.kind(p)?.type_name().to_owned(), size.raw()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(owners(&doc), owners(&o.document));
+    assert_eq!(
+        owners(&o.document),
+        vec![("Group".to_owned(), 8_000), ("Path".to_owned(), 3_000)]
+    );
+    assert_eq!(first, resave(&mut o), "a fixed point");
+}

@@ -667,7 +667,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             node,
             e,
             &|ns, l| {
-                (ns == NS_XARAST && matches!(l, "kind" | "soft" | "was-text"))
+                (ns == NS_XARAST && matches!(l, "kind" | "soft" | "was-text" | "feather"))
                     || (ns == NS_INKSCAPE && l == "label")
             },
             &leftover,
@@ -675,6 +675,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             false,
         );
         self.b.push_scope()?;
+        self.own_feather(e)?;
         self.children(e, &cctx, &is_source, 0, &mut bag)?;
         self.b.pop_scope();
         self.store(node, bag);
@@ -829,6 +830,21 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
         Ok(())
     }
 
+    /// A container's own feather (`xarast:feather` on the `<g>`), as an
+    /// attribute child of the node just opened: the node is feathered as
+    /// one unit (the writer's `own_feather`).
+    fn own_feather(&mut self, e: &'d Elem) -> Result<(), SvgReadError> {
+        if let Some(v) = xa(e, "feather").and_then(parse::floats)
+            && let [size, bias, gain] = v.as_slice()
+        {
+            self.b.attribute(AttrValue::Feather {
+                size: Mp::from_f64_round(size * 1000.0),
+                profile: BiasGain::new(*bias, *gain),
+            })?;
+        }
+        Ok(())
+    }
+
     fn clipview(&mut self, e: &'d Elem, ctx: &Ctx) -> Result<(), SvgReadError> {
         let (cctx, leftover) = self.child_ctx(e, ctx);
         let mode = if xa(e, "clip-mode") == Some("outside") {
@@ -840,7 +856,9 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
         let mut bag = self.common(
             node,
             e,
-            &|ns, l| ns == NS_XARAST && matches!(l, "kind" | "clip-shape" | "clip-mode"),
+            &|ns, l| {
+                ns == NS_XARAST && matches!(l, "kind" | "clip-shape" | "clip-mode" | "feather")
+            },
             &leftover,
             false,
             false,
@@ -876,6 +894,8 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
                 }
             }
         }
+        // After the clipping shape, which must stay the first child.
+        self.own_feather(e)?;
         self.children(e, &cctx, &|_| false, count, &mut bag)?;
         self.b.pop_scope();
         self.store(node, bag);
@@ -904,7 +924,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             node,
             e,
             &|ns, l| {
-                (ns == NS_XARAST && matches!(l, "kind" | "regen"))
+                (ns == NS_XARAST && matches!(l, "kind" | "regen" | "feather"))
                     || (ns == NS_INKSCAPE && l == "label")
             },
             &leftover,
@@ -915,6 +935,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             self.stats.parametric = self.stats.parametric.saturating_add(1);
         }
         self.b.push_scope()?;
+        self.own_feather(e)?;
         let pk = kind.to_owned();
         self.children(
             e,
