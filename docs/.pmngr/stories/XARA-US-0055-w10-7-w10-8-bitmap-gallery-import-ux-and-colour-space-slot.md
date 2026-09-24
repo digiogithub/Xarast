@@ -2,13 +2,14 @@
 id: XARA-US-0055
 type: story
 title: W10.7/W10.8 — Bitmap gallery, import UX and colour-space slot
-status: in_review
+status: done
 parent: XARA-EP-0011
 author: mcp
 labels: [phase-10, ui, color]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-24T12:02:56Z
+updated: 2026-09-24T12:37:57Z
 started: 2026-09-24T11:12:47Z
+closed: 2026-09-24T12:37:57Z
 ---
 
 ## Tasks (full tables: phase-10 §W10.7, §W10.8)

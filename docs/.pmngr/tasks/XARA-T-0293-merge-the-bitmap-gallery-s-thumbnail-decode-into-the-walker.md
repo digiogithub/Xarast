@@ -2,12 +2,14 @@
 id: XARA-T-0293
 type: task
 title: Merge the bitmap gallery's thumbnail decode into the walker's shared decode path and DecodedImages
-status: backlog
+status: done
 parent: XARA-US-0053
 author: mcp
 labels: [phase-10, image, perf]
 created: 2026-09-24T12:06:55Z
-updated: 2026-09-24T12:06:55Z
+updated: 2026-09-24T12:37:57Z
+started: 2026-09-24T12:09:27Z
+closed: 2026-09-24T12:37:57Z
 ---
 
 ## Description
