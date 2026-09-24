@@ -230,8 +230,9 @@ struct Frame {
     clip: bool,
     /// The child that supplied the clipping path and must not be painted.
     clip_child: Option<NodeId>,
-    /// A live effect (a feather) wraps the node: popped last.
-    effect: bool,
+    /// How many live effects wrap the node (its feather, its shadow):
+    /// popped last.
+    effects: u8,
     /// The culling rectangle outside the node, when the effect widened it
     /// for the node's subtree.
     outer_clip: Option<Option<Rect>>,
@@ -519,6 +520,16 @@ impl SceneWalker {
                             walk.control(xarast_doc::Descend::Skip);
                             continue;
                         }
+                        // The renderer draws a shadow from its source
+                        // (`shadow_of`); whatever a file baked under the
+                        // generated node is not drawn twice.
+                        NodeKind::Live(l)
+                            if l.role == xarast_doc::LiveRole::Generated
+                                && matches!(l.kind, xarast_doc::LiveKind::Shadow(_)) =>
+                        {
+                            walk.control(xarast_doc::Descend::Skip);
+                            continue;
+                        }
                         NodeKind::Layer(l) => {
                             if !l.visible || l.guide {
                                 walk.control(xarast_doc::Descend::Skip);
@@ -613,8 +624,22 @@ impl SceneWalker {
                         b.push_effect(effect);
                         self.stats.effects += 1;
                     }
+                    // A shadow controller's shadow, beneath its source,
+                    // inside the controller's own feather.
+                    let shadow = shadow_of(doc, parent, &attrs);
+                    let shadowed = shadow.is_some();
+                    if let Some((effect, margin)) = shadow {
+                        // Everything whose shadow can land in the area
+                        // shapes the pixels kept.
+                        if let Some(c) = clip {
+                            outer_clip.get_or_insert(Some(c));
+                            clip = Some(c.inflated(margin));
+                        }
+                        b.push_effect(effect);
+                        self.stats.effects += 1;
+                    }
                     let mut f = self.open(doc, parent, &attrs, &mut b);
-                    f.effect = feathered;
+                    f.effects = u8::from(feathered) + u8::from(shadowed);
                     f.outer_clip = outer_clip;
                     frames.push(f);
                 }
@@ -634,7 +659,7 @@ impl SceneWalker {
                         if f.clip {
                             b.pop_clip();
                         }
-                        if f.effect {
+                        for _ in 0..f.effects {
                             b.pop_effect();
                         }
                         if let Some(outer) = f.outer_clip {
@@ -1002,7 +1027,7 @@ impl SceneWalker {
             group: false,
             clip: false,
             clip_child: None,
-            effect: false,
+            effects: 0,
             outer_clip: None,
         };
         match doc.tree.kind(node) {
@@ -1062,6 +1087,9 @@ impl SceneWalker {
             return;
         };
         match kind {
+            // A shadow's controller and source are drawn: the source as
+            // what it holds, the shadow by the effect `shadow_of` pushed.
+            NodeKind::Live(l) if matches!(l.kind, xarast_doc::LiveKind::Shadow(_)) => return,
             NodeKind::Live(_) => {
                 self.stats.live_pending += 1;
                 return;
@@ -2041,6 +2069,67 @@ fn is_culled(doc: &Document, node: NodeId, clip: Rect, attrs: &AttrStack) -> boo
         None => xarast_doc::bounds::compute_bounds_with(&doc.tree, node, attrs.stroke_extent()),
     };
     !b.is_empty() && !b.intersects(clip)
+}
+
+/// The shadow a shadow controller casts, and how far beyond its source it
+/// can reach in document units (the walk's culling rectangle grows by that
+/// much under it, so a source outside the area whose shadow falls inside
+/// is still drawn into the effect).
+///
+/// `None` for anything but a shadow controller with a source that has
+/// bounds. The source's bounds anchor a floor shadow (the middle of their
+/// bottom edge) and bound how far the map moves it.
+fn shadow_of(doc: &Document, node: NodeId, attrs: &AttrStack) -> Option<(LayerEffect, Mp)> {
+    let Some(NodeKind::Live(l)) = doc.tree.kind(node) else {
+        return None;
+    };
+    let xarast_doc::LiveKind::Shadow(p) = &l.kind else {
+        return None;
+    };
+    if l.role != xarast_doc::LiveRole::Controller {
+        return None;
+    }
+    let parts = xarast_doc::live::parts(&doc.tree, node)?;
+    let src = match doc.tree.bounds(parts.source).get() {
+        Some(b) => b,
+        None => {
+            xarast_doc::bounds::compute_bounds_with(&doc.tree, parts.source, attrs.stroke_extent())
+        }
+    };
+    if src.is_empty() {
+        return None;
+    }
+    let map = p.silhouette_map(src);
+    let (x0, y0) = (f64::from(src.lo.x.raw()), f64::from(src.lo.y.raw()));
+    let (x1, y1) = (f64::from(src.hi.x.raw()), f64::from(src.hi.y.raw()));
+    // An affine map moves the points of a box furthest at its corners.
+    let displacement = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]
+        .iter()
+        .map(|&(x, y)| {
+            let dx = map[0] * x + map[2] * y + map[4] - x;
+            let dy = map[1] * x + map[3] * y + map[5] - y;
+            dx.hypot(dy)
+        })
+        .fold(0.0f64, f64::max);
+    let spread = if p.kind == xarast_doc::ShadowKind::Glow {
+        f64::from(p.glow_width.raw().max(0))
+    } else {
+        0.0
+    };
+    let blur = f64::from(p.blur.raw().max(0));
+    let mut colour = p.colour.resolve(&doc.resources.colours).to_rgba8();
+    colour.a = u8::try_from((u32::from(colour.a) * u32::from(p.opacity_level()) + 127) / 255)
+        .unwrap_or(u8::MAX);
+    let margin = Mp::from_f64_round((displacement + spread + blur).ceil().min(1e9));
+    let effect = LayerEffect::Shadow(Box::new(xarast_render::ShadowEffect {
+        map,
+        displacement,
+        spread,
+        blur,
+        profile: p.profile,
+        colour,
+    }));
+    Some((effect, margin))
 }
 
 /// The feather `node` applies to itself and its subtree: its own
