@@ -263,6 +263,29 @@ the renderer samples decoded (top-down) rows from `v = 0`.
 `file:line` and SSIM in `render.md`, "Bitmap fill orientation". Contone
 and duotone tiles and the mirrored mapping are upright too.
 
+### Resampling (XARA-US-0052, 2026-09-24)
+
+How a decoded bitmap is *sampled* is the renderer's
+(`xarast-render/src/resample.rs`; decisions, harness numbers and the
+kernel choice in `render.md`, "Resampling quality"). What matters on this
+side:
+
+- `ImageRef` keeps **straight** RGBA8, as registered by the walker; the
+  sampler premultiplies (and linearises, for minification) itself, so there is no reason to
+  hand it premultiplied data.
+- It lazily builds a **mip pyramid** (+⅓ of the image's bytes) the first
+  time the image is drawn at two or more texels per pixel, shared by every
+  clone of the `ImageRef`. The walker registers each resource once per
+  walker, so a document pays it once per image and session — but on the
+  render thread, 26 ms for 2048² (`perf.md`). Moving it next to the decode
+  is T10.5.2's proxy work (XARA-US-0053), which should reuse
+  `resample::build_pyramid`'s levels rather than invent a second reduction.
+- Contone (duotone) is applied per texel through a 256-entry table, before
+  filtering, as the original does in its sampler; bitmap transparencies
+  are filtered like colour fills (`TranspSource::Image` has a `Filter`).
+- Not wired: the document's smoothing flag (XARA-T-0273); bitmap fill
+  editing (XARA-T-0271); placing a new bitmap (XARA-T-0272).
+
 ## Dead ends (do not retry)
 
 - Inverting a tag-68 PNG's alpha **after** `decode` (on premultiplied

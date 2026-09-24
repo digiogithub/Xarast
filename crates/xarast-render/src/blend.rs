@@ -279,6 +279,8 @@ pub enum TranspSource {
         mapping: GradMapping,
         /// How it repeats.
         repeat: Repeat,
+        /// How it is sampled, as for a colour image fill.
+        filter: crate::paint::Filter,
     },
 }
 

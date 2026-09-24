@@ -215,6 +215,83 @@ fn paints(c: &mut Criterion) {
     g.finish();
 }
 
+/// A `w × h` image with detail everywhere (so no filter is flattered).
+fn noisy_image(w: u32, h: u32) -> xarast_render::ImageRef {
+    let mut rng = Rng(0x5eed);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..w * h {
+        let v = (rng.next() * 255.0) as u8;
+        data.extend_from_slice(&[v, 255 - v, v / 2, 255]);
+    }
+    xarast_render::ImageRef::new(w, h, data)
+}
+
+/// Resampling cost (W10.4): one 512 × 512 frame covered by one placed
+/// image, per filter and footprint, plus building a pyramid.
+fn images(c: &mut Criterion) {
+    use xarast_render::{Filter, GradMapping, Point64, Repeat};
+    let mut g = c.benchmark_group("images");
+    g.sample_size(20);
+    let (w, h) = (512u32, 512u32);
+    let cases: [(&str, u32, f64, Filter); 6] = [
+        ("aligned_hq", 512, 512.0, Filter::HighQuality),
+        ("nearest_magnify_3x", 171, 512.0, Filter::Nearest),
+        ("bilinear_magnify_3x", 171, 512.0, Filter::Bilinear),
+        ("hq_magnify_3x", 171, 512.0, Filter::HighQuality),
+        ("hq_minify_1_5x", 768, 512.0, Filter::HighQuality),
+        ("hq_minify_2_67x", 1366, 512.0, Filter::HighQuality),
+    ];
+    for (name, n, side, filter) in cases {
+        let mut res = Resolver::new();
+        let img = res.images.insert(noisy_image(n, n));
+        // The pyramid is built once per image, outside the timing.
+        let _ = res
+            .images
+            .get(img)
+            .map(xarast_render::ImageRef::level_count);
+        let mp = f64::from(Mp::PER_PT);
+        let mapping = GradMapping::Affine {
+            a: Point64::new(0.0, 0.0),
+            b: Point64::new(0.0, side * mp),
+            c: Point64::new(side * mp, 0.0),
+        };
+        let mut scene = Scene::new();
+        {
+            let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+            let paint = Paint::Image {
+                image: img,
+                mapping,
+                repeat: Repeat::Simple,
+                filter,
+                contone: None,
+                adjust: xarast_render::BitmapAdjust::default(),
+            };
+            b.image(SceneNodeId(0), img, mapping, paint);
+            b.finish().expect("balanced");
+        }
+        let v = ViewParams::new(w, h, Transform2D::scale(1.0 / mp), RenderQuality::Final);
+        let dl = DisplayList::build(&scene, &v, &DirtyRect::NONE);
+        let mut cpu = CpuBackend::new(CpuConfig::interactive());
+        let mut target = Surface::new(w, h);
+        g.bench_function(name, |b| {
+            b.iter(|| {
+                cpu.render(black_box(&dl), &res, &mut target)
+                    .expect("renders")
+            });
+        });
+    }
+    g.bench_function("pyramid_2048", |b| {
+        let base = noisy_image(2048, 2048);
+        // A fresh image each time: the pyramid is cached per image.
+        b.iter_batched(
+            || xarast_render::ImageRef::new(2048, 2048, base.level(0).data.to_vec()),
+            |img| black_box(img.level_count()),
+            criterion::BatchSize::LargeInput,
+        );
+    });
+    g.finish();
+}
+
 /// The cache-admission sweep the phase leaves open: the threshold above
 /// which a plain group earns a cache slot is chosen from the knee of this
 /// curve, not from intuition.
@@ -272,6 +349,7 @@ criterion_group!(
     display_list,
     strip,
     paints,
+    images,
     cache_threshold
 );
 criterion_main!(benches);

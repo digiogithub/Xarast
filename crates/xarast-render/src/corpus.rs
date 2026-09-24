@@ -702,6 +702,215 @@ fn image_cases() -> Vec<Case> {
     out
 }
 
+/// A 64 × 64 image with detail at every scale: 1-px stripes, a 2-px
+/// checker, a colour ramp, a hard-edged disc and a transparent corner.
+fn detail_image() -> ImageRef {
+    let n = 64u32;
+    let mut data = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let px = if y < 16 {
+                if x % 2 == 0 {
+                    [250, 250, 250, 255]
+                } else {
+                    [10, 10, 10, 255]
+                }
+            } else if y < 32 {
+                if (x / 2 + y / 2) % 2 == 0 {
+                    [230, 40, 30, 255]
+                } else {
+                    [30, 60, 220, 255]
+                }
+            } else {
+                let (dx, dy) = (i64::from(x) - 40, i64::from(y) - 48);
+                if dx * dx + dy * dy < 100 {
+                    [20, 160, 60, 255]
+                } else if x < 12 && y > 52 {
+                    [255, 0, 255, 0]
+                } else {
+                    let v = u8::try_from(x * 4).unwrap_or(u8::MAX);
+                    [v, 255 - v, 128, 255]
+                }
+            };
+            data.extend_from_slice(&px);
+        }
+    }
+    ImageRef::new(n, n, data)
+}
+
+/// Resampling quality (W10.4): minification either side of 2× (the
+/// widened tent, then the pyramid), a perspective plane, a magnified
+/// contone fill, the aligned fast path and a bitmap transparency, at the
+/// filters the product uses. 10 cases.
+fn resampling_cases() -> Vec<Case> {
+    use crate::paint::{BitmapAdjust, Filter};
+    let mut out = Vec::new();
+    let placed = |side: f64| GradMapping::Affine {
+        a: dpt(8.0, 8.0),
+        b: dpt(8.0, 8.0 + side),
+        c: dpt(8.0 + side, 8.0),
+    };
+    for (filter, fname) in [(Filter::Bilinear, "bilinear"), (Filter::HighQuality, "hq")] {
+        // 64 texels on 43 px (1.49 texels per pixel) and on 24 (2.67).
+        for side in [43.0, 24.0] {
+            let mut scene = Scene::new();
+            let mut res = Resolver::new();
+            let img = res.images.insert(detail_image());
+            {
+                let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+                backdrop(&mut b);
+                let paint = Paint::Image {
+                    image: img,
+                    mapping: placed(side),
+                    repeat: Repeat::Simple,
+                    filter,
+                    contone: None,
+                    adjust: BitmapAdjust::default(),
+                };
+                b.image(SceneNodeId(1), img, placed(side), paint);
+                b.finish().expect("balanced");
+            }
+            out.push(Case {
+                name: format!("resample_minify_{fname}_{side}"),
+                scene,
+                resolver: res,
+                view: view(),
+            });
+        }
+    }
+    // A receding plane: every level of the pyramid on one primitive.
+    let mut scene = Scene::new();
+    let mut res = Resolver::new();
+    let img = res.images.insert(detail_image());
+    {
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        backdrop(&mut b);
+        b.fill(
+            SceneNodeId(1),
+            &rect_path(0.0, 20.0, 96.0, 96.0),
+            FillRule::NonZero,
+            Paint::Image {
+                image: img,
+                mapping: GradMapping::Perspective {
+                    a: dpt(0.0, 96.0),
+                    b: dpt(40.0, 20.0),
+                    c: dpt(96.0, 96.0),
+                    d: dpt(56.0, 20.0),
+                },
+                repeat: Repeat::Repeat,
+                filter: Filter::HighQuality,
+                contone: None,
+                adjust: BitmapAdjust::default(),
+            },
+        );
+        b.finish().expect("balanced");
+    }
+    out.push(Case {
+        name: "resample_perspective_hq".to_string(),
+        scene,
+        resolver: res,
+        view: view(),
+    });
+    // Magnified contone (duotone) in each effect space: the remap is per
+    // texel, before the kernel.
+    for (space, sname) in [
+        (EffectSpace::Rgb, "rgb"),
+        (EffectSpace::HsvShort, "hsvshort"),
+        (EffectSpace::HsvLong, "hsvlong"),
+    ] {
+        let mut scene = Scene::new();
+        let mut res = Resolver::new();
+        let img = res.images.insert(checker_image());
+        {
+            let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+            b.fill(
+                SceneNodeId(1),
+                &star_path(),
+                FillRule::NonZero,
+                Paint::Image {
+                    image: img,
+                    mapping: GradMapping::Affine {
+                        a: dpt(10.0, 10.0),
+                        b: dpt(20.0, 60.0),
+                        c: dpt(60.0, 0.0),
+                    },
+                    repeat: Repeat::Mirror,
+                    filter: Filter::HighQuality,
+                    contone: Some((rgb(20, 20, 90), rgb(250, 220, 60), space)),
+                    adjust: BitmapAdjust::default(),
+                },
+            );
+            b.finish().expect("balanced");
+        }
+        out.push(Case {
+            name: format!("resample_contone_{sname}"),
+            scene,
+            resolver: res,
+            view: view(),
+        });
+    }
+    // One texel per pixel: every filter is a point sample.
+    let mut scene = Scene::new();
+    let mut res = Resolver::new();
+    let img = res.images.insert(detail_image());
+    {
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        backdrop(&mut b);
+        let paint = Paint::Image {
+            image: img,
+            mapping: placed(64.0),
+            repeat: Repeat::Simple,
+            filter: Filter::HighQuality,
+            contone: None,
+            adjust: BitmapAdjust::default(),
+        };
+        b.image(SceneNodeId(1), img, placed(64.0), paint);
+        b.finish().expect("balanced");
+    }
+    out.push(Case {
+        name: "resample_aligned_hq".to_string(),
+        scene,
+        resolver: res,
+        view: view(),
+    });
+    // A bitmap transparency, rotated and magnified.
+    let mut scene = Scene::new();
+    let mut res = Resolver::new();
+    let img = res.images.insert(checker_image());
+    {
+        let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+        backdrop(&mut b);
+        b.push_transparency(Transparency {
+            family: BlendFamily::Mix,
+            source: TranspSource::Image {
+                image: img,
+                mapping: GradMapping::Affine {
+                    a: dpt(48.0, 4.0),
+                    b: dpt(4.0, 48.0),
+                    c: dpt(92.0, 48.0),
+                },
+                repeat: Repeat::Repeat,
+                filter: Filter::HighQuality,
+            },
+        });
+        b.fill(
+            SceneNodeId(10),
+            &rect_path(8.0, 8.0, 88.0, 88.0),
+            FillRule::NonZero,
+            Paint::Solid(rgb(20, 20, 20)),
+        );
+        b.pop_transparency();
+        b.finish().expect("balanced");
+    }
+    out.push(Case {
+        name: "resample_transparency_hq".to_string(),
+        scene,
+        resolver: res,
+        view: view(),
+    });
+    out
+}
+
 /// The antialiasing probes, which are also the cases the AA report reads.
 fn aa_cases() -> Vec<Case> {
     let mut out = Vec::new();
@@ -923,6 +1132,7 @@ pub fn all_cases() -> Vec<Case> {
     out.extend(clip_cases());
     out.extend(layer_cases());
     out.extend(image_cases());
+    out.extend(resampling_cases());
     out.extend(aa_cases());
     out.extend(structure_cases());
     out

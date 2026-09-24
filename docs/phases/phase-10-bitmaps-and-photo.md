@@ -297,6 +297,16 @@ light, and doing it in encoded space visibly darkens downscaled images. Convert
 to linear for the filter, convert back. The same exception `research/03 §3.7`
 already grants to blur and high-quality scaling.
 
+**Outcome (XARA-US-0052, 2026-09-24).** Measured in
+`crates/xarast-render/tests/resampling.rs`, numbers in
+`docs/memory/render.md`, "Resampling quality": Mitchell–Netravali for
+magnification, as hypothesised; the tent widened by the footprint for 1–2×
+minification (trilinear lost at ÷1.5 on every test image) and trilinear
+over a linear-light pyramid beyond. Minification is in linear light as
+stated above, but **magnification averages in encoded sRGB**: it measured
+better for every kernel, with less ringing and no light leak into dark
+texels of a magnified small bitmap.
+
 ### W10.5 — Memory budget and out-of-core
 
 | ID | Task | Crate | Size | Depends on |
