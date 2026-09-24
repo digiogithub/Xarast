@@ -493,6 +493,8 @@ pub enum InfobarField {
     StopPosition,
     /// The selected handle's transparency, in per cent.
     StopLevel,
+    /// A bitmap fill's resolution, in dots per inch (phase 10, T10.3.1).
+    BitmapDpi,
     /// The text's font family (phase 9, T9.4.9).
     TextFont,
     /// The text's size, in points.
@@ -553,6 +555,7 @@ impl InfobarField {
             InfobarField::TranspMode => "Mode",
             InfobarField::StopPosition => "Position",
             InfobarField::StopLevel => "Transparency",
+            InfobarField::BitmapDpi => "Resolution",
             InfobarField::TextFont => "Font",
             InfobarField::TextSize => "Size",
             InfobarField::TextBold => "Bold",
@@ -596,6 +599,9 @@ impl InfobarField {
             InfobarField::TranspMode => "How the transparency combines with what is below",
             InfobarField::StopPosition => "Position of the selected stop, in per cent",
             InfobarField::StopLevel => "Transparency of the selected handle, in per cent",
+            InfobarField::BitmapDpi => {
+                "Resolution the bitmap fill shows its image at, in dots per inch"
+            }
             InfobarField::TextFont => "Font family of the text",
             InfobarField::TextSize => "Font size in points",
             InfobarField::TextBold => "Bold text",
@@ -1069,6 +1075,9 @@ pub enum ToolAction {
     Break,
     /// Join two selected end points.
     Join,
+    /// Resize the selected bitmap fills to their images' natural size
+    /// (phase 10, T10.3.1).
+    NaturalSize,
 }
 
 impl ToolAction {
@@ -1087,6 +1096,7 @@ impl ToolAction {
             ToolAction::ClosePath => "Close path",
             ToolAction::Break => "Break at points",
             ToolAction::Join => "Join ends",
+            ToolAction::NaturalSize => "Natural size",
         }
     }
 }

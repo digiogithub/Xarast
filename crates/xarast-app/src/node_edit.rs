@@ -944,6 +944,8 @@ impl Tool for ShapeEditorTool {
                 cx.requests.overlay_changed = true;
                 true
             }
+            // A fill tool's action.
+            ToolAction::NaturalSize => false,
             ToolAction::SelectAll => {
                 let paths = edited(cx.doc, cx.edit);
                 if paths.is_empty() {

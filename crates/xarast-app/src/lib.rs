@@ -83,6 +83,7 @@ pub mod ops;
 mod paint;
 pub mod pen;
 pub mod picking;
+pub mod place;
 pub mod prefs;
 pub mod prompt;
 pub mod recent;

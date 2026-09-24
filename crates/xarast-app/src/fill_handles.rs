@@ -16,10 +16,13 @@
 //! | conical | `centre` | to the zero direction | the sweep's circle |
 //! | diamond | `centre` | to `corner1` and `corner2` | the rhombus |
 //! | three / four colour | one per colour | — | the edges between them |
+//! | bitmap | `centre` | to the middles of the two axis edges | the placement |
+//! | bitmap in perspective | `centre`, four corners | — | the quadrilateral |
 //!
 //! Ramp stops are diamonds *on* the arm at their parametric position.
 
 use xarast_color::Stop;
+use xarast_doc::bitmap_fill::bitmap_virtual_points;
 use xarast_doc::fill::FillGeometry;
 use xarast_doc::fill_edit::{FillHandle, StopTarget, fill_arm};
 use xarast_geom::{Matrix, Point, Vector};
@@ -231,12 +234,21 @@ pub fn fill_handles<S: Stop>(g: &FillGeometry<S>, object_to_doc: &Matrix) -> Fil
             out.handles
                 .push(h(FillHandle::End3, d, HandleKind::CornerBlob));
         }
-        // Flat fills have no handles; bitmap handles are phase 10's,
-        // fractal and noise fills phase 13's.
-        FillGeometry::Flat { .. }
-        | FillGeometry::Bitmap { .. }
-        | FillGeometry::Fractal { .. }
-        | FillGeometry::Noise { .. } => {}
+        FillGeometry::Bitmap {
+            origin,
+            axis_x,
+            axis_y,
+            persp,
+            ..
+        } => bitmap_handles(
+            m(origin),
+            m(axis_x),
+            m(axis_y),
+            persp.as_ref().map(|p| (m(&p.p2), m(&p.p3))),
+            &mut out,
+        ),
+        // Flat fills have no handles; fractal and noise fills are phase 13's.
+        FillGeometry::Flat { .. } | FillGeometry::Fractal { .. } | FillGeometry::Noise { .. } => {}
     }
     if let Some((a, b)) = fill_arm(g) {
         let (a, b) = (m(&a), m(&b));
@@ -253,6 +265,57 @@ pub fn fill_handles<S: Stop>(g: &FillGeometry<S>, object_to_doc: &Matrix) -> Fil
         }
     }
     out
+}
+
+/// A bitmap fill's handles (phase 10, T10.3.2; `xarast_doc::bitmap_fill`):
+/// the centre and the middles of the two axis edges, with arms from the
+/// centre and the placement's outline dashed; in perspective, the four
+/// corners and the centre.
+fn bitmap_handles(
+    origin: Point,
+    axis_x: Point,
+    axis_y: Point,
+    persp: Option<(Point, Point)>,
+    out: &mut FillHandles,
+) {
+    let h = |id, pos, kind| Handle { id, pos, kind };
+    match persp {
+        None => {
+            let [c, mx, my] = bitmap_virtual_points(origin, axis_x, axis_y);
+            let far = axis_x + (axis_y - origin);
+            out.guides.push(Guide::Dashed {
+                points: vec![origin, axis_x, far, axis_y],
+                closed: true,
+            });
+            out.guides.push(Guide::Arrow { from: c, to: mx });
+            out.guides.push(Guide::Arrow { from: c, to: my });
+            out.handles.push(h(FillHandle::Centre, c, HandleKind::Blob));
+            out.handles
+                .push(h(FillHandle::End, mx, HandleKind::ArrowHead));
+            out.handles
+                .push(h(FillHandle::End2, my, HandleKind::ArrowHead));
+        }
+        Some((p2, p3)) => {
+            let pts = [origin, axis_x, p3, p2];
+            let (sx, sy) = pts
+                .iter()
+                .fold((0.0, 0.0), |(x, y), q| (x + q.to_f64().0, y + q.to_f64().1));
+            let c = Point::from_f64_round(sx / 4.0, sy / 4.0);
+            out.guides.push(Guide::Dashed {
+                points: pts.to_vec(),
+                closed: true,
+            });
+            out.handles.push(h(FillHandle::Centre, c, HandleKind::Blob));
+            for (id, p) in [
+                (FillHandle::Start, origin),
+                (FillHandle::End, axis_x),
+                (FillHandle::End2, p2),
+                (FillHandle::End3, p3),
+            ] {
+                out.handles.push(h(id, p, HandleKind::CornerBlob));
+            }
+        }
+    }
 }
 
 /// The positions of a fill's intermediate stops.
@@ -317,6 +380,16 @@ pub fn hit_handle(
 /// stop fields, edit.
 #[must_use]
 pub fn stop_target<S: Stop>(g: &FillGeometry<S>, h: FillHandle) -> Option<StopTarget> {
+    // A bitmap fill has values only as a contone pair: the centre is its
+    // first colour, the x-axis handle its second.
+    if let FillGeometry::Bitmap { contone, .. } = g {
+        return match h {
+            _ if contone.is_none() => None,
+            FillHandle::Centre | FillHandle::Start => Some(StopTarget::From),
+            FillHandle::End => Some(StopTarget::To),
+            _ => None,
+        };
+    }
     let corner = matches!(
         g,
         FillGeometry::ThreeColour { .. } | FillGeometry::FourColour { .. }
