@@ -29,7 +29,7 @@
 //! # Who files here
 //!
 //! Every walker given the cache, and the bitmap gallery's thumbnail
-//! thread ([`DecodedImages::image_for`]), which decodes through the same
+//! thread (`DecodedImages::image_for`), which decodes through the same
 //! path and under the process-wide budget the session's walkers use. So a
 //! bitmap is decoded once whichever of the two sees it first; two that
 //! miss at the same moment both decode, and the first filed wins.
@@ -50,7 +50,7 @@
 //! walkers evaluate a chain the view already evaluated no more than they
 //! decode. A derived entry goes when its master does, and when no object
 //! attached to the document uses its chain any more
-//! ([`DecodedImages::retain_derived`], which the walker calls when the
+//! (`DecodedImages::retain_derived`, which the walker calls when the
 //! document changes): an undo that brings a chain back evaluates it
 //! again.
 

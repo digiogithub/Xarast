@@ -74,7 +74,7 @@
 //! # Layouts
 //!
 //! The tool lays stories out itself, as the walker does
-//! ([`crate::text::lay_story`]), and keeps them in a cache keyed by the
+//! (`text::lay_story`), and keeps them in a cache keyed by the
 //! document's epoch: any committed edit (undo included) drops them all. A
 //! story on a path keeps its fit, so the caret, hit tests and highlight
 //! follow the drawn text ([`CaretMap::on_path`]).

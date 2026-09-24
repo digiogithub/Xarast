@@ -2,7 +2,7 @@
 //! `research/06 §6.7`).
 //!
 //! The format crate knows no fonts; it asks a
-//! [`TextPlacer`](xarast_format::svg::TextPlacer) for the position of
+//! [`TextPlacer`] for the position of
 //! every character so that the SVG base shows a story where Xarast draws
 //! it. This one lays the story out exactly as the walker does (the same
 //! attribute bridge, the same shaper, the same fit onto a path) and

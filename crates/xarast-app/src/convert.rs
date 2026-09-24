@@ -5,7 +5,7 @@
 //! * A **shape** keeps its `NodeId` and its attribute children; only its
 //!   kind changes (`tools.md` decision 30).
 //! * A **text story** is laid out exactly as the walker draws it
-//!   ([`crate::text::story_outlines`]) and replaced by a group of one path
+//!   (`text::story_outlines`) and replaced by a group of one path
 //!   per attribute run that keeps the story's text
 //!   ([`xarast_doc::convert_story_to_shapes`]). A story with nothing to
 //!   draw (only spaces, or no font at all) is left alone.

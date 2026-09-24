@@ -514,7 +514,7 @@ pub fn shrink(w: u32, h: u32, rgba: &[u8]) -> Thumb {
 /// A resource's thumbnail; `None` when it cannot be decoded.
 ///
 /// The pixels come from the walker's decode path
-/// ([`crate::walker::ready_image`], the one dispatch over the façade and
+/// (`walker::ready_image`, the one dispatch over the façade and
 /// the `.xar` wrappings) through `images`, the document's
 /// [`DecodedImages`]: a bitmap the view already decoded is not decoded
 /// again, and one decoded here is filed for the view (XARA-T-0293). The
