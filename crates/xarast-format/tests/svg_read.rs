@@ -1438,3 +1438,102 @@ fn a_feather_comes_back_on_the_node_that_owns_it() {
     );
     assert_eq!(first, resave(&mut o), "a fixed point");
 }
+
+/// A shadow controller as the `.xar` importer builds it, with parameters
+/// 6 decimals cannot carry (an `f32` darkness of `1 − 94/255`, a floor
+/// tilt, a profile of odd bits) and a colour that is a palette reference or
+/// a CMYK literal (XARA-T-0318).
+fn shadow_doc() -> Document {
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    let ink = b.define_colour(ColourDef::normal(ColourValue::rgb(0.1, 0.2, 0.5)).named("Ink"));
+    let shadows = [
+        xarast_doc::ShadowParams {
+            kind: xarast_doc::ShadowKind::Wall,
+            offset: Point::raw(2_220, -3_750),
+            blur: Mp::new(5_250),
+            darkness: (1.0 - 94.0 / 255.0) as f32,
+            profile: BiasGain::new(0.123_456_7, -0.3),
+            colour: Colour::Indexed {
+                id: ink,
+                tint: None,
+            },
+            ..xarast_doc::ShadowParams::default()
+        },
+        xarast_doc::ShadowParams {
+            kind: xarast_doc::ShadowKind::Floor,
+            tilt: 0.785_397,
+            scale: 0.37,
+            glow_width: Mp::new(0),
+            colour: Colour::Direct(ColourValue::cmyk(0.1, 0.7, 0.2, 0.05)),
+            ..xarast_doc::ShadowParams::default()
+        },
+        xarast_doc::ShadowParams {
+            kind: xarast_doc::ShadowKind::Glow,
+            glow_width: Mp::new(3_000),
+            ..xarast_doc::ShadowParams::default()
+        },
+    ];
+    for (i, p) in shadows.into_iter().enumerate() {
+        let kind = LiveKind::Shadow(Box::new(p));
+        let live = |role| {
+            NodeKind::Live(Box::new(LiveNode {
+                role,
+                kind: kind.clone(),
+                regen: RegenState::Clean,
+                name: None,
+            }))
+        };
+        b.node(live(LiveRole::Controller)).unwrap();
+        b.push_scope().unwrap();
+        b.attribute(AttrValue::LineWidth(Mp::new(500))).unwrap();
+        b.node(live(LiveRole::Generated)).unwrap();
+        b.node(live(LiveRole::Source)).unwrap();
+        b.push_scope().unwrap();
+        let x = 50_000 + 150_000 * i32::try_from(i).unwrap();
+        b.node(triangle(x, 300_000)).unwrap();
+        b.push_scope().unwrap();
+        b.attribute(flat(rgb(0.9, 0.5, 0.1))).unwrap();
+        b.pop_scope();
+        b.pop_scope();
+        b.pop_scope();
+    }
+    b.finish().unwrap().0
+}
+
+#[test]
+fn a_shadow_reads_back_exactly_and_saves_to_the_same_bytes() {
+    let doc = shadow_doc();
+    let first = package(&doc, SvgOptions::default());
+    let svg = svg_of(&first);
+    assert!(svg.contains("xarast:darkness=\".6313726\""), "{svg}");
+    assert!(svg.contains("xarast:colour-ref=\"#c-1\""), "{svg}");
+    assert!(svg.contains("xarast:glow-width=\"3\""), "{svg}");
+    let mut o = open(&first);
+    assert!(o.diagnostics.is_empty(), "{:?}", o.diagnostics);
+    same_text(&normal_form(&doc), &normal_form(&o.document));
+    let params: Vec<xarast_doc::ShadowParams> = o
+        .document
+        .tree
+        .preorder(o.document.tree.root())
+        .filter_map(|n| match o.document.tree.kind(n) {
+            Some(NodeKind::Live(l)) if l.role == LiveRole::Controller => match &l.kind {
+                LiveKind::Shadow(p) => Some((**p).clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(params.len(), 3);
+    // Everything but a literal colour comes back bit for bit; the palette
+    // colour stays a palette colour.
+    assert_eq!(params[0].darkness, (1.0 - 94.0 / 255.0) as f32);
+    assert_eq!(params[0].profile, BiasGain::new(0.123_456_7, -0.3));
+    assert!(matches!(
+        params[0].colour,
+        Colour::Indexed { tint: None, .. }
+    ));
+    assert_eq!(params[1].tilt, 0.785_397);
+    assert_eq!(params[1].scale, 0.37);
+    assert_eq!(params[2].glow_width, Mp::new(3_000));
+    assert_eq!(first, resave(&mut o), "a fixed point");
+}

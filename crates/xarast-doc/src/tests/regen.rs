@@ -28,6 +28,7 @@ fn shadow(role: LiveRole, blur: i32) -> NodeKind {
             profile: BiasGain::IDENTITY,
             scale: 1.0,
             tilt: 0.0,
+            ..ShadowParams::default()
         })),
         regen: RegenState::Clean,
         name: None,

@@ -412,6 +412,7 @@ fn compromises(s: &fsvg::Stats, svg: &str, failed_images: usize) -> Vec<Compromi
         ("unknown .xar records", s.opaque),
         ("arrowheads", s.arrows_unbaked),
         ("feathering", s.effects_approximated),
+        ("shadows (recorded, not baked)", s.shadows_unbaked),
     ];
     let simplified = [
         (

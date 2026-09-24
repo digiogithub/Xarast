@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use xarast_color::Colour;
 use xarast_geom::{BiasGain, Mp, Point};
 
 use crate::kind::NodeKind;
@@ -160,23 +161,142 @@ pub enum ShadowKind {
     Glow,
 }
 
-/// Parameters of a shadow.
+/// Parameters of a shadow (`research/02 §6.9`; the `.xar` records are
+/// `research/01`'s 4050 and 4051).
+///
+/// Every field is kept whatever the kind, as the original keeps them: a
+/// wall shadow switched to a floor shadow finds its floor settings again.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShadowParams {
     /// Wall, floor or glow.
     pub kind: ShadowKind,
-    /// Offset from the object.
+    /// Wall shadows only: the offset from the object (a vector, kept as a
+    /// point).
     pub offset: Point,
-    /// Blur radius.
+    /// The penumbra: the blur's **diameter** (the renderer blurs by a disc
+    /// of half of it).
     pub blur: Mp,
-    /// Darkness, `0.0..=1.0`.
+    /// Darkness, `0.0..=1.0`: the shadow's opacity where it is densest.
     pub darkness: f32,
-    /// The blur profile.
+    /// The blur profile, as the file stores it. The original negates the
+    /// bias before mapping the blurred silhouette through it.
     pub profile: BiasGain,
-    /// Floor shadows only: the vertical scale.
+    /// Floor shadows only: the vertical scale, the shadow's height as a
+    /// fraction of the object's.
     pub scale: f32,
-    /// Floor shadows only: the tilt.
+    /// Floor shadows only: the tilt, radians clockwise from the vertical.
     pub tilt: f32,
+    /// Glow shadows only: how far the silhouette grows before it is blurred.
+    pub glow_width: Mp,
+    /// The shadow's colour: the fill the original's shadow node carries.
+    pub colour: Colour,
+}
+
+impl Default for ShadowParams {
+    /// The original's defaults for a new shadow: a wall shadow 5 px right
+    /// and 5 px down, a 6 px penumbra, 25 % dark, black; a floor at 45° and
+    /// half height; a 4 px glow (`research/02 §6.9`).
+    fn default() -> ShadowParams {
+        ShadowParams {
+            kind: ShadowKind::Wall,
+            offset: Point::raw(3750, -3750),
+            blur: Mp::new(4500),
+            darkness: 0.25,
+            profile: BiasGain::IDENTITY,
+            scale: 0.5,
+            tilt: core::f32::consts::FRAC_PI_4,
+            glow_width: Mp::new(3000),
+            colour: Colour::Direct(xarast_color::ColourValue::BLACK),
+        }
+    }
+}
+
+impl ShadowParams {
+    /// Where the shadow's silhouette goes before it is blurred, as an
+    /// affine map in document space, `[a, b, c, d, e, f]` with
+    /// `x' = a·x + c·y + e` and `y' = b·x + d·y + f` (`kurbo`'s order).
+    /// `source` is the bounding box of what casts the shadow.
+    ///
+    /// A wall shadow is translated by its offset; a floor shadow is
+    /// squashed to [`scale`](Self::scale) of its height and sheared by
+    /// [`tilt`](Self::tilt) about the middle of the source's bottom edge;
+    /// a glow stays where it is (it grows instead).
+    #[must_use]
+    pub fn silhouette_map(&self, source: xarast_geom::Rect) -> [f64; 6] {
+        match self.kind {
+            ShadowKind::Wall => [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                f64::from(self.offset.x.raw()),
+                f64::from(self.offset.y.raw()),
+            ],
+            ShadowKind::Glow => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            ShadowKind::Floor => {
+                let h = finite_or(f64::from(self.scale), 1.0).clamp(-1e3, 1e3);
+                let t = finite_or(f64::from(self.tilt).tan(), 0.0).clamp(-1e3, 1e3);
+                // The original anchors at the middle of the bottom edge; a
+                // vertical scale and a horizontal shear both leave that
+                // whole edge where it is, so only its height matters.
+                let ay = if source.is_empty() {
+                    0.0
+                } else {
+                    f64::from(source.lo.y.raw())
+                };
+                // x' = x + t·h·(y − ay), y' = ay + h·(y − ay).
+                [1.0, 0.0, t * h, h, -t * h * ay, ay - h * ay]
+            }
+        }
+    }
+
+    /// Everything the shadow can darken, given the bounding box of what
+    /// casts it: the silhouette moved by
+    /// [`silhouette_map`](Self::silhouette_map), grown by the glow width,
+    /// and by the whole penumbra (twice the blur radius, as the original's
+    /// bounds do, which leaves room for the antialiased edge).
+    #[must_use]
+    pub fn extent(&self, source: xarast_geom::Rect) -> xarast_geom::Rect {
+        if source.is_empty() {
+            return source;
+        }
+        let m = self.silhouette_map(source);
+        let (x0, y0) = (f64::from(source.lo.x.raw()), f64::from(source.lo.y.raw()));
+        let (x1, y1) = (f64::from(source.hi.x.raw()), f64::from(source.hi.y.raw()));
+        let mut lo = (f64::INFINITY, f64::INFINITY);
+        let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for (x, y) in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)] {
+            let px = m[0] * x + m[2] * y + m[4];
+            let py = m[1] * x + m[3] * y + m[5];
+            lo = (lo.0.min(px), lo.1.min(py));
+            hi = (hi.0.max(px), hi.1.max(py));
+        }
+        let mut grow = f64::from(self.blur.raw().max(0));
+        if self.kind == ShadowKind::Glow {
+            grow += f64::from(self.glow_width.raw().max(0));
+        }
+        let r = xarast_geom::Rect::new(
+            Point::from_f64_round((lo.0 - grow).floor(), (lo.1 - grow).floor()),
+            Point::from_f64_round((hi.0 + grow).ceil(), (hi.1 + grow).ceil()),
+        );
+        if r.is_empty() { source } else { r }
+    }
+
+    /// The shadow's opacity where it is densest, as an 8-bit level: the
+    /// original paints it through a transparency of
+    /// `round(255 × (1 − darkness))` (`research/02 §6.9`).
+    #[must_use]
+    pub fn opacity_level(&self) -> u8 {
+        let d = f64::from(self.darkness);
+        let d = if d.is_nan() { 0.0 } else { d.clamp(0.0, 1.0) };
+        let transp = (0.5 + 255.0 * (1.0 - d)).floor().clamp(0.0, 255.0);
+        // In 0..=255 by the clamp.
+        255 - transp as u8
+    }
+}
+
+fn finite_or(v: f64, or: f64) -> f64 {
+    if v.is_finite() { v } else { or }
 }
 
 /// Which sort of bevel.
@@ -305,4 +425,89 @@ pub fn in_generated(tree: &Tree, id: NodeId) -> bool {
     std::iter::once(id)
         .chain(tree.ancestors(id))
         .any(|a| matches!(tree.kind(a), Some(NodeKind::Live(l)) if l.role.needs_parent()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xarast_geom::Rect;
+
+    fn apply(m: [f64; 6], x: f64, y: f64) -> (f64, f64) {
+        (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+    }
+
+    #[test]
+    fn a_wall_moves_a_floor_squashes_and_leans_and_a_glow_stays() {
+        let src = Rect::raw(100_000, 100_000, 300_000, 300_000);
+        let wall = ShadowParams {
+            offset: Point::raw(5_000, -7_000),
+            ..ShadowParams::default()
+        };
+        assert_eq!(
+            apply(wall.silhouette_map(src), 0.0, 0.0),
+            (5_000.0, -7_000.0)
+        );
+        let floor = ShadowParams {
+            kind: ShadowKind::Floor,
+            scale: 0.5,
+            tilt: core::f32::consts::FRAC_PI_4,
+            ..ShadowParams::default()
+        };
+        let m = floor.silhouette_map(src);
+        // The bottom edge stays; the top comes down to half height and
+        // leans right by tan 45° × that height.
+        let (bx, by) = apply(m, 150_000.0, 100_000.0);
+        assert!((bx - 150_000.0).abs() < 1e-6 && (by - 100_000.0).abs() < 1e-6);
+        let (tx, ty) = apply(m, 150_000.0, 300_000.0);
+        assert!((ty - 200_000.0).abs() < 1e-6, "{ty}");
+        assert!((tx - 250_000.0).abs() < 1.0, "{tx}");
+        let glow = ShadowParams {
+            kind: ShadowKind::Glow,
+            ..ShadowParams::default()
+        };
+        assert_eq!(glow.silhouette_map(src), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_extent_covers_the_moved_silhouette_its_glow_and_its_penumbra() {
+        let src = Rect::raw(0, 0, 100_000, 100_000);
+        let wall = ShadowParams {
+            offset: Point::raw(10_000, -20_000),
+            blur: Mp::new(6_000),
+            ..ShadowParams::default()
+        };
+        assert_eq!(
+            wall.extent(src),
+            Rect::raw(10_000 - 6_000, -20_000 - 6_000, 116_000, 86_000)
+        );
+        let glow = ShadowParams {
+            kind: ShadowKind::Glow,
+            blur: Mp::new(1_000),
+            glow_width: Mp::new(4_000),
+            ..ShadowParams::default()
+        };
+        assert_eq!(
+            glow.extent(src),
+            Rect::raw(-5_000, -5_000, 105_000, 105_000)
+        );
+        assert!(wall.extent(Rect::EMPTY).is_empty());
+    }
+
+    #[test]
+    fn the_opacity_is_the_complement_of_the_originals_transparency() {
+        let at = |d: f32| {
+            ShadowParams {
+                darkness: d,
+                ..ShadowParams::default()
+            }
+            .opacity_level()
+        };
+        assert_eq!(at(1.0), 255);
+        assert_eq!(at(0.0), 0);
+        // 25 %: a transparency of round(191.25) = 191.
+        assert_eq!(at(0.25), 64);
+        assert_eq!(at(0.5), 127);
+        assert_eq!(at(f32::NAN), 0);
+        assert_eq!(at(7.0), 255);
+    }
 }

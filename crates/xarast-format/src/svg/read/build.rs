@@ -989,6 +989,8 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
                 profile: prof("profile"),
                 scale: f("scale", 1.0),
                 tilt: f("tilt", 0.0),
+                glow_width: mpv("glow-width"),
+                colour: self.shadow_colour(g("colour"), g("colour-ref")),
             })),
             "bevel" => LiveKind::Bevel(Box::new(BevelParams {
                 bevel_type: match g("type") {

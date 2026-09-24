@@ -30,7 +30,7 @@ use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Vector};
 
 use super::defs::Defs;
 use super::frame::Frame;
-use super::num::{f32s, f64s, mp};
+use super::num::{f32s, f64s, f64s_exact, mp};
 use super::paint::{
     BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, transparency,
 };
@@ -1719,6 +1719,20 @@ impl<'d, 'b> Emitter<'d, 'b> {
         self.close(tag);
     }
 
+    /// A shadow's colour as the paint writer spells a flat colour: 8-bit
+    /// sRGB, plus the palette reference when it is an untinted palette
+    /// colour (`xarast:colour`, `xarast:colour-ref`).
+    fn shadow_colour(&self, c: &xarast_color::Colour) -> (String, Option<String>) {
+        let rgba = c.resolve(&self.doc.resources.colours).to_rgba8();
+        let reference = match c {
+            xarast_color::Colour::Indexed { id, tint: None } => {
+                self.palette.get(id).map(|p| format!("#{p}"))
+            }
+            _ => None,
+        };
+        (crate::svg::paint::hex(rgba), reference)
+    }
+
     fn live(&mut self, n: NodeId, l: &LiveNode) {
         self.stats.live += 1;
         let kind = live_name(&l.kind);
@@ -1727,7 +1741,16 @@ impl<'d, 'b> Emitter<'d, 'b> {
         match l.role {
             LiveRole::Controller => {
                 el.a("xarast:kind", kind);
-                prelude = Some(live_params(&self.frame, &l.kind));
+                let colour = match &l.kind {
+                    LiveKind::Shadow(sh) => {
+                        // Not baked yet (§6.8.1): an external viewer draws
+                        // the object without its shadow.
+                        self.stats.shadows_unbaked += 1;
+                        Some(self.shadow_colour(&sh.colour))
+                    }
+                    _ => None,
+                };
+                prelude = Some(live_params(&self.frame, &l.kind, colour));
             }
             LiveRole::Source => {
                 el.a("xarast:kind", "live-source");
@@ -2267,7 +2290,9 @@ fn live_name(k: &LiveKind) -> &'static str {
 }
 
 /// The parametric element of a live effect (§6.8).
-fn live_params(frame: &Frame, k: &LiveKind) -> String {
+///
+/// `colour` is a shadow's colour as `Emitter::shadow_colour` spells it.
+fn live_params(frame: &Frame, k: &LiveKind, colour: Option<(String, Option<String>)>) -> String {
     let profile = |p: xarast_geom::BiasGain| format!("{} {}", f64s(p.bias, 6), f64s(p.gain, 6));
     let mut s = String::new();
     match k {
@@ -2310,10 +2335,34 @@ fn live_params(frame: &Frame, k: &LiveKind) -> String {
             let (dx, dy) = frame.vec(Vector::new(sh.offset.x, sh.offset.y));
             attr(&mut s, "xarast:offset", &format!("{} {}", mp(dx), mp(dy)));
             attr(&mut s, "xarast:blur", &mp(i64::from(sh.blur.raw())));
-            attr(&mut s, "xarast:darkness", &f64s(f64::from(sh.darkness), 6));
-            attr(&mut s, "xarast:profile", &profile(sh.profile));
-            attr(&mut s, "xarast:scale", &f64s(f64::from(sh.scale), 6));
-            attr(&mut s, "xarast:tilt", &f64s(f64::from(sh.tilt), 6));
+            // Shortest exact spellings: a reload gives the model's values
+            // bit for bit (the corpus darkness 1 − 94/255 is not 6
+            // decimals of an `f32`).
+            attr(&mut s, "xarast:darkness", &f32s(sh.darkness));
+            attr(
+                &mut s,
+                "xarast:profile",
+                &format!(
+                    "{} {}",
+                    f64s_exact(sh.profile.bias),
+                    f64s_exact(sh.profile.gain)
+                ),
+            );
+            attr(&mut s, "xarast:scale", &f32s(sh.scale));
+            attr(&mut s, "xarast:tilt", &f32s(sh.tilt));
+            if sh.glow_width != xarast_geom::Mp::ZERO {
+                attr(
+                    &mut s,
+                    "xarast:glow-width",
+                    &mp(i64::from(sh.glow_width.raw())),
+                );
+            }
+            if let Some((hex, reference)) = &colour {
+                attr(&mut s, "xarast:colour", hex);
+                if let Some(r) = reference {
+                    attr(&mut s, "xarast:colour-ref", r);
+                }
+            }
         }
         LiveKind::Bevel(b) => {
             s.push_str("<xarast:bevel");

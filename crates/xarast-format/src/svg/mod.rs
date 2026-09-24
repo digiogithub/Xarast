@@ -284,6 +284,9 @@ pub struct Stats {
     pub strokes_approximated: usize,
     /// Feathering recorded but not drawn.
     pub effects_approximated: usize,
+    /// Shadows recorded (`<xarast:shadow>`) but not baked: an external
+    /// viewer draws the object without its shadow.
+    pub shadows_unbaked: usize,
     /// `ClipRegion` attributes, which nothing draws yet.
     pub clip_regions_ignored: usize,
     /// Non-attribute children of ink nodes, drawn before them as siblings.

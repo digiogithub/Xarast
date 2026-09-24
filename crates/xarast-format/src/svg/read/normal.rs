@@ -453,8 +453,25 @@ impl Nf<'_> {
                 self.container(n, depth, head, false);
             }
             NodeKind::Live(l) => {
-                let params = match l.role {
-                    xarast_doc::LiveRole::Controller => format!("{:?}", l.kind),
+                let params = match (l.role, &l.kind) {
+                    // A shadow's colour as the profile carries it: 8-bit
+                    // sRGB, and its palette reference when it has one.
+                    (xarast_doc::LiveRole::Controller, xarast_doc::LiveKind::Shadow(sh)) => {
+                        let rgba = sh.colour.resolve(&self.doc.resources.colours).to_rgba8();
+                        let reference = match &sh.colour {
+                            xarast_color::Colour::Indexed { id, tint: None } => {
+                                self.palette.get(id).cloned()
+                            }
+                            _ => None,
+                        };
+                        let mut p = (**sh).clone();
+                        p.colour = xarast_color::Colour::Direct(xarast_color::ColourValue::BLACK);
+                        format!(
+                            "Shadow({p:?}) colour={} ref={reference:?}",
+                            hex(xarast_color::Rgba8 { a: 255, ..rgba })
+                        )
+                    }
+                    (xarast_doc::LiveRole::Controller, _) => format!("{:?}", l.kind),
                     _ => l.kind.type_name().to_owned(),
                 };
                 let head = format!(
