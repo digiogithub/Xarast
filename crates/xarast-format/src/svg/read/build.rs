@@ -166,6 +166,15 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
         self.dom.elem(k)
     }
 
+    /// Whether `v` (a `filter` value) names a filter the writer derives
+    /// from the model (`xarast:filter="feather"`, `svg/effect.rs`): the
+    /// parameters are read from their twin and the filter is dropped.
+    fn is_derived_filter(&self, v: &str) -> bool {
+        self.by_ref(v)
+            .and_then(|k| self.elem(k))
+            .is_some_and(|f| f.is(NS_SVG, "filter") && xa(f, "filter") == Some("feather"))
+    }
+
     /// The element an `href`/`url()` names.
     pub(super) fn by_ref(&self, v: &str) -> Option<usize> {
         local_ref(v).and_then(|id| self.ids.get(id).copied())
@@ -314,6 +323,7 @@ impl<'d, 'r, 'f> Reader<'d, 'r, 'f> {
             let common_known = match ns {
                 "" => {
                     matches!(local, "id" | "style" | "transform")
+                        || (local == "filter" && self.is_derived_filter(&a.value))
                         || (local == "class" && self.sheet.knows_all(&a.value))
                         || style::is_known_property(local)
                 }

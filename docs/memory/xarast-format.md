@@ -29,7 +29,7 @@ application's layout; the render round trip is exact for 59/59 again and
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
 | W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
-| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 geometry baking of conical, diamond, 3/4-colour fills done (XARA-US-0043), filter/raster baking and `BakeProvider` open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `bake`, `style`, `emit`), `save.rs` |
+| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 geometry baking of conical, diamond, 3/4-colour fills done (XARA-US-0043), feather filters done (`effect`, XARA-T-0317), other filter/raster baking and `BakeProvider` open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `bake`, `effect`, `style`, `emit`), `save.rs` |
 | W4 SVG read + preservation | F4.1–F4.6, F4.8–F4.10 done; F4.7 marking done, deletion accounting open (XARA-T-0113); XARA-T-0105 (localise + normal form) and T-0107 (passes 4–5) done | `svg/read/` (`dom`, `parse`, `style`, `build/{ink,paint,root}`, `normal`), `open.rs` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4 lock UX + signals, F6.5 autosave and F6.7 recovery done **in the app** (`xarast-app` `locks`/`autosave`, XARA-US-0084); F6.6 journal, F6.8, F6.9 open | `durability/` |
@@ -720,8 +720,31 @@ back as one feather per member — caught by the corpus render round trip
   per-member owners (each member feathered alone), as they were written.
 - Pinned by `tests/svg_read.rs`,
   `a_feather_comes_back_on_the_node_that_owns_it`, and by
-  `xarast-app/tests/xarast_roundtrip.rs` over the corpus. Baking a
-  filter for external viewers is still C10 (XARA-T-0317).
+  `xarast-app/tests/xarast_roundtrip.rs` over the corpus.
+- **The base layer draws it** (XARA-T-0317): the owner also carries
+  `filter="url(#f…)"` to a `<filter xarast:filter="feather">` built by
+  `svg/effect.rs` from the feather alone (chain, region and measurements:
+  `export.md`, "Feathers in SVG"). It is written in both dialects, so a
+  `.xarast` opened in a browser or Inkscape shows the feathers. It is
+  *derived*: the reader recognises the def by `xarast:filter` (as it does
+  `transparency-mask` and `contone`, `is_known_def`) and a `filter`
+  attribute naming one (`Reader::is_derived_filter`, in `common`), drops
+  both, and reads the feather from `xarast:feather`; the next save derives
+  the same filter again. Any other `filter` stays foreign baggage.
+  Pinned by `svg_read.rs`,
+  `a_feather_is_drawn_by_a_filter_that_the_reader_ignores` (no baggage,
+  re-save identical, no `xarast` in interchange), and by the corpus
+  (`svg_roundtrip` 59/59 byte fixed point, `xarast_roundtrip`).
+- **Order caveat:** SVG applies `filter` before `clip-path`/`mask` on the
+  same element. For ink elements that is harmless (the feather multiplies
+  alpha; transparency masks commute with it). For a feathered ClipView
+  `<g>` the filter sees the unclipped content, so its fade follows the
+  wrong outline; no corpus file has one. A wrapper `<g>` would fix it and
+  needs a reader rule — not done.
+- **`svg/effect.rs` is the seam for other live effects** (shadow, glow,
+  bevel, §6.8): `FilterChain::new(kind, Region)`, `push` primitives,
+  `finish(defs)`; mark the kind in `xarast:filter` and add it to the
+  reader's derived list.
 
 ## Photo operations: `<xarast:photo-ops>` (XARA-US-0054, 2026-09-24)
 
@@ -1048,7 +1071,7 @@ the file means", not crashes; each input is now a unit test in
   SVG mask/pattern of a bitmap ignores `Simple` (clamp) and mirrored
   tiling — patterns always repeat — and a transparency's contone levels.
 - W3 leftovers: filter/raster baking and `BakeProvider` (fractal, noise,
-  feathers, perspective gradients, projective four-colour fills;
+  ~~feathers~~ (filter since XARA-T-0317), perspective gradients, projective four-colour fills;
   XARA-T-0102 — geometry baking is done, XARA-US-0043), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
   entry (§5.9, SHOULD), split layout above 32 spreads / 8 MiB.

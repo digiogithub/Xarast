@@ -29,10 +29,11 @@ use xarast_doc::{
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Vector};
 
 use super::defs::Defs;
+use super::effect;
 use super::frame::Frame;
 use super::num::{f32s, f64s, mp};
 use super::paint::{
-    BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, transparency,
+    BitmapRef, PaintCtx, PaintOut, TranspOut, blend_of, colour_paint, hex, rgba, transparency,
 };
 use super::pathdata::path_data;
 use super::style::{self, GroupKind, Styler, Vals, p};
@@ -1515,7 +1516,95 @@ impl<'d, 'b> Emitter<'d, 'b> {
             });
         if let Some((size, profile)) = owned {
             el.a("xarast:feather", feather_text(size, profile));
-            self.stats.effects_approximated += 1;
+            let filter = self.feather_filter(n, el, size, profile);
+            el.a("filter", format!("url(#{filter})"));
+            self.stats.effects_baked += 1;
+        }
+    }
+
+    /// The filter that draws `n`'s feather in a browser (`svg/effect.rs`),
+    /// in the user space of `el`: the spread's, or a placed image's unit
+    /// square when it has a `transform`.
+    fn feather_filter(
+        &mut self,
+        n: NodeId,
+        el: &El,
+        size: Mp,
+        profile: xarast_geom::BiasGain,
+    ) -> String {
+        let r = f64::from(size.raw()) / 2000.0;
+        let image_axes = match self.doc.tree.kind(n) {
+            Some(NodeKind::Bitmap(b)) if el.has("transform") => Some((b.major, b.minor)),
+            _ => None,
+        };
+        let (radius, region) = if let Some((u, v)) = image_axes {
+            let len = |w: Vector| w.dx.to_f64().hypot(w.dy.to_f64()) / 1000.0;
+            let (lu, lv) = (len(u).max(1e-3), len(v).max(1e-3));
+            (
+                effect::Radius {
+                    x: r / lu,
+                    y: r / lv,
+                },
+                effect::Region::Object { margin: 0.1 },
+            )
+        } else {
+            (effect::Radius { x: r, y: r }, self.effect_region(n, size))
+        };
+        effect::feather(radius, profile, region).finish(&mut self.defs)
+    }
+
+    /// The region an effect filter on `n` draws in: the geometry of the
+    /// subtree, grown by its widest visible stroke (twice it, for a
+    /// mitre), the effect's `size` and a point of slack, in the spread's
+    /// user space.
+    ///
+    /// Only what the file says goes in, never cached bounds or the width
+    /// of a stroke that is not drawn: an unstroked element does not write
+    /// its line width, so an imported document and the same document read
+    /// back can differ there, and the region must be the same at every
+    /// save (a re-save is byte-identical). A subtree with text, whose
+    /// extent the writer does not know, takes the element's own box with a
+    /// wide margin instead.
+    fn effect_region(&self, n: NodeId, size: Mp) -> effect::Region {
+        let tree = &self.doc.tree;
+        let mut widest = 0i64;
+        let mut b = xarast_geom::Rect::EMPTY;
+        for c in tree.preorder(n) {
+            let stroked = match tree.kind(c) {
+                Some(NodeKind::Path(p)) => p.stroked,
+                Some(NodeKind::Shape(_) | NodeKind::QuickShape(_)) => true,
+                Some(NodeKind::Bitmap(_)) => false,
+                Some(NodeKind::TextStory(_)) => return effect::Region::Object { margin: 0.5 },
+                _ => continue,
+            };
+            let cb = xarast_doc::bounds::compute_bounds_with(tree, c, Mp::ZERO);
+            if cb.is_empty() {
+                continue;
+            }
+            b = if b.is_empty() { cb } else { b.union(cb) };
+            if stroked {
+                let a = xarast_doc::attr::resolve_uncached(tree, c, &self.doc.defaults);
+                let visible = !matches!(a.stroke(), xarast_doc::fill::FillGeometry::Flat { value }
+                    if rgba(value, &self.doc.resources.colours).a == 0);
+                if visible && let AttrValue::LineWidth(w) = a.get(AttrSlot::LineWidth) {
+                    widest = widest.max(i64::from(w.raw()));
+                }
+            }
+        }
+        if b.is_empty() {
+            return effect::Region::Object { margin: 0.5 };
+        }
+        let extent = widest
+            .saturating_mul(2)
+            .saturating_add(i64::from(size.raw()))
+            .saturating_add(1000);
+        let (x0, y0) = self.frame.pt(Point::new(b.lo.x, b.hi.y));
+        let (x1, y1) = self.frame.pt(Point::new(b.hi.x, b.lo.y));
+        effect::Region::User {
+            x0: x0.min(x1).saturating_sub(extent),
+            y0: y0.min(y1).saturating_sub(extent),
+            x1: x0.max(x1).saturating_add(extent),
+            y1: y0.max(y1).saturating_add(extent),
         }
     }
 

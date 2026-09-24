@@ -23,13 +23,8 @@ leafgirl svg 11
 leafgirl pdf 10.8
 TestBitmapFill pdf 6.5
 
-# Feathers: since XARA-US-0068 Xarast draws them (our PNG and the PDF,
-# which rasterises each feather), but the SVG writer still records them
-# only as `xarast:feather`, so resvg draws those objects unfeathered.
-# Measured 2026-09-24: feathers svg 20.15, Groucho2 svg 5.71 (63
-# feathers). Baking the filter is XARA-T-0317; drop these limits with it.
-feathers svg 23.2
-Groucho2 svg 6.6
+# (Feathers: the SVG draws them with a filter since XARA-T-0317: feathers
+# svg 20.15 -> 2.00, Groucho2 5.71 -> 2.01, both under the default now.)
 
 # (SoftShadow: its four-colour Bleach transparencies are baked as masks
 # since XARA-T-0256: svg 4.1 -> 1.20, under the default now.)

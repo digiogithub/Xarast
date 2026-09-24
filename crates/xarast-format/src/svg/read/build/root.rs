@@ -274,11 +274,14 @@ fn is_known_def(e: &Elem) -> bool {
             &*e.local,
             "linearGradient" | "radialGradient" | "mask" | "pattern" | "clipPath" | "style"
         ))
-        // The writer's own bitmap filters (a transparency mask, a contone
-        // ramp), derived from the twins; any other filter is foreign and
+        // The writer's own filters (a transparency mask, a contone ramp, a
+        // feather), derived from the twins; any other filter is foreign and
         // kept.
         || (e.is(NS_SVG, "filter")
-            && matches!(xa(e, "filter"), Some("transparency-mask" | "contone")))
+            && matches!(
+                xa(e, "filter"),
+                Some("transparency-mask" | "contone" | "feather")
+            ))
         || e.is(NS_XARAST, "document")
         || e.is(NS_XARAST, "palette")
         || e.is(NS_XARAST, "paint-class")

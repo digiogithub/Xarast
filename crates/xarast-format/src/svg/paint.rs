@@ -98,7 +98,7 @@ fn hex_alpha(c: Rgba8) -> String {
     }
 }
 
-fn rgba(c: &Colour, t: &ColourTable) -> Rgba8 {
+pub(crate) fn rgba(c: &Colour, t: &ColourTable) -> Rgba8 {
     c.resolve(t).to_rgba8()
 }
 
