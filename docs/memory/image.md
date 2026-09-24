@@ -524,14 +524,17 @@ job each:
   `SceneWalker::photo_proxies` / `Session::photo_proxies` report the
   level and size per frame.
 - **Measured** (test profile, this 24-core machine shared with other
-  agents; `photo_panel.rs::a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms`,
+  agents; measured then by a timed test, now by the perf gate
+  `photo-slider-24mpx`, `xarast-cli bench photo`, see `perf.md`;
   6000 × 4000 native master shown at ≈ 1200 × 800 in a 1280 × 800
   view): proxy level 2 (1500 × 1000). At load average ≈ 10: intent +
   walk with the proxy evaluation **3.3 ms median, 10.5 ms max**; whole
   slider frame with the CPU render of the view **19.1 ms median, 27.9 ms
   p90, 31.0 ms max** over 30 frames. Before the banded pixel pass the
   walk was ≈ 10 ms; with the machine loaded (load ≈ 80–115) the frame
-  median reached ≈ 33 ms. The test asserts the median ≤ 33 ms. **The release is not in budget**: committing evaluates the full
+  median reached ≈ 33 ms. The test
+  (`a_slider_drag_on_a_24_mpx_photo_draws_proxies`) asserts no clock,
+  only that the document is untouched and every frame is a proxy. **The release is not in budget**: committing evaluates the full
   24 Mpx on the walk thread, ≈ 60 ms evaluation + ≈ 200 ms pyramid
   (`prepare`) ≈ 264 ms once (XARA-T-0304: evaluate the committed chain
   off the walk thread and keep drawing the proxy until it lands).

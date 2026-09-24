@@ -127,6 +127,8 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
 | `export-10k-rss` | pr | MiB | 552 | — | 440 | 433–446 | — |
 | `undo-100k` (undo or redo via `Session::apply`) | pr | median ms/op | 1 | 1 | 0.17 | 0.17 | st |
 | `edit-100k` (the move itself) | pr | median ms/op | 0.65 | — | 0.31 | 0.30–0.32 | st |
+| `photo-slider-24mpx` (slider frame, render thread) | pr | median ms | 45 | 33 | 21 | 19–57 | mt |
+| `photo-slider-24mpx-p95` | pr | p95 ms | 100 | — | 45 | 42–75 | mt |
 | `open-100k` | nightly | median ms | 1750 | — | 865 | 828 | st |
 | `open-100k-rss` | nightly | MiB | 672 | — | 535 | 534 | — |
 | `save-100k` | nightly | median ms | 1100 | — | 550 | 558 | st |
@@ -172,6 +174,17 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
   the render thread is 4 ms. The real window's ≈ 330 ms (surface, adapter,
   first present) needs a display and a GPU: XARA-T-0010, on the reference
   machine or a self-hosted runner (A5).
+- **Photo slider frames are a gate, not a test** (2026-09-24). The
+  33 ms slider-frame budget used to be a hard median assertion in
+  `xarast-app/tests/photo_panel.rs`, which failed on the GitHub runners
+  (slow, shared, no GPU) at d00e783. `xarast-cli bench photo` now
+  measures it through the render thread — the intent, the walk with its
+  proxy evaluation, the frame the window would wait for — and the test
+  keeps only what is not a clock: the document is untouched mid-drag and
+  every frame draws a proxy. Local runs at load 8–14: median 19–57 ms
+  (the render of a 1200 × 800 picture dominates; the walk is 3–7 ms),
+  so the refs are indicative. Rule: **no wall-clock assertion in
+  `cargo test`**; a budget goes in `xtask/perf-budgets.txt`.
 - **Font service (XARA-T-0288).** Spitfire's first open + paint is ~100 ms
   of which ~40 ms is waiting for fontconfig enumeration. The shell already
   starts it on a background thread before the window exists (`main.rs`,

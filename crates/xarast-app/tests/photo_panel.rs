@@ -4,7 +4,6 @@
 //! behind; the committed picture is the full-resolution evaluation.
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use xarast_app::headless::{HeadlessFrame, HeadlessOptions, render, render_with_walker};
 use xarast_app::photo_panel::PhotoPanelOp;
@@ -15,7 +14,6 @@ use xarast_doc::photo::{Levels, LevelsChannel, PhotoOp, PhotoOps, PhotoOrient};
 use xarast_doc::resources::{BitmapData, BitmapInfo, BitmapResource};
 use xarast_doc::{Command, EditError, NodeId, NodeKind, Tx};
 use xarast_geom::{Matrix, Vector};
-use xarast_render::{CpuBackend, CpuConfig, DirtyRect, DisplayList, Surface};
 
 fn gradient(w: u32, h: u32, seed: u8) -> Vec<u8> {
     (0..w * h)
@@ -367,23 +365,14 @@ fn native(w: u32, h: u32, rgba: Vec<u8>) -> BitmapResource {
     }
 }
 
-/// Renders the session's own scene as the render thread would: display
-/// list, then the CPU backend, into `surface`.
-fn draw(s: &mut Session, surface: &mut Surface) {
-    let scene = s.scene_snapshot();
-    let resolver = s.resolver_snapshot();
-    let params = s.view_params();
-    let dl = DisplayList::build(&scene, &params, &DirtyRect::of(params.viewport));
-    CpuBackend::new(CpuConfig::interactive())
-        .render(&dl, &resolver, surface)
-        .unwrap();
-}
-
-/// T10.6.5's budget: a slider frame on a 24 Mpx photograph — the intent,
-/// the walk with its proxy evaluation, and a CPU render of the view —
-/// within 33 ms. Prints the numbers (`-- --nocapture`).
+/// T10.6.5 on a 24 Mpx photograph: every slider frame draws a proxy of
+/// at most [`PROXY_MAX_PIXELS`](xarast_app::walker::PROXY_MAX_PIXELS)
+/// from a reduced level and leaves the document alone. How long a frame
+/// takes is a perf gate (`photo-slider-24mpx` in `xtask/perf-budgets.txt`,
+/// `xarast-cli bench photo`), not a test: wall clocks on shared CI
+/// runners are not assertions.
 #[test]
-fn a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms() {
+fn a_slider_drag_on_a_24_mpx_photo_draws_proxies() {
     const W: u32 = 6000;
     const H: u32 = 4000;
     let mut app = AppState::new();
@@ -423,22 +412,20 @@ fn a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms() {
     .unwrap();
     s.apply(Intent::ZoomTo(ZoomTarget::Selection)).unwrap();
     let cache = s.decoded_images().clone();
-    let mut surface = Surface::filled(1280, 800, [255, 255, 255, 255]);
-    // At rest: the master registered, its pyramid built (off the clock).
     s.rebuild_scene(None).unwrap();
-    draw(s, &mut surface);
+    let before = s.doc.canonical_digest();
+    let len = s.bus.history().len();
 
-    let mut frames: Vec<Duration> = Vec::new();
-    let mut walks: Vec<Duration> = Vec::new();
     for i in 0..30 {
-        let t = Instant::now();
         s.apply(Intent::PhotoPanel(PhotoPanelOp::Preview(slider(i))))
             .unwrap();
         s.rebuild_scene(None).unwrap();
-        let walked = t.elapsed();
-        draw(s, &mut surface);
-        frames.push(t.elapsed());
-        walks.push(walked);
+        assert_eq!(
+            s.doc.canonical_digest(),
+            before,
+            "frame {i} touched the document"
+        );
+        assert_eq!(s.bus.history().len(), len);
         let p = s.photo_proxies()[0];
         assert!(p.evaluated);
         assert!(p.level >= 1, "{p:?}");
@@ -448,37 +435,11 @@ fn a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms() {
         );
     }
     assert_eq!(cache.stats().derived, 0, "no full-resolution evaluation");
-    frames.sort();
-    walks.sort();
-    let p = s.photo_proxies()[0];
-    let ms = |d: Duration| d.as_secs_f64() * 1e3;
-    println!(
-        "24 Mpx slider frame, proxy level {} ({} × {}): intent + walk median {:.1} ms, max {:.1} ms; \
-         with the CPU render of 1280 × 800 median {:.1} ms, p90 {:.1} ms, max {:.1} ms",
-        p.level,
-        p.width,
-        p.height,
-        ms(walks[walks.len() / 2]),
-        ms(walks[walks.len() - 1]),
-        ms(frames[frames.len() / 2]),
-        ms(frames[frames.len() * 9 / 10]),
-        ms(frames[frames.len() - 1]),
-    );
-    assert!(
-        frames[frames.len() / 2] <= Duration::from_millis(33),
-        "median frame {:.1} ms",
-        ms(frames[frames.len() / 2])
-    );
 
-    // The release: one full-resolution evaluation, then the view is the
-    // committed chain.
-    let t = Instant::now();
+    // The release commits the chain: one step, and no proxy any more.
     s.apply(Intent::PhotoPanel(PhotoPanelOp::Commit)).unwrap();
     s.rebuild_scene(None).unwrap();
-    println!(
-        "24 Mpx commit (full-resolution evaluation on the walk): {:.1} ms",
-        ms(t.elapsed())
-    );
+    assert_eq!(s.bus.history().len(), len + 1);
     assert_eq!(cache.stats().derived, 1);
     assert!(s.photo_proxies().is_empty());
 }
