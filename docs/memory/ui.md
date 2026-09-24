@@ -148,6 +148,13 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   3-hairline halo, open 9 × 8 px head, no head for a zero-length arm),
   `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);
   stops reuse the `Fill` diamond; a selected handle is drawn `active`.
+- **Bitmap fills (phase 10, XARA-T-0271)** reuse the same overlay: a round
+  centre blob, two arrow heads at the middles of the axis edges, arms from
+  the centre and the placement dashed (`tools.md` decision 64). The infobar
+  adds a "Resolution" `Scalar` field (suffix `dpi`,
+  `InfobarField::BitmapDpi`) and a "Natural size" `Command` button
+  (`AppCommand::Action(ToolAction::NaturalSize)`, no key); the tiling combo
+  gains "Repeat inverted" for bitmap fills. No new UI widget was needed.
 
 ### Text infobar and text ruler (phase 9, XARA-T-0225)
 
@@ -383,6 +390,18 @@ invent them.
     a throw-away thread (the source writes when it likes); the main thread
     turns protocol messages into `DragEvent`s with the scale in force. X11
     drops still come from `winit`.
+28. **A dropped image is placed, not opened** (XARA-T-0272, T10.3.8).
+    `Viewer::handle` splits a `DragEvent::Dropped`: with a document open,
+    paths with an image extension (`xarast_app::place::is_image_path`)
+    become `Intent::ImportImage { path, at }`, the drop point mapped from
+    window to canvas pixels through `CanvasRegion` (`None` when it lands
+    off the canvas: the view's centre); every other path still goes to
+    `to_open`. On X11 `winit` gives no drop point, so an X11 drop is
+    centred in the view. **Paste reads a picture** in `perform_requests`
+    (`ReadClipboard`) only when the text is neither our own copy nor SVG
+    and no text caret is up, then answers `Intent::PasteImage`; tests use
+    a synthetic `Dropped` event and the viewer's `FakeClipboard` (now with
+    an `image`), never a real window or clipboard.
 
 ### Invariants that must not be broken
 

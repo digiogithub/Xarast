@@ -28,6 +28,10 @@
 //! all (T8.3.4). Objects with different fills each show their own.
 
 use xarast_color::{Colour, ColourValue, FillEffect, Stop, TranspMode, Transparency};
+use xarast_doc::bitmap_fill::{
+    MoveBitmapControl, SetBitmapDpi, SetBitmapTiling, bitmap_fill_dpi, bitmap_virtual_points,
+    move_bitmap_control,
+};
 use xarast_doc::fill::{FillGeometry, Ramp, RampMapping, Tiling};
 use xarast_doc::fill_edit::{
     FillChannel, FillHandle, FillValue, InsertStop, MoveFillControl, MoveStop, PaintSlot,
@@ -76,6 +80,12 @@ pub enum FillCommand {
     SetTranspMode(SetTranspMode),
     /// Change the fill's shape.
     Mutate(MutateFill),
+    /// Move a bitmap fill's handle (phase 10).
+    MoveBitmapControl(MoveBitmapControl),
+    /// Set a bitmap fill's tiling (phase 10).
+    SetBitmapTiling(SetBitmapTiling),
+    /// Resize a bitmap fill to a resolution (phase 10).
+    SetBitmapDpi(SetBitmapDpi),
 }
 
 impl FillCommand {
@@ -95,6 +105,9 @@ impl FillCommand {
             FillCommand::SetTiling(c) => c.node,
             FillCommand::SetTranspMode(c) => c.node,
             FillCommand::Mutate(c) => c.node,
+            FillCommand::MoveBitmapControl(c) => c.node,
+            FillCommand::SetBitmapTiling(c) => c.node,
+            FillCommand::SetBitmapDpi(c) => c.node,
         }
     }
 
@@ -114,6 +127,9 @@ impl FillCommand {
             FillCommand::SetTiling(c) => c,
             FillCommand::SetTranspMode(c) => c,
             FillCommand::Mutate(c) => c,
+            FillCommand::MoveBitmapControl(c) => c,
+            FillCommand::SetBitmapTiling(c) => c,
+            FillCommand::SetBitmapDpi(c) => c,
         }
     }
 }
@@ -312,6 +328,9 @@ enum Drag<S: Stop> {
         origin: Point,
         /// The last computed target point, for the commit.
         to: Point,
+        /// Whether a bitmap fill's aspect was locked (Adjust) on the last
+        /// frame, for the commit.
+        lock: bool,
     },
     /// A new gradient being dragged out.
     New {
@@ -388,6 +407,33 @@ const EFFECTS: [FillEffect; 3] = [
     FillEffect::AltRainbow,
 ];
 
+fn is_bitmap<S: Stop>(g: &FillGeometry<S>) -> bool {
+    matches!(g, FillGeometry::Bitmap { .. })
+}
+
+/// The tilings a bitmap fill offers, in menu order: the three it renders
+/// (`research/01 §8.3`); "Repeat inverted" is what makes a tiled bitmap
+/// seamless.
+const BITMAP_TILINGS: [Tiling; 3] = [Tiling::Simple, Tiling::Repeat, Tiling::RepeatInverted];
+
+/// The menu index of the tiling a bitmap fill renders with: its own when
+/// set, else the mapping attribute's, and unset means repeat.
+fn bitmap_tiling_index<S: Stop>(g: &FillGeometry<S>, attr: Option<Tiling>) -> Option<usize> {
+    let own = match g {
+        FillGeometry::Bitmap { tiling, .. } => *tiling,
+        _ => return None,
+    };
+    let t = match (own, attr) {
+        (Tiling::None, Some(t)) => t,
+        (t, _) => t,
+    };
+    Some(match t {
+        Tiling::Simple => 0,
+        Tiling::RepeatInverted => 2,
+        Tiling::None | Tiling::Repeat | Tiling::RepeatExtra => 1,
+    })
+}
+
 fn is_graduated<S: Stop>(g: &FillGeometry<S>) -> bool {
     matches!(
         g,
@@ -451,6 +497,34 @@ impl<K: FillKind> FillLikeTool<K> {
         nodes.iter().map(|n| f(*n)).collect()
     }
 
+    /// Resizes every bitmap fill of `sets` to a resolution: `dpi` of the
+    /// image's own, or the image's own itself for natural size. Sets whose
+    /// image size is unknown, or which are in perspective, are left alone.
+    fn bitmap_dpi_cmds(
+        doc: &Document,
+        sets: &[FillSet<K::S>],
+        dpi: impl Fn((u32, u32)) -> (u32, u32),
+        natural: bool,
+    ) -> Vec<FillCommand> {
+        sets.iter()
+            .filter(|s| bitmap_fill_dpi(&s.fill, (1, 1)).is_some())
+            .filter_map(|s| Some((s, crate::place::bitmap_pixels(doc, s.fill.bitmap()?)?)))
+            .flat_map(|(s, (pixels, own))| {
+                let dpi = dpi(own);
+                Self::slot_cmds(&s.nodes, |node| {
+                    FillCommand::SetBitmapDpi(SetBitmapDpi {
+                        node,
+                        slot: PaintSlot::Fill,
+                        channel: K::CHANNEL,
+                        pixels,
+                        dpi,
+                        natural,
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// The handle's new point: snapped, and with Constrain held, turned to
     /// the nearest 15° about the arm's other end.
     fn target(
@@ -480,6 +554,17 @@ impl<K: FillKind> FillLikeTool<K> {
                 FillGeometry::ThreeColour { origin, .. } | FillGeometry::FourColour { origin, .. },
                 FillHandle::End | FillHandle::End2 | FillHandle::End3,
             ) => *origin,
+            // A bitmap fill's edge handles turn about its centre.
+            (
+                FillGeometry::Bitmap {
+                    origin,
+                    axis_x,
+                    axis_y,
+                    persp: None,
+                    ..
+                },
+                FillHandle::End | FillHandle::End2,
+            ) => bitmap_virtual_points(*origin, *axis_x, *axis_y)[0],
             _ => return to,
         };
         let (ax, ay) = anchor.to_f64();
@@ -556,6 +641,7 @@ impl<K: FillKind> FillLikeTool<K> {
                 start: set.fill.clone(),
                 origin,
                 to: origin,
+                lock: false,
             });
             cx.requests.overlay_changed = true;
             return;
@@ -602,12 +688,19 @@ impl<K: FillKind> FillLikeTool<K> {
                 start,
                 origin,
                 to: last,
+                lock,
             }) => {
                 let target = *origin + (to - from);
                 let target = Self::target(cx, start, *handle, target);
                 *last = target;
+                *lock = cx.modifiers.adjust;
                 let mut g = start.clone();
-                if move_control(&mut g, *handle, target).is_ok() {
+                let moved = if is_bitmap(start) {
+                    move_bitmap_control(&mut g, *handle, target, *lock)
+                } else {
+                    move_control(&mut g, *handle, target)
+                };
+                if moved.is_ok() {
                     let nodes = nodes.clone();
                     Self::preview(cx, &nodes, &g);
                 }
@@ -643,6 +736,7 @@ impl<K: FillKind> FillLikeTool<K> {
                 handle,
                 start,
                 to,
+                lock,
                 ..
             }) => {
                 let edits = match handle {
@@ -669,6 +763,16 @@ impl<K: FillKind> FillLikeTool<K> {
                             })
                         })
                     }
+                    _ if is_bitmap(&start) => Self::slot_cmds(&nodes, |node| {
+                        FillCommand::MoveBitmapControl(MoveBitmapControl {
+                            node,
+                            slot: PaintSlot::Fill,
+                            channel: K::CHANNEL,
+                            handle,
+                            to,
+                            lock_aspect: lock,
+                        })
+                    }),
                     _ => Self::slot_cmds(&nodes, |node| {
                         FillCommand::MoveControl(MoveFillControl {
                             node,
@@ -903,10 +1007,35 @@ impl<K: FillKind> Tool for FillLikeTool<K> {
                 AttrValue::FillMapping(t) | AttrValue::TranspFillMapping(t) => Some(t),
                 _ => None,
             };
-            items.push(InfobarItem::Choice {
-                field: InfobarField::FillTiling,
-                options: vec!["Simple", "Repeating"],
-                selected: tiling.map(|t| usize::from(is_repeating(&set.fill, t))),
+            if is_bitmap(&set.fill) {
+                items.push(InfobarItem::Choice {
+                    field: InfobarField::FillTiling,
+                    options: vec!["Simple", "Repeating", "Repeat inverted"],
+                    selected: bitmap_tiling_index(&set.fill, tiling),
+                });
+            } else {
+                items.push(InfobarItem::Choice {
+                    field: InfobarField::FillTiling,
+                    options: vec!["Simple", "Repeating"],
+                    selected: tiling.map(|t| usize::from(is_repeating(&set.fill, t))),
+                });
+            }
+        }
+        if let Some(image) = set.fill.bitmap() {
+            let pixels = crate::place::bitmap_pixels(view.doc, image);
+            let dpi = pixels
+                .and_then(|(px, _)| bitmap_fill_dpi(&set.fill, px))
+                .map(|(h, _)| h.round());
+            items.push(InfobarItem::Scalar {
+                field: InfobarField::BitmapDpi,
+                value: dpi,
+                suffix: "dpi",
+                min: 1.0,
+                max: 100_000.0,
+            });
+            items.push(InfobarItem::Command {
+                command: crate::command::AppCommand::Action(ToolAction::NaturalSize),
+                enabled: pixels.is_some() && dpi.is_some(),
             });
         }
         if is_graduated(&set.fill) {
@@ -999,6 +1128,17 @@ impl<K: FillKind> Tool for FillLikeTool<K> {
                 .iter()
                 .filter(|s| s.fill.has_control_points())
                 .flat_map(|s| {
+                    if is_bitmap(&s.fill) {
+                        let tiling = BITMAP_TILINGS.get(i).copied().unwrap_or(Tiling::Repeat);
+                        return Self::slot_cmds(&s.nodes, |node| {
+                            FillCommand::SetBitmapTiling(SetBitmapTiling {
+                                node,
+                                slot,
+                                channel,
+                                tiling,
+                            })
+                        });
+                    }
                     let tiling = if i == 1 {
                         repeating(&s.fill)
                     } else {
@@ -1076,6 +1216,13 @@ impl<K: FillKind> Tool for FillLikeTool<K> {
                     })
                 })
             }
+            (InfobarField::BitmapDpi, InfobarValue::Real(v)) => {
+                if !v.is_finite() || v < 1.0 {
+                    return;
+                }
+                let dpi = v.min(100_000.0).round() as u32;
+                Self::bitmap_dpi_cmds(cx.doc, &sets, |_| (dpi, dpi), false)
+            }
             (InfobarField::StopLevel, InfobarValue::Real(v)) => {
                 let Some((set, h)) = self.selected_set(&sets) else {
                     return;
@@ -1127,6 +1274,16 @@ impl<K: FillKind> Tool for FillLikeTool<K> {
                     })
                 });
                 self.selected = None;
+                Self::emit(cx, edits);
+                cx.requests.overlay_changed = true;
+                true
+            }
+            ToolAction::NaturalSize => {
+                let sets = Self::sets(cx.doc, cx.edit);
+                let edits = Self::bitmap_dpi_cmds(cx.doc, &sets, |own| own, true);
+                if edits.is_empty() {
+                    return false;
+                }
                 Self::emit(cx, edits);
                 cx.requests.overlay_changed = true;
                 true

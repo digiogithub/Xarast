@@ -77,7 +77,7 @@ impl FillChannel {
 /// | diamond | `Centre` (moves the whole fill), `Corner1`, `Corner2` |
 /// | three colour | `Start` (origin), `End` (axis 1), `End2` (axis 2) |
 /// | four colour | `Start`, `End`, `End2`, `End3` (axis 3) |
-/// | bitmap | `Start` (origin), `End` (x axis), `End2` (y axis) |
+/// | bitmap | `Centre` (moves the whole fill), `End` (middle of the x-axis edge), `End2` (middle of the y-axis edge); in perspective `Start`, `End`, `End2`, `End3` are its corners (`crate::bitmap_fill`) |
 ///
 /// `Stop(i)` is an intermediate ramp stop, dragged along the fill's arm.
 /// A linear fill's third, skew point (`End2`) is not modelled yet
@@ -234,7 +234,7 @@ pub fn set_own_attr(tx: &mut Tx<'_>, node: NodeId, value: AttrValue) -> Result<(
 
 /// Reads the fill in force, lets `f` edit it, and writes it back as the
 /// node's own attribute.
-fn edit_fill(
+pub(crate) fn edit_fill(
     tx: &mut Tx<'_>,
     node: NodeId,
     slot: PaintSlot,
@@ -255,6 +255,7 @@ macro_rules! on_both {
         }
     };
 }
+pub(crate) use on_both;
 
 // ───────────────────────────── ramp helpers ─────────────────────────────
 
@@ -472,16 +473,18 @@ pub fn move_control<S: Stop>(
         }
         (FillGeometry::Diamond { corner1, .. }, FillHandle::Corner1) => *corner1 = to,
         (FillGeometry::Diamond { corner2, .. }, FillHandle::Corner2) => *corner2 = to,
+        // Bitmap fills have their own handle model: virtual points about
+        // the centre (`crate::bitmap_fill`).
+        (g @ FillGeometry::Bitmap { .. }, h) => {
+            return crate::bitmap_fill::move_bitmap_control(g, h, to, false);
+        }
         (FillGeometry::ThreeColour { origin, .. }, FillHandle::Start)
-        | (FillGeometry::FourColour { origin, .. }, FillHandle::Start)
-        | (FillGeometry::Bitmap { origin, .. }, FillHandle::Start) => *origin = to,
+        | (FillGeometry::FourColour { origin, .. }, FillHandle::Start) => *origin = to,
         (FillGeometry::ThreeColour { axis1, .. }, FillHandle::End)
         | (FillGeometry::FourColour { axis1, .. }, FillHandle::End) => *axis1 = to,
         (FillGeometry::ThreeColour { axis2, .. }, FillHandle::End2)
         | (FillGeometry::FourColour { axis2, .. }, FillHandle::End2) => *axis2 = to,
         (FillGeometry::FourColour { axis3, .. }, FillHandle::End3) => *axis3 = to,
-        (FillGeometry::Bitmap { axis_x, .. }, FillHandle::End) => *axis_x = to,
-        (FillGeometry::Bitmap { axis_y, .. }, FillHandle::End2) => *axis_y = to,
         _ => return Err(NO),
     }
     Ok(())

@@ -51,6 +51,8 @@
 #![doc(html_no_source)]
 
 pub mod attr;
+pub mod bitmap_fill;
+pub mod bitmap_place;
 pub mod bounds;
 pub mod builder;
 pub mod digest;
@@ -82,6 +84,8 @@ pub use attr::{
     ALL_ATTR_SLOTS, ATTR_SLOT_COUNT, AttrNode, AttrResolver, AttrSlot, AttrStack, AttrValue,
     DefaultAttrs, MultiAttr, Quality, ResolvedAttrs, default_for, slot_name,
 };
+pub use bitmap_fill::{MoveBitmapControl, SetBitmapDpi, SetBitmapTiling};
+pub use bitmap_place::{PlaceBitmap, default_bitmap_attrs};
 pub use bounds::{BoundsCache, Epoch, compute_bounds};
 pub use builder::{
     BuildError, BuildId, BuildLimits, DiagCode, Diagnostic, DocumentBuilder, Severity, legal_child,

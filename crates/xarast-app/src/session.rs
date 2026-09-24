@@ -1381,6 +1381,8 @@ impl Session {
             | Intent::Cut
             | Intent::Paste { .. }
             | Intent::PasteText { .. }
+            | Intent::PasteImage { .. }
+            | Intent::ImportImage { .. }
             | Intent::ShowDialog(_)
             | Intent::Quit
             | Intent::Save
@@ -1537,6 +1539,49 @@ impl Session {
         let created = cmd.created.take();
         if !created.is_empty() {
             self.edit.select(created, SelectMode::Replace);
+        }
+        changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
+        Ok(changed)
+    }
+
+    /// Places an image as a bitmap object at its natural size (phase 10,
+    /// T10.3.8), on the active layer, centred on `at` (canvas device
+    /// pixels) or in the middle of the view, and selects it. The resource
+    /// goes into the document first, outside the history (deduplicated by
+    /// content); the object is one undo step named `label`.
+    ///
+    /// # Errors
+    ///
+    /// When the command is refused: a locked or guide layer.
+    pub fn place_image(
+        &mut self,
+        img: crate::place::ImageToPlace,
+        at: Option<crate::geometry::DevicePoint>,
+        label: &'static str,
+    ) -> Result<Changed, SessionError> {
+        use crate::geometry::DocPointF64Ext;
+        let mut changed = self.cancel_gesture();
+        let Some(layer) = self
+            .edit
+            .active_layer()
+            .or_else(|| self.doc.active_layer(self.doc.active_spread()))
+        else {
+            return Ok(changed);
+        };
+        let centre = match at {
+            Some(p) => self.viewport.device_to_doc_f64(p).to_doc_point(),
+            None => self.viewport.visible_doc_rect().centre(),
+        };
+        let (w, h) = img.natural_size();
+        let image = self.doc.resources.insert_bitmap(img.resource);
+        let cmd = xarast_doc::PlaceBitmap {
+            layer,
+            bitmap: xarast_doc::bitmap_place::bitmap_node_centred(image, centre, w, h),
+            label,
+        };
+        self.dispatch(&cmd)?;
+        if let Some(n) = self.doc.tree.children(layer).next_back() {
+            self.edit.select([n], SelectMode::Replace);
         }
         changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
         Ok(changed)

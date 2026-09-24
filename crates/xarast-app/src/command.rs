@@ -457,7 +457,8 @@ impl AppCommand {
                 ToolAction::Delete
                 | ToolAction::Cancel
                 | ToolAction::SelectAll
-                | ToolAction::ClosePath => NONE,
+                | ToolAction::ClosePath
+                | ToolAction::NaturalSize => NONE,
             },
             AppCommand::ConvertToShapes => CONVERT,
             AppCommand::Cut => CUT,
