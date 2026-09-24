@@ -29,7 +29,7 @@ application's layout; the render round trip is exact for 59/59 again and
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
 | W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
-| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `style`, `emit`), `save.rs` |
+| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 geometry baking of conical, diamond, 3/4-colour fills done (XARA-US-0043), filter/raster baking and `BakeProvider` open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `bake`, `style`, `emit`), `save.rs` |
 | W4 SVG read + preservation | F4.1–F4.6, F4.8–F4.10 done; F4.7 marking done, deletion accounting open (XARA-T-0113); XARA-T-0105 (localise + normal form) and T-0107 (passes 4–5) done | `svg/read/` (`dom`, `parse`, `style`, `build/{ink,paint,root}`, `normal`), `open.rs` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4 lock UX + signals, F6.5 autosave and F6.7 recovery done **in the app** (`xarast-app` `locks`/`autosave`, XARA-US-0084); F6.6 journal, F6.8, F6.9 open | `durability/` |
@@ -128,12 +128,48 @@ stats, foreign_count, foreign_digest }`.
   `gradientTransform`) must write `cx="0" cy="0"` — found by rendering
   `Fill Types simple.xar` (all elliptical fills came out black). Only the
   "extra" repeat tiles (`spreadMethod="repeat"`), matching the renderer.
-- **Ramp baking**: resolved colours in a `Ramp<ColourValue>`, sampled with
-  `Ramp::sample` (so profile, sin easing and HSV rainbow are the model's own
-  maths), 8 uniform segments bisected up to 5 times until the midpoint error
-  is ≤ 2/255; twin: `xarast:profile`, `xarast:ramp-mapping`,
-  `xarast:fill-effect`, `xarast:stops="pos:#rrggbb[aa] …"`. A plain RGB ramp
-  gets its key stops only (rule 5).
+- **Ramp baking** (reworked in XARA-US-0043): resolved colours in a
+  `Ramp<ColourValue>`, sampled with `Ramp::sample` (so profile, sin easing
+  and HSV rainbow are the model's own maths). Stops sit on the 1/10 000
+  grid `<stop offset>` writes (`GRID`), so the offset sampled is the offset
+  written; spans start as 8 equal ones plus the two grid points either
+  side of every key's image under mapping + profile (`key_breaks`: the
+  kinks), and a span splits while any of its quarter points misses by more
+  than 1 level (`PROBE_ERROR`), down to one grid step. Measured worst error
+  against the curve, 4 097 samples over 32 baked ramps: **1.9/255**
+  (`tests/fill_round_trip.rs`). The old midpoint-only, depth-5 baker was
+  64/255 off on a steep profile. Twin: `xarast:profile` (shortest exact
+  `f64`, `num::f64s_exact`), `xarast:ramp-mapping`, `xarast:fill-effect`,
+  `xarast:stops="pos:#rrggbb[aa] …"`. A plain RGB ramp gets its key stops
+  only (rule 5).
+- **Baked fills** (`svg/bake.rs`, XARA-US-0043; `research/06 §5.4.1`
+  strategy 1): conical, diamond (no perspective), three-colour and
+  four-colour (parallelogram) fills become a `<pattern>` over the element's
+  box + 1 pt (**not** the stroke-padded box: an unstroked element does not
+  write its line width, so that box would change on a re-save); a conical
+  or diamond transparency becomes a `<mask>` over the mask box. Content is
+  one `<g transform="matrix(frame)" shape-rendering="crispEdges">` in the
+  fill's own frame. Diamond: four triangles, each a unit-frame gradient
+  along its axis (exact; `spreadMethod="repeat"` for the extra repeat).
+  Conical: flat wedges from a 1 024-step fan, each a run whose colours stay
+  within 2 levels, coloured at its middle. Meshes: rows across the axis the
+  colour changes least along (`bake::variation`), split on a 1/1 024 grid
+  while any of 17 columns changes by more than 2 levels, each row a
+  gradient along the other axis baked with `bake_spans(…, 1)` (a
+  three-colour row has a kink at `u = 1 − v`), plus a clamped edge row
+  beyond each side. The samplers mirror the CPU renderer's
+  (`xarast-render` `shape_param`, the mesh sampler): conical's second axis
+  is the first turned a quarter anticlockwise in document space, i.e.
+  `(u.y, −u.x)` in SVG space; meshes clamp to the unit square (the
+  renderer ignores the fill mapping for meshes). Pieces overlap their
+  predecessor by a sliver and are crisp: antialiased shared edges showed
+  the background as hairlines. Everything baked is marked
+  `xarast:generated="fill-bake"`; the reader never reads it (twins win).
+  Mesh transparencies stay flat means: the renderer has no mesh
+  transparency either (`xarast-app` `paint.rs`). Unbaked fallbacks (no
+  box, perspective, degenerate frame) keep the old approximations and
+  count in `Stats::fills_approximated`; baked conical/mesh fills count in
+  `Stats::fills_baked`.
 - **Transparency**: flat → multiplied into `fill-opacity`/`stroke-opacity`;
   graduated → `<mask>` over the element's box (+ stroke) with a greyscale
   gradient, `color-interpolation="sRGB"` on both; a fill transparency is
@@ -280,6 +316,15 @@ Inkscape on 8 files checked; Chrome is identical on 7 and differs on
 (SSIM 0.99999: Chrome composites an inherited `fill-opacity` over a
 gradient a hair differently than an explicit one).
 
+### Baked fills (2026-09-24, XARA-US-0043)
+
+SVG export against our PNG export (72 dpi, paper, `cargo xtask
+export-check`; the profile writer is shared): Fill Types simple
+**19.70 → 1.87**/255, WATCH2 **16.51 → 0.66**, WATCH 5.07 → 2.35,
+Girard_simple 0.73 → 0.32, testimp1 0.34 → 0.23; nothing got worse. The
+three SVG lines left `xtask/export-limits-corpus.txt`. Corpus SVG size
+83.2 → 85.8 MB (+3 %; Fill Types simple 481 → 976 KB, mostly mesh rows).
+
 ### Conformance with bitmaps decoded (2026-09-23, round 5)
 
 Same method (`xarast-cli render --frame page` vs `cargo xtask
@@ -359,8 +404,11 @@ diagnostics, stats, preservation }`; `open` wraps it with the container,
 - **Twins win (F4.2)**: `xarast:parallelogram` over `d`; quick-shape
   parameters (the base `d` is kept as the outline cache when it differs
   from `QuickShape::outline()` — it does for 32k corpus shapes, whose
-  import generated edge templates in shape space); conical, 3/4-colour,
-  fractal/noise twins over their flat approximation; `xarast:stops` /
+  import generated edge templates in shape space); conical, diamond
+  (`<xarast:fill xarast:type="diamond" xarast:points="c c1 c2">` + ramp
+  twin, since XARA-US-0043; a perspective diamond is still a radial
+  gradient marked `xarast:fill="diamond"`), 3/4-colour, fractal/noise
+  twins over their baked or flat base; `xarast:stops` /
   `xarast:levels` keys over baked stops. Generated live-effect subtrees
   under their controller are kept as `LiveRole::Generated` (nothing
   regenerates before Phase 13); an orphan one becomes a plain group plus a
@@ -715,6 +763,18 @@ the file means", not crashes; each input is now a unit test in
 
 ## Dead ends (do not retry)
 
+- Baking a fill into the stroke-padded mask box: an unstroked element's
+  line width is not written, so the reloaded box differs and the first
+  re-save is not a fixed point (Girard_simple, Groucho2). Fill patterns
+  use the geometry box + 1 pt.
+- Antialiased baked pieces: shared edges composite to partial coverage
+  and show hairlines of the background; crisp pieces with a sliver of
+  overlap do not.
+- Reading SVG decimals as `mantissa × 10^scale`: `35 × 0.01` is
+  `0.35000000000000003`, so a profile never came back equal. The scanner
+  divides by an exact power of ten (one rounding) and falls back to
+  `str::parse` beyond 2^53 / 10^22.
+
 - Text runs split on snapshot inequality alone: a restore attribute or a
   slot the profile does not write splits a run in the original and not in
   the reload, so the first re-save differs. Split on what is *written*.
@@ -805,8 +865,9 @@ the file means", not crashes; each input is now a unit test in
   written; a reload has empty names (not part of the normal form). The
   SVG mask/pattern of a bitmap ignores `Simple` (clamp) and mirrored
   tiling — patterns always repeat — and a transparency's contone levels.
-- W3 leftovers: baking/`BakeProvider`
-  (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
+- W3 leftovers: filter/raster baking and `BakeProvider` (fractal, noise,
+  feathers, perspective gradients, projective four-colour fills;
+  XARA-T-0102 — geometry baking is done, XARA-US-0043), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
   entry (§5.9, SHOULD), split layout above 32 spreads / 8 MiB.
 - `meta.xml` model (F2.6) and the full `<metadata>` mirror (F2.7):

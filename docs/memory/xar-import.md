@@ -588,6 +588,32 @@ original's defaults where they differ (text size 16 pt,
 default an explicit size attribute. Surrogate pairs split over two
 `TAG_TEXT_CHAR` records join; a lone half is U+FFFD.
 
+### 15. Fill records land one-to-one in the model; definitions survive a dropped subtree (phase 8, XARA-US-0043)
+
+`crates/xarast-cli/tests/fills.rs` counts, for all 59 files, the fill,
+transparency, line colour and line transparency records by shape
+(`xarast_cli::inspect::tag_census`) and the model's fill attributes
+(`inspect::census`), plus fill effect and mapping records: they agree
+exactly (**355 831** fill attributes). Two exclusions, both principled:
+records inside `TAG_CURRENTATTRIBUTES` (finding 3: not the drawing), and
+records inside `TAG_TEXT_LINE` — the text importer folds per-string
+attributes into runs, eliding a value equal to the one in force and
+adding restores, so those counts are the text mapping's (AngledText,
+TextCurve, GardenPlan differ there and nowhere else).
+
+What the census found: **Groucho2 defines a bitmap (record 1255) inside a
+shadow controller**, an atomic subtree the importer drops, and three
+contone fills after it refer to it; they dangled and imported as "no
+colour". The tree builder now keeps every decodable definition (colour,
+bitmap, font) found inside a dropped atomic subtree, in the subtree's
+place (`RecordTree::rescued`; Groucho2 +5 bitmaps, SoftShadow +1,
+Brush Test +6 colours). Definitions are document-wide whatever subtree
+they sit in.
+
+Three-point linear fills (finding 10) still drop their third point: all
+27 corpus records have it within 1.2° of perpendicular (26 within 0.4°),
+so the render is unchanged; the model gap stays filed.
+
 ## Dead ends (do not retry)
 
 - Storing a regular shape's edge path as its outline (finding 12).

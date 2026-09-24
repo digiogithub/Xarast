@@ -1290,6 +1290,12 @@ impl<'d, 'b> Emitter<'d, 'b> {
             let p = width / 2 + 1;
             (a - p, b - p, c + p, d + p)
         });
+        // The box a baked fill covers (`bake.rs`): the geometry plus a
+        // point, so an antialiased edge pixel never samples the pattern's
+        // next tile. Not the line width: an unstroked element does not
+        // write it, and the box must come back the same on a re-save.
+        let fill_box = bounds.map(|(a, b, c, d)| (a - 1000, b - 1000, c + 1000, d + 1000));
+        let stroke_box = mbox.map(|(a, b, c, d)| (a - 1000, b - 1000, c + 1000, d + 1000));
 
         let this = &mut *self;
         let mut ctx = PaintCtx {
@@ -1301,7 +1307,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             bitmap_href: &mut *this.bitmap_href,
         };
         let fill = match &fill_paint {
-            Some(p) => colour_paint(&mut ctx, p, fill_tiling, effect),
+            Some(p) => colour_paint(&mut ctx, p, fill_tiling, effect, fill_box),
             None => PaintOut {
                 value: "none".into(),
                 ..PaintOut::default()
@@ -1314,7 +1320,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             _ => TranspOut::default(),
         };
         let stroke = match &stroke_paint {
-            Some(p) => colour_paint(&mut ctx, p, Tiling::None, effect),
+            Some(p) => colour_paint(&mut ctx, p, Tiling::None, effect, stroke_box),
             None => PaintOut {
                 value: "none".into(),
                 ..PaintOut::default()
