@@ -2,12 +2,13 @@
 id: XARA-T-0250
 type: task
 title: "Text tool: carets, hit tests and selection along a path"
-status: backlog
+status: in_review
 parent: XARA-US-0048
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T23:43:49Z
-updated: 2026-09-23T23:43:49Z
+updated: 2026-09-24T00:32:13Z
+started: 2026-09-24T00:15:40Z
 ---
 
 ## Description
