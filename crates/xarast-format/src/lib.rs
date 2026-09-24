@@ -11,7 +11,7 @@
 //! | Module | What it owns | Spec |
 //! |---|---|---|
 //! | [`name`] | Entry-name validation (reject, never sanitise) and the normative entry order | §3.1, §3.2 |
-//! | [`sniff`] | The 64-byte signature check | §9.2 |
+//! | [`mod@sniff`] | The 64-byte signature check | §9.2 |
 //! | [`digest`] | BLAKE3-256 digests, streaming | §3.4 rule 4, §4.4 |
 //! | [`manifest`] | `META-INF/manifest.xml`: model, parser, writer, foreign-data carry | §3.4, §11.1 |
 //! | [`policy`] | Which ZIP method each entry gets | §4.2, §4.3 |
@@ -21,8 +21,8 @@
 //! | [`writer`] | [`PackageWriter`]: normative order, `mimetype` first, raw copies | §3.2, §13.4 |
 //! | [`durability`] | [`write_atomic`] and [`DocumentLock`] | §10.1, §10.4 |
 //! | [`svg`] | The SVG profile: [`svg::write_svg`], and [`svg::read_svg`] with [`svg::normal_form`] | §5, §6, §8 |
-//! | [`save`] | [`save()`]: SVG + resources + `meta.xml` + container, atomically | §10.1, §13.3 |
-//! | [`open`] | [`open()`]: container, `meta.xml` and SVG into a document; [`save_opened`] re-saves with raw copies | §3, §8.3, §10.1 |
+//! | [`mod@save`] | [`save()`]: SVG + resources + `meta.xml` + container, atomically | §10.1, §13.3 |
+//! | [`mod@open`] | [`open()`]: container, `meta.xml` and SVG into a document; [`save_opened`] re-saves with raw copies | §3, §8.3, §10.1 |
 //!
 //! The container, the manifest, the resource index and the durability layer
 //! move bytes and know nothing about the document model. The SVG profile
@@ -34,7 +34,7 @@
 //!
 //! # Untrusted input
 //!
-//! Everything under [`reader`], [`manifest`], [`sniff`] and [`name`] runs on
+//! Everything under [`reader`], [`manifest`], [`mod@sniff`] and [`name`] runs on
 //! bytes from disk. Those modules must never panic, never overflow and never
 //! allocate from a declared length before it has been checked against
 //! [`Limits`]; they are fuzzed (`fuzz/fuzz_targets/fuzz_xarast_*.rs`).

@@ -88,7 +88,7 @@ pub fn save_to<W: Write + Seek>(
 /// For a caller that adds entries of its own before writing — the
 /// application renders `thumbnail.png` on another thread meanwhile and
 /// sets it with [`PackageWriter::set_thumbnail`] — then finishes with
-/// [`PackageWriter::finish`] inside [`crate::write_atomic_with`].
+/// [`PackageWriter::finish`] inside [`crate::durability::write_atomic_with`].
 ///
 /// # Errors
 ///
