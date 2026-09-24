@@ -263,6 +263,7 @@ fn fixture() -> Document {
         origin: Point::raw(50_000, 500_000),
         major: Vector::raw(100_000, 0),
         minor: Vector::raw(0, -80_000),
+        photo_ops: Default::default(),
     })))
     .unwrap();
     b.node(triangle(200_000, 400_000)).unwrap();
@@ -1308,6 +1309,7 @@ fn a_jpeg8bpp_palette_survives_as_a_blob_beside_the_jpeg() {
         origin: Point::raw(50_000, 500_000),
         major: Vector::raw(100_000, 0),
         minor: Vector::raw(0, -80_000),
+        photo_ops: Default::default(),
     })))
     .unwrap();
     let (o, ax, ay) = (

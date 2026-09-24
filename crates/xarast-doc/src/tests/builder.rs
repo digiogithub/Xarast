@@ -115,6 +115,7 @@ fn a_dangling_bitmap_reference_is_dropped_and_reported() {
         origin: Point::ORIGIN,
         major: Vector::raw(1, 0),
         minor: Vector::raw(0, 1),
+        photo_ops: Default::default(),
     })))
     .unwrap();
     let (doc, diags) = b.finish().unwrap();

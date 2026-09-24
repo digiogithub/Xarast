@@ -750,6 +750,11 @@ impl Canon for NodeKind {
                 h.add(&b.origin);
                 h.add(&b.major);
                 h.add(&b.minor);
+                // Nothing for an empty chain: the digest of every existing
+                // bitmap object is unchanged.
+                if !b.photo_ops.is_empty() {
+                    h.bytes(&b.photo_ops.hash());
+                }
             }
             NodeKind::Guideline(g) => {
                 h.bool(g.horizontal);

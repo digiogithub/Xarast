@@ -81,6 +81,7 @@ fn bitmap_node(image: xarast_doc::BitmapId, x: i32) -> NodeKind {
         origin: Point::raw(x, 400_000),
         major: Vector::raw(100_000, 0),
         minor: Vector::raw(0, 100_000),
+        photo_ops: Default::default(),
     }))
 }
 

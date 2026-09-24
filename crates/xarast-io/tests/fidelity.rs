@@ -156,6 +156,7 @@ fn document(palette_on_image: bool) -> Document {
         origin: Point::raw(0, 100_000),
         major: Vector::raw(100_000, 0),
         minor: Vector::raw(0, 100_000),
+        photo_ops: Default::default(),
     })))
     .unwrap();
     b.finish().unwrap().0

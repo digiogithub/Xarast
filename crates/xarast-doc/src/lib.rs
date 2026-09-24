@@ -65,6 +65,7 @@ pub mod history;
 pub mod kind;
 pub mod live;
 pub mod palette;
+pub mod photo;
 pub mod resources;
 pub mod snapshot;
 pub mod structure;
@@ -116,6 +117,10 @@ pub use live::{
 pub use palette::{
     ColourUses, CreateColour, DeleteColour, MoveColour, PaletteResolver, RedefineColour,
     RenameColour, ReparentColour,
+};
+pub use photo::{
+    Levels, LevelsChannel, PhotoOp, PhotoOps, PhotoOrient, PixelRect, SetPhotoOps,
+    replaced_placement,
 };
 pub use resources::{
     ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, BitmapUsage, DashId,

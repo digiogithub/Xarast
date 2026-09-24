@@ -825,6 +825,7 @@ impl<'o> Mapper<'o> {
                                 origin,
                                 major,
                                 minor,
+                                photo_ops: Default::default(),
                             })))?;
                     }
                     // `opaque_node` counts the record itself; counting it

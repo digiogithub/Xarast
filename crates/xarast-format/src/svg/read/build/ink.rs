@@ -389,6 +389,7 @@ impl<'d> Reader<'d, '_, '_> {
             origin,
             major,
             minor,
+            photo_ops: Default::default(),
         }));
         let info = InkInfo {
             filled: false,

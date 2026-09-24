@@ -374,6 +374,7 @@ fn collect_unused_keeps_what_a_retained_node_still_references() {
             origin: Point::ORIGIN,
             major: Vector::raw(1, 0),
             minor: Vector::raw(0, 1),
+            photo_ops: Default::default(),
         })));
     f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
 
@@ -426,6 +427,7 @@ fn bitmap_usage_splits_the_document_from_the_history_and_guards_removal() {
             origin: Point::ORIGIN,
             major: Vector::raw(1, 0),
             minor: Vector::raw(0, 1),
+            photo_ops: Default::default(),
         })));
     f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
     let u = bitmap_usage(&f.doc);
@@ -829,4 +831,71 @@ fn eviction_keeps_the_state_serial_of_what_it_dropped() {
     let bottom = history.state_serial();
     assert_ne!(bottom, 0, "the oldest reachable state is not the fresh one");
     assert_ne!(bottom, top);
+}
+
+#[test]
+fn set_photo_ops_is_one_undo_step_and_moves_the_placement_with_a_crop() {
+    use crate::photo::{PhotoOp, PhotoOps, PixelRect, SetPhotoOps};
+    let mut f = fixture();
+    let id = f.doc.resources.insert_bitmap(BitmapResource {
+        name: Arc::from("b"),
+        info: BitmapInfo::default(),
+        pixels: Arc::new(BitmapData::default()),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    });
+    let before = crate::kind::BitmapNode {
+        image: id,
+        origin: Point::raw(0, 100_000),
+        major: Vector::raw(100_000, 0),
+        minor: Vector::raw(0, -100_000),
+        photo_ops: PhotoOps::new(),
+    };
+    let node = f
+        .doc
+        .tree
+        .create(NodeKind::Bitmap(Box::new(before.clone())));
+    f.doc.tree.attach(node, f.layer, Attach::LastChild).unwrap();
+    let digest0 = f.doc.canonical_digest();
+    let mut bus = CommandBus::new();
+    let ops = PhotoOps {
+        ops: vec![
+            PhotoOp::Brightness(0.2),
+            PhotoOp::Crop(PixelRect {
+                x: 50,
+                y: 0,
+                width: 50,
+                height: 100,
+            }),
+        ],
+    };
+    bus.dispatch(
+        &mut f.doc,
+        &SetPhotoOps {
+            node,
+            ops: ops.clone(),
+            master: Some((100, 100)),
+            label: "Adjust Photo",
+        },
+    )
+    .unwrap();
+    let Some(NodeKind::Bitmap(after)) = f.doc.tree.kind(node) else {
+        panic!("not a bitmap")
+    };
+    assert_eq!(after.photo_ops, ops.normalised(), "stored normalised");
+    assert_eq!(after.origin, Point::raw(50_000, 100_000));
+    assert_eq!(after.major, Vector::raw(50_000, 0));
+    assert_ne!(
+        f.doc.canonical_digest(),
+        digest0,
+        "the digest sees the chain"
+    );
+    assert_eq!(bus.history().len(), 1);
+    assert_eq!(bus.undo(&mut f.doc), Some("Adjust Photo"));
+    let Some(NodeKind::Bitmap(undone)) = f.doc.tree.kind(node) else {
+        panic!("not a bitmap")
+    };
+    assert_eq!(**undone, before);
+    assert_eq!(f.doc.canonical_digest(), digest0);
 }
