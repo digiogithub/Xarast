@@ -272,6 +272,7 @@ pub fn write_pdf(
         o: *o,
         canvases: vec![Canvas::new()],
         frames: Vec::new(),
+        in_effect: 0,
         compromises,
         text,
         raster: Rasteriser::new(
@@ -378,6 +379,9 @@ fn opacity(alpha: u8, t: u8) -> u32 {
 struct Translator<'a> {
     w: PdfWriter,
     dl: &'a DisplayList,
+    /// How deep inside a live effect the stream is: what it wraps was
+    /// rasterised with it, at its push, so it is skipped.
+    in_effect: usize,
     built: &'a SourceScene,
     o: PdfOptions,
     canvases: Vec<Canvas>,
@@ -442,7 +446,30 @@ impl Translator<'_> {
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<(), ExportError> {
         let dl = self.dl;
+        if self.in_effect > 0 {
+            match cmd {
+                DrawCmd::PushEffect { .. } => self.in_effect += 1,
+                DrawCmd::PopEffect => self.in_effect -= 1,
+                _ => {}
+            }
+            return Ok(());
+        }
         match (dl.item(cmd), *cmd) {
+            // A live effect is pixels the renderer computes (a feather's
+            // blurred mask): PDF has nothing that draws it, so it is
+            // rasterised whole, alone, and what it wraps is skipped.
+            (DrawItem::PushEffect { content, .. }, DrawCmd::PushEffect { op, .. }) => {
+                self.in_effect = 1;
+                self.touch(content);
+                self.rasterise(
+                    SceneNodeId(0),
+                    Target::Effect(op),
+                    content,
+                    false,
+                    "a live effect (feather) has no PDF equivalent",
+                    cancelled,
+                )?;
+            }
             (DrawItem::PushClip { path, rule, xf }, _) => {
                 let p = xf.to_affine() * path.bez().clone();
                 let rule = match rule {
