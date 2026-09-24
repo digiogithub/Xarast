@@ -136,6 +136,19 @@ struct Burst {
     epoch: Option<u64>,
 }
 
+impl Burst {
+    /// The undo-step key its commands coalesce on.
+    fn key(&self) -> xarast_doc::CoalesceKey {
+        xarast_doc::CoalesceKey {
+            gesture: self.id,
+            kind: match self.kind {
+                BurstKind::Typing => crate::ops::TYPING_KIND,
+                BurstKind::Deleting => crate::ops::TEXT_DELETE_KIND,
+            },
+        }
+    }
+}
+
 use crate::text_clip::typed;
 
 /// A caret and selection in a story: the text between `anchor` and `head`.
@@ -350,6 +363,14 @@ pub struct TextTool {
     /// An edit just emitted takes all of a story's text: where the caret
     /// goes if that removes the story ([`Emptying`]).
     emptying: Option<Emptying>,
+    /// The story the tool has edited since the caret went into it: the
+    /// only one leaving it may remove (XARA-T-0295). A story the user only
+    /// entered (an imported empty one) is never touched.
+    edited: Option<NodeId>,
+    /// The story and undo-step key of the last typing or deleting burst
+    /// that applied: a removal on leaving merges into that step when it is
+    /// still the last one.
+    last_burst: Option<(NodeId, xarast_doc::CoalesceKey)>,
 }
 
 /// A story an edit is about to empty, which the edit then removes
@@ -368,8 +389,9 @@ struct Emptying {
 }
 
 impl Emptying {
-    /// `Some` when replacing `range` of the story `v` with `text` leaves it
-    /// without text.
+    /// `Some` when deleting `range` of the story `v` (replacing it with an
+    /// empty `text`) leaves it without characters: only paragraph breaks
+    /// and tabs ([`xarast_doc::holds_no_characters`]).
     fn of(
         story: NodeId,
         v: &StoryView,
@@ -378,7 +400,14 @@ impl Emptying {
         doc: &Document,
         current: &[AttrValue],
     ) -> Option<Emptying> {
-        if !text.is_empty() || range.start > 0 || range.end < v.map.text().len() || range.is_empty()
+        let all = v.map.text();
+        if !text.is_empty()
+            || range.is_empty()
+            || range.end > all.len()
+            || !all.is_char_boundary(range.start)
+            || !all.is_char_boundary(range.end)
+            || !xarast_doc::holds_no_characters(&all[..range.start])
+            || !xarast_doc::holds_no_characters(&all[range.end..])
         {
             return None;
         }
@@ -505,6 +534,18 @@ impl TextTool {
 
     fn set(&mut self, state: Option<TextEditing>, goal_x: Option<Mp>, cx: &mut ToolCtx<'_>) {
         let new = state.map(|state| Editing { state, goal_x });
+        let story_of = |e: Option<Editing>| match e {
+            Some(Editing {
+                state: TextEditing::Story(s),
+                ..
+            }) => Some(s.story),
+            _ => None,
+        };
+        if let Some(from) = story_of(self.editing)
+            && story_of(new) != Some(from)
+        {
+            self.leave(from, cx);
+        }
         // Anything that sets the caret ends a typing burst; typing starts
         // its own again right after.
         self.burst = None;
@@ -521,6 +562,30 @@ impl TextTool {
         }
         self.editing = new;
         cx.requests.overlay_changed = true;
+    }
+
+    /// Editing `story` ends (Esc, a tool switch, a click elsewhere): a story
+    /// the tool edited that now holds no characters, only paragraph breaks
+    /// and tabs, is removed, as the original does when editing ends
+    /// (`text.md`, "Removing an emptied story"; tools invariant 11). The
+    /// removal merges into the burst that left the story so when that is
+    /// still the last undo step; otherwise it is a "Delete Text" step of
+    /// its own.
+    fn leave(&mut self, story: NodeId, cx: &mut ToolCtx<'_>) {
+        let edited = self.edited.take() == Some(story);
+        let joins = self
+            .last_burst
+            .take()
+            .filter(|(s, _)| *s == story)
+            .map(|(_, key)| key);
+        if edited
+            && cx.doc.tree.is_reachable(story)
+            && is_editable(&cx.doc.tree, story)
+            && xarast_doc::is_story_empty(cx.doc, story) == Some(true)
+        {
+            cx.commands
+                .emit(EditCommand::RemoveEmptyStory { story, joins });
+        }
     }
 
     fn select_story(&mut self, story: NodeId, anchor: Caret, head: Caret, cx: &mut ToolCtx<'_>) {
@@ -697,6 +762,7 @@ impl TextTool {
             cx.doc,
             cx.edit.current.values(),
         );
+        self.edited = Some(sel.story);
         cx.commands.emit(match kind {
             BurstKind::Typing => EditCommand::TypeText {
                 story: sel.story,
@@ -861,6 +927,7 @@ impl TextTool {
                     TextClipOp::Cut => emptied(""),
                     TextClipOp::Paste(t) => emptied(&t.text),
                 };
+                self.edited = Some(sel.story);
                 let caret = match op {
                     TextClipOp::Cut if sel.is_caret() => return true,
                     TextClipOp::Cut => {
@@ -1295,6 +1362,7 @@ impl TextTool {
             self.tab_kind,
         );
         if !edits.is_empty() {
+            self.edited = Some(sel.story);
             cx.commands.emit(EditCommand::SetTextAttr {
                 story: sel.story,
                 edits,
@@ -1315,12 +1383,16 @@ pub fn caret_map(doc: &Document, story: NodeId, fonts: &FontService) -> Option<C
 /// Every story on a visible, unlocked, non-guide layer, in paint order.
 fn editable_stories(doc: &Document) -> impl Iterator<Item = NodeId> + '_ {
     let tree = &doc.tree;
-    tree.preorder(tree.root()).filter(move |&id| {
-        matches!(tree.kind(id), Some(NodeKind::TextStory(_)))
-            && tree.ancestors(id).any(|a| {
-                matches!(tree.kind(a), Some(NodeKind::Layer(l)) if l.visible && !l.locked && !l.guide)
-            })
-    })
+    tree.preorder(tree.root())
+        .filter(move |&id| is_editable(tree, id))
+}
+
+/// Whether `id` is a story on a visible, unlocked, non-guide layer.
+fn is_editable(tree: &xarast_doc::Tree, id: NodeId) -> bool {
+    matches!(tree.kind(id), Some(NodeKind::TextStory(_)))
+        && tree.ancestors(id).any(|a| {
+            matches!(tree.kind(a), Some(NodeKind::Layer(l)) if l.visible && !l.locked && !l.guide)
+        })
 }
 
 impl Tool for TextTool {
@@ -1683,6 +1755,8 @@ impl Tool for TextTool {
             // join: the next key starts its own step.
             self.burst = None;
             self.adopt = None;
+            self.edited = None;
+            self.last_burst = None;
             self.editing = e.pending.map(|(at, column)| Editing {
                 state: TextEditing::Pending { at, column },
                 goal_x: None,
@@ -1702,6 +1776,8 @@ impl Tool for TextTool {
                 created.filter(|&n| matches!(doc.tree.kind(n), Some(NodeKind::TextStory(_))))
             {
                 self.pending.clear();
+                self.edited = Some(story);
+                self.last_burst = None;
                 self.editing = Some(Editing {
                     state: TextEditing::Story(TextSelection {
                         story,
@@ -1724,6 +1800,7 @@ impl Tool for TextTool {
         {
             // The story typing created: the caret goes on in it.
             b.story = Some(story);
+            self.edited = Some(story);
             self.pending.clear();
             let caret = Caret::at(b.caret);
             self.editing = Some(Editing {
@@ -1735,6 +1812,11 @@ impl Tool for TextTool {
                 goal_x: None,
             });
             self.moved = self.moved.wrapping_add(1);
+        }
+        // The step a removal on leaving may merge into. Should some other
+        // step have come last, the history's key check keeps them apart.
+        if let Some(b) = self.burst {
+            self.last_burst = b.story.map(|s| (s, b.key()));
         }
     }
 }

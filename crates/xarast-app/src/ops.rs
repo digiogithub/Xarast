@@ -259,6 +259,20 @@ pub enum EditCommand {
         /// The byte range.
         range: Range<usize>,
     },
+    /// Removes a story that holds no characters, only paragraph breaks
+    /// (and tabs), when editing it ends (XARA-T-0295; `text.md`, "Removing
+    /// an emptied story"): the text tool emits it on leaving a story it
+    /// edited. A story on a path leaves its path as an ordinary shape.
+    /// With `joins`, the removal merges into the undo step with that key
+    /// (the typing or deleting burst that left the story so), as the
+    /// original merges its story deletion into the operation before it;
+    /// otherwise it is a step of its own.
+    RemoveEmptyStory {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The key of the undo step it merges into, if any.
+        joins: Option<CoalesceKey>,
+    },
 }
 
 /// Where [`EditCommand::PasteText`] puts its text.
@@ -355,6 +369,7 @@ impl EditCommand {
             EditCommand::CreateText { .. } => "New Text",
             EditCommand::PasteText { .. } => "Paste",
             EditCommand::CutText { .. } => "Cut",
+            EditCommand::RemoveEmptyStory { .. } => "Delete Text",
             EditCommand::SetTextAttr { edits, .. } => edits
                 .first()
                 .and_then(|(_, v)| v.slot())
@@ -425,6 +440,7 @@ impl EditCommand {
             | EditCommand::SetShapeParams { .. }
             | EditCommand::SetPath { .. }
             | EditCommand::CreatePath { .. }
+            | EditCommand::RemoveEmptyStory { .. }
             | EditCommand::Palette(_) => false,
         }
     }
@@ -605,7 +621,13 @@ impl xarast_doc::Command for EditCommand {
                 check_layers(tx, &[*story])?;
                 xarast_doc::delete_range(tx, *story, replace.clone())?;
                 xarast_doc::insert_text(tx, *story, replace.start, text)?;
-                remove_if_emptied(tx, *story, replace)
+                if text.is_empty() {
+                    remove_if_emptied(tx, *story, replace)
+                } else {
+                    // Typing a break over the selection is not a deletion:
+                    // the story goes, if at all, when editing it ends.
+                    Ok(())
+                }
             }
             EditCommand::DeleteText { story, range, .. } => {
                 check_layers(tx, &[*story])?;
@@ -639,6 +661,10 @@ impl xarast_doc::Command for EditCommand {
                 xarast_doc::delete_range(tx, *story, range.clone())?;
                 remove_if_emptied(tx, *story, range)
             }
+            EditCommand::RemoveEmptyStory { story, .. } => {
+                check_layers(tx, &[*story])?;
+                xarast_doc::remove_empty_story(tx, *story).map(|_| ())
+            }
         }
     }
 
@@ -660,14 +686,16 @@ impl xarast_doc::Command for EditCommand {
                 gesture: *burst,
                 kind: TYPING_KIND,
             }),
+            EditCommand::RemoveEmptyStory { joins, .. } => *joins,
             _ => None,
         }
     }
 }
 
-/// A story a deletion of `range` left without text is removed in the same
-/// step, as the original does (`text.md`, "Removing an emptied story"): one
-/// undo brings back the story and its text. A story on a path leaves its
+/// A story a deletion of `range` left without characters (only paragraph
+/// breaks and tabs) is removed in the same step, as the original does
+/// (`text.md`, "Removing an emptied story"): one undo brings back the
+/// story and its text. A story on a path leaves its
 /// path behind as an ordinary shape. Nothing happens when nothing was
 /// deleted, so a story that was already empty (an imported one) stays.
 fn remove_if_emptied(

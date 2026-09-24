@@ -29,6 +29,11 @@ const Y0: i32 = 400_000;
 /// A session holding one point story at (100 pt, 400 pt), 20 pt Noto Sans:
 /// "Hello world" and "Second line" as two paragraphs.
 fn fixture() -> (Session, NodeId) {
+    fixture_lines(&["Hello world", "Second line"])
+}
+
+/// The same story holding `lines`, one paragraph each.
+fn fixture_lines(lines: &[&str]) -> (Session, NodeId) {
     xarast_app::fonts::set_shared(fonts());
     let mut b = skeleton(BuildLimits::default()).unwrap();
     let story = b
@@ -46,7 +51,7 @@ fn fixture() -> (Session, NodeId) {
     })))
     .unwrap();
     b.attribute(AttrValue::FontSize(Mp::new(20_000))).unwrap();
-    for line in ["Hello world", "Second line"] {
+    for line in lines {
         b.node(NodeKind::TextLine(Box::default())).unwrap();
         b.push_scope().unwrap();
         for c in line.chars() {
@@ -760,22 +765,177 @@ fn a_backspace_burst_that_empties_a_new_story_undoes_in_one_step() {
     assert_eq!(s.doc.canonical_digest(), before);
 }
 
+// ── A story holding only breaks goes when editing ends (XARA-T-0295) ────
+
 #[test]
-fn a_story_left_with_only_paragraph_breaks_stays_when_the_text_is_left() {
-    // Decided: removal happens at the deletion that empties a story, never
-    // when editing ends, so leaving the text is still no edit (invariant
-    // 11); a story holding only breaks is not empty.
+fn enter_three_times_then_esc_removes_the_story_in_the_typing_step() {
+    let (mut s, _) = fixture();
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, 300_000, 200_000, 0);
+    for t in [1_000, 1_100, 1_200] {
+        type_str(&mut s, "\n", t);
+    }
+    let new = selection(&s).story;
+    assert_eq!(story_text(&s, new), "\n\n\n\n");
+    assert_eq!(steps(&s), 1, "one typing burst");
+    s.apply(Intent::Cancel).unwrap();
+    assert!(!s.doc.tree.is_reachable(new), "the story of breaks is gone");
+    assert_eq!(s.text_state(), None);
+    assert_eq!(s.edit.selection().count(), 0);
+    assert_eq!(steps(&s), 1, "merged into the typing step");
+    valid(&s);
+    // One undo: exactly the document from before the first Enter.
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+    assert!(s.undo_label().is_none());
+    s.apply(Intent::Redo).unwrap();
+    assert!(!s.doc.tree.is_reachable(new));
+}
+
+#[test]
+fn a_tool_switch_or_a_click_elsewhere_removes_a_story_of_breaks_and_tabs() {
+    // Tabs are not characters either, as in the original.
+    for leave in ["tool", "canvas", "story"] {
+        let (mut s, old) = fixture();
+        let before = s.doc.canonical_digest();
+        text_tool(&mut s);
+        click(&mut s, 300_000, 200_000, 0);
+        type_str(&mut s, "\t", 1_000);
+        type_str(&mut s, "\n", 1_100);
+        let new = selection(&s).story;
+        assert_eq!(story_text(&s, new), "\t\n\n");
+        match leave {
+            "tool" => {
+                s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
+            }
+            "canvas" => click(&mut s, 300_000, 100_000, 5_000),
+            _ => click(&mut s, X0 + 30_000, Y0 + 5_000, 5_000),
+        }
+        assert!(!s.doc.tree.is_reachable(new), "{leave}");
+        assert_eq!(steps(&s), 1, "{leave}");
+        if leave == "story" {
+            assert_eq!(selection(&s).story, old, "the caret is in the other story");
+        }
+        valid(&s);
+        s.apply(Intent::Undo).unwrap();
+        assert_eq!(s.doc.canonical_digest(), before, "{leave}");
+    }
+}
+
+#[test]
+fn leaving_after_the_burst_is_no_longer_the_last_step_removes_in_a_step_of_its_own() {
     let (mut s, _) = fixture();
     text_tool(&mut s);
     click(&mut s, 300_000, 200_000, 0);
     type_str(&mut s, "\n", 1_000);
     let new = selection(&s).story;
-    assert_eq!(story_text(&s, new), "\n\n");
+    let first = s.doc.canonical_digest();
+    // A second burst, then undone: the step last in the history is the
+    // first burst, which the removal must not reach into.
+    type_str(&mut s, "\n", 5_000);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), first);
+    assert_eq!(s.text_state().map(|_| ()), Some(()), "still editing");
     let n = steps(&s);
     s.apply(Intent::Cancel).unwrap();
+    assert!(!s.doc.tree.is_reachable(new));
+    assert_eq!(steps(&s), n + 1, "a step of its own");
+    assert_eq!(s.undo_label(), Some("Delete Text"));
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), first);
+}
+
+#[test]
+fn deleting_a_story_after_undoing_a_break_undoes_to_the_whole_story() {
+    // The redo branch the deletion drops retains the break the undone
+    // Enter moved; the story it sits in must survive for the undo.
+    let (mut s, _) = fixture();
+    text_tool(&mut s);
+    click(&mut s, 300_000, 200_000, 0);
+    type_str(&mut s, "a", 1_000);
+    let new = selection(&s).story;
+    assert_eq!(story_text(&s, new), "a\n");
+    let first = s.doc.canonical_digest();
+    type_str(&mut s, "\n", 5_000);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), first);
+    s.apply(Intent::Cancel).unwrap();
     s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
-    assert!(s.doc.tree.is_reachable(new));
-    assert_eq!(steps(&s), n);
+    s.apply(Intent::DeleteSelection).unwrap();
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), first);
+}
+
+#[test]
+fn deleting_every_character_but_the_breaks_removes_the_story_in_that_step() {
+    let (mut s, story) = fixture_lines(&["Hello world", ""]);
+    let before = s.doc.canonical_digest();
+    assert_eq!(story_text(&s, story), "Hello world\n\n");
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    nav(&mut s, TextKey::Home, false, false);
+    nav(&mut s, TextKey::End, false, true);
+    assert_eq!(selection(&s).range(), 0..11);
+    backspace(&mut s, 1_000);
+    assert!(!s.doc.tree.is_reachable(story), "only breaks left: gone");
+    assert_eq!(steps(&s), 1);
+    assert_eq!(s.undo_label(), Some("Delete Text"));
+    assert_eq!(
+        s.text_state(),
+        Some(TextEditing::Pending {
+            at: Point::raw(X0, Y0),
+            column: None
+        })
+    );
+    valid(&s);
+    // Leaving now removes nothing more.
+    s.apply(Intent::Cancel).unwrap();
+    assert_eq!(steps(&s), 1);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+}
+
+#[test]
+fn typing_a_break_over_all_the_text_keeps_the_story_until_editing_ends() {
+    let (mut s, story) = fixture_lines(&["Hello world"]);
+    let before = s.doc.canonical_digest();
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    s.apply(Intent::SelectAll).unwrap();
+    type_str(&mut s, "\n", 1_000);
+    assert!(s.doc.tree.is_reachable(story), "typing is no deletion");
+    assert_eq!(story_text(&s, story), "\n\n");
+    assert_eq!(selection(&s).story, story);
+    s.apply(Intent::Cancel).unwrap();
+    assert!(!s.doc.tree.is_reachable(story));
+    assert_eq!(steps(&s), 1);
+    s.apply(Intent::Undo).unwrap();
+    assert_eq!(s.doc.canonical_digest(), before);
+}
+
+#[test]
+fn an_imported_story_of_breaks_survives_being_entered_and_left() {
+    for lines in [&[""][..], &["", ""][..]] {
+        let (mut s, story) = fixture_lines(lines);
+        let before = s.doc.canonical_digest();
+        // Entered from a selection, then left by Esc and a tool switch.
+        s.edit.select([story], xarast_app::SelectMode::Replace);
+        text_tool(&mut s);
+        assert_eq!(selection(&s).story, story);
+        nav(&mut s, TextKey::Home, true, false);
+        s.apply(Intent::Cancel).unwrap();
+        s.apply(Intent::ChooseTool(ToolId::Selector)).unwrap();
+        assert!(s.doc.tree.is_reachable(story));
+        untouched(&s, &s.doc.canonical_digest(), &before);
+        // Entered by a click, left by a click on empty canvas.
+        text_tool(&mut s);
+        click(&mut s, X0 + 200, Y0 + 5_000, 0);
+        assert_eq!(selection(&s).story, story);
+        click(&mut s, 300_000, 100_000, 1_000);
+        assert!(s.doc.tree.is_reachable(story));
+        untouched(&s, &s.doc.canonical_digest(), &before);
+    }
 }
 
 /// A session holding one story on a straight path from (X0, Y0) 200 pt
@@ -906,6 +1066,73 @@ fn removing_an_emptied_story_repaints_its_damage_exactly() {
     assert!(f.surface == whole.surface, "the repaint is the full frame");
 
     // Undo repaints the text back.
+    s.apply(Intent::Undo).unwrap();
+    s.rebuild_scene(None).unwrap();
+    rt.submit(s.frame_job(BG, PAGE));
+    let u = next(&rt, &woken);
+    assert_eq!(u.reuse, FrameReuse::Repainted);
+    assert!(u.surface == first.surface, "undo repaints the text exactly");
+}
+
+#[test]
+fn removing_a_story_of_breaks_on_leaving_repaints_its_damage_exactly() {
+    use std::sync::Mutex;
+    use std::sync::mpsc;
+    use xarast_app::render_thread::CpuFrameRenderer;
+    use xarast_app::{FrameReuse, RenderThread, RenderedFrame};
+    const BG: [u8; 4] = [128, 128, 132, 255];
+    const PAGE: [u8; 4] = [255, 255, 255, 255];
+    let t = std::time::Duration::from_secs(60);
+    let thread = || {
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let rt = RenderThread::spawn_with(
+            CpuFrameRenderer::new(xarast_render::CpuConfig::deterministic()),
+            Box::new(move || {
+                let _ = tx.lock().map(|t| t.send(()));
+            }),
+        )
+        .unwrap();
+        (rt, rx)
+    };
+    let next = |rt: &RenderThread, w: &mpsc::Receiver<()>| -> RenderedFrame {
+        w.recv_timeout(t).expect("a frame");
+        rt.take_latest().expect("published before the wake")
+    };
+
+    // Typing a break over the text leaves only breaks (the ink goes with
+    // that step); Esc then removes the story, merged into it.
+    let (mut s, story) = fixture_lines(&["Hello world"]);
+    s.rebuild_scene(None).unwrap();
+    let (mut rt, woken) = thread();
+    rt.submit(s.frame_job(BG, PAGE));
+    let first = next(&rt, &woken);
+
+    text_tool(&mut s);
+    click(&mut s, X0 + 30_000, Y0 + 5_000, 0);
+    s.apply(Intent::SelectAll).unwrap();
+    type_str(&mut s, "\n", 1_000);
+    s.rebuild_scene(None).unwrap();
+    rt.submit(s.frame_job(BG, PAGE));
+    let typed = next(&rt, &woken);
+    s.apply(Intent::Cancel).unwrap();
+    assert!(!s.doc.tree.is_reachable(story));
+    s.rebuild_scene(None).unwrap();
+    let job = s.frame_job(BG, PAGE);
+    rt.submit(job.clone());
+    let f = next(&rt, &woken);
+    assert_eq!(f.reuse, FrameReuse::Repainted);
+    let (mut full, full_woken) = thread();
+    full.submit(job);
+    let whole = next(&full, &full_woken);
+    assert!(whole.surface != first.surface, "the text went");
+    assert!(f.surface == whole.surface, "the repaint is the full frame");
+    assert!(
+        f.surface == typed.surface,
+        "a story of breaks painted nothing"
+    );
+
+    // One undo brings the text back, painted exactly.
     s.apply(Intent::Undo).unwrap();
     s.rebuild_scene(None).unwrap();
     rt.submit(s.frame_job(BG, PAGE));
