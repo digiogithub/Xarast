@@ -27,7 +27,7 @@ use std::time::Instant;
 use xarast_doc::BitmapResource;
 use xarast_doc::resources::ImageFormat;
 use xarast_format::ResourceIndex;
-use xarast_format::svg::{self as fsvg, BitmapLinker, SvgDialect};
+use xarast_format::svg::{self as fsvg, BitmapLinker, DerivedLinker, SvgDialect};
 
 use crate::model::{Background, ExportRequest};
 use crate::options::{
@@ -123,6 +123,18 @@ impl Exporter for SvgExporter {
             Background::Paper => Some(src.paper_colour()),
             Background::Colour(c) => Some(c),
         };
+        // A bitmap object with photo operations shows its adjusted pixels
+        // (W10.6): the chain is baked into a PNG of its own, since an SVG
+        // viewer cannot evaluate it.
+        let derived = {
+            let links = Arc::clone(&links);
+            let prefix = sidecar.as_ref().map(|(_, href)| href.clone());
+            DerivedLinker(Arc::new(move |_, res: &BitmapResource, ops| {
+                let (bytes, mime, ext) = baked_image(res, ops)?;
+                let mut l = links.lock().unwrap_or_else(PoisonError::into_inner);
+                Some(l.link_bytes(bytes, mime, ext, prefix.as_deref()))
+            }))
+        };
         let opts = fsvg::SvgOptions {
             pretty: o.pretty && !o.minify,
             text: src.svg_text_placer(),
@@ -131,6 +143,7 @@ impl Exporter for SvgExporter {
             background,
             minify: o.minify,
             bitmaps: Some(linker),
+            derived_bitmaps: Some(derived),
             ..fsvg::SvgOptions::default()
         };
         let t = Instant::now();
@@ -248,8 +261,20 @@ impl Links {
             self.failed += 1;
             return None;
         };
+        Some(self.link_bytes(bytes, mime, ext, sidecar))
+    }
+
+    /// The `href` for encoded image bytes, written once however many
+    /// times they are linked.
+    fn link_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        mime: &str,
+        ext: &str,
+        sidecar: Option<&str>,
+    ) -> String {
         if let Some(h) = self.seen.get(&bytes) {
-            return Some(h.clone());
+            return h.clone();
         }
         let href = match sidecar {
             None => format!("data:{mime};base64,{}", fsvg::xml::base64(&bytes)),
@@ -261,8 +286,35 @@ impl Links {
             }
         };
         self.seen.insert(bytes, href.clone());
-        Some(href)
+        href
     }
+}
+
+/// A bitmap object's photo-adjusted image as a PNG: the master's pixels
+/// (as [`pixels`] reads them) through the chain
+/// ([`crate::photo::bake`], the evaluation the renderer uses). The
+/// master's ICC profile still describes the result, so it travels too.
+fn baked_image(
+    res: &BitmapResource,
+    ops: &xarast_doc::PhotoOps,
+) -> Option<(Vec<u8>, &'static str, &'static str)> {
+    let (w, h, rgba, icc) = pixels(res)?;
+    let (w, h, rgba) = crate::photo::bake(w, h, &rgba, ops)?;
+    let header = PngHeader {
+        width: w,
+        height: h,
+        colour: PngColour::Rgba,
+        depth: PngDepth::Eight,
+        interlace: false,
+        ppm: None,
+        level: 6,
+    };
+    let mut png = Vec::new();
+    encode_png(&mut png, header, &rgba).ok()?;
+    if let Some(tagged) = icc.and_then(|p| with_icc_profile(&png, &p)) {
+        png = tagged;
+    }
+    Some((png, "image/png", "png"))
 }
 
 /// A bitmap as bytes every SVG viewer decodes: PNG, JPEG and GIF
@@ -351,6 +403,10 @@ fn decode_original(res: &BitmapResource) -> Option<xarast_image::DecodedImage> {
 fn compromises(s: &fsvg::Stats, svg: &str, failed_images: usize) -> Vec<Compromise> {
     let not_rendered = [
         ("images (no pixels)", s.images_missing.max(failed_images)),
+        (
+            "photo adjustments (the image is shown unadjusted)",
+            s.photo_ops_unbaked,
+        ),
         ("quick shapes (no outline)", s.quickshapes_without_outline),
         ("clips (unsupported clip shape)", s.clips_unsupported),
         ("unknown .xar records", s.opaque),
@@ -376,6 +432,10 @@ fn compromises(s: &fsvg::Stats, svg: &str, failed_images: usize) -> Vec<Compromi
             s.strokes_approximated,
         ),
         ("text on a path laid out on straight lines", s.text_on_path),
+        (
+            "photo adjustments baked into a PNG of the adjusted pixels",
+            s.photo_ops.saturating_sub(s.photo_ops_unbaked),
+        ),
     ];
     let mut out: Vec<Compromise> = not_rendered
         .into_iter()
