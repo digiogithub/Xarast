@@ -25,6 +25,7 @@ use std::sync::Arc;
 use xarast_render::backend::gpu_tiles::{create_target, read_back};
 use xarast_render::corpus::all_cases;
 use xarast_render::golden::compare;
+use xarast_render::gpu_test_lock;
 use xarast_render::{
     CpuBackend, CpuConfig, DeviceRect, DirtyRect, DisplayList, GpuTileCache, GpuTileCacheConfig,
     Surface, TileGrid, TileKey, TilePlacement, Transform2D, compose_cpu, whole_tile,
@@ -47,13 +48,10 @@ fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 
 /// Every adapter, or those whose name contains `WGPU_ADAPTER_NAME`
 /// (case-insensitive), with a device each.
+///
+/// The caller must hold the machine-wide GPU lock
+/// ([`gpu_test_lock::acquire`]) for as long as the devices live.
 fn devices() -> Vec<(String, Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
-    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
-    // maintainer's display driver (concurrent runs once hung the desktop).
-    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
-        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
-        return Vec::new();
-    }
     if wgpu::Instance::enabled_backend_features().is_empty() {
         return Vec::new();
     }
@@ -129,6 +127,10 @@ fn mappings() -> Vec<(&'static str, Transform2D)> {
 
 #[test]
 fn the_gpu_tile_composite_equals_the_cpu_reference_byte_for_byte() {
+    // Bound first so that it drops last, after every device.
+    let Some(_gpu) = gpu_test_lock::acquire("parity_tiles::byte_for_byte") else {
+        return;
+    };
     let devices = devices();
     if devices.is_empty() {
         eprintln!("skipping tile parity: no adapter. The gate is unmeasured, not passed.");
@@ -316,6 +318,9 @@ fn a_frame_assembled_from_tiles_differs_from_the_whole_frame_in_few_pixels() {
 
 #[test]
 fn a_full_cache_evicts_the_least_recently_used_tile() {
+    let Some(_gpu) = gpu_test_lock::acquire("parity_tiles::lru_eviction") else {
+        return;
+    };
     let Some((_, device, queue)) = devices().into_iter().next() else {
         eprintln!("skipping: no adapter");
         return;

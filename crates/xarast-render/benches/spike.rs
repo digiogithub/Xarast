@@ -522,6 +522,10 @@ mod gpu {
     }
 
     pub fn run(objs: &[Obj], reference: &Pixmap) {
+        // The machine-wide GPU lock, held until every device is gone.
+        let Some(_gpu) = xarast_render::gpu_test_lock::acquire("bench spike") else {
+            return;
+        };
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle_from_env()

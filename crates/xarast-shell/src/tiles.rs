@@ -1144,13 +1144,10 @@ mod tests {
     }
 
     /// A headless device on whatever adapter there is, or `None`.
+    ///
+    /// The caller must hold the machine-wide GPU lock
+    /// (`xarast_render::gpu_test_lock::acquire`) while the device lives.
     fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
-        // Real GPUs are opt-in: an unattended `cargo test` must never touch the
-        // maintainer's display driver (concurrent runs once hung the desktop).
-        if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
-            eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
-            return None;
-        }
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all().with_env(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -1160,6 +1157,8 @@ mod tests {
             ..Default::default()
         }))
         .ok()?;
+        let info = adapter.get_info();
+        eprintln!("GPU tile tier on {} ({:?})", info.name, info.backend);
         let (d, q) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         Some((Arc::new(d), Arc::new(q)))
@@ -1167,6 +1166,10 @@ mod tests {
 
     #[test]
     fn the_gpu_tier_composites_byte_for_byte_as_the_cpu_tier() {
+        // Bound first so that it drops last, after the device.
+        let Some(_gpu) = xarast_render::gpu_test_lock::acquire("shell::tiles::gpu_tier") else {
+            return;
+        };
         let Some((device, queue)) = device() else {
             eprintln!("skipped: no GPU adapter");
             return;

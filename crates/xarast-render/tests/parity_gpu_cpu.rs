@@ -15,15 +15,15 @@ use common::render_case;
 use xarast_render::backend::gpu::adapter_available;
 use xarast_render::corpus::all_cases;
 use xarast_render::golden::compare;
+use xarast_render::gpu_test_lock;
 
 #[test]
 fn the_two_backends_agree_within_the_parity_band() {
-    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
-    // maintainer's display driver, not even to enumerate adapters.
-    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
-        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
+    // The machine-wide GPU lock, before even enumerating adapters, held
+    // until the device is gone (it is bound first, so it drops last).
+    let Some(_gpu) = gpu_test_lock::acquire("parity_gpu_cpu") else {
         return;
-    }
+    };
     if !adapter_available() {
         eprintln!(
             "skipping GPU parity: wgpu enumerated no adapter on this machine. \
@@ -74,15 +74,11 @@ fn the_two_backends_agree_within_the_parity_band() {
 }
 
 fn create_device() -> Option<(std::sync::Arc<wgpu::Device>, std::sync::Arc<wgpu::Queue>)> {
-    // Real GPUs are opt-in: an unattended `cargo test` must never touch the
-    // maintainer's display driver (concurrent runs once hung the desktop).
-    if std::env::var("XARAST_GPU_TESTS").as_deref() != Ok("1") {
-        eprintln!("skipping: set XARAST_GPU_TESTS=1 to run GPU tests");
-        return None;
-    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+    let info = adapter.get_info();
+    eprintln!("GPU parity on {} ({:?})", info.name, info.backend);
     let (device, queue) =
         block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     Some((std::sync::Arc::new(device), std::sync::Arc::new(queue)))

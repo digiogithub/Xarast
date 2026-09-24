@@ -253,6 +253,10 @@ fn main() {
         }),
     );
 
+    // The machine-wide GPU lock, held until every device is gone.
+    let Some(_gpu) = xarast_render::gpu_test_lock::acquire("bench tiles") else {
+        return;
+    };
     let want = std::env::var("WGPU_ADAPTER_NAME")
         .ok()
         .map(|s| s.to_lowercase());
