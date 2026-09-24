@@ -141,6 +141,8 @@ pub struct Viewer {
     requests: Vec<PlatformRequest>,
     /// The file chooser on screen, if one is.
     open_dialog: Option<PortalRequestId>,
+    /// The File › Import… chooser on screen, if one is (T10.7.4).
+    import_dialog: Option<PortalRequestId>,
     /// The active document changed: the window title is owed.
     title_stale: bool,
     /// The save chooser on screen, if one is.
@@ -215,6 +217,7 @@ impl Viewer {
             momentary: crate::input::momentary::MomentarySwitch::new(),
             requests: Vec::new(),
             open_dialog: None,
+            import_dialog: None,
             title_stale: false,
             save_dialog: None,
             signals: crate::signals::SignalWatch::inert(),
@@ -401,6 +404,12 @@ impl Viewer {
                         self.open_dialog = Some(id);
                     }
                 }
+                PlatformRequest::ShowImportDialog => {
+                    if self.import_dialog.is_none() {
+                        let id = ctx.portal().open_files(import_request(ctx.parent_window()));
+                        self.import_dialog = Some(id);
+                    }
+                }
                 PlatformRequest::ShowSaveDialog {
                     title,
                     file_name,
@@ -438,9 +447,15 @@ impl Viewer {
                     // when the text is not something Xarast pastes itself:
                     // not our copy, not SVG, and no text caret is up.
                     let text_editing = self.app.active().is_some_and(Session::text_editing);
+                    // A file manager's copy names files: those are
+                    // imported by the core, not looked for as a picture.
                     let wants_image = !text_editing
                         && match &read {
-                            Ok(t) => !is_ours && !looks_like_svg(t),
+                            Ok(t) => {
+                                !is_ours
+                                    && !looks_like_svg(t)
+                                    && xarast_app::place::image_paths_in_text(t).is_empty()
+                            }
                             Err(crate::clipboard::ClipboardError::Unavailable(_)) => false,
                             Err(_) => true,
                         };
@@ -542,7 +557,13 @@ impl Viewer {
             ctx.exit();
             return;
         }
-        let changed = self.app.poll_saves();
+        let mut changed = self.app.poll_saves();
+        // Background imports that finished (T10.7.5) land now; thumbnails
+        // that arrived redraw the gallery.
+        changed |= self.app.poll_imports();
+        if self.app.poll_thumbnails() {
+            ctx.request_redraw();
+        }
         if !changed.is_empty() {
             self.requests.extend(self.app.take_requests());
             if let Some(n) = self.app.take_notice() {
@@ -569,6 +590,46 @@ impl Viewer {
             }
         }
         self.perform_requests(ctx);
+    }
+
+    /// Takes the answer to the File › Import… chooser: every file chosen
+    /// is placed in the middle of the view. Returns false for an answer to
+    /// something else.
+    fn import_answer(&mut self, event: &PortalEvent) -> bool {
+        let request = match event {
+            PortalEvent::FilesChosen { request, .. }
+            | PortalEvent::Cancelled { request }
+            | PortalEvent::Failed { request, .. } => *request,
+            _ => return false,
+        };
+        if self.import_dialog != Some(request) {
+            return false;
+        }
+        self.import_dialog = None;
+        match event {
+            PortalEvent::FilesChosen { paths, .. } => {
+                let intents = paths
+                    .iter()
+                    .map(|path| Intent::ImportImage {
+                        path: path.clone(),
+                        at: None,
+                    })
+                    .collect();
+                self.apply(intents);
+            }
+            PortalEvent::Failed { reason, .. } => {
+                let message = format!("Could not show the file chooser: {reason}");
+                tracing::warn!("{message}");
+                self.app.diagnostics.push(xarast_app::DiagnosticEntry {
+                    severity: xarast_app::Severity::Error,
+                    message: message.clone(),
+                    document: None,
+                });
+                self.message = Some(message);
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Takes the answer to the open dialog. Returns false for an answer to
@@ -613,6 +674,7 @@ impl Viewer {
             .active()
             .map(|s| document_view(s, scale, &mut self.layer_keys, &mut self.guide_keys));
         let colour_bar = self.app.active().map(Session::colour_bar_view);
+        let bitmap_gallery = self.app.bitmap_gallery_view();
         let editing = self.app.active().map(|s| EditingView {
             tool: s.tools().current(),
             undo: s.undo_label().map(str::to_owned),
@@ -633,6 +695,12 @@ impl Viewer {
                     .as_ref()
                     .and_then(|v| v.drag.as_ref())
                     .map(|d| d.status.clone())
+                    .or_else(|| {
+                        bitmap_gallery
+                            .as_ref()
+                            .and_then(|v| v.drag.as_ref())
+                            .map(|d| d.status.clone())
+                    })
                     .or_else(|| self.message.clone()),
                 problem_count: self.app.diagnostics.entries().len(),
                 ..StatusInfo::default()
@@ -642,6 +710,8 @@ impl Viewer {
             palette: vec![xarast_ui::model::PaletteEntry::none()],
             colour_editor: self.app.active().and_then(Session::colour_editor_view),
             colour_bar,
+            bitmap_gallery,
+            imports: self.app.import_progress(),
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
                 ColorScheme::Dark => xarast_ui::ColorScheme::Dark,
@@ -898,6 +968,18 @@ impl Viewer {
                     },
                 ))
             }
+            UiCommand::BitmapGallery(op) => Intent::BitmapGallery(op),
+            UiCommand::BitmapDragAt { x, y } => {
+                use xarast_app::bitmap_gallery::{BitmapDragPoint, BitmapGalleryOp};
+                let at = PhysicalPos::new(f64::from(x) * ppp, f64::from(y) * ppp);
+                let canvas = self.adapter.canvas();
+                Intent::BitmapGallery(BitmapGalleryOp::DragTo(if canvas.contains(at) {
+                    BitmapDragPoint::Canvas(canvas.to_canvas(at))
+                } else {
+                    BitmapDragPoint::Elsewhere
+                }))
+            }
+            UiCommand::CancelImports => Intent::CancelImports,
             UiCommand::SetFill(v) | UiCommand::SetLine(v) => {
                 use xarast_app::colour_bar::{ColourBarOp, ColourSource};
                 use xarast_app::colour_editor::PaintSlot;
@@ -1158,6 +1240,27 @@ fn open_request(parent: Option<String>) -> OpenFileRequest {
     }
 }
 
+/// File › Import…: the images Xarast places, then anything; several at
+/// once.
+fn import_request(parent: Option<String>) -> OpenFileRequest {
+    OpenFileRequest {
+        title: "Import".to_owned(),
+        filters: vec![
+            FileFilter::new(
+                "Images (PNG, JPEG, GIF, WebP, TIFF, BMP, PNM)",
+                &[
+                    "png", "jpg", "jpeg", "jpe", "gif", "webp", "tif", "tiff", "bmp", "pnm", "pbm",
+                    "pgm", "ppm", "pam",
+                ],
+            ),
+            FileFilter::new("All files", &["*"]),
+        ],
+        multiple: true,
+        directory: None,
+        parent,
+    }
+}
+
 fn zoom_target(t: xarast_ui::model::ZoomTarget) -> xarast_app::ZoomTarget {
     use xarast_app::ZoomTarget as A;
     use xarast_ui::model::ZoomTarget as U;
@@ -1229,6 +1332,7 @@ impl Viewer {
                 redraw = true;
             }
             ShellEvent::Portal(answer) if self.portal_answer(answer) => redraw = true,
+            ShellEvent::Portal(answer) if self.import_answer(answer) => redraw = true,
             ShellEvent::Portal(answer) if self.save_answer(answer) => redraw = true,
             ShellEvent::CloseRequested => {
                 // The window's close button is File › Quit: it asks about
@@ -3796,5 +3900,122 @@ mod tests {
             "the objects were pasted, not the picture"
         );
         assert_eq!(v.app.active().unwrap().undo_label(), Some("Paste"));
+    }
+
+    #[test]
+    fn file_import_asks_for_a_chooser_of_several_images_and_places_each() {
+        let (mut v, _) = viewer_with_square();
+        v.run_command(AppCommand::Import);
+        assert_eq!(v.requests, [PlatformRequest::ShowImportDialog]);
+        let r = import_request(Some("wayland:x".to_owned()));
+        assert!(r.multiple, "several files at once");
+        assert_eq!(r.title, "Import");
+        assert!(r.filters[0].extensions.iter().any(|e| e == "webp"));
+        let (_, answers) = with_ctx(|ctx| v.perform_requests(ctx));
+        assert!(v.import_dialog.is_some() && v.open_dialog.is_none());
+        // The offline portal fails at once: said, and nothing changes.
+        for a in answers {
+            v.handle(&ShellEvent::Portal(a));
+        }
+        assert!(v.import_dialog.is_none());
+        assert!(
+            v.message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Could not show the file chooser"))
+        );
+        // A chooser that answers with two files places both, in the view.
+        let (dir, png) = png_file("import", 96, 48);
+        let second = dir.join("second.png");
+        std::fs::copy(&png, &second).unwrap();
+        v.import_dialog = Some(PortalRequestId(9));
+        let history = v.app.active().unwrap().bus.history().len();
+        assert!(v.handle(&ShellEvent::Portal(PortalEvent::FilesChosen {
+            request: PortalRequestId(9),
+            paths: vec![png, second],
+        })));
+        assert!(v.import_dialog.is_none());
+        let s = v.app.active().unwrap();
+        assert_eq!(s.bus.history().len(), history + 2, "one step each");
+        assert_eq!(s.undo_label(), Some("Import Bitmap"));
+        assert_eq!(bitmaps(&v).len(), 2);
+        assert!(v.to_open.is_empty(), "nothing is opened as a document");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ctrl_v_of_a_file_managers_copy_imports_the_files_not_a_picture() {
+        let (mut v, _) = viewer_with_square();
+        let (dir, png) = png_file("paste-files", 8, 4);
+        let mut clipboard = FakeClipboard {
+            text: Some(format!("copy\nfile://{}\n", png.display())),
+            // A picture beside it must not win over the files.
+            image: crate::clipboard::ClipboardImage::new(1, 1, vec![0, 0, 0, 255]),
+        };
+        press(&mut v, Key::char('v'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        let s = v.app.active().unwrap();
+        assert_eq!(s.undo_label(), Some("Import Bitmap"));
+        let b = bitmaps(&v);
+        assert_eq!(b.len(), 1);
+        // 8 × 4 px at 96 dpi: the file, not the 1 × 1 picture.
+        assert_eq!(b[0].major.dx, xarast_geom::Mp::new(6_000));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bitmap_dragged_from_the_gallery_lands_on_the_canvas_point() {
+        use xarast_app::bitmap_gallery::{BitmapDragPoint, BitmapGalleryOp};
+        let (mut v, _) = viewer_with_square();
+        let img = xarast_app::place::image_from_rgba(4, 4, &[9u8, 9, 9, 255].repeat(16)).unwrap();
+        let id = v
+            .app
+            .active_mut()
+            .unwrap()
+            .doc
+            .resources
+            .insert_bitmap(img.resource);
+        let m = v.ui_model(1.0);
+        let gallery = m.bitmap_gallery.expect("the gallery is in the model");
+        assert_eq!(gallery.entries.len(), 1);
+        assert_eq!(gallery.entries[0].id, id);
+        // A pointer over the canvas maps to canvas pixels; elsewhere not.
+        let (x, y) = window_at(&v, 300_000, 450_000);
+        #[allow(clippy::cast_possible_truncation)]
+        let over = UiCommand::BitmapDragAt {
+            x: x as f32,
+            y: y as f32,
+        };
+        let Some(Intent::BitmapGallery(BitmapGalleryOp::DragTo(BitmapDragPoint::Canvas(at)))) =
+            v.ui_intent(over.clone(), 1.0)
+        else {
+            panic!("over the canvas");
+        };
+        assert_eq!(
+            v.ui_intent(UiCommand::BitmapDragAt { x: 1.0, y: 1.0 }, 1.0),
+            Some(Intent::BitmapGallery(BitmapGalleryOp::DragTo(
+                BitmapDragPoint::Elsewhere
+            )))
+        );
+        assert_eq!(
+            v.ui_intent(UiCommand::CancelImports, 1.0),
+            Some(Intent::CancelImports)
+        );
+        let intents = vec![
+            Intent::BitmapGallery(BitmapGalleryOp::DragBegin(id)),
+            Intent::BitmapGallery(BitmapGalleryOp::DragTo(BitmapDragPoint::Canvas(at))),
+        ];
+        v.apply(intents);
+        // While it is dragged the status line says what a drop does.
+        let status = v.ui_model(1.0).status.message.unwrap_or_default();
+        assert!(status.starts_with("Drop to"), "{status}");
+        v.apply(vec![Intent::BitmapGallery(BitmapGalleryOp::DragDrop)]);
+        let b = bitmaps(&v);
+        assert_eq!(b.len(), 1);
+        let c = bitmap_centre(&b[0]);
+        let px = 1.0 / v.app.active().unwrap().viewport.zoom() * 750.0 + 1.0;
+        assert!(
+            (c.0 - 300_000.0).abs() <= px && (c.1 - 450_000.0).abs() <= px,
+            "{c:?}"
+        );
     }
 }

@@ -558,6 +558,12 @@ impl AppState {
         ))
     }
 
+    /// Takes the bitmap-gallery thumbnails that have arrived; true when
+    /// any did, so the gallery is worth drawing again.
+    pub fn poll_thumbnails(&mut self) -> bool {
+        self.thumbnails.poll()
+    }
+
     /// Waits for the thumbnails asked for so far. For tests.
     pub fn settle_thumbnails(&mut self, timeout: std::time::Duration) {
         self.thumbnails.settle(timeout);
