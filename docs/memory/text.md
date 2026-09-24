@@ -19,8 +19,8 @@ architecture open question 4 is closed (see "Text on a path" below).
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
-| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
-| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
+| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr` done (XARA-T-0225), `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
+| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). Text infobar, OpenType panel and interactive ruler (T9.4.9–T9.4.10) done (XARA-T-0225). IME, clipboard (T9.4.7–T9.4.8) open | in review |
 | XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType open (XARA-T-0218), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
 
@@ -291,6 +291,65 @@ burst ends, graphemes, selection replace + Enter, pending → story in one
 step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
+
+## Text attributes: `SetTextAttr`, the infobar, the ruler (XARA-T-0225, as built)
+
+Code: `xarast-doc/src/text_edit.rs` (`SetTextAttr`, `set_text_attr`,
+`is_paragraph_slot`, `paragraph_line_range`, `text_attr_label`),
+`xarast-app/src/text_infobar.rs` (values shown, field → attribute, feature
+and tab edits), `text_tool.rs` (targets, pending style),
+`ops.rs` (`EditCommand::SetTextAttr { story, edits, burst }`),
+`xarast-ui/src/toolbar.rs` (widgets) and `text_ruler.rs` (the ruler).
+
+- **Byte ranges, like the other edit commands.** `SetTextAttr { story,
+  range, value }`; the app's `EditCommand::SetTextAttr` carries several
+  `(range, value)` pairs so one step can set, per run, a feature list that
+  keeps each run's other features.
+- **A character attribute becomes an own attribute child of every item in
+  the range** (chars, tabs, paragraph breaks; not kerns), replacing the
+  item's own child of that slot (`set_attr` when one exists). Own children
+  apply to their item alone (the collector pushes them in the item's own
+  scope), so nothing outside the range changes, and `insert_text` copies the
+  previous character's own children onto typed text, so typing after bold
+  text is bold. No sibling attribute + "restore" pair (the importer's
+  representation): it would need the value in force after the range, per
+  slot, and a delete could strand the restore.
+- **A paragraph attribute** (justification, line spacing, left/right margin,
+  first-line indent, ruler: `is_paragraph_slot`) goes on **every line of
+  every paragraph the range touches** (`paragraph_line_range`; the caret's
+  paragraph for an empty range) as one line-level attribute right before the
+  line's first item; other attributes of that slot before the first item,
+  and the first item's own child of that slot, are removed, because layout
+  reads a line's attributes at its first item. A line with no items is left
+  alone (it reads its attributes from outside itself).
+- **Setting a value an item already has** changes nothing but still records
+  an (empty) step through the bare bus; the tool therefore never emits an
+  edit whose value is already shown (`plain_edit`/`story_edits` compare).
+- **OpenType features** are Xarast's own attribute slot `TxtFeatures`
+  (`AttrValue::FontFeatures`, `FeatureSetting { tag, value }` sorted by tag,
+  `document-model.md`), bridged to `StyleRange::features` and written as
+  `xarast:features` (`research/06 §6.7`). The panel offers liga, dlig, smcp,
+  c2sc, onum, lnum, tnum, pnum, frac, zero, swsh, ss01; a setting equal to
+  the font's default (only `liga` defaults on) is dropped from the list
+  rather than stored. Whether a feature *renders* depends on the font:
+  the pinned Noto Sans subsets have no `smcp`, so no test asserts glyphs.
+- **Font family chooser**: the database's families (`FontDb::families`,
+  sorted) once enumerated, empty until then (the tool never waits for
+  enumeration from the infobar); the tool remembers the list it offered so
+  a chosen index resolves to the family shown. A chosen family becomes
+  `TypefaceRef { family, full_name: family, panose: None }`. A substituted
+  family still shows its own name.
+- **Line spacing field**: per cent of the ratio, or points when the
+  paragraph already spaces absolutely; the typed number is read in the
+  field's current mode (no way to switch mode from the bar yet).
+
+Tests: `xarast-doc` `text_edit::tests` (+3: a character attribute styles
+exactly its range and typing after it; a paragraph attribute on every line
+of the touched paragraphs, also after a break was deleted; non-text values
+and bad ranges refused), `xarast-format` `tests/svg_text_features.rs` (2),
+`xarast-app` `text_infobar::tests` (3) and `tests/text_infobar.rs` (8, through
+`Session` intents), `xarast-ui` `tests/text_bar.rs` (4, AccessKit) and
+`text_ruler::tests` (5, two through the canvas widget's raw input).
 
 ## Convert to shapes (W9.6, as built, XARA-US-0049)
 
@@ -1000,10 +1059,19 @@ first story of a process waits for enumeration when nothing prewarmed
   fonts (W9.7)~~ (done, XARA-T-0260).
 - Typing leftovers (T9.4.6): a story emptied by deleting all its text stays
   (the original deletes an empty story when the caret leaves it; doing so
-  here would add an undo step — decide with the maintainer); typed text
-  does not pick up attributes chosen while the caret is up (needs
-  `SetTextAttr`, T9.2.4); Unicode line/paragraph separators (U+2028/9)
-  type as characters, not breaks.
+  here would add an undo step — decide with the maintainer); ~~typed text
+  does not pick up attributes chosen while the caret is up~~ (done,
+  XARA-T-0225: the caret's pending style); Unicode line/paragraph
+  separators (U+2028/9) type as characters, not breaks.
+- Text attribute leftovers (XARA-T-0225): text typed at the start of a line
+  takes the line's scope, not the following character's own attributes (the
+  bar shows the following character's); the bar has no control for
+  baseline shift, super/subscript or aspect ratio (the model and
+  `SetTextAttr` handle them); line spacing cannot be switched between ratio
+  and absolute from the bar; a ruler with every tab removed falls back to
+  the ruler a `.xar` line node carries; centre/right/decimal stops can be
+  set but layout still treats every stop as left (T9.3.8); the ruler is not
+  shown for turned, sheared or mirrored stories or text on a path.
 - Convert to shapes leftovers: T9.6.5 (outline fallback for export and
   profile C, XARA-T-0245).
 - Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
@@ -1033,7 +1101,8 @@ first story of a process waits for enumeration when nothing prewarmed
 
 - W9.1: T9.1.6 background enumeration (the API is ready; the app must call
   `load_system_fonts` on its I/O thread), T9.1.7 gallery, T9.1.8 Windows and
-  macOS smoke tests. A per-document embedded-font overlay: today an embedded
+  macOS smoke tests (T9.1.7's gallery would replace the infobar's plain
+  family list, which has no previews). A per-document embedded-font overlay: today an embedded
   face registered in a shared `FontDb` is visible to every document.
 - W9.3: T9.3.8 centre/right/decimal tabs (only left stops now), T9.3.10
   features/variations are plumbed per run but untested beyond `kern`/`liga`/
@@ -1041,8 +1110,9 @@ first story of a process waits for enumeration when nothing prewarmed
   cache of `CaretMap`s; the walker another).
 - W9.4 leftovers: typing and grapheme-aware deletion with undo per burst
   (T9.4.6, creates the pending story), IME preedit and the IME caret area
-  from the text caret (T9.4.7), clipboard (T9.4.8), text infobar and
-  OpenType panel (T9.4.9), the interactive ruler (T9.4.10); Ctrl+Up/Down
+  from the text caret (T9.4.7), clipboard (T9.4.8); ~~text infobar and
+  OpenType panel (T9.4.9), the interactive ruler (T9.4.10)~~ (done,
+  XARA-T-0225); Ctrl+Up/Down
   by paragraph (they move by line now); the pending caret's height uses
   0.8/0.2 of the current size, not the face's metrics.
 - Shaping across a soft line break is not redone: an Arabic word split by

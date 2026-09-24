@@ -149,6 +149,35 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);
   stops reuse the `Fill` diamond; a selected handle is drawn `active`.
 
+### Text infobar and text ruler (phase 9, XARA-T-0225)
+
+- **Infobar items added** (`toolbar.rs`): `Scalar` (a text field with a
+  unit suffix — `format_scalar`/`parse_scalar`, the suffix optional when
+  typing, clamped to `min..=max`, committed on Enter/focus loss, raising
+  `InfobarValue::Real`); `FontFamily` (a combo box 160 pt wide, 320 pt
+  tall, with a filter field at the top of its popup and at most
+  `MAX_FONTS_LISTED` = 400 matches listed; the family in force shows even
+  when it is not in the list; AccessKit "Font family of the text: <name>");
+  `Features` (a menu button "OpenType" with one check box per feature,
+  indeterminate for a mixed selection, each named "Small capitals (smcp):
+  off"); `TextRuler` is skipped by the row.
+- **The text ruler** (`text_ruler.rs`, `CanvasWidget::set_text_ruler`, fed
+  by the workspace from the infobar each frame): drawn over the horizontal
+  ruler strip after its ticks — the column's band tinted with the accent,
+  the first-line indent a triangle hanging from the top, the left and right
+  margins triangles standing on the bottom, tab stops └ ┘ ┴ (decimal ┴ with
+  a dot) on the bottom edge. **Interaction model**: a drag that *starts* on
+  a marker (grab 5 pt; `press_origin`, not where egui recognises the drag,
+  or the neighbouring marker is taken) moves it, drawn at the pointer, and
+  raises one `InfobarEdit` on release; the strip's upper half picks the
+  indent, the lower half the margin, where they coincide; a tab dropped
+  more than a strip's depth below the ruler is removed; a click on no
+  marker inside the column adds a stop of the kind the infobar's "Tab"
+  choice says; a drag that starts on no marker is still a guide pulled out
+  of the ruler (`handle_guides` runs after and skips while a marker is
+  held). Shown only for a straight story (no turn, shear or mirror) with a
+  caret; a point story's band runs from its anchor rightwards.
+
 ### Colour editor (phase 8, XARA-US-0041)
 
 - **Seam**: `UiModel::colour_editor: Option<ColourEditorView>` in,

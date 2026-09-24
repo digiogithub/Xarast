@@ -445,6 +445,8 @@ pub const SLOTS_WITHOUT_ATTRIBUTE_TAG: &[AttrSlot] = &[
     AttrSlot::BevelLightTilt,
     AttrSlot::ClipRegion,
     AttrSlot::ClipView,
+    // Xarast's own: OpenType features have no record in the format.
+    AttrSlot::TxtFeatures,
 ];
 
 /// Where a tag goes, if we know.
@@ -499,8 +501,9 @@ mod tests {
     }
 
     #[test]
-    fn the_reconciliation_left_the_slot_count_at_46() {
-        assert_eq!(ATTR_SLOT_COUNT, 46);
+    fn the_reconciliation_left_the_slot_count_at_46_plus_xarast_own() {
+        // 46 reconciled against the `.xar` tags, plus `TxtFeatures`.
+        assert_eq!(ATTR_SLOT_COUNT, 47);
     }
 
     #[test]

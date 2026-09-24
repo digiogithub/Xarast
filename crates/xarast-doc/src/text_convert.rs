@@ -68,6 +68,7 @@ pub fn is_text_slot(slot: AttrSlot) -> bool {
             | AttrSlot::TxtRightMargin
             | AttrSlot::TxtFirstIndent
             | AttrSlot::TxtRuler
+            | AttrSlot::TxtFeatures
     )
 }
 

@@ -184,6 +184,14 @@ impl Workspace {
             })
             .show(ctx, |ui| match model.document.as_ref() {
                 Some(doc) => {
+                    // The text tool's ruler, when its infobar carries one.
+                    self.canvas
+                        .set_text_ruler(model.editing.as_ref().and_then(|e| {
+                            e.infobar.items.iter().find_map(|i| match i {
+                                xarast_app::InfobarItem::TextRuler(r) => Some(r.clone()),
+                                _ => None,
+                            })
+                        }));
                     canvas_response =
                         Some(self.canvas.show(ui, doc, scale, &tokens, overlay, &mut out));
                 }

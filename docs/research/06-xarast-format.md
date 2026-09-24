@@ -1383,6 +1383,7 @@ indentation 4201-4204, linked stories 4205-4207).
 | Manual kerning | `TAG_TEXT_KERN` 2204 | Baked into the characters' `x` (§6.7.1) | `<xarast:kern xarast:em="N"/>` in place | None |
 | Tab stops and ruler | `TAG_TEXT_TAB` 4200, `TAG_TEXT_RULER` 4204 | Baked positions | `<xarast:tabs>` and `<xarast:ruler>` | They are frozen |
 | Indents | 4201-4203 | Baked into `x` | `xarast:indent-left/first/right` | They are frozen |
+| OpenType features | — (Xarast's own `TxtFeatures` attribute, T9.4.9) | The glyphs a browser shapes without them (no `font-feature-settings`) | `xarast:features="liga:0 smcp:1"`: `tag:value` pairs sorted by tag, written only when not empty | The base SVG ignores them |
 | Text converted to curves | — | `<path>` | `xarast:was-text="true"` + `<xarast:text-source>` with the original text (accessibility and search) | — |
 
 **Fonts.** Normative rules:
