@@ -50,7 +50,7 @@ const MAX_BAND_BYTES: u64 = 1 << 20;
 /// The height of the bands an export of `width × height` pixels is
 /// rasterised in.
 ///
-/// Aims for [`TARGET_BANDS`] bands, never shorter than
+/// Aims for `TARGET_BANDS` bands, never shorter than
 /// [`MIN_BAND_SCANLINES`] and never over 1 MiB. A function of the size
 /// alone: that is what makes an export byte-reproducible across thread
 /// counts and machines.

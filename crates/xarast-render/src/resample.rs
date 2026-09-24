@@ -32,7 +32,7 @@
 //! The footprint (texels per device pixel) comes from the Jacobian of the
 //! device → texel mapping: once per primitive for an affine mapping, per
 //! pixel for a perspective one. The pyramid is a 2 × 2 box in premultiplied
-//! linear light ([`reduce_level`]), built on the walker's decode threads
+//! linear light (`reduce_level`), built on the walker's decode threads
 //! ([`ImageRef::prepare`]) or else the first time an image is minified,
 //! and shared by every clone of the [`ImageRef`]. A sampler pins the
 //! levels its primitive can reach when it is made; a level the pixel
