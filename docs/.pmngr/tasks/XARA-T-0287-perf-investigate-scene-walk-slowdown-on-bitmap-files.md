@@ -2,13 +2,14 @@
 id: XARA-T-0287
 type: task
 title: "perf: investigate scene walk slowdown on bitmap files (Groucho2 35 ms vs 5.6 ms in perf.md)"
-status: in_review
+status: done
 priority: high
 author: mcp
 labels: [perf, render, phase-10]
 created: 2026-09-24T10:12:47Z
-updated: 2026-09-24T11:06:18Z
+updated: 2026-09-24T11:06:56Z
 started: 2026-09-24T10:39:44Z
+closed: 2026-09-24T11:06:56Z
 ---
 
 ## Description
