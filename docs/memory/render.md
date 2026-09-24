@@ -1217,6 +1217,11 @@ thread"). The store starts with **no level resident** and `pending`;
   or both made and equal; a pending image is "different" (a false
   "different" costs one repaint of the object). `PartialEq` itself is
   unchanged and exact.
+- **A bitmap transparency is two resources** (T-0307 on top of T-0304):
+  `transparency_refs` yields the image *and* its level ramp, so a
+  deferred image under changed levels is damage and two pending stores
+  are compared without producing either. Pinned by
+  `damage::tests::a_deferred_bitmap_transparency_with_a_ramp_compares_without_producing`.
 
 ### GPU tests: on by default, serialised machine-wide (2026-09-24)
 
