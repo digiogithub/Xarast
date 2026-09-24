@@ -198,6 +198,9 @@ decodes), before → after. Only files with bitmaps change:
 | `TextJust`, `Rotated` | 0.0 ms | 5–7 ms | 652×1243 RGBA PNG |
 | every other bitmap file | ≤ 3 ms | ≤ 3 ms | |
 
+Superseded for Groucho2, which now imports five more bitmaps: see "First
+walk of the bitmap files, re-measured" (XARA-T-0287) below.
+
 The import of the 22 alpha PNGs now also decodes and re-encodes them
 (`normalise_xar_png`): `Rotated` opens in 6.7 ms instead of 0.4 ms, every
 other file < 5 ms; `the_corpus_imports_within_its_time_budget` still
@@ -273,10 +276,58 @@ walk, three runs with and two without (same load) the walker's
 `prepare`: leafgirl 28.7 → 31.8 ms, Groucho2 34.9 → 40.4 ms, scope3
 23.4 → 26.4 ms, Spitfire 8.6 → 12.8 ms (+3–5 ms on the walker's decode
 threads, in parallel) — in exchange the render thread no longer builds
-any pyramid on the first minified frame. (These walks are several times
-the XARA-T-0129 table's at the same files, *without* `prepare` too: the
-machine was at load ≈ 30–98 from other agents, so compare only within
-this pair.)
+any pyramid on the first minified frame. (Groucho2's walk was many times
+the XARA-T-0129 table's *without* `prepare` too. That was not the load:
+see "First walk of the bitmap files, re-measured" below.)
+
+#### First walk of the bitmap files, re-measured (XARA-T-0287, 2026-09-24)
+
+Quiet machine (the only agent running; `uptime` 1-min load 1.1–5.8
+throughout, 24 cores). Release `xarast-cli smoke-open` on Groucho2,
+leafgirl, scope3 simple, Spitfire and ProbeX16 (no bitmaps, the
+control) in one process, 9 runs (5 or 3 per bisect point), medians. The
+probe scripts are not in the tree: a loop over that command that parses
+the `open … ms, walk … ms` columns. Older commits were built from
+`git archive <c> | tar -x -m` into a scratch tree with one shared
+`CARGO_TARGET_DIR`.
+
+| Walk, ms | 1fa7fef (XARA-T-0129 table) | 5e03b36 | + cell-grid snap |
+|---|---|---|---|
+| `Groucho2` | 3.1 | 40.3 | **18.3** |
+| `leafgirl` | 27.8 | 30.5 | **12.5** |
+| `scope3 simple` | 23.1 | 25.9 | **18.4** |
+| `Spitfire` | 8.9 | 13.9 | 12.4 |
+| `ProbeX16` (control) | 197 | 196 | 203 |
+
+- **Groucho2's slowdown was real, and it is more work, not slower code.**
+  Bisected over the first-parent merges to 6ee21df, whose b213986 keeps
+  the definitions found inside a dropped atomic subtree: Groucho2 gained
+  five bitmaps (four of them 700–900 px JPEG8BPP photographs, used by
+  contone fills that had imported as "no colour"). The walker's first
+  frame costs its slowest bitmap, here a 764 × 512 tag-71 photograph
+  whose palette snap alone was ≈ 30 ms of a 34 ms decode (125 k cache
+  misses × a 256-entry scan). The snap now searches only the colour's
+  cell of a lazily built `16^3` grid (`image.md`, "The `.xar`
+  wrappings"): that decode is 11.6 ms, and the walk is that plus the
+  image's `prepare` (4.5 ms). Output unchanged: the 73 PNGs that
+  `xarast-cli export <corpus root> --format png --dpi 150` writes are
+  byte-identical before and after.
+- The +2.5–4 ms on leafgirl, scope3 and Spitfire since the T-0129 table is
+  `ImageRef::prepare` (US-0053), as measured above; not a regression.
+- **Spitfire's open went from 4.5 to ≈ 46 ms** at 7f44eac (text stories
+  in the walker, which bring the font service). It is a once-per-process
+  cost paid by the first document with text (≈ 41 ms, mostly fontconfig):
+  the same file opened again in the same process takes 3.8 ms. Not per
+  document; left as it is.
+- **`build_scene`'s re-decode** (XARA-T-0281) does not show here:
+  `smoke-open` walks once with the session's own walker, which decodes
+  once. It costs every export or thumbnail one decode pass per call, now
+  with the faster snap.
+- Render time is unchanged by the snap. `xarast-cli export … --format png`
+  at 96 dpi, medians of 5, before → after, render ms: Groucho2 5.8 → 6.2,
+  leafgirl 5.8 → 5.2, scope3 16.6 → 15.7, Spitfire 22.6 → 24.2, ProbeX16
+  102 → 105 (noise); scene ms: 40.0 → 18.1, 31.1 → 12.7, 22.9 → 17.9,
+  12.3 → 14.4, 233 → 231.
 
 **Corpus under a tiny budget** (`xarast-app/tests/pixel_budget.rs`, 24
 files × Final/Draft at 640 × 480, limit 0, everything above 1 × 1
