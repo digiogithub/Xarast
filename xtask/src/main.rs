@@ -9,6 +9,7 @@ use std::process::ExitCode;
 
 mod export_check;
 mod fonts;
+mod perf;
 
 /// Icon sizes required by the freedesktop icon theme specification, plus the
 /// 512 that AppImage thumbnailers prefer.
@@ -40,6 +41,12 @@ TASKS:
                 |difference| exceeds its limit (default 4/255; per-file
                 limits in FILE). --require-tools fails when pdftoppm or qpdf
                 is missing instead of skipping (phase 11 T11.6.2, T11.6.3)
+    perf        [--tier pr|nightly] [--cli PATH] [--only ID,...] [--out FILE]:
+                run the `xarast-cli bench` scenarios and judge them against
+                xtask/perf-budgets.txt: performance, memory and start-up
+                gates, time limits scaled by a calibration run on the same
+                machine; a breach is measured twice before it fails
+                (phase 12 A4, A6, B5, C2; docs/memory/perf.md, CI gates)
     help        Print this help
 ";
 
@@ -50,6 +57,7 @@ fn main() -> ExitCode {
         "svg-render" => svg_render(&std::env::args().skip(2).collect::<Vec<_>>()),
         "svg-check" => svg_check(&std::env::args().skip(2).collect::<Vec<_>>()),
         "export-check" => export_check::run(&std::env::args().skip(2).collect::<Vec<_>>()),
+        "perf" => perf::run(&std::env::args().skip(2).collect::<Vec<_>>()),
         "help" | "-h" | "--help" => {
             print!("{USAGE}");
             return ExitCode::SUCCESS;

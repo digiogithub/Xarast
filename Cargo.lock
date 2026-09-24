@@ -5948,6 +5948,7 @@ version = "0.0.1"
 dependencies = [
  "png 0.18.1",
  "resvg",
+ "serde_json",
  "xarast-text",
 ]
 

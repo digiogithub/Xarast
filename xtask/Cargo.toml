@@ -20,3 +20,6 @@ png = "0.18"
 # Decodes the WOFF2 fonts an exported SVG embeds, so resvg renders with
 # them as a browser would (`src/fonts.rs`).
 xarast-text = { path = "../crates/xarast-text" }
+# Reads the JSON `xarast-cli bench` prints and writes the gate results
+# (`src/perf.rs`). `MIT OR Apache-2.0`, already in the workspace.
+serde_json = { workspace = true }
