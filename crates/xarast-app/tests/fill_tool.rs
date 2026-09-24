@@ -1145,3 +1145,110 @@ fn a_double_click_held_and_dragged_makes_a_conical_fill() {
         }
     ));
 }
+
+/// Draws `scene` over `target` as the render thread does: all of it, or
+/// only `rect` after putting the backdrop back there.
+fn draw_scene(
+    scene: &xarast_render::Scene,
+    res: &xarast_render::Resolver,
+    view: &xarast_render::ViewParams,
+    rect: Option<xarast_render::DeviceRect>,
+    target: &mut xarast_render::Surface,
+) {
+    let dirty = rect.map_or(xarast_render::DirtyRect::NONE, xarast_render::DirtyRect::of);
+    if let Some(r) = rect {
+        let w = target.width() as usize;
+        let data = target.data_mut();
+        for y in r.y0..r.y1 {
+            let row = y as usize * w * 4;
+            data[row + r.x0 as usize * 4..row + r.x1 as usize * 4].fill(0);
+        }
+    }
+    let dl = xarast_render::DisplayList::build(scene, view, &dirty);
+    xarast_render::CpuBackend::new(xarast_render::CpuConfig::deterministic())
+        .render(&dl, res, target)
+        .expect("renders");
+}
+
+/// A slider preview on a feathered object reaches as far as the feather
+/// does: repainting only the damage over the last frame gives, byte for
+/// byte, the frame a full render of the preview gives (XARA-T-0220 with
+/// XARA-US-0068's effect padding).
+#[test]
+fn a_slider_preview_on_a_feathered_object_repaints_all_it_changes() {
+    let mut s = Session::new_empty(DocumentId(1));
+    let spread = s.doc.active_spread();
+    let layer = s.doc.active_layer(spread).unwrap();
+    s.apply_edit(EditCommand::CreateShape {
+        layer,
+        shape: Box::new(rectangle(Point::raw(200_000, 200_000), 50_000.0, 30_000.0)),
+        attrs: vec![
+            flat(RED),
+            AttrValue::Feather {
+                size: xarast_geom::Mp(12_000),
+                profile: xarast_geom::BiasGain::IDENTITY,
+            },
+        ],
+    })
+    .unwrap();
+    s.bus.history_mut().clear(&mut s.doc);
+    let nodes: Vec<NodeId> = xarast_app::edit::selectable_objects(&s.doc).collect();
+    s.apply(Intent::Select {
+        nodes: nodes.clone(),
+        mode: xarast_app::SelectMode::Replace,
+    })
+    .unwrap();
+    s.apply(Intent::ChooseTool(ToolId::Fill)).unwrap();
+    set_fill(
+        &mut s,
+        &nodes,
+        &linear(Point::raw(160_000, 200_000), Point::raw(240_000, 200_000)),
+    );
+    s.rebuild_scene(None).unwrap();
+    let view = s.view_params();
+    let (w, h) = (view.viewport.width(), view.viewport.height());
+    let (mut s0, mut r0) = (s.scene_snapshot(), s.resolver_snapshot());
+    assert!(
+        s.walk_stats().effects > 0,
+        "the fixture's feather is not drawn as an effect"
+    );
+    let obj = xarast_app::viewport::nodes_rect(&s.doc, nodes.iter().copied());
+    let (a, b) = (
+        s.viewport.doc_to_device(obj.lo),
+        s.viewport.doc_to_device(obj.hi),
+    );
+    let (ox0, ox1) = (a.x.min(b.x), a.x.max(b.x));
+    let (oy0, oy1) = (a.y.min(b.y), a.y.max(b.y));
+    // The feather's size in pixels, plus the blur's rounding.
+    let reach = 12_000.0 * view.transform.max_scale() + 4.0;
+    let mut frame = xarast_render::Surface::new(w, h);
+    draw_scene(&s0, &r0, &view, None, &mut frame);
+    for i in 1..=6 {
+        drag_slider(&mut s, InfobarField::ProfileBias, f64::from(i) / 8.0);
+        s.rebuild_scene(None).unwrap();
+        let (s1, r1) = (s.scene_snapshot(), s.resolver_snapshot());
+        let damage =
+            xarast_render::scene_damage((&s0, &r0), (&s1, &r1), &view, 8).expect("comparable");
+        assert!(!damage.rects.is_empty(), "frame {i} shows nothing new");
+        // Padded by the feather's reach at most, never the whole view.
+        let b = damage.bounds();
+        assert!(
+            f64::from(b.x0) >= ox0 - reach
+                && f64::from(b.x1) <= ox1 + reach
+                && f64::from(b.y0) >= oy0 - reach
+                && f64::from(b.y1) <= oy1 + reach,
+            "frame {i}: damage {b:?} beyond the object ({ox0}..{ox1}, {oy0}..{oy1}) and its feather"
+        );
+        for r in &damage.rects {
+            draw_scene(&s1, &r1, &view, Some(*r), &mut frame);
+        }
+        let mut full = xarast_render::Surface::new(w, h);
+        draw_scene(&s1, &r1, &view, None, &mut full);
+        assert!(
+            frame == full,
+            "frame {i}: damage {:?} missed pixels",
+            damage.rects
+        );
+        (s0, r0) = (s1, r1);
+    }
+}

@@ -508,6 +508,14 @@ after). Shell: `arrows_nudge_a_selected_fill_handle_and_pan_otherwise`.
     it goes (the old behaviour; none today). The overlay and the infobar
     read the previewed fill (`live_sets`), so handles and the slider follow
     the drag.
+    On a feathered object the preview goes through the walker inside the
+    feather's `push_effect`, so `scene_damage` pads it like any edit under
+    an effect; `a_slider_preview_on_a_feathered_object_repaints_all_it_changes`
+    (`tests/fill_tool.rs`) checks the repainted damage equals a full render,
+    byte for byte, and stays within the object plus the feather's reach. A
+    feather fades inward and a fill preview moves no geometry, so that test
+    passes even with `effect_pad` zeroed: padding matters for geometry
+    edits, which `xarast-render`'s damage property covers.
 
 ## Phase 9: the text tool (XARA-US-0047)
 
