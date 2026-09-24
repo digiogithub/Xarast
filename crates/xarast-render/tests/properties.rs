@@ -28,6 +28,10 @@ enum Step {
     /// A feather of this many points (phase 13's offscreen pipeline).
     PushFeather(f64),
     PopFeather,
+    /// A shadow (XARA-T-0318): 0 a wall moved by `(dx, dy)` points, 1 a
+    /// glow, 2 a floor (squashed and sheared), with a penumbra of `blur`
+    /// points. Its pop is [`Step::PopFeather`]'s: both close an effect.
+    PushShadow(u8, f64, f64, f64),
 }
 
 fn step() -> impl Strategy<Value = Step> {
@@ -44,7 +48,43 @@ fn step() -> impl Strategy<Value = Step> {
         Just(Step::PopTransparency),
         (0.0f64..12.0).prop_map(Step::PushFeather),
         Just(Step::PopFeather),
+        (0u8..3, -15.0f64..15.0, -15.0f64..15.0, 0.0f64..12.0)
+            .prop_map(|(k, x, y, b)| Step::PushShadow(k, x, y, b)),
     ]
+}
+
+/// The shadow a [`Step::PushShadow`] pushes. Its `displacement` bounds how
+/// far the map moves any point the generator can put under it (content
+/// within 2000 points of the effect's origin, far more than 24 steps reach).
+fn shadow(kind: u8, dx: f64, dy: f64, blur: f64) -> LayerEffect {
+    let (map, spread) = match kind {
+        0 => ([1.0, 0.0, 0.0, 1.0, dx, dy], 0.0),
+        1 => ([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], dx.abs() / 4.0),
+        _ => ([1.0, 0.0, 0.25, 0.6, dx, dy], 0.0),
+    };
+    // |M p − p| ≤ ‖A − I‖₁ · 2000 pt + |t|.
+    let skew = (map[0] - 1.0).abs() + map[1].abs() + map[2].abs() + (map[3] - 1.0).abs();
+    let displacement = skew * 2000.0 + map[4].hypot(map[5]);
+    LayerEffect::Shadow(Box::new(xarast_render::ShadowEffect {
+        map: [
+            map[0],
+            map[1],
+            map[2],
+            map[3],
+            map[4] * 1000.0,
+            map[5] * 1000.0,
+        ],
+        displacement: displacement * 1000.0,
+        spread: spread * 1000.0,
+        blur: blur * 1000.0,
+        profile: xarast_render::Profile::IDENTITY,
+        colour: Rgba8 {
+            r: 20,
+            g: 10,
+            b: 60,
+            a: 170,
+        },
+    }))
 }
 
 fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> PathRef {
@@ -136,8 +176,12 @@ fn record(steps: &[Step]) -> (Scene, Result<(), SceneError>) {
                     });
                     depth.push(s.clone());
                 }
+                Step::PushShadow(k, dx, dy, blur) => {
+                    b.push_effect(shadow(*k, *dx, *dy, *blur));
+                    depth.push(s.clone());
+                }
                 Step::PopFeather => match depth.last() {
-                    Some(Step::PushFeather(..)) => {
+                    Some(Step::PushFeather(..) | Step::PushShadow(..)) => {
                         depth.pop();
                         b.pop_effect();
                     }
@@ -154,7 +198,7 @@ fn record(steps: &[Step]) -> (Scene, Result<(), SceneError>) {
                 Step::PushLayer(..) => b.pop_layer(),
                 Step::PushClip(..) => b.pop_clip(),
                 Step::PushTransparency(..) => b.pop_transparency(),
-                Step::PushFeather(..) => b.pop_effect(),
+                Step::PushFeather(..) | Step::PushShadow(..) => b.pop_effect(),
                 _ => unreachable!("only pushes are recorded as open"),
             }
         }
@@ -184,7 +228,8 @@ fn render(scene: &Scene) -> Surface {
 enum Edit {
     /// Change the colour of the step at this index, if it is a fill.
     Recolour(usize, u8),
-    /// Move the step at this index: a fill, a group's offset, a clip.
+    /// Move the step at this index: a fill, a group's offset, a clip, a
+    /// shadow's offset.
     Move(usize, f64, f64),
     /// Swap two steps.
     Swap(usize, usize),
@@ -192,8 +237,8 @@ enum Edit {
     Remove(usize),
     /// Insert a fill.
     Insert(usize, f64, f64, f64, u8),
-    /// Change a layer's or a transparency scope's family and value, or a
-    /// feather's size.
+    /// Change a layer's or a transparency scope's family and value, a
+    /// feather's size or a shadow's penumbra.
     Restyle(usize, usize, u8),
 }
 
@@ -235,7 +280,7 @@ fn apply_edit(steps: &[Step], e: &Edit) -> Vec<Step> {
                 *x += dx;
                 *y += dy;
             }
-            Step::PushClip(a, b) => {
+            Step::PushClip(a, b) | Step::PushShadow(_, a, b, _) => {
                 *a += dx;
                 *b += dy;
             }
@@ -251,7 +296,7 @@ fn apply_edit(steps: &[Step], e: &Edit) -> Vec<Step> {
                 *a = f;
                 *b = t;
             }
-            Step::PushFeather(size) => *size = f64::from(t) / 16.0,
+            Step::PushFeather(size) | Step::PushShadow(.., size) => *size = f64::from(t) / 16.0,
             _ => {}
         },
     }
@@ -464,5 +509,31 @@ fn flat_interiors_do_not_depend_on_the_scale() {
             Some([37, 149, 220, 255]),
             "the interior moved at scale {scale}"
         );
+    }
+}
+
+/// A shadow inside another effect whose object is culled from a draw area
+/// while its shadow falls in it: the enclosing effect's region counts the
+/// shadow, so repainting any rectangle gives the whole frame's pixels
+/// (render.md invariant 23; found by the damage property above).
+#[test]
+fn a_nested_shadow_is_drawn_the_same_whatever_the_draw_area() {
+    let steps = [
+        Step::PushShadow(1, 0.0, 0.0, 0.0),
+        Step::PushShadow(0, 0.0, -12.7, 0.0),
+        Step::Fill(0.0, 0.0, 4.0, 0),
+        Step::Fill(0.0, 44.1, 4.0, 0),
+    ];
+    let (scene, _) = record(&steps);
+    let mut full = Surface::new(64, 64);
+    render_into(&scene, None, &mut full);
+    for y in (0..64).step_by(4) {
+        let mut frame = full.clone();
+        render_into(
+            &scene,
+            Some(xarast_render::DeviceRect::new(0, y, 64, y + 4)),
+            &mut frame,
+        );
+        assert!(frame == full, "the strip at {y} differs");
     }
 }

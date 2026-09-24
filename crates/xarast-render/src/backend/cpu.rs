@@ -644,6 +644,12 @@ fn render_effect(
     let DrawCmd::PushEffect { op, .. } = *push else {
         return None;
     };
+    // Nothing it wraps is drawn here (culled to the draw area): nothing to
+    // grow from. `EMPTY.inflated(g)` is a real rectangle round the origin,
+    // which would render and cache a layer of nothing.
+    if content.is_empty() {
+        return None;
+    }
     let growth = effect.growth_px(xf.max_scale());
     // The pixels kept.
     let keep = content.inflated(growth).intersection(area);
