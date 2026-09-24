@@ -479,6 +479,47 @@ reason the walker *reports*, which is its own test.
     the document's, not the walker's). Walkers built with
     `SceneWalker::new()` elsewhere (tests, the corpus tools) decode for
     themselves as before.
+43. **ClipViews render, in both modes** (XARA-US-0017, 2026-09-24).
+    * **No ClipView had ever rendered.** `open` pushes a ClipView's clip
+      and then its group, and the frame was closed clip first, so the
+      scene builder underflowed (`SceneError::Underflow { kind: "clip" }`)
+      and the whole render failed. The corpus has no ClipView
+      (`TAG_CLIPVIEW*` 4084/4085: 0 records), so nothing noticed. The
+      frame now closes in reverse order.
+    * **`ClipViewMode::Outside` is an inside clip of a complement**
+      (`walker::outside_clip`): a frame around the other children
+      (their zero-extent bounds grown by their larger side, at least an
+      inch, clamped to `Mp::EXTENT`) minus the clipping path, resolved by
+      `xarast_geom::boolean` under the ClipView's winding rule and pushed
+      with `NonZero`. The boolean restores untouched cubics verbatim, so
+      the edge stays exact at any zoom; a self-overlapping non-zero path
+      keeps its overlap in the hole. The renderer keeps a single clip
+      primitive (inside of a path) — no `invert` flag in `SceneOp`, which
+      would have touched every backend. The SVG writer already used a
+      mask for the same thing.
+    * The clipping child is never painted, in either mode (it was painted
+      in outside mode while the clip was dropped).
+    * `WalkStats::clips_unsupported` now counts only a ClipView whose first
+      child has no clip geometry.
+    Pinned by `tests/gradients_and_clips.rs` with pixel probes.
+44. **Perspective gradient corners are the original's `EndPoint2` and
+    `EndPoint3`** (XARA-US-0017; the provisional mapping of the old
+    TODO, now confirmed from the source, not from an image). For a
+    perspective fill the original hands the rasteriser the quadrilateral
+    Start, `EndPoint2`, `EndPoint3`, End for a linear fill and Start,
+    End, `EndPoint3`, `EndPoint2` for the others
+    (`wxOil/grndrgn.cpp:2540-2560`), and `EndPoint3` is the far corner
+    when a fill is made perspective (`Kernel/fillval.cpp:1513`, "line at
+    90°" from End through `EndPoint2`). So `Perspective::p2` = `EndPoint2`
+    = the image of `(0, 1)` (the second axis) and `p3` = `EndPoint3` = the
+    image of `(1, 1)`, which is what `paint::perspective` does. No `.xar`
+    fill record carries perspective corners — a perspective fill exists
+    only inside a mould (129 perspective moulds, all Phase 13 live
+    objects) — so no corpus golden can exist. The pixel test pins that a
+    parallelogram "perspective" draws exactly as its affine twin and
+    that a trapezoid's far edge is where `p3` says.
+45. **A sine fill mapping is eased on the canvas**: see `render.md`,
+    "Sine-mapped ramps".
 
 ---
 
@@ -741,14 +782,13 @@ be better run once at `Tx::commit` than after every call.
 
 ## Open TODOs
 
-- [ ] **Perspective gradients are mapped provisionally.**
-      `fill::Perspective`'s `p2`/`p3` are taken as the images of `(0,1)`
-      and `(1,1)`. Nothing in the corpus proves the ordering; a file
-      with a perspective gradient and a golden image would.
-- [ ] **`RampMapping::Sin` is ignored.** The renderer's `build_ramp`
-      takes a bias/gain profile but no sine easing, so a sine-mapped
-      gradient renders linear. Either bake the easing into the stop list
-      here or add it to `xarast-render`.
+- [x] **Perspective gradients are mapped provisionally.** Confirmed
+      from the original's source (decision 44, XARA-US-0017): `p2` is
+      the image of `(0,1)` and `p3` of `(1,1)`. The corpus has no
+      perspective fill, so a golden against the original stays
+      impossible until moulds (Phase 13) produce one.
+- [x] **`RampMapping::Sin` is ignored.** Done in `xarast-render`
+      (`RampEase`, decision 45, XARA-US-0017).
 - [x] **When a gradient becomes `Repeat::RepeatHq`**: exactly when its
       mapping is `Tiling::RepeatExtra`, which is also the only mapping
       that makes a gradient tile (decision 31).
@@ -760,9 +800,9 @@ be better run once at `Tx::commit` than after every call.
       be left out of a pan strip. It was not seen in the corpus, because
       pages cover the drawings. If it shows up, reuse `viewport::ink_rect`
       with the culling extent.
-- [ ] **`ClipViewMode::Outside` drops the clip** and counts it in
-      `WalkStats::clips_unsupported`. The renderer has no "keep the
-      outside" clip; it needs either an inverted path or a mask layer.
+- [x] **`ClipViewMode::Outside` drops the clip.** Done as an inverted
+      path (decision 43, XARA-US-0017), which also found that no
+      ClipView had ever rendered.
 - [x] **Bitmaps render.** `SceneWalker::register_images` decodes the
       importer's encoded originals through `xarast-image` (XARA-T-0129);
       `images_pending` is 0 on every corpus file.
