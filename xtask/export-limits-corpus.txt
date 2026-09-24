@@ -31,9 +31,11 @@ TestBitmapFill pdf 6.5
 # resvg draws the objects without their shadows. Measured 2026-09-24:
 # Groucho2 svg 5.71 -> 10.04 (63 feathers and 81 shadows), SoftShadow svg
 # 1.20 -> 5.03 (3 shadows, one under the whole textured background).
-# Baking the shadow filter goes with the feather's (XARA-T-0317's
+# With XARA-T-0317's feather filter merged, Groucho2's feathers are drawn
+# and only its 81 shadows are missing: 10.04 -> 6.67 (2026-09-24), limit
+# 7.7. Baking the shadow filter goes with the feather's (XARA-T-0317's
 # FilterChain); drop these limits with it.
-Groucho2 svg 11.6
+Groucho2 svg 7.7
 SoftShadow svg 5.8
 # SoftShadow's three shadow controllers hold everything on the page,
 # including the bitmap-textured background, so the PDF is one rasterised
