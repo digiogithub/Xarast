@@ -739,6 +739,12 @@ impl DisplayList {
         self.ops.get(i as usize)
     }
 
+    /// The scene's ops, whole: what the commands index into, including the
+    /// ops a culled build dropped.
+    pub(crate) fn scene_ops(&self) -> &[SceneOp] {
+        &self.ops
+    }
+
     fn try_item(&self, cmd: &DrawCmd) -> Option<DrawItem<'_>> {
         Some(match *cmd {
             DrawCmd::Fill {
