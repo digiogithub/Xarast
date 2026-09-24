@@ -43,6 +43,7 @@ use crate::blend::{BlendFamily, BlendLuts, LumaWeights, TranspSource, Transparen
 use crate::display_list::{DisplayList, DrawCmd, DrawItem, ListParts, SCENE_PAINT};
 use crate::paint::{FrameMap, GradMapping, ImageId, ImageRegistry, Paint, PaintSampler};
 use crate::path::PathRef;
+use crate::pixel_budget::MissingLevels;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
 use crate::scene::{LayerKind, RenderQuality, SceneOp};
@@ -76,6 +77,12 @@ pub struct CpuConfig {
     pub band_budget_bytes: usize,
     /// The luminance weights every blend family's `Y(c)` uses.
     pub weights: LumaWeights,
+    /// What an image sampler does about a level the pixel budget evicted:
+    /// wait for it ([`MissingLevels::Materialise`], both presets, byte
+    /// for byte) or draw a smaller resident one
+    /// ([`MissingLevels::Substitute`], the interactive render thread,
+    /// which then brings the base back off its thread and repaints).
+    pub missing_levels: MissingLevels,
 }
 
 impl Default for CpuConfig {
@@ -100,6 +107,7 @@ impl CpuConfig {
             threads: 0,
             band_budget_bytes: 1 << 20,
             weights: LumaWeights::BT601,
+            missing_levels: MissingLevels::Materialise,
         }
     }
 
@@ -117,6 +125,7 @@ impl CpuConfig {
             threads: 0,
             band_budget_bytes: 1 << 19,
             weights: LumaWeights::BT601,
+            missing_levels: MissingLevels::Materialise,
         }
     }
 
@@ -192,6 +201,13 @@ impl CpuBackend {
     #[must_use]
     pub const fn config(&self) -> &CpuConfig {
         &self.cfg
+    }
+
+    /// Changes what image samplers do about an evicted level
+    /// ([`CpuConfig::missing_levels`]) for the renders that follow; the
+    /// blend tables are kept.
+    pub const fn set_missing_levels(&mut self, missing: MissingLevels) {
+        self.cfg.missing_levels = missing;
     }
 
     /// What this backend can do.
@@ -1081,8 +1097,8 @@ fn draw_image_cmd(
     let Some(frame) = mapping.frame_map() else {
         return 0;
     };
-    let sampler = PaintSampler::new(&paint, &res.ramps, &res.images);
-    let levels = LevelSampler::new(transparency, res);
+    let sampler = PaintSampler::with_missing(&paint, &res.ramps, &res.images, cfg.missing_levels);
+    let levels = LevelSampler::new(transparency, res, cfg.missing_levels);
     let flat = match &transparency.source {
         TranspSource::Flat(t) => Some(*t),
         _ => None,
@@ -1172,8 +1188,8 @@ fn composite_coverage(
         _ => None,
     };
     // Gradients and images are readied once per primitive, not per pixel.
-    let sampler = PaintSampler::new(paint, &res.ramps, &res.images);
-    let levels = LevelSampler::new(transparency, res);
+    let sampler = PaintSampler::with_missing(paint, &res.ramps, &res.images, cfg.missing_levels);
+    let levels = LevelSampler::new(transparency, res, cfg.missing_levels);
     // The same replacement for a paint whose colour varies: decided per
     // pixel, on the sampled colour.
     let replace_sampled = flat == Some(0) && transparency.family == BlendFamily::Mix;
@@ -1248,7 +1264,7 @@ struct LevelSampler<'a> {
 }
 
 impl<'a> LevelSampler<'a> {
-    fn new(t: &'a Transparency, res: &'a Resolver) -> LevelSampler<'a> {
+    fn new(t: &'a Transparency, res: &'a Resolver, missing: MissingLevels) -> LevelSampler<'a> {
         let (frame, table, image) = match &t.source {
             TranspSource::Flat(_) => (None, None, None),
             TranspSource::Gradient { mapping, ramp, .. } => (
@@ -1267,7 +1283,9 @@ impl<'a> LevelSampler<'a> {
                 None,
                 None,
                 res.images.get(*image).and_then(|img| {
-                    crate::resample::ImageSampler::new(img, *mapping, *repeat, *filter, None)
+                    crate::resample::ImageSampler::with_missing(
+                        img, *mapping, *repeat, *filter, None, missing,
+                    )
                 }),
             ),
         };

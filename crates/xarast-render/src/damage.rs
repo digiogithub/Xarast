@@ -129,6 +129,67 @@ pub fn scene_damage(
     })
 }
 
+/// The device rectangles of `view` that a frame of `scene` drew from any
+/// image `hit` selects, merged into at most `max_rects`: every leaf that
+/// samples one (as a placed image, an image paint or a bitmap
+/// transparency) and everything under a transparency scope or layer whose
+/// mask is one. The same bounds [`scene_damage`] uses, so repainting them
+/// over a frame gives the frame a full render of `scene` gives.
+///
+/// This is how the render thread redraws what it drew from a smaller
+/// resident level while an evicted base came back (`pixel_budget`,
+/// "Drawing without waiting", XARA-T-0281). `None` for an unbalanced
+/// scene.
+#[must_use]
+pub fn image_damage(
+    scene: &Scene,
+    view: &ViewParams,
+    hit: impl Fn(ImageId) -> bool,
+    max_rects: usize,
+) -> Option<Damage> {
+    let res = Resolver::new();
+    let side = Side::new(scene, &res)?;
+    let mut rects = Vec::new();
+    let mut leaves = 0;
+    let mut stack = vec![view.transform];
+    let mut i = 0;
+    while i < side.len() {
+        let op = side.op(i);
+        let xf = stack.last().copied().unwrap_or(view.transform);
+        match op {
+            SceneOp::PushGroup { xf: g, .. } => {
+                stack.push(g.then(xf));
+                i += 1;
+                continue;
+            }
+            SceneOp::PopGroup => {
+                stack.pop();
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let mut uses = false;
+        refs(op, &mut |r| {
+            if let Ref::Image(id) = r {
+                uses = uses || hit(id);
+            }
+        });
+        if uses {
+            let end = side.close[i as usize].max(i);
+            leaves += leaf_bounds(&side, (i, end), xf, view.viewport, &mut rects);
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    Some(Damage {
+        rects: coalesce(rects, max_rects.max(1)),
+        removed: leaves,
+        added: leaves,
+    })
+}
+
 /// One scene, with the matching pop of every push.
 struct Side<'a> {
     ops: &'a [SceneOp],

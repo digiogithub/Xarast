@@ -830,7 +830,7 @@ pixel.
 
 | `Filter` | ≤ 1 texel/px | 1–2 texels/px | ≥ 2 texels/px |
 |---|---|---|---|
-| `Nearest` (Draft) | point on the base | point on the base | point on the base |
+| `Nearest` (Draft) | point on the base | point on the base | point on level ⌊log2 footprint⌋ (since XARA-T-0281) |
 | `Bilinear` | bilinear | tent widened by the footprint | trilinear, pyramid |
 | `HighQuality` (Final, export) | Mitchell–Netravali (B = C = ⅓) | tent widened by the footprint | trilinear, pyramid |
 
@@ -1058,14 +1058,70 @@ re-produce a base (`PixelSource`).
   from spill, or all by re-decode), 69 level rebuilds, 88 spill writes
   (53 MiB), 0 lost. 28 s in the test profile.
 
-**Not done** (XARA-T-0281, T10.5.5): re-materialisation is synchronous on
-the render thread, and Draft's `Nearest` always samples the base even
-when minified, so a zoomed-out Draft view of evicted photos reads every
-base back. The fix is to draw the proxy and re-materialise on a worker;
-it is not byte-identical by design, so it belongs to interactive frames
-only. The phase's 40 × 24 Mpx stress test is XARA-T-0282. The document's
-own copies (`BitmapResource::pixels`, the encoded `original`) are outside
-the budget: it covers the renderer's decoded levels.
+The phase's 40 × 24 Mpx stress test is XARA-T-0282. The document's own
+copies (`BitmapResource::pixels`, the encoded `original`) are outside the
+budget: it covers the renderer's decoded levels.
+
+### Drawing without waiting for an evicted base (XARA-T-0281, T10.5.5, 2026-09-24)
+
+Before this, a sampler that needed an evicted level re-materialised it on
+the render thread (a spill read, ≈ 1.2 ms per 16 MiB hot, or a decode,
+tens to hundreds of ms), and Draft's `Nearest` always read the base, so a
+zoomed-out Draft of many evicted photographs read every base back.
+
+- **Draft picks its level by footprint.** `Plan::Nearest { level }`
+  point-samples the level trilinear would start from
+  (`nearest_level(lod_of(ρ))`: the base below 2 texels per pixel, level
+  ⌊log2 ρ⌋ above) and pins only that level; a perspective plane
+  (`Plan::NearestPerPixel`) picks it per pixel. **Draft output changes
+  only for images minified by 2× or more**: each pixel is a texel of a
+  2 × 2-box reduction instead of a texel of the base — less aliasing, and
+  the value is a linear-light mean of the texels it covers rather than one
+  of them. No golden moved (the `image_0_*` Draft goldens and every
+  corpus Draft render are magnified or within 2×); every
+  byte-for-byte budget test compares Draft to Draft and still holds.
+  **Final and export are unchanged.**
+- **`MissingLevels`** (`pixel_budget.rs`), a new `CpuConfig` field.
+  `Materialise` (both presets, export, thumbnails, tests) is the old
+  behaviour, byte-identical to an unlimited budget. `Substitute`: when
+  the lowest level a sampler needs has no resident level at or above it
+  in size (so it needs the base back), the sampler gets the best resident
+  smaller level (`Pinned::Substitute`) and a `Plan::Fallback` (point for
+  `Nearest`, bilinear in encoded sRGB otherwise); the image is stamped
+  with a process-wide substitution clock (`substitution_tick`,
+  `ImageRef::substituted_since`) and `BudgetStats::substituted` counts
+  it. A level that is a reduction of a resident larger level is still
+  rebuilt in place — arithmetic, exact, not I/O.
+- **A substitute always exists.** `evict` now reduces the base down to
+  the proxy before dropping it when no level at or below the proxy is
+  resident (an image nobody prepared); levels `≥ proxy` are never evicted
+  and the proxy only grows, so once a base is gone some smaller level
+  stays. If none does (only a damaged spill with no source), the sampler
+  falls back to waiting.
+- **Bringing it back and repainting** is the caller's:
+  `ImageRef::rematerialise()` (blocking, for a worker thread; counted in
+  `BudgetStats::rematerialised` as well as `from_spill`/`from_source`),
+  then `image_damage(scene, view, hit, max_rects)` (`damage.rs`): the
+  display-list bounds of every leaf that samples a hit image (placed
+  image, image paint, bitmap transparency) and of everything under a
+  transparency scope or layer whose mask is one — the same bounds
+  `scene_damage` uses, so redrawing them over the frame gives the full
+  render (invariant 15). The render thread does exactly this
+  (`app-core.md` decision 41), repainting through its ordinary
+  `Plan::Repaint` path so the shell's tiles update.
+- **Tests.** `tests/pixel_budget.rs`,
+  `a_zoomed_out_draft_reads_no_base_back_and_the_final_converges`: four
+  1200 × 900 photographs, every base spilled (product proxy sizes,
+  limit 0). A Draft at 1/8 reads nothing back under either policy
+  (level 3 is the proxy); a Draft at 1/4 under `Substitute` reads nothing
+  back and substitutes; the Final at 1/4 under `Substitute` differs from
+  the unlimited render, and after `rematerialise` + a repaint of
+  `image_damage` it is byte-identical; under `Materialise` it is
+  identical at once. The corpus version on the render thread is in
+  `xarast-app/tests/pixel_budget.rs`. The existing byte-for-byte tests
+  (130-case corpus × three sources × two pyramids × two configurations;
+  24 corpus files × Final/Draft × spill/re-decode) are unchanged and
+  green.
 
 ### GPU tests: on by default, serialised machine-wide (2026-09-24)
 
@@ -1180,12 +1236,20 @@ run the shell's dependency turns it on).
 19. **An aligned mapping samples as a point under every filter.** Do not
     "improve" a 1:1 bitmap with the magnification kernel; the fast path
     and the golden `resample_aligned_hq` depend on it.
-20. **The pixel budget never changes a rendered pixel.** Sampling code
-    reads image levels only through a sampler's pins (`ImageSampler`) or
-    `ImageRef::level`, never by keeping a borrow across a pin; a level is
-    rebuilt only with `reduce_level`; a `PixelSource` must return the
-    exact bytes first registered; a base with no way back is never
-    dropped. `tests/pixel_budget.rs` here and in `xarast-app` hold it.
+20. **The pixel budget never changes a rendered pixel** under
+    `MissingLevels::Materialise`. Sampling code reads image levels only
+    through a sampler's pins (`ImageSampler`) or `ImageRef::level`, never
+    by keeping a borrow across a pin; a level is rebuilt only with
+    `reduce_level`; a `PixelSource` must return the exact bytes first
+    registered; a base with no way back is never dropped.
+    `tests/pixel_budget.rs` here and in `xarast-app` hold it.
+21. **A render under `MissingLevels::Substitute` is not a picture until
+    it is repaired.** Whoever asks for it must read `substitution_tick()`
+    before, find the stamped images after, bring their bases back and
+    repaint their `image_damage` (or re-render under `Materialise`).
+    Export, thumbnails, goldens and every byte-for-byte test use
+    `Materialise`; only the interactive render thread substitutes, and it
+    never publishes such a frame as exact (`app-core.md` invariant 17).
 ---
 
 ## Dead ends (do not retry)

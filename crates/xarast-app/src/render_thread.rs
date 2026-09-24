@@ -55,19 +55,42 @@
 //! list to build depends on what the worker holds. The policy is in
 //! `reuse.rs`.
 //!
+//! # Evicted bitmaps: draw what is resident, repaint when the rest is back
+//!
+//! The production renderer samples images with
+//! [`MissingLevels::Substitute`]: a level the pixel budget evicted that
+//! needs its base back (a spill read or a decode) is drawn from the best
+//! resident level instead, and the render thread never waits for disk or
+//! a decoder (XARA-T-0281). After a frame, the worker asks the frame's
+//! images which were substituted during it
+//! ([`ImageRef::substituted_since`](xarast_render::ImageRef::substituted_since)),
+//! hands them to a helper thread that brings their bases back, and adds
+//! their damage ([`xarast_render::image_damage`]) to the kept frame's
+//! inexact rectangle, so the frame is published as not exact. When the
+//! helper is done and no newer frame waits, a `Final` frame is repaired:
+//! the worker re-runs its job under a generation of its own, which the
+//! reuse policy turns into a [`FrameReuse::Repainted`] frame of exactly
+//! that damage — the ordinary repaint path, tiles included. The repair
+//! samples with [`MissingLevels::Materialise`], so it is exact even when
+//! the budget evicted a base again in between; that is the only place the
+//! render thread may still read a base, and only under a budget smaller
+//! than one frame's images. A `Draft` frame is not repaired (its `Final`
+//! follows anyway), but its bases are brought back all the same.
+//!
 //! # Waking the main thread
 //!
 //! The worker calls a waker after publishing. The shell passes one that
 //! posts to its event loop; the application core never learns what an
 //! event loop is.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
 use xarast_render::{
-    BackendError, CpuBackend, CpuConfig, DeviceRect, DirtyRect, DisplayList, FrameTimings,
-    RenderQuality, Resolver, Scene, Surface, ViewParams,
+    BackendError, CpuBackend, CpuConfig, DeviceRect, DirtyRect, DisplayList, FrameTimings, ImageId,
+    ImageRef, MissingLevels, RenderQuality, Resolver, Scene, Surface, ViewParams,
 };
 
 use crate::reuse::{self, Kept, Plan};
@@ -233,6 +256,12 @@ pub struct RenderStats {
     /// Frames of a new scene drawn by repainting only its damage over the
     /// previous frame.
     pub repainted: u64,
+    /// Frames that drew an evicted image from a smaller resident level
+    /// instead of waiting for its base.
+    pub substituted: u64,
+    /// `Final` frames repainted by the worker itself once the bases it
+    /// substituted were back (their own generations).
+    pub repaired: u64,
     /// `Draft` zooms skipped because the job asked for no CPU rescale
     /// ([`FrameJob::cpu_rescale`]).
     pub skipped: u64,
@@ -256,10 +285,21 @@ pub trait FrameRenderer: Send + 'static {
         list: &DisplayList,
         target: &mut Surface,
     ) -> Result<FrameTimings, BackendError>;
+
+    /// What image samplers do about an evicted level from now on. The
+    /// worker asks for [`MissingLevels::Materialise`] around a repair; a
+    /// renderer that samples no images ignores it.
+    ///
+    /// Returns the policy it replaces (the default implementation keeps
+    /// none and returns `missing`).
+    fn set_missing_levels(&mut self, missing: MissingLevels) -> MissingLevels {
+        missing
+    }
 }
 
 /// The production renderer: the CPU backend in its interactive
-/// configuration.
+/// configuration, drawing evicted images from what is resident
+/// ([`MissingLevels::Substitute`]).
 #[derive(Debug)]
 pub struct CpuFrameRenderer {
     backend: CpuBackend,
@@ -277,7 +317,10 @@ impl CpuFrameRenderer {
 
 impl Default for CpuFrameRenderer {
     fn default() -> Self {
-        CpuFrameRenderer::new(CpuConfig::interactive())
+        CpuFrameRenderer::new(CpuConfig {
+            missing_levels: MissingLevels::Substitute,
+            ..CpuConfig::interactive()
+        })
     }
 }
 
@@ -289,6 +332,12 @@ impl FrameRenderer for CpuFrameRenderer {
         target: &mut Surface,
     ) -> Result<FrameTimings, BackendError> {
         self.backend.render(list, &job.resolver, target)
+    }
+
+    fn set_missing_levels(&mut self, missing: MissingLevels) -> MissingLevels {
+        let old = self.backend.config().missing_levels;
+        self.backend.set_missing_levels(missing);
+        old
     }
 }
 
@@ -302,6 +351,9 @@ struct State {
     cancel_up_to: Option<u64>,
     shutdown: bool,
     stats: RenderStats,
+    /// The newest frame generation whose substituted bases the helper
+    /// has brought back.
+    rematerialised: u64,
 }
 
 impl State {
@@ -310,10 +362,23 @@ impl State {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Shared {
     state: Mutex<State>,
     work: Condvar,
+    /// The next generation. Shared because the worker allocates one for
+    /// each repair it publishes, and generations must stay increasing.
+    next_generation: AtomicU64,
+}
+
+impl Default for Shared {
+    fn default() -> Shared {
+        Shared {
+            state: Mutex::default(),
+            work: Condvar::new(),
+            next_generation: AtomicU64::new(1),
+        }
+    }
 }
 
 impl Shared {
@@ -331,14 +396,13 @@ impl Shared {
 /// Dropping it shuts the thread down and joins it.
 pub struct RenderThread {
     shared: Arc<Shared>,
-    next_generation: u64,
     handle: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for RenderThread {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderThread")
-            .field("next_generation", &self.next_generation)
+            .field("next_generation", &self.next_generation())
             .field("running", &self.handle.is_some())
             .finish_non_exhaustive()
     }
@@ -370,7 +434,6 @@ impl RenderThread {
             .spawn(move || worker_loop(&worker, renderer, &waker))?;
         Ok(RenderThread {
             shared,
-            next_generation: 1,
             handle: Some(handle),
         })
     }
@@ -378,17 +441,17 @@ impl RenderThread {
     /// Submits a frame, returning the generation it was given. Never
     /// blocks; a frame still waiting is superseded.
     pub fn submit(&mut self, mut job: FrameJob) -> u64 {
-        let generation = self.next_generation;
-        self.next_generation += 1;
+        let generation = self.shared.next_generation.fetch_add(1, Ordering::SeqCst);
         job.generation = generation;
         self.send(RenderRequest::Frame(job));
         generation
     }
 
-    /// The generation the next [`RenderThread::submit`] will allocate.
+    /// The generation the next [`RenderThread::submit`] will allocate,
+    /// unless the worker takes it first for a repair.
     #[must_use]
-    pub const fn next_generation(&self) -> u64 {
-        self.next_generation
+    pub fn next_generation(&self) -> u64 {
+        self.shared.next_generation.load(Ordering::SeqCst)
     }
 
     /// Sends a raw request. [`RenderThread::submit`] is the usual way to
@@ -738,27 +801,163 @@ fn elapsed_us(t: Instant) -> u32 {
     u32::try_from(t.elapsed().as_micros()).unwrap_or(u32::MAX)
 }
 
-fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
+/// What the worker does next.
+enum Next {
+    /// A frame the main thread submitted.
+    Job(FrameJob),
+    /// The kept `Final` frame again, under a generation of the worker's
+    /// own, once the bases it drew substitutes for are back.
+    Repair(FrameJob),
+}
+
+/// The helper thread that brings substituted bases back
+/// ([`ImageRef::rematerialise`]), so that the worker never waits for a
+/// spill read or a decode. Started on first use; it ends when the worker
+/// drops its sender.
+struct Rematerialiser {
+    tx: std::sync::mpsc::Sender<(u64, Vec<ImageRef>)>,
+    handle: JoinHandle<()>,
+}
+
+impl Rematerialiser {
+    fn spawn(shared: &Arc<Shared>) -> Option<Rematerialiser> {
+        let (tx, rx) = std::sync::mpsc::channel::<(u64, Vec<ImageRef>)>();
+        let shared = Arc::clone(shared);
+        let handle = std::thread::Builder::new()
+            .name("xarast-rematerialise".to_owned())
+            .spawn(move || {
+                while let Ok((generation, images)) = rx.recv() {
+                    for image in &images {
+                        image.rematerialise();
+                    }
+                    let mut st = shared.lock();
+                    st.rematerialised = st.rematerialised.max(generation);
+                    drop(st);
+                    shared.work.notify_all();
+                }
+            })
+            .ok()?;
+        Some(Rematerialiser { tx, handle })
+    }
+
+    fn stop(self) {
+        drop(self.tx);
+        // A panic in a decoder was reported by the hook; nothing to add.
+        let _ = self.handle.join();
+    }
+}
+
+/// The images of `job` that a sampler drew from a substitute after
+/// `tick`, with their id indices.
+fn substituted(job: &FrameJob, tick: u64) -> Vec<(u32, ImageRef)> {
+    job.resolver
+        .images
+        .iter()
+        .zip(0u32..)
+        .filter(|(image, _)| image.substituted_since(tick))
+        .map(|(image, i)| (i, image.clone()))
+        .collect()
+}
+
+fn worker_loop<R: FrameRenderer>(shared: &Arc<Shared>, renderer: R, waker: &Waker) {
     let mut w = Worker {
         shared,
         renderer,
         kept: None,
     };
+    // The job of the kept frame, for a repair; the generation of the kept
+    // frame a repair is owed to; the helper that brings bases back.
+    let mut last_job: Option<FrameJob> = None;
+    let mut repair: Option<u64> = None;
+    let mut helper: Option<Rematerialiser> = None;
     loop {
-        let job = {
+        let next = {
             let mut st = shared.lock();
             loop {
                 if st.shutdown {
+                    drop(st);
+                    if let Some(h) = helper.take() {
+                        h.stop();
+                    }
                     return;
                 }
                 if let Some(job) = st.pending.take() {
-                    break job;
+                    break Next::Job(job);
+                }
+                if let Some(g) = repair
+                    && st.rematerialised >= g
+                {
+                    repair = None;
+                    let current = w.kept.as_ref().is_some_and(|k| k.generation == g);
+                    if current
+                        && !st.is_cancelled(g)
+                        && let Some(mut job) = last_job.clone()
+                    {
+                        job.generation = shared.next_generation.fetch_add(1, Ordering::SeqCst);
+                        break Next::Repair(job);
+                    }
                 }
                 st = shared.work.wait(st).unwrap_or_else(PoisonError::into_inner);
             }
         };
+        let (job, repairing) = match next {
+            Next::Job(job) => (job, false),
+            Next::Repair(job) => (job, true),
+        };
 
-        let produced = w.produce(&job);
+        let tick = xarast_render::substitution_tick();
+        let mut produced = if repairing {
+            // Exact whatever the budget did since: see the module docs.
+            let old = w.renderer.set_missing_levels(MissingLevels::Materialise);
+            let p = w.produce(&job);
+            w.renderer.set_missing_levels(old);
+            p
+        } else {
+            w.produce(&job)
+        };
+        // A frame that drew substitutes: bring the bases back off this
+        // thread, and owe a `Final` its repair.
+        let subs = if produced.is_ok() {
+            substituted(&job, tick)
+        } else {
+            Vec::new()
+        };
+        let drew_substitutes = !subs.is_empty();
+        if drew_substitutes {
+            if helper.is_none() {
+                helper = Rematerialiser::spawn(shared);
+            }
+            let hit: std::collections::HashSet<u32> = subs.iter().map(|(i, _)| *i).collect();
+            let images: Vec<ImageRef> = subs.into_iter().map(|(_, image)| image).collect();
+            if let Some(h) = &helper {
+                // The helper outlives every send: it stops only below.
+                let _ = h.tx.send((job.generation, images));
+            } else {
+                // No thread to be had: bring them back here, late rather
+                // than never.
+                for image in &images {
+                    image.rematerialise();
+                }
+                let mut st = shared.lock();
+                st.rematerialised = st.rematerialised.max(job.generation);
+            }
+            if let Ok(p) = produced.as_mut()
+                && job.view.quality == RenderQuality::Final
+            {
+                let damage = xarast_render::image_damage(
+                    &job.scene,
+                    &p.view,
+                    |id: ImageId| hit.contains(&id.index()),
+                    reuse::MAX_REPAINT_RECTS,
+                )
+                .map_or(p.view.viewport, |d| d.bounds());
+                p.inexact = p.inexact.union(damage);
+                p.exact = p.inexact.is_empty();
+                if !p.exact {
+                    repair = Some(job.generation);
+                }
+            }
+        }
 
         let mut st = shared.lock();
         if !matches!(produced, Err(Abandoned::Skipped)) {
@@ -778,6 +977,8 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
                 continue;
             }
         };
+        st.stats.substituted += u64::from(drew_substitutes);
+        st.stats.repaired += u64::from(repairing);
         match p.reuse {
             FrameReuse::Scrolled { .. } => st.stats.scrolled += 1,
             FrameReuse::Rescaled => st.stats.rescaled += 1,
@@ -787,6 +988,7 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
         // The pixels are kept whatever happens to the frame: they are a
         // correct picture of `p.view` either way.
         let published = p.surface.clone();
+        last_job = Some(job.clone());
         w.kept = Some(Kept {
             doc: job.doc,
             scene_epoch: job.scene_epoch,

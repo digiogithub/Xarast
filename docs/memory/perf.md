@@ -321,8 +321,8 @@ the `open … ms, walk … ms` columns. Older commits were built from
   document; left as it is.
 - **`build_scene`'s re-decode** (XARA-T-0281) does not show here:
   `smoke-open` walks once with the session's own walker, which decodes
-  once. It costs every export or thumbnail one decode pass per call, now
-  with the faster snap.
+  once. It cost every export or thumbnail one decode pass per call; gone
+  since the per-document decoded-image cache (next section).
 - Render time is unchanged by the snap. `xarast-cli export … --format png`
   at 96 dpi, medians of 5, before → after, render ms: Groucho2 5.8 → 6.2,
   leafgirl 5.8 → 5.2, scope3 16.6 → 15.7, Spitfire 22.6 → 24.2, ProbeX16
@@ -335,6 +335,57 @@ evictable): 297 evictions freeing 197 MiB, 209 base re-materialisations,
 69 level rebuilds, 88 spill writes (53 MiB), 0 lost, pixels identical.
 Peak resident under that budget: 7.6 MiB spilling, 4.1 MiB re-decoding
 (pins in flight only).
+
+#### Export and thumbnails with the decoded-image cache (XARA-T-0281, 2026-09-24)
+
+**Indicative numbers**: other agents were building and testing on the
+machine throughout the day (1-min load 57–87 during the first runs); the
+table is the one pair taken back to back when it had dropped to **3.7–3.9**
+for both. Release, a scratch probe (not in the tree, like T-0287's) that
+per file, in one process: opens the session, walks it once with the
+session's own walker (`rebuild_scene`, as the window does before any
+export), exports PNG at 96 dpi twice through `Registry::export` and
+`SessionSource` (what `xarast-cli export` runs), then renders the
+thumbnail twice (`thumbnail_png` before, `thumbnail_png_with(doc,
+session.decoded_images())` after — what a save now does). Nine runs,
+medians, ms. "Scene" is `ExportReport::scene_time` (the export's walk).
+
+| File | Export scene 1st / 2nd, before | after | Export wall 1st / 2nd, before | after | Thumbnail 1st / 2nd, before | after |
+|---|---|---|---|---|---|---|
+| `Groucho2` | 17.4 / 17.6 | **1.5 / 1.2** | 48.4 / 36.0 | **22.8 / 20.1** | 23.6 / 23.2 | **7.0 / 6.8** |
+| `leafgirl` | 11.8 / 12.1 | **0.8 / 0.6** | 33.1 / 32.9 | **20.7 / 19.7** | 15.4 / 15.1 | **3.8 / 3.5** |
+| `scope3 simple` | 17.9 / 18.1 | **5.6 / 8.2** | 77.7 / 67.2 | **56.5 / 54.0** | 30.9 / 30.7 | **21.3 / 20.9** |
+
+- Before, every export and every thumbnail decoded (and `prepare`d) every
+  bitmap again: the export's scene time *was* the first walk's decode
+  cost (compare T-0287's walk column), paid again on the second export.
+  After, the first export already hits the session's walk, so there is
+  no "first export" penalty either. Render times are unchanged (± noise:
+  Groucho2 6.6 → 6.1, leafgirl 5.4 → 4.2, scope3 16.1 → 16.0 on the
+  first export).
+- What is left of scope3's export scene (5–8 ms) is the walk itself
+  (text stories, 2 000+ objects), not bitmaps; ProbeX16-sized documents
+  are dominated by it too.
+- Under the heavy load the same pair gave scene 17.8 / 12.2 / 18.0 →
+  1.5 / 0.9 / 8.1 and thumbnail 25.3 / 17.0 / 31.7 → 7.2 / 4.3 / 20.6
+  (loads 60–80 vs 57): the saving is the decode, which is the part that
+  does not scale with the other agents' load; export wall times swing by
+  10× under load (PNG's parallel DEFLATE competes for cores) and mean
+  nothing there.
+- Session open and the first walk are unchanged (open 1.1–3.7 ms, walk
+  12–18 ms both sides): the cache only removes repeats.
+
+**Draft zoomed out, and the render thread.** No timing here: what changed
+is *where* the time goes, which the tests count instead
+(`xarast-render/tests/pixel_budget.rs`,
+`xarast-app/tests/pixel_budget.rs`). A Draft at 1/8 of four evicted
+1200 × 900 photographs used to read four spill files (≈ 4 MiB each,
+≈ 0.3 ms each hot, or a decode each without spilling); it now reads none
+under either policy, because it samples level 3, the proxy. Under
+`Substitute` no frame reads a base on the render thread at all; the
+helper's reads are the same count and cost as before, off the thread,
+followed by a repaint of the images' damage only (leafgirl's corpus test:
+one repaint frame, `FrameReuse::Repainted`).
 
 ### Document model
 

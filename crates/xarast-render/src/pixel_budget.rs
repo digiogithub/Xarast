@@ -32,7 +32,10 @@
 //!
 //! After any store gains resident bytes, [`PixelBudget::enforce`] evicts
 //! whole stores, least recently sampled first, until the evictable total is
-//! at most the limit. Evicting a store drops its levels `..p`. A sampler
+//! at most the limit. Evicting a store drops its levels `..p`. When it drops
+//! the base and no level `p..` is resident yet (an image nobody prepared),
+//! it first reduces the base down to the proxy, so that something smaller
+//! is always there to draw from without waiting. A sampler
 //! holds its own `Arc`s to the levels it pinned, so eviction never pulls
 //! pixels from under a primitive being drawn; the memory is freed when the
 //! last pin goes.
@@ -54,6 +57,23 @@
 //! stays resident, so there is always a way back. Nothing here may change
 //! a rendered pixel: the byte-for-byte tests in `tests/pixel_budget.rs`
 //! and in `xarast-app` render under a tiny budget and compare.
+//!
+//! # Drawing without waiting ([`MissingLevels`])
+//!
+//! Bringing a base back costs a spill read or a decode. A render that must
+//! not wait for that (the interactive render thread) asks for
+//! [`MissingLevels::Substitute`]: a level that is not resident and cannot
+//! be rebuilt from a larger resident one is then **not** re-materialised;
+//! the sampler draws the best resident level instead (at worst the proxy,
+//! which is always resident once the base has been evicted) and the image
+//! is stamped with [`substitution_tick`]. The caller finds the stamped
+//! images with [`ImageRef::substituted_since`](crate::ImageRef::substituted_since),
+//! brings their bases back off its thread
+//! ([`ImageRef::rematerialise`](crate::ImageRef::rematerialise)) and
+//! redraws what they cover. Reductions from a resident larger level are
+//! still done in place: they are arithmetic, not I/O, and exact. Export,
+//! thumbnails and the tests use the default [`MissingLevels::Materialise`],
+//! which is byte-identical to an unlimited budget.
 //!
 //! # Locks
 //!
@@ -79,6 +99,33 @@ pub const PROXY_CAP: u32 = 2048;
 pub const PROXY_DEFAULT: u32 = 256;
 
 const MIB: u64 = 1024 * 1024;
+
+/// What a sampler does about a level that is not resident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MissingLevels {
+    /// Re-materialise it now, byte for byte, whatever it costs: the
+    /// output is identical to an unlimited budget.
+    #[default]
+    Materialise,
+    /// Rebuild it only when that is a reduction of a resident larger
+    /// level; if it needs the base back (a spill read or a decode), draw
+    /// the best resident level instead and stamp the image
+    /// ([`substitution_tick`]). The pixels are then not the exact ones
+    /// until the caller re-materialises and redraws.
+    Substitute,
+}
+
+/// Every substitution takes a new value of this counter, so a caller that
+/// read it before a render can tell which images were substituted during
+/// that render.
+static SUBSTITUTIONS: AtomicU64 = AtomicU64::new(1);
+
+/// The substitution clock now: an image stamped after this value was
+/// drawn from a substitute after the call ([`MissingLevels::Substitute`]).
+#[must_use]
+pub fn substitution_tick() -> u64 {
+    SUBSTITUTIONS.load(Ordering::SeqCst)
+}
 
 /// Where re-produced pixels come from after an eviction.
 ///
@@ -221,6 +268,13 @@ pub struct BudgetStats {
     pub spill_failures: u64,
     /// Bases that could not be re-produced at all (drawn transparent).
     pub lost: u64,
+    /// Samplers that drew a smaller resident level instead of waiting for
+    /// a base ([`MissingLevels::Substitute`]).
+    pub substituted: u64,
+    /// Bases brought back by [`ImageRef::rematerialise`](crate::ImageRef::rematerialise),
+    /// off the render thread. They are counted in `from_spill` /
+    /// `from_source` too.
+    pub rematerialised: u64,
 }
 
 #[derive(Debug, Default)]
@@ -234,6 +288,8 @@ struct Counters {
     spill_bytes: AtomicU64,
     spill_failures: AtomicU64,
     lost: AtomicU64,
+    substituted: AtomicU64,
+    rematerialised: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -339,6 +395,8 @@ impl PixelBudget {
             spill_bytes: c.spill_bytes.load(Ordering::Relaxed),
             spill_failures: c.spill_failures.load(Ordering::Relaxed),
             lost: c.lost.load(Ordering::Relaxed),
+            substituted: c.substituted.load(Ordering::Relaxed),
+            rematerialised: c.rematerialised.load(Ordering::Relaxed),
         }
     }
 
@@ -455,6 +513,16 @@ impl PixelBudget {
     }
 }
 
+/// What [`ImageStore::pin`] hands a sampler.
+#[derive(Debug)]
+pub(crate) enum Pinned {
+    /// Every level asked for, in order.
+    Levels(Vec<LevelBuf>),
+    /// The levels asked for need the base back and the caller would not
+    /// wait: the best resident level instead, with its index.
+    Substitute(usize, LevelBuf),
+}
+
 /// One level resident in memory, shared with whoever pinned it.
 #[derive(Debug, Clone)]
 pub struct LevelBuf {
@@ -502,6 +570,8 @@ pub(crate) struct ImageStore {
     key: u64,
     source: Option<Arc<dyn PixelSource>>,
     state: Mutex<StoreState>,
+    /// The [`substitution_tick`] of its last substitution, 0 for never.
+    substituted_at: AtomicU64,
 }
 
 impl fmt::Debug for ImageStore {
@@ -561,6 +631,7 @@ impl ImageStore {
                 built,
                 spilled: None,
             }),
+            substituted_at: AtomicU64::new(0),
         });
         budget.register(key, Arc::downgrade(&store));
         {
@@ -599,6 +670,22 @@ impl ImageStore {
     /// looking at a level) does not. The result has one entry per level in
     /// the range.
     pub(crate) fn pin(&self, lo: usize, hi: usize, draw: bool) -> Vec<LevelBuf> {
+        match self.pin_with(lo, hi, draw, MissingLevels::Materialise) {
+            Pinned::Levels(v) => v,
+            // `Materialise` never substitutes.
+            Pinned::Substitute(_, l) => vec![l],
+        }
+    }
+
+    /// [`ImageStore::pin`] under a policy for levels that need the base
+    /// back (`MissingLevels`).
+    pub(crate) fn pin_with(
+        &self,
+        lo: usize,
+        hi: usize,
+        draw: bool,
+        missing: MissingLevels,
+    ) -> Pinned {
         let last = self.dims.len() - 1;
         let (lo, hi) = (lo.min(last), hi.min(last).max(lo.min(last)));
         let out = {
@@ -608,12 +695,68 @@ impl ImageStore {
             if draw && wanted < st.proxy {
                 st.proxy = wanted;
             }
-            let out: Vec<LevelBuf> = (lo..=hi).map(|i| self.ensure(&mut st, i)).collect();
+            // `lo` needs the base back when neither it nor any larger level
+            // is resident; every level above it is then a reduction of it.
+            let needs_base = (0..=lo).all(|j| st.levels[j].is_none());
+            let substitute = (missing == MissingLevels::Substitute && needs_base)
+                .then(|| (lo + 1..=last).find(|&j| st.levels[j].is_some()))
+                .flatten();
+            let out = match substitute {
+                Some(j) => {
+                    let (width, height) = self.dims[j];
+                    let data = st.levels[j].clone().unwrap_or_default();
+                    self.budget
+                        .counters
+                        .substituted
+                        .fetch_add(1, Ordering::Relaxed);
+                    let tick = SUBSTITUTIONS.fetch_add(1, Ordering::SeqCst) + 1;
+                    self.substituted_at.fetch_max(tick, Ordering::SeqCst);
+                    Pinned::Substitute(
+                        j,
+                        LevelBuf {
+                            width,
+                            height,
+                            data,
+                        },
+                    )
+                }
+                None => Pinned::Levels((lo..=hi).map(|i| self.ensure(&mut st, i)).collect()),
+            };
             self.recount(&st, true);
             out
         };
         self.budget.enforce();
         out
+    }
+
+    /// Whether a sampler drew a substitute for this image after `tick`
+    /// ([`substitution_tick`]).
+    pub(crate) fn substituted_since(&self, tick: u64) -> bool {
+        self.substituted_at.load(Ordering::SeqCst) > tick
+    }
+
+    /// Makes the base resident again (a spill read or a decode), for a
+    /// caller that drew a substitute and does this off its render thread.
+    /// Returns whether anything had to be brought back.
+    pub(crate) fn rematerialise(&self) -> bool {
+        let brought = {
+            let mut st = lock(&self.state);
+            if st.levels[0].is_some() {
+                false
+            } else {
+                let _ = self.ensure(&mut st, 0);
+                self.recount(&st, true);
+                true
+            }
+        };
+        if brought {
+            self.budget
+                .counters
+                .rematerialised
+                .fetch_add(1, Ordering::Relaxed);
+            self.budget.enforce();
+        }
+        brought
     }
 
     /// Builds every level (off the render thread, next to the decode).
@@ -716,6 +859,16 @@ impl ImageStore {
                     st.spilled = self.budget.spill(base);
                 }
                 drop_base = cheap || st.spilled.is_some() || self.source.is_some();
+            }
+            // What a sampler that will not wait draws instead
+            // (`MissingLevels::Substitute`): some level at or below the
+            // proxy stays resident whenever the base goes.
+            if drop_base
+                && p < self.dims.len()
+                && st.levels[0].is_some()
+                && st.levels[p..].iter().all(Option::is_none)
+            {
+                let _ = self.ensure(&mut st, p);
             }
             let first = usize::from(!drop_base);
             for slot in st.levels.iter_mut().take(p).skip(first) {

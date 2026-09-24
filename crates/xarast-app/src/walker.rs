@@ -55,6 +55,7 @@ use xarast_render::{
 };
 use xarast_text::FontSubstitution;
 
+use crate::decoded::DecodedImages;
 use crate::edit::EditState;
 use crate::fonts::FontService;
 use crate::paint::PaintCtx;
@@ -157,6 +158,9 @@ pub struct SceneWalker {
     /// The pixel budget decoded bitmaps are registered under; `None` is
     /// the process-wide one ([`PixelBudget::global`]).
     pixel_budget: Option<Arc<PixelBudget>>,
+    /// The document's decoded bitmaps, shared with its other walkers
+    /// ([`crate::decoded`]); `None` decodes for this walker alone.
+    decoded: Option<DecodedImages>,
 }
 
 /// What a scope opened in the scene, so that `LeaveScope` can close it.
@@ -191,6 +195,16 @@ impl SceneWalker {
     #[must_use]
     pub fn with_pixel_budget(mut self, budget: Arc<PixelBudget>) -> SceneWalker {
         self.pixel_budget = Some(budget);
+        self
+    }
+
+    /// Looks bitmaps up in `images` before decoding them, and files what
+    /// it decodes there: how a session's walkers (its own, export,
+    /// thumbnails, [`crate::build_scene`]) decode each bitmap once
+    /// ([`crate::decoded`]).
+    #[must_use]
+    pub fn with_decoded_images(mut self, images: DecodedImages) -> SceneWalker {
+        self.decoded = Some(images);
         self
     }
 
@@ -546,20 +560,45 @@ impl SceneWalker {
     /// here and not in the walk itself so that the registry is built once
     /// per frame rather than once per object.
     fn register_images(&mut self, doc: &Document) {
+        let budget = self
+            .pixel_budget
+            .clone()
+            .unwrap_or_else(|| Arc::clone(PixelBudget::global()));
+        if let Some(cache) = &self.decoded {
+            cache.retain(doc.resources.bitmaps().map(|(_, res)| res));
+        }
         let mut todo: Vec<(BitmapId, &xarast_doc::BitmapResource)> = Vec::new();
+        let mut found: Vec<(BitmapId, Option<ImageRef>)> = Vec::new();
         for (id, res) in doc.resources.bitmaps() {
             if self.images.contains_key(&id) || self.failed.contains(&id) {
                 continue;
             }
             if has_native_pixels(res) || (res.pixels.pixels.is_empty() && res.original.is_some()) {
-                todo.push((id, res));
+                match self.decoded.as_ref().and_then(|c| c.get(res, &budget)) {
+                    Some(image) => found.push((id, image)),
+                    None => todo.push((id, res)),
+                }
             }
         }
-        let budget = self
-            .pixel_budget
-            .clone()
-            .unwrap_or_else(|| Arc::clone(PixelBudget::global()));
-        for (id, decoded) in decode_all(&todo, &budget) {
+        let mut made = decode_all(&todo, &budget);
+        if let Some(cache) = &self.decoded {
+            // `decode_all` answers in input order.
+            for ((_, image), (_, res)) in made.iter_mut().zip(&todo) {
+                *image = cache.insert(res, &budget, image.take());
+            }
+        }
+        // Registration order is document order either way, so the ids and
+        // the scene do not depend on what the cache held.
+        let mut all: Vec<(BitmapId, Option<ImageRef>)> = found;
+        all.append(&mut made);
+        let order: HashMap<BitmapId, usize> = doc
+            .resources
+            .bitmaps()
+            .enumerate()
+            .map(|(i, (id, _))| (id, i))
+            .collect();
+        all.sort_by_key(|(id, _)| order.get(id).copied().unwrap_or(usize::MAX));
+        for (id, decoded) in all {
             match decoded {
                 Some(image) => {
                     let rid = self.resolver.images.insert(image);

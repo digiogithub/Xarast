@@ -248,10 +248,21 @@ frame before the walk:
    bitmap file ≤ 8 ms. Since the cell-grid snap (XARA-T-0287) the worst
    first walk is Groucho2's 18 ms (`perf.md`). Open-to-first-paint in the real window is unchanged
    within noise (≈ 330–370 ms for the bitmap files, both before and after;
-   `perf.md`). Moving decode off the frame path entirely is T10.5.5.
-7. `build_scene(&Session)` makes a fresh walker, so it re-decodes every
-   call (thumbnails, tests, export). Fine for the corpus; a per-document
-   decoded-image cache belongs with T10.5.5.
+   `perf.md`). The first decode of a bitmap is still on the walk (the
+   main thread); what XARA-T-0281 moved off the render thread is
+   bringing an *evicted* base back (below, "Pixel memory budget").
+7. **One decode per document** (XARA-T-0281): a `Session` owns a
+   `DecodedImages` (`xarast-app/src/decoded.rs`) shared by every walker
+   made for it — its own, `build_scene`, the CLI export, headless renders
+   and the save thread's thumbnail. A walker looks each bitmap up there
+   before decoding and files what it decodes (failures too, so a bad
+   bitmap is tried once per document). Key: the addresses of the
+   resource's `pixels` and `original` `Arc`s (held by the entry, so they
+   cannot be reused), its declared size and the pixel budget. Resources
+   are copy-on-write, so a changed bitmap misses. A walker made with
+   plain `SceneWalker::new()` (tests, corpus tools) still decodes for
+   itself; `SceneWalker::with_decoded_images` opts in. Numbers in
+   `perf.md`.
 
 Bitmap **fills** render too, and tile by the fill-mapping attribute
 (XARA-T-0054, `paint.rs::bitmap_repeat`): the fill's own `tiling` wins
@@ -387,6 +398,17 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
   a walker.
 - The document's own bytes (`BitmapResource::pixels`, `original`) are
   **not** in the budget; only the renderer's decoded levels are.
+- **Nothing on the render thread waits for a decode any more**
+  (XARA-T-0281): the interactive renderer draws an evicted image from a
+  smaller resident level and a helper thread runs this crate's
+  re-decode (the `PixelSource`) or the spill read; the render thread then
+  repaints the image's damage (`render.md`, "Drawing without waiting for
+  an evicted base"; `app-core.md` decision 41). Export and thumbnails
+  still re-produce an evicted base in place, byte for byte.
+- The cached `ImageRef`s of `DecodedImages` stay under the budget like
+  any other: sharing them between walkers shares their proxies and
+  eviction state too (an export at 300 dpi may grow a proxy for the
+  session's view — the proxy rule is per image, not per walker).
 
 ## Dead ends (do not retry)
 
@@ -420,9 +442,6 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
   we leave palette PNGs alone. No corpus file has one, and the original's
   writer never produces one.
 - Encoders for resource storage (T10.2.5).
-- `build_scene` makes a fresh walker, so it re-decodes (and now
-  re-prepares) every bitmap per call; a per-document decoded-image cache
-  is part of XARA-T-0281 (T10.5.5).
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - `DecodeLimits::max_frames` is informational: every decoder already takes
   the first frame only.

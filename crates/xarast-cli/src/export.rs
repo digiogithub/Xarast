@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use xarast_app::viewport::{drawing_or_page_rect, page_rect, spread_rect};
-use xarast_app::{DocumentId, SceneWalker, Session};
+use xarast_app::{DocumentId, Session};
 use xarast_color::Rgba8;
 use xarast_geom::{Mp, Point, Rect};
 use xarast_io::{
@@ -502,7 +502,8 @@ impl ExportSource for SessionSource<'_> {
 
     fn build_scene(&self, quality: RenderQuality) -> Result<SourceScene, ExportError> {
         let s = self.session;
-        let mut walker = SceneWalker::new();
+        // The session's decoded bitmaps: a second export decodes nothing.
+        let mut walker = s.scene_walker();
         let mut scene = Scene::new();
         walker
             .rebuild(&s.doc, &s.edit, &s.viewport, quality, None, &mut scene)

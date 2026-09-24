@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use xarast_color::Rgba8;
 
-use crate::pixel_budget::{ImageStore, LevelBuf, PixelBudget, PixelSource};
+use crate::pixel_budget::{ImageStore, LevelBuf, MissingLevels, Pinned, PixelBudget, PixelSource};
 use crate::precision::Point64;
 use crate::ramp::{Profile, RampCache, RampId};
 use crate::resample::ImageSampler;
@@ -607,9 +607,27 @@ impl ImageRef {
     }
 
     /// Levels `lo..=hi`, clamped to the pyramid, pinned for one primitive
-    /// that draws the image (which may grow its proxy).
-    pub(crate) fn pin_levels(&self, lo: usize, hi: usize) -> Vec<LevelBuf> {
-        self.store.pin(lo, hi, true)
+    /// that draws the image (which may grow its proxy), under a policy for
+    /// levels that need the base back.
+    pub(crate) fn pin_levels(&self, lo: usize, hi: usize, missing: MissingLevels) -> Pinned {
+        self.store.pin_with(lo, hi, true, missing)
+    }
+
+    /// Whether a sampler drew a smaller resident level of this image
+    /// instead of waiting for its base, after `tick`
+    /// ([`crate::pixel_budget::substitution_tick`],
+    /// [`MissingLevels::Substitute`]).
+    #[must_use]
+    pub fn substituted_since(&self, tick: u64) -> bool {
+        self.store.substituted_since(tick)
+    }
+
+    /// Brings an evicted base back (a spill read or a decode), blocking.
+    /// For a worker thread, after a render drew a substitute; the budget
+    /// may evict it again later like any other level. Returns whether the
+    /// base had to be brought back.
+    pub fn rematerialise(&self) -> bool {
+        self.store.rematerialise()
     }
 
     /// Reads one texel with the given repeat mode applied to both axes.
@@ -904,6 +922,18 @@ impl<'a> PaintSampler<'a> {
         ramps: &'a RampCache,
         images: &'a ImageRegistry,
     ) -> PaintSampler<'a> {
+        PaintSampler::with_missing(paint, ramps, images, MissingLevels::Materialise)
+    }
+
+    /// [`PaintSampler::new`], with what an image paint does about an
+    /// evicted level ([`ImageSampler::with_missing`]).
+    #[must_use]
+    pub fn with_missing(
+        paint: &'a Paint,
+        ramps: &'a RampCache,
+        images: &'a ImageRegistry,
+        missing: MissingLevels,
+    ) -> PaintSampler<'a> {
         let (frame, table, image) = match paint {
             Paint::Solid(_) | Paint::Fractal(_) => (None, None, None),
             Paint::Gradient { mapping, ramp, .. } => (
@@ -924,9 +954,9 @@ impl<'a> PaintSampler<'a> {
             } => (
                 None,
                 None,
-                images
-                    .get(*image)
-                    .and_then(|img| ImageSampler::new(img, *mapping, *repeat, *filter, *contone)),
+                images.get(*image).and_then(|img| {
+                    ImageSampler::with_missing(img, *mapping, *repeat, *filter, *contone, missing)
+                }),
             ),
         };
         PaintSampler {

@@ -25,7 +25,7 @@
 //!
 //! | [`Filter`] | magnification (≤ 1 texel per pixel) | minification |
 //! |---|---|---|
-//! | `Nearest` (Draft) | point | point, base level |
+//! | `Nearest` (Draft) | point | point, on the pyramid level the footprint picks |
 //! | `Bilinear` (the original's smoothing flag) | bilinear | widened tent below 2×, then trilinear over the pyramid |
 //! | `HighQuality` (Final, export) | [`HQ_KERNEL`] | widened tent below 2×, then trilinear over the pyramid |
 //!
@@ -52,7 +52,7 @@ use std::sync::LazyLock;
 use xarast_color::Rgba8;
 
 use crate::paint::{Filter, FrameMap, GradMapping, ImageRef, Repeat};
-use crate::pixel_budget::LevelBuf;
+use crate::pixel_budget::{LevelBuf, MissingLevels, Pinned};
 use crate::precision::Point64;
 use crate::ramp::EffectSpace;
 
@@ -598,17 +598,38 @@ fn lod_of(rho: f64, levels: impl FnOnce() -> usize) -> Lod {
     }
 }
 
+/// The level a `Nearest` sampler points into: the one trilinear would
+/// start from, so a minified Draft frame reads a reduction the size of
+/// what it draws and never the base (XARA-T-0281).
+fn nearest_level(lod: Lod) -> usize {
+    match lod {
+        Lod::Minify { level, .. } => level,
+        Lod::Magnify | Lod::Widen(_) => 0,
+    }
+}
+
 /// How a sampler maps pixels to texels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Plan {
-    /// Point sampling through the mapping (the `Nearest` filter).
-    Nearest,
+    /// Point sampling through the mapping (the `Nearest` filter), in one
+    /// pyramid level chosen by the footprint: the base unless minified by
+    /// two or more.
+    Nearest { level: usize },
+    /// Point sampling through a perspective mapping, the level chosen by
+    /// the footprint per pixel.
+    NearestPerPixel,
     /// Texel centres on pixel centres: `tx = sx·x + ox`, `ty = sy·y + oy`.
     Aligned { sx: i64, ox: i64, sy: i64, oy: i64 },
     /// An affine mapping: one level of detail for the whole primitive.
     Fixed(Lod),
     /// A perspective mapping: the level of detail per pixel.
     PerPixel,
+    /// The levels the plan needed were evicted and the render would not
+    /// wait for them ([`MissingLevels::Substitute`]): the only pinned
+    /// level, a smaller resident one, point-sampled for `Nearest` and
+    /// bilinear otherwise. Never byte-identical by design; the caller
+    /// redraws once the base is back.
+    Fallback,
 }
 
 /// How close to exact the aligned case must be, relative per axis: over
@@ -688,34 +709,70 @@ impl<'a> ImageSampler<'a> {
         filter: Filter,
         contone: Option<(Rgba8, Rgba8, EffectSpace)>,
     ) -> Option<ImageSampler<'a>> {
+        ImageSampler::with_missing(
+            img,
+            mapping,
+            repeat,
+            filter,
+            contone,
+            MissingLevels::Materialise,
+        )
+    }
+
+    /// [`ImageSampler::new`], with what to do when a level it needs was
+    /// evicted and needs the base back (`pixel_budget`, "Drawing without
+    /// waiting").
+    #[must_use]
+    pub fn with_missing(
+        img: &'a ImageRef,
+        mapping: GradMapping,
+        repeat: Repeat,
+        filter: Filter,
+        contone: Option<(Rgba8, Rgba8, EffectSpace)>,
+        missing: MissingLevels,
+    ) -> Option<ImageSampler<'a>> {
         if img.width() == 0 || img.height() == 0 {
             return None;
         }
         let frame = mapping.frame_map()?;
         let (w, h) = (f64::from(img.width()), f64::from(img.height()));
+        let fixed_lod = || {
+            let rho = frame
+                .jacobian(Point64::new(0.5, 0.5))
+                .map_or(1.0, |j| footprint(j, w, h));
+            lod_of(rho, || img.level_count())
+        };
         let plan = if let Some((sx, ox, sy, oy)) =
             frame.is_affine().then(|| aligned(&frame, w, h)).flatten()
         {
             Plan::Aligned { sx, ox, sy, oy }
         } else if filter == Filter::Nearest {
-            Plan::Nearest
+            if frame.is_affine() {
+                Plan::Nearest {
+                    level: nearest_level(fixed_lod()),
+                }
+            } else {
+                Plan::NearestPerPixel
+            }
         } else if frame.is_affine() {
-            let rho = frame
-                .jacobian(Point64::new(0.5, 0.5))
-                .map_or(1.0, |j| footprint(j, w, h));
-            Plan::Fixed(lod_of(rho, || img.level_count()))
+            Plan::Fixed(fixed_lod())
         } else {
             Plan::PerPixel
         };
         // The levels the plan can touch: the base for everything but a
-        // fixed minification, which reads two adjacent reduced levels; a
-        // perspective plane may reach any level.
+        // minification, which reads one reduced level (point) or two
+        // adjacent ones (trilinear); a perspective plane may reach any
+        // level.
         let (first, last) = match plan {
             Plan::Fixed(Lod::Minify { level, .. }) => (level, level + 1),
-            Plan::PerPixel => (0, img.level_count() - 1),
-            _ => (0, 0),
+            Plan::Nearest { level } => (level, level),
+            Plan::PerPixel | Plan::NearestPerPixel => (0, img.level_count() - 1),
+            Plan::Aligned { .. } | Plan::Fixed(_) | Plan::Fallback => (0, 0),
         };
-        let pins = img.pin_levels(first, last);
+        let (plan, first, pins) = match img.pin_levels(first, last, missing) {
+            Pinned::Levels(pins) => (plan, first, pins),
+            Pinned::Substitute(level, pin) => (Plan::Fallback, level, vec![pin]),
+        };
         Some(ImageSampler {
             img,
             pins,
@@ -757,21 +814,19 @@ impl<'a> ImageSampler<'a> {
                     self.repeat,
                 )
             }
-            Plan::Nearest => {
+            Plan::Nearest { level } => {
                 let Some((u, v)) = self.frame.apply(p) else {
                     return Rgba8::TRANSPARENT;
                 };
-                let (x, y) = (
-                    u * f64::from(self.img.width()) - 0.5,
-                    v * f64::from(self.img.height()) - 0.5,
-                );
-                fetch(
-                    self.lvl(0),
-                    remap,
-                    x.round() as i64,
-                    y.round() as i64,
-                    self.repeat,
-                )
+                self.point(u, v, level)
+            }
+            Plan::NearestPerPixel => {
+                let Some((u, v)) = self.frame.apply(p) else {
+                    return Rgba8::TRANSPARENT;
+                };
+                let (w, h) = (f64::from(self.img.width()), f64::from(self.img.height()));
+                let rho = self.frame.jacobian(p).map_or(1.0, |j| footprint(j, w, h));
+                self.point(u, v, nearest_level(lod_of(rho, || self.img.level_count())))
             }
             Plan::Fixed(lod) => {
                 let Some((u, v)) = self.frame.apply(p) else {
@@ -788,7 +843,38 @@ impl<'a> ImageSampler<'a> {
                 let lod = lod_of(rho, || self.img.level_count());
                 self.filtered(u, v, lod)
             }
+            Plan::Fallback => {
+                let Some((u, v)) = self.frame.apply(p) else {
+                    return Rgba8::TRANSPARENT;
+                };
+                if self.filter == Filter::Nearest {
+                    return self.point(u, v, self.first);
+                }
+                if !(u.abs() < 1e9 && v.abs() < 1e9) {
+                    return Rgba8::TRANSPARENT;
+                }
+                let l = self.lvl(self.first);
+                let (x, y) = (u * f64::from(l.width) - 0.5, v * f64::from(l.height) - 0.5);
+                encode_premul_in(
+                    bilinear(MAGNIFY_SPACE.table(), l, remap, x, y, self.repeat),
+                    MAGNIFY_SPACE,
+                )
+            }
         }
+    }
+
+    /// The texel of pinned level `level` nearest to `(u, v)`. On the
+    /// base this is exactly the old base-only point sampling.
+    fn point(&self, u: f64, v: f64, level: usize) -> Rgba8 {
+        let l = self.lvl(level);
+        let (x, y) = (u * f64::from(l.width) - 0.5, v * f64::from(l.height) - 0.5);
+        fetch(
+            l,
+            self.remap.as_deref(),
+            x.round() as i64,
+            y.round() as i64,
+            self.repeat,
+        )
     }
 
     fn filtered(&self, u: f64, v: f64, lod: Lod) -> Rgba8 {
@@ -992,6 +1078,39 @@ mod tests {
                 assert_eq!((s.r, s.g, s.b, s.a), (90, 140, 30, 255), "{k:?} ×{stretch}");
             }
         }
+    }
+
+    #[test]
+    fn a_nearest_sampler_points_into_the_level_the_footprint_picks() {
+        assert_eq!(nearest_level(Lod::Magnify), 0);
+        assert_eq!(nearest_level(Lod::Widen(1.9)), 0);
+        assert_eq!(nearest_level(lod_of(3.0, || 8)), 1);
+        assert_eq!(nearest_level(lod_of(4.0, || 8)), 2);
+        // A 64² image of four flat quadrants on 16 px (four texels per
+        // pixel): every sample is a texel of level 2, where each
+        // quadrant is still flat, so the picture is the quadrants.
+        let mut data = Vec::new();
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                let q = u8::from(x >= 32) + 2 * u8::from(y >= 32);
+                data.extend_from_slice(&[q * 60, 255 - q * 60, 40, 255]);
+            }
+        }
+        let image = ImageRef::new(64, 64, data);
+        let mapping = GradMapping::Affine {
+            a: Point64::new(0.0, 0.0),
+            b: Point64::new(0.0, 16.0),
+            c: Point64::new(16.0, 0.0),
+        };
+        let s = ImageSampler::new(&image, mapping, Repeat::Simple, Filter::Nearest, None)
+            .expect("sampler");
+        assert_eq!(s.plan, Plan::Nearest { level: 2 });
+        assert_eq!((s.first, s.pins.len()), (2, 1), "the base is not pinned");
+        let at = |x: f64, y: f64| s.sample(Point64::new(x, y));
+        assert_eq!(at(2.5, 2.5), image.texel(0, 0, Repeat::Simple));
+        assert_eq!(at(13.5, 2.5), image.texel(63, 0, Repeat::Simple));
+        assert_eq!(at(2.5, 13.5), image.texel(0, 63, Repeat::Simple));
+        assert_eq!(at(13.5, 13.5), image.texel(63, 63, Repeat::Simple));
     }
 
     #[test]
