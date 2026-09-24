@@ -174,6 +174,44 @@ pub struct SceneWalker {
     derived_epoch: Epoch,
     /// A 1 × 1 transparent image parked in freed slots.
     placeholder: Option<ImageRef>,
+    /// The photo chains the frame being walked previews, by object
+    /// ([`Preview::photo`]).
+    photo_preview: Vec<(NodeId, xarast_doc::PhotoOps)>,
+    /// Device pixels per millipoint of the frame being walked.
+    frame_scale: f64,
+    /// Proxy images of previewed chains, kept while the same chain is
+    /// previewed at the same level and parked when no frame uses them.
+    proxies: Vec<Proxy>,
+    /// What the last walk drew for each previewed chain.
+    proxy_info: Vec<PhotoProxyInfo>,
+}
+
+/// A registered proxy image: a previewed chain evaluated on a reduced
+/// level of its master.
+#[derive(Debug, Clone, Copy)]
+struct Proxy {
+    /// Master, hash of the evaluable chain, pyramid level.
+    key: (BitmapId, [u8; 32], usize),
+    slot: ImageId,
+    used: bool,
+}
+
+/// How the last walk drew a photo chain being previewed
+/// ([`SceneWalker::photo_proxies`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhotoProxyInfo {
+    /// The bitmap object.
+    pub node: NodeId,
+    /// The master's pyramid level the chain was evaluated on: 0 is the
+    /// master itself, each next level half its size.
+    pub level: usize,
+    /// The size of the proxy image, after crop and turns.
+    pub width: u32,
+    /// Its height.
+    pub height: u32,
+    /// Whether this walk evaluated it (false: the previous frame's proxy
+    /// was reused, or the chain changes no pixel).
+    pub evaluated: bool,
 }
 
 /// What a scope opened in the scene, so that `LeaveScope` can close it.
@@ -290,6 +328,14 @@ impl SceneWalker {
         self.scene_stats
     }
 
+    /// How the last walk drew the photo chains its preview carried
+    /// ([`Preview::photo`]), one entry per previewed bitmap object it
+    /// painted. Empty when nothing was previewed.
+    #[must_use]
+    pub fn photo_proxies(&self) -> &[PhotoProxyInfo] {
+        &self.proxy_info
+    }
+
     /// Forgets every cache. Call it when the document is replaced.
     pub fn reset(&mut self) {
         self.resolver = Resolver::new();
@@ -299,6 +345,8 @@ impl SceneWalker {
         self.derived_failed.clear();
         self.derived_free.clear();
         self.derived_epoch = Epoch::default();
+        self.proxies.clear();
+        self.proxy_info.clear();
         self.attr_cache.clear();
         self.attr_epoch = Epoch::default();
         self.text_fonts = None;
@@ -373,6 +421,12 @@ impl SceneWalker {
         self.sync_caches(doc);
         self.resolver.begin_frame();
         self.stats = WalkStats::default();
+        self.photo_preview.clone_from(&preview.photo);
+        self.frame_scale = vp.scale();
+        self.proxy_info.clear();
+        for p in &mut self.proxies {
+            p.used = false;
+        }
         self.text_ink = Rect::EMPTY;
         self.painted_text.clear();
 
@@ -530,6 +584,7 @@ impl SceneWalker {
 
         let stats = b.finish()?;
         self.scene_stats = stats;
+        self.park_unused_proxies();
         // Ramps no scene of late has used go past the budget (a fill drag
         // makes one per frame); this frame's are never evicted.
         self.resolver.trim_ramps(RAMP_CACHE_BUDGET);
@@ -1094,8 +1149,23 @@ impl SceneWalker {
             return;
         };
         // The parallelogram maps the derived image: with photo operations
-        // the object shows the master put through them (W10.6).
-        let Some(image) = self.derived_image(doc, bm, master) else {
+        // the object shows the master put through them (W10.6). A chain a
+        // slider drag previews is evaluated on a reduced level instead
+        // (T10.6.5), and the node's fingerprint follows it.
+        let previewed = self
+            .photo_preview
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|(_, ops)| ops.evaluable());
+        let mut scope = self.scope;
+        let image = match &previewed {
+            Some(ops) => {
+                scope = mix64(scope, u64::from_le_bytes(first8(&ops.hash())));
+                self.proxy_image(node, bm, master, ops)
+            }
+            None => self.derived_image(doc, bm, master),
+        };
+        let Some(image) = image else {
             self.stats.images_failed += 1;
             return;
         };
@@ -1123,8 +1193,175 @@ impl SceneWalker {
         let t = object_transparency(attrs, AttrSlot::TranspFillGeometry, &mut ctx);
         let id = scene_id(doc, node);
         emit(b, t, |b| b.image(id, image, mapping, paint.clone()));
-        b.finish_node(id, content_hash(doc, node, self.scope));
+        b.finish_node(id, content_hash(doc, node, scope));
     }
+
+    /// The image a bitmap object shows while a slider drag previews `ops`
+    /// on it: the chain evaluated on the smallest level of the master
+    /// that still covers the object's size on screen, and never one of
+    /// more than [`PROXY_MAX_PIXELS`] unless the master itself is that
+    /// small. Reused while the chain and the level stay the same; one
+    /// registry slot per previewed object, parked when the preview ends.
+    fn proxy_image(
+        &mut self,
+        node: NodeId,
+        bm: &xarast_doc::BitmapNode,
+        master: ImageId,
+        ops: &xarast_doc::PhotoOps,
+    ) -> Option<ImageId> {
+        let base = self.resolver.images.get(master)?.clone();
+        let (mw, mh) = (base.width(), base.height());
+        let mut info = PhotoProxyInfo {
+            node,
+            level: 0,
+            width: mw,
+            height: mh,
+            evaluated: false,
+        };
+        if ops.is_empty() {
+            self.proxy_info.push(info);
+            return Some(master);
+        }
+        let (dw, dh) = ops.derived_size(mw, mh);
+        let scale = self.frame_scale;
+        let on_screen = |v: Vector| f64::from(v.dx.0).hypot(f64::from(v.dy.0)) * scale;
+        let level = proxy_level(
+            mw,
+            mh,
+            (dw, dh),
+            (on_screen(bm.major), on_screen(bm.minor)),
+            base.level_count(),
+        );
+        info.level = level;
+        let key = (bm.image, ops.hash(), level);
+        if let Some(p) = self.proxies.iter_mut().find(|p| p.key == key) {
+            p.used = true;
+            let slot = p.slot;
+            if let Some(img) = self.resolver.images.get(slot) {
+                (info.width, info.height) = (img.width(), img.height());
+            }
+            self.proxy_info.push(info);
+            return Some(slot);
+        }
+        let lv = base.level(level);
+        let recipe = xarast_io::photo::recipe(ops);
+        let recipe = scale_recipe(recipe, (mw, mh), (lv.width, lv.height));
+        let (w, h, data) = xarast_image::photo::evaluate(lv.width, lv.height, &lv.data, &recipe)?;
+        let budget = self
+            .pixel_budget
+            .clone()
+            .unwrap_or_else(|| Arc::clone(PixelBudget::global()));
+        let image = ImageRef::with_budget(w, h, data, &budget, None);
+        (info.width, info.height, info.evaluated) = (w, h, true);
+        // The object's previous proxy (another value of the slider) gives
+        // its slot to this one.
+        let reuse = self
+            .proxies
+            .iter()
+            .position(|p| !p.used && p.key.0 == bm.image);
+        let slot = match reuse {
+            Some(i) => {
+                let p = self.proxies.swap_remove(i);
+                self.resolver.images.replace(p.slot, image);
+                p.slot
+            }
+            None => match self.derived_free.pop() {
+                Some(slot) => {
+                    self.resolver.images.replace(slot, image);
+                    slot
+                }
+                None => self.resolver.images.insert(image),
+            },
+        };
+        self.proxies.push(Proxy {
+            key,
+            slot,
+            used: true,
+        });
+        self.proxy_info.push(info);
+        Some(slot)
+    }
+
+    /// Parks the proxies no object of the last walk previewed: their
+    /// slots hold the placeholder and go back to the free list.
+    fn park_unused_proxies(&mut self) {
+        if self.proxies.iter().all(|p| p.used) {
+            return;
+        }
+        let placeholder = self
+            .placeholder
+            .get_or_insert_with(|| ImageRef::new(1, 1, vec![0; 4]))
+            .clone();
+        let mut i = 0;
+        while i < self.proxies.len() {
+            if self.proxies[i].used {
+                i += 1;
+            } else {
+                let p = self.proxies.swap_remove(i);
+                self.resolver.images.replace(p.slot, placeholder.clone());
+                self.derived_free.push(p.slot);
+            }
+        }
+    }
+}
+
+/// The largest proxy a slider drag evaluates, in pixels: about a full-HD
+/// screen. At ≈ 3 ns a pixel for the fused table (`image.md`) that is a
+/// few milliseconds, well inside the 33 ms slider budget of phase 10.
+pub const PROXY_MAX_PIXELS: u64 = 2_100_000;
+
+/// The pyramid level a previewed chain is evaluated on. `derived` is the
+/// chain's output size at full resolution, `shown` the object's two sides
+/// on screen in device pixels. The smallest level whose output still has
+/// at least as many pixels as the screen shows, and then smaller still
+/// until it holds at most [`PROXY_MAX_PIXELS`]; clamped to the pyramid.
+fn proxy_level(mw: u32, mh: u32, derived: (u32, u32), shown: (f64, f64), levels: usize) -> usize {
+    let last = levels.saturating_sub(1);
+    let full = derived.0 as f64 * derived.1 as f64;
+    let wanted = (shown.0 * shown.1).max(1.0);
+    // Each level has a quarter of the pixels of the one before it.
+    let mut level = 0;
+    let (mut w, mut h) = (u64::from(mw), u64::from(mh));
+    let mut out = full;
+    while level < last {
+        let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
+        let next = out / 4.0;
+        let too_big = w * h > PROXY_MAX_PIXELS;
+        if !too_big && next < wanted {
+            break;
+        }
+        (w, h, out) = (nw, nh, next);
+        level += 1;
+    }
+    level
+}
+
+/// `recipe` for a level of `level` size of a `master`-sized image: the
+/// crop, in master pixels, scaled onto the level and rounded outwards.
+fn scale_recipe(
+    mut recipe: xarast_image::photo::Recipe,
+    master: (u32, u32),
+    level: (u32, u32),
+) -> xarast_image::photo::Recipe {
+    if level == master {
+        return recipe;
+    }
+    if let Some((x, y, w, h)) = recipe.crop {
+        let sx = f64::from(level.0) / f64::from(master.0.max(1));
+        let sy = f64::from(level.1) / f64::from(master.1.max(1));
+        let x0 = ((f64::from(x) * sx).floor() as u32).min(level.0.saturating_sub(1));
+        let y0 = ((f64::from(y) * sy).floor() as u32).min(level.1.saturating_sub(1));
+        let x1 = ((f64::from(x.saturating_add(w)) * sx).ceil() as u32).clamp(x0 + 1, level.0);
+        let y1 = ((f64::from(y.saturating_add(h)) * sy).ceil() as u32).clamp(y0 + 1, level.1);
+        recipe.crop = Some((x0, y0, x1 - x0, y1 - y0));
+    }
+    recipe
+}
+
+fn first8(h: &[u8; 32]) -> [u8; 8] {
+    let mut a = [0; 8];
+    a.copy_from_slice(&h[..8]);
+    a
 }
 
 /// Whether a resource carries its pixels decoded (`w·h·4` bytes).
@@ -1585,4 +1822,51 @@ fn doc_rect_of(vp: &Viewport, r: DeviceRect) -> Rect {
         out = out.union_point(c.to_doc_point());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_proxy_is_the_smallest_level_covering_the_screen_under_the_cap() {
+        let levels = 14; // 6000 × 4000
+        // Shown at 1200 × 800: level 2 (1500 × 1000) still covers it.
+        assert_eq!(
+            proxy_level(6000, 4000, (6000, 4000), (1200.0, 800.0), levels),
+            2
+        );
+        // Shown larger than the cap allows: the cap wins.
+        assert_eq!(
+            proxy_level(6000, 4000, (6000, 4000), (6000.0, 4000.0), levels),
+            2
+        );
+        // Shown tiny: a small level, never past the last.
+        assert_eq!(
+            proxy_level(6000, 4000, (6000, 4000), (60.0, 40.0), levels),
+            6
+        );
+        assert_eq!(proxy_level(6000, 4000, (6000, 4000), (0.0, 0.0), 3), 2);
+        // A small master shown at its size is its own proxy.
+        assert_eq!(proxy_level(60, 40, (60, 40), (60.0, 40.0), 7), 0);
+    }
+
+    #[test]
+    fn a_crop_is_scaled_onto_the_level_and_rounded_outwards() {
+        let r = xarast_image::photo::Recipe {
+            crop: Some((101, 50, 200, 99)),
+            ..Default::default()
+        };
+        let s = scale_recipe(r, (1000, 800), (250, 200));
+        assert_eq!(s.crop, Some((25, 12, 51, 26)));
+        // Never empty, never outside the level.
+        let r = xarast_image::photo::Recipe {
+            crop: Some((999, 799, 1, 1)),
+            ..Default::default()
+        };
+        assert_eq!(
+            scale_recipe(r, (1000, 800), (1, 1)).crop,
+            Some((0, 0, 1, 1))
+        );
+    }
 }

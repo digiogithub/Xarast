@@ -201,6 +201,11 @@ pub struct Preview {
     /// Text drawn inside a story that is not in the document: an input
     /// method's composition (phase 9, T9.4.7).
     pub text: Option<TextPreview>,
+    /// Bitmap objects drawn with a photo chain other than their own: a
+    /// photo panel slider being dragged (phase 10, T10.6.5). The walker
+    /// evaluates it on a reduced level of the master (the *proxy*), never
+    /// at full resolution; the release commits the chain as one step.
+    pub photo: Vec<(NodeId, xarast_doc::PhotoOps)>,
 }
 
 /// Text shown in a story as if it had been typed at `at`, without being
@@ -233,6 +238,7 @@ impl Preview {
         self.hidden.clear();
         self.attrs.clear();
         self.text = None;
+        self.photo.clear();
     }
 
     /// Whether there is nothing to apply.
@@ -242,6 +248,7 @@ impl Preview {
             && self.hidden.is_empty()
             && self.attrs.is_empty()
             && self.text.is_none()
+            && self.photo.is_empty()
     }
 
     /// The previewed nodes as a set, for the walker's lookups.
