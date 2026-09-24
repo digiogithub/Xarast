@@ -788,8 +788,8 @@ object, evaluates nothing full-size, commits one step and undoes
 exactly; `Esc` mid-drag restores digest, history, label, chain and
 pixels; turns are set at once, levels preview on top, reset is one
 step, an unknown chain is read-only; the committed render equals a
-fresh walker's and a hand-baked full-resolution master's; the 24 Mpx
-timing (numbers in `image.md`).
+fresh walker's and a hand-baked full-resolution master's; a 24 Mpx drag
+draws proxies only (its timing is the perf gate `photo-slider-24mpx`).
 
 ## Provisional values (observe in the VM before trusting)
 

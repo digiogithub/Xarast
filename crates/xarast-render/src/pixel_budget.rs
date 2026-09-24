@@ -75,6 +75,17 @@
 //! thumbnails and the tests use the default [`MissingLevels::Materialise`],
 //! which is byte-identical to an unlimited budget.
 //!
+//! # Deferred images
+//!
+//! A store made by [`ImageRef::deferred`](crate::ImageRef::deferred)
+//! starts with no level at all: its source produces the base when a
+//! `Materialise` sampler first needs it, or when
+//! [`ImageRef::rematerialise`](crate::ImageRef::rematerialise) runs,
+//! which then builds the whole pyramid too. Until then a `Substitute`
+//! sampler draws its **stand-in**, an approximation kept apart from the
+//! levels so that nothing else can ever sample it; producing the base
+//! drops it.
+//!
 //! # Locks
 //!
 //! Each store has a mutex, the budget has one for its ledger. A store's
@@ -559,7 +570,15 @@ struct StoreState {
     proxy: usize,
     /// Which levels have ever been built, to tell a rebuild from a build.
     built: Vec<bool>,
-    spilled: Option<SpillFile>,
+    /// Shared so that a base can be read back with the state unlocked.
+    spilled: Option<Arc<SpillFile>>,
+    /// A deferred image ([`ImageStore::deferred`]) whose base has never
+    /// been produced.
+    pending: bool,
+    /// What a [`MissingLevels::Substitute`] sampler draws while the image
+    /// is pending: an approximation at about the size of level `.0`,
+    /// **never** a level. Dropped when the base is produced.
+    standin: Option<(usize, LevelBuf)>,
 }
 
 /// The levels of one image and where its base comes back from. What an
@@ -613,12 +632,46 @@ impl ImageStore {
         budget: &Arc<PixelBudget>,
         source: Option<Arc<dyn PixelSource>>,
     ) -> Arc<ImageStore> {
+        ImageStore::create(width, height, Some(data), budget, source, None)
+    }
+
+    /// A store whose base is produced later, by `source`: nothing is
+    /// resident but `standin`, which only a
+    /// [`MissingLevels::Substitute`] sampler ever sees. The first pin
+    /// under [`MissingLevels::Materialise`] produces the base in place;
+    /// [`ImageStore::rematerialise`] produces it and the whole pyramid,
+    /// off the caller's render thread.
+    pub(crate) fn deferred(
+        width: u32,
+        height: u32,
+        budget: &Arc<PixelBudget>,
+        source: Arc<dyn PixelSource>,
+        standin: Option<(usize, LevelBuf)>,
+    ) -> Arc<ImageStore> {
+        ImageStore::create(width, height, None, budget, Some(source), standin)
+    }
+
+    fn create(
+        width: u32,
+        height: u32,
+        data: Option<Vec<u8>>,
+        budget: &Arc<PixelBudget>,
+        source: Option<Arc<dyn PixelSource>>,
+        standin: Option<(usize, LevelBuf)>,
+    ) -> Arc<ImageStore> {
         let dims = level_dims(width, height);
         let proxy = first_level_within(&dims, budget.proxy_default);
         let mut levels = vec![None; dims.len()];
-        levels[0] = Some(Arc::new(data));
         let mut built = vec![false; dims.len()];
-        built[0] = true;
+        let pending = data.is_none();
+        if let Some(data) = data {
+            levels[0] = Some(Arc::new(data));
+            built[0] = true;
+        }
+        let last = dims.len() - 1;
+        let standin = standin
+            .filter(|_| pending)
+            .map(|(level, buf)| (level.min(last), buf));
         let key = budget.next_key.fetch_add(1, Ordering::Relaxed);
         let store = Arc::new(ImageStore {
             dims,
@@ -630,6 +683,8 @@ impl ImageStore {
                 proxy,
                 built,
                 spilled: None,
+                pending,
+                standin,
             }),
             substituted_at: AtomicU64::new(0),
         });
@@ -653,6 +708,12 @@ impl ImageStore {
     /// The proxy index now.
     pub(crate) fn proxy_level(&self) -> usize {
         lock(&self.state).proxy
+    }
+
+    /// Whether this is a deferred store whose base has never been
+    /// produced.
+    pub(crate) fn is_pending(&self) -> bool {
+        lock(&self.state).pending
     }
 
     /// Which levels are resident now.
@@ -698,27 +759,36 @@ impl ImageStore {
             // `lo` needs the base back when neither it nor any larger level
             // is resident; every level above it is then a reduction of it.
             let needs_base = (0..=lo).all(|j| st.levels[j].is_none());
+            // The best resident smaller level, or else a deferred image's
+            // stand-in (which exists only while no level does).
             let substitute = (missing == MissingLevels::Substitute && needs_base)
-                .then(|| (lo + 1..=last).find(|&j| st.levels[j].is_some()))
+                .then(|| {
+                    (lo + 1..=last)
+                        .find_map(|j| {
+                            let (width, height) = self.dims[j];
+                            st.levels[j].clone().map(|data| {
+                                (
+                                    j,
+                                    LevelBuf {
+                                        width,
+                                        height,
+                                        data,
+                                    },
+                                )
+                            })
+                        })
+                        .or_else(|| st.standin.clone())
+                })
                 .flatten();
             let out = match substitute {
-                Some(j) => {
-                    let (width, height) = self.dims[j];
-                    let data = st.levels[j].clone().unwrap_or_default();
+                Some((j, buf)) => {
                     self.budget
                         .counters
                         .substituted
                         .fetch_add(1, Ordering::Relaxed);
                     let tick = SUBSTITUTIONS.fetch_add(1, Ordering::SeqCst) + 1;
                     self.substituted_at.fetch_max(tick, Ordering::SeqCst);
-                    Pinned::Substitute(
-                        j,
-                        LevelBuf {
-                            width,
-                            height,
-                            data,
-                        },
-                    )
+                    Pinned::Substitute(j, buf)
                 }
                 None => Pinned::Levels((lo..=hi).map(|i| self.ensure(&mut st, i)).collect()),
             };
@@ -737,26 +807,55 @@ impl ImageStore {
 
     /// Makes the base resident again (a spill read or a decode), for a
     /// caller that drew a substitute and does this off its render thread.
-    /// Returns whether anything had to be brought back.
+    /// A deferred image that was never produced gets its whole pyramid
+    /// too, so that the render thread does not reduce it on its next
+    /// minified frame. Returns whether anything had to be brought back.
+    ///
+    /// The base (and that pyramid) is produced with the state
+    /// **unlocked**: a render thread pinning this image meanwhile gets
+    /// its stand-in or a smaller level at once instead of waiting behind
+    /// a decode or a photo evaluation. Whatever became resident in
+    /// between is kept; the bytes are the same anyway.
     pub(crate) fn rematerialise(&self) -> bool {
-        let brought = {
-            let mut st = lock(&self.state);
+        let (spilled, pending) = {
+            let st = lock(&self.state);
             if st.levels[0].is_some() {
-                false
-            } else {
-                let _ = self.ensure(&mut st, 0);
-                self.recount(&st, true);
-                true
+                return false;
             }
+            (st.spilled.clone(), st.pending)
         };
-        if brought {
-            self.budget
-                .counters
-                .rematerialised
-                .fetch_add(1, Ordering::Relaxed);
-            self.budget.enforce();
+        let base = Arc::new(self.materialise_base(spilled.as_deref()));
+        let mut pyramid: Vec<Arc<Vec<u8>>> = Vec::new();
+        if pending {
+            let mut src = Arc::clone(&base);
+            for k in 1..self.dims.len() {
+                let (w, h) = self.dims[k - 1];
+                src = Arc::new(crate::resample::reduce_level(w, h, &src).2);
+                pyramid.push(Arc::clone(&src));
+            }
         }
-        brought
+        {
+            let mut st = lock(&self.state);
+            if st.levels[0].is_none() {
+                st.levels[0] = Some(base);
+            }
+            for (k, level) in (1..).zip(pyramid) {
+                if st.levels[k].is_none() {
+                    st.levels[k] = Some(level);
+                    st.built[k] = true;
+                }
+            }
+            st.built[0] = true;
+            st.pending = false;
+            st.standin = None;
+            self.recount(&st, true);
+        }
+        self.budget
+            .counters
+            .rematerialised
+            .fetch_add(1, Ordering::Relaxed);
+        self.budget.enforce();
+        true
     }
 
     /// Builds every level (off the render thread, next to the decode).
@@ -783,8 +882,12 @@ impl ImageStore {
             };
         }
         if i == 0 {
-            let data = Arc::new(self.materialise_base(st));
+            let spilled = st.spilled.clone();
+            let data = Arc::new(self.materialise_base(spilled.as_deref()));
             st.levels[0] = Some(Arc::clone(&data));
+            st.built[0] = true;
+            st.pending = false;
+            st.standin = None;
             return LevelBuf {
                 width,
                 height,
@@ -815,11 +918,13 @@ impl ImageStore {
         src
     }
 
-    fn materialise_base(&self, st: &StoreState) -> Vec<u8> {
+    /// The base from its spill file or its source. Reads nothing of the
+    /// state but the spill file handed in, so it may run unlocked.
+    fn materialise_base(&self, spilled: Option<&SpillFile>) -> Vec<u8> {
         let (w, h) = self.dims[0];
         let len = w as usize * h as usize * 4;
         let c = &self.budget.counters;
-        if let Some(f) = &st.spilled {
+        if let Some(f) = spilled {
             match f.read() {
                 Ok(d) if d.len() == len => {
                     c.from_spill.fetch_add(1, Ordering::Relaxed);
@@ -856,7 +961,7 @@ impl ImageStore {
             if drop_base && st.spilled.is_none() {
                 let cheap = self.source.as_ref().is_some_and(|s| s.is_cheap());
                 if !cheap && let Some(base) = &st.levels[0] {
-                    st.spilled = self.budget.spill(base);
+                    st.spilled = self.budget.spill(base).map(Arc::new);
                 }
                 drop_base = cheap || st.spilled.is_some() || self.source.is_some();
             }
@@ -884,10 +989,11 @@ impl ImageStore {
         }
     }
 
-    /// Resident (evictable, proxy) bytes.
+    /// Resident (evictable, proxy) bytes. A stand-in counts as proxy
+    /// bytes: it is never evicted, only dropped when the base arrives.
     fn bytes(&self, st: &StoreState) -> (u64, u64) {
         let mut e = 0u64;
-        let mut p = 0u64;
+        let mut p = st.standin.as_ref().map_or(0, |(_, l)| l.data.len() as u64);
         for (i, l) in st.levels.iter().enumerate() {
             if let Some(d) = l {
                 if i < st.proxy {

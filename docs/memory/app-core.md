@@ -456,6 +456,14 @@ reason the walker *reports*, which is its own test.
       are brought back all the same, so the `Final` usually finds them.
     * `RenderStats::substituted` counts frames that drew substitutes,
       `repaired` the worker's own repairs.
+    * **The same path makes deferred images** (XARA-T-0304): the
+      session's walker registers a large committed photo chain with
+      `ImageRef::deferred`, which a `Substitute` sampler draws from its
+      stand-in, so the helper's `rematerialise` is where the chain is
+      evaluated and its pyramid built; the repair then shows it. A
+      repair is owed to one generation, so after an undo or redo the
+      helper's result lands in a store no newer frame draws and no
+      stale picture is published (`tests/photo_release.rs`).
     * Tested on the corpus (`tests/pixel_budget.rs`,
       `the_render_thread_never_reads_a_base_back_and_converges`): Groucho2
       and leafgirl, Draft zoomed out then Final, under a budget with every

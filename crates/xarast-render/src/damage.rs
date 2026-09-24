@@ -379,10 +379,14 @@ impl Diff<'_> {
                             && x.transparency_ramps.get(id.index() as usize)
                                 == y.transparency_ramps.get(id.index() as usize)
                     }),
-                    Ref::Image(id) => *self
-                        .images
-                        .entry(id)
-                        .or_insert_with(|| self.a.res.images.get(id) == self.b.res.images.get(id)),
+                    // Never by producing a deferred image's base: that is
+                    // a full evaluation on the render thread (XARA-T-0304).
+                    Ref::Image(id) => *self.images.entry(id).or_insert_with(|| {
+                        match (self.a.res.images.get(id), self.b.res.images.get(id)) {
+                            (Some(x), Some(y)) => x.eq_without_producing(y),
+                            (x, y) => x.is_none() && y.is_none(),
+                        }
+                    }),
                 };
         });
         ok

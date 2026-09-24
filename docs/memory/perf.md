@@ -127,6 +127,11 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
 | `export-10k-rss` | pr | MiB | 552 | — | 440 | 433–446 | — |
 | `undo-100k` (undo or redo via `Session::apply`) | pr | median ms/op | 1 | 1 | 0.17 | 0.17 | st |
 | `edit-100k` (the move itself) | pr | median ms/op | 0.65 | — | 0.31 | 0.30–0.32 | st |
+| `photo-slider-24mpx` (slider frame, render thread) | pr | median ms | 45 | 33 | 21 | 19–57 | mt |
+| `photo-slider-24mpx-p95` | pr | p95 ms | 100 | — | 45 | 42–75 | mt |
+| `photo-release-24mpx` (frame after the release) | pr | median ms | 45 | 33 | 21 | 25–34 | mt |
+| `photo-release-walk-24mpx` (intent + walk at the release) | pr | max ms | 8 | — | 0.2 | 0.2 | st |
+| `photo-converge-24mpx` (release → exact frame) | nightly | median ms | 700 | — | 320 | 314–366 | mt |
 | `open-100k` | nightly | median ms | 1750 | — | 865 | 828 | st |
 | `open-100k-rss` | nightly | MiB | 672 | — | 535 | 534 | — |
 | `save-100k` | nightly | median ms | 1100 | — | 550 | 558 | st |
@@ -172,6 +177,31 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
   the render thread is 4 ms. The real window's ≈ 330 ms (surface, adapter,
   first present) needs a display and a GPU: XARA-T-0010, on the reference
   machine or a self-hosted runner (A5).
+- **Photo slider frames are a gate, not a test** (2026-09-24). The
+  33 ms slider-frame budget used to be a hard median assertion in
+  `xarast-app/tests/photo_panel.rs`, which failed on the GitHub runners
+  (slow, shared, no GPU) at d00e783. `xarast-cli bench photo` now
+  measures it through the render thread — the intent, the walk with its
+  proxy evaluation, the frame the window would wait for — and the test
+  keeps only what is not a clock: the document is untouched mid-drag and
+  every frame draws a proxy. Local runs at load 8–14: median 19–57 ms
+  (the render of a 1200 × 800 picture dominates; the walk is 3–7 ms),
+  so the refs are indicative. Rule: **no wall-clock assertion in
+  `cargo test`**; a budget goes in `xtask/perf-budgets.txt`.
+- **The photo release (XARA-T-0304).** Same scenario, the frame after
+  the slider's release. Before: the release walk evaluated the 24 Mpx
+  chain and built its pyramid, **223–373 ms** (release frame 247–482 ms,
+  load 8–14). After: the walk registers a deferred image with the drag's
+  last proxy as stand-in, **0.2 ms**; the release frame is **25–34 ms**
+  at load 33–36 — a slider frame — and the render thread's helper makes
+  the image and its pyramid, the exact frame arriving **314–366 ms**
+  after the release (it was the release frame itself before, 247–482
+  ms). The release frame is no longer an outlier, so it is gated like a
+  slider frame (budget 33 ms), the walk alone at 8 ms (a regression to
+  an evaluation on the walk shows as ~250 ms), and the convergence
+  nightly. `cargo xtask perf --tier pr` at load 80–105 (2026-09-24):
+  16/16 passed; slider median 14.6 ms, p95 16.9, release 15.6, release
+  walk 0.11 ms; convergence 235 ms (nightly gate, run alone).
 - **Font service (XARA-T-0288).** Spitfire's first open + paint is ~100 ms
   of which ~40 ms is waiting for fontconfig enumeration. The shell already
   starts it on a background thread before the window exists (`main.rs`,
@@ -1148,10 +1178,11 @@ straight-RGBA image, single thread, test profile (opt-level 2), this
 machine under the concurrent agents' load: **66 ms** (phase budget
 ≤ 200 ms with rayon; `xarast-image/tests/photo.rs` prints it). Not
 parallelised: it is a table lookup per byte and already inside budget.
-The walker evaluates on the walk thread at full resolution, once per
-(master, chain), cached in `DecodedImages` for every other walker; the
-≤ 33 ms slider-latency budget needs the proxy-resolution preview of
-XARA-T-0301. The materialisation threshold of T10.6.6 (250 ms of
+The walker evaluates once per (master, chain), cached in
+`DecodedImages` for every other walker: the session's walker defers an
+image of ≥ 1 Mi px to the render thread's helper (XARA-T-0304, numbers
+under "CI gates"), any other walker evaluates on its walk. The ≤ 33 ms
+slider-latency budget is met by the proxy preview of XARA-T-0301. The materialisation threshold of T10.6.6 (250 ms of
 regeneration) is not measured yet (XARA-T-0302).
 
 ## Things that were slow, and why

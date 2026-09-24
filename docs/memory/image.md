@@ -500,8 +500,11 @@ job each:
   dropped from both caches (history-only chains are re-evaluated on
   undo); the walker's registry slot is parked with a 1 × 1 placeholder
   and reused (`ImageRegistry::replace`), so twenty slider values leave
-  the registry at most one slot bigger (tested). The committed chain is
-  evaluated on the walk thread, at full resolution.
+  the registry at most one slot bigger (tested). Since XARA-T-0304 the
+  session's own walker evaluates nothing large on the walk: see "The
+  release, off the walk thread" below. Every other walker (export,
+  thumbnails, `build_scene`, headless) still evaluates at full resolution
+  on its walk, or finds the session's image in `DecodedImages`.
 - **Live proxy preview (XARA-T-0301, T10.6.5).** While a photo panel
   slider is dragged, `Preview::photo` carries `(node, chain)` and the
   walker draws that object from a **proxy** (`SceneWalker::proxy_image`):
@@ -524,17 +527,51 @@ job each:
   `SceneWalker::photo_proxies` / `Session::photo_proxies` report the
   level and size per frame.
 - **Measured** (test profile, this 24-core machine shared with other
-  agents; `photo_panel.rs::a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms`,
+  agents; measured then by a timed test, now by the perf gate
+  `photo-slider-24mpx`, `xarast-cli bench photo`, see `perf.md`;
   6000 × 4000 native master shown at ≈ 1200 × 800 in a 1280 × 800
   view): proxy level 2 (1500 × 1000). At load average ≈ 10: intent +
   walk with the proxy evaluation **3.3 ms median, 10.5 ms max**; whole
   slider frame with the CPU render of the view **19.1 ms median, 27.9 ms
   p90, 31.0 ms max** over 30 frames. Before the banded pixel pass the
   walk was ≈ 10 ms; with the machine loaded (load ≈ 80–115) the frame
-  median reached ≈ 33 ms. The test asserts the median ≤ 33 ms. **The release is not in budget**: committing evaluates the full
-  24 Mpx on the walk thread, ≈ 60 ms evaluation + ≈ 200 ms pyramid
-  (`prepare`) ≈ 264 ms once (XARA-T-0304: evaluate the committed chain
-  off the walk thread and keep drawing the proxy until it lands).
+  median reached ≈ 33 ms. The test
+  (`a_slider_drag_on_a_24_mpx_photo_draws_proxies`) asserts no clock,
+  only that the document is untouched and every frame is a proxy. The
+  release used to evaluate the full 24 Mpx on the walk thread, ≈ 60 ms
+  evaluation + ≈ 200 ms pyramid (`prepare`) ≈ 264 ms once; see the next
+  item.
+- **The release, off the walk thread (XARA-T-0304).** The session's
+  walker is made `SceneWalker::with_deferred_derived`: a derived image of
+  at least `DEFER_MIN_PIXELS` (1 Mi px) is registered with
+  `ImageRef::deferred` — nothing resident but a **stand-in**, and a
+  source that runs the same evaluation `derive` runs (`derived_source`,
+  shared by both, so the bytes are the same). The stand-in is the proxy
+  the last slider frame drew of that very chain (still in `proxies`
+  during the release walk; its pixels are shared, not copied), so the
+  release frame shows exactly what the drag's last frame showed; with no
+  such proxy (undo, redo, opening a file, an off-screen commit) the
+  chain is evaluated on the level `proxy_level` picks, never below
+  level 1. The interactive render thread draws the stand-in
+  (`MissingLevels::Substitute`), its helper makes the image **and its
+  whole pyramid** off both threads, and the worker repaints the
+  picture's damage under `Materialise` (`render.md`, "Deferred images";
+  `app-core.md` decision 41). Export, thumbnails and headless renders
+  sample under `Materialise`, which makes a pending image in place,
+  byte for byte — they never show a stand-in. Images under 1 Mi px
+  (≈ 10 ms of evaluation and pyramid) are still evaluated on the walk.
+  Measured (`xarast-cli bench photo`, release build, load 33–36): the
+  release walk **0.2 ms** (was 223–373 ms at load 8–14), the release
+  frame 25–34 ms (the same as a slider frame: the render of the
+  picture), exact again 314–366 ms after the release. Gates:
+  `photo-release-24mpx`, `photo-release-walk-24mpx`,
+  `photo-converge-24mpx` (`perf.md`). Tests:
+  `xarast-app/tests/photo_release.rs` (the walk makes nothing; the
+  settled frame is a fresh walker's full-resolution picture byte for
+  byte, with every repainted rectangle on the photograph; undo and redo
+  while the helper works settle on the right picture and no exact frame
+  after them shows the stale one) and
+  `xarast-render/tests/deferred_images.rs`.
 - **Damage:** an adjustment changes one leaf's image id; `scene_damage`
   compares images by content, so only that object repaints and undo gives
   no damage against the frame before (tested with a second picture
@@ -589,9 +626,12 @@ job each:
   the first frame only.
 - Photo adjustments: derived renditions in `.xarast` and a
   browser-correct base picture (XARA-T-0302); chains on bitmap fills
-  (XARA-T-0303); the full-resolution evaluation of a committed chain off
-  the walk thread (XARA-T-0304, the 264 ms release hitch on 24 Mpx).
-  (The panel and the live proxy preview: done, XARA-T-0301.)
+  (XARA-T-0303). (The panel and the live proxy preview: done,
+  XARA-T-0301; the release off the walk thread: done, XARA-T-0304.)
+- The helper builds a deferred image's pyramid single-threaded
+  (≈ 200 of the ≈ 300 ms to the exact frame on 24 Mpx). Banding
+  `reduce_level` would shorten the wait for the exact picture; nothing
+  blocks on it.
 - Bitmap gallery (XARA-US-0055): thumbnails on disk and the thumbnail
   budget (XARA-T-0289); Replace and Save a copy (XARA-T-0290); ICC
   profiles as resources and through the placement PNG conversion

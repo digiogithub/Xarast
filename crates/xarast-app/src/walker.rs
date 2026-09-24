@@ -49,9 +49,9 @@ use xarast_doc::{
 };
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Rect, StrokeStyle, Vector};
 use xarast_render::{
-    CacheHint, ContentHash, DeviceRect, FnSource, ImageId, ImageRef, PathRef, PixelBudget,
-    PixelSource, RenderQuality, Resolver, Scene, SceneBuilder, SceneError, SceneNodeId, SceneStats,
-    Transparency,
+    CacheHint, ContentHash, DeviceRect, FnSource, ImageId, ImageRef, LevelBuf, PathRef,
+    PixelBudget, PixelSource, RenderQuality, Resolver, Scene, SceneBuilder, SceneError,
+    SceneNodeId, SceneStats, Transparency,
 };
 use xarast_text::FontSubstitution;
 
@@ -186,6 +186,9 @@ pub struct SceneWalker {
     proxies: Vec<Proxy>,
     /// What the last walk drew for each previewed chain.
     proxy_info: Vec<PhotoProxyInfo>,
+    /// Whether a large derived image is registered deferred
+    /// ([`SceneWalker::with_deferred_derived`]).
+    defer_derived: bool,
 }
 
 /// A registered proxy image: a previewed chain evaluated on a reduced
@@ -258,6 +261,27 @@ impl SceneWalker {
     #[must_use]
     pub fn with_decoded_images(mut self, images: DecodedImages) -> SceneWalker {
         self.decoded = Some(images);
+        self
+    }
+
+    /// Registers a photo-adjusted image of at least [`DEFER_MIN_PIXELS`]
+    /// **deferred** ([`ImageRef::deferred`]) instead of evaluating it on
+    /// the walk: the walk costs a stand-in — the last slider preview of
+    /// that very chain, or the chain evaluated on a reduced level like a
+    /// preview — and the full-resolution image and its pyramid are made
+    /// when something samples it. A render under
+    /// [`xarast_render::MissingLevels::Substitute`] draws the stand-in and
+    /// the render thread's helper makes the image, then repaints its
+    /// damage (`app-core.md` decision 41); a render under `Materialise`
+    /// (export, thumbnails, headless) makes it in place, byte for byte.
+    ///
+    /// For the walker whose scenes the interactive render thread draws —
+    /// the session's own (XARA-T-0304). Its caches are shared, so an
+    /// export that finds a deferred image in [`DecodedImages`] makes it
+    /// once for both.
+    #[must_use]
+    pub const fn with_deferred_derived(mut self) -> SceneWalker {
+        self.defer_derived = true;
         self
     }
 
@@ -721,7 +745,15 @@ impl SceneWalker {
         let image = match cached {
             Some(image) => image,
             None => {
-                let made = derive(&base, recipe, &budget);
+                let deferred = if self.defer_derived {
+                    self.deferred_derived(bm, key.1, &base, &recipe, &budget)
+                } else {
+                    None
+                };
+                let made = match deferred {
+                    Some(image) => Some(image),
+                    None => derive(&base, recipe, &budget),
+                };
                 match &self.decoded {
                     Some(c) => c.insert_derived(res, &budget, key.1, made),
                     None => made,
@@ -741,6 +773,89 @@ impl SceneWalker {
         };
         self.derived.insert(key, id);
         Some(id)
+    }
+
+    /// `recipe`'s image of `master`, registered deferred with a stand-in
+    /// ([`SceneWalker::with_deferred_derived`]); `None` when it is too
+    /// small to be worth it or no stand-in can be made, so the caller
+    /// evaluates it now.
+    fn deferred_derived(
+        &self,
+        bm: &xarast_doc::BitmapNode,
+        chain: [u8; 32],
+        master: &ImageRef,
+        recipe: &xarast_image::photo::Recipe,
+        budget: &Arc<PixelBudget>,
+    ) -> Option<ImageRef> {
+        let (w, h) = recipe.output_size(master.width(), master.height())?;
+        if u64::from(w) * u64::from(h) < DEFER_MIN_PIXELS {
+            return None;
+        }
+        let standin = self.standin(bm, chain, master, recipe, (w, h))?;
+        let source = derived_source(master, recipe.clone(), (w, h));
+        Some(ImageRef::deferred(w, h, budget, source, Some(standin)))
+    }
+
+    /// What a deferred derived image shows until it is made: the proxy
+    /// the last slider frame drew of this very chain — so a release shows
+    /// no change at all until the full image lands — or else the chain
+    /// evaluated on the level a preview would use, never the base.
+    fn standin(
+        &self,
+        bm: &xarast_doc::BitmapNode,
+        chain: [u8; 32],
+        master: &ImageRef,
+        recipe: &xarast_image::photo::Recipe,
+        derived: (u32, u32),
+    ) -> Option<(usize, LevelBuf)> {
+        let previewed = self
+            .proxies
+            .iter()
+            .find(|p| p.key.0 == bm.image && p.key.1 == chain && p.key.2 > 0);
+        if let Some(p) = previewed
+            && let Some(image) = self.resolver.images.get(p.slot)
+        {
+            return Some((p.key.2, image.level(0)));
+        }
+        let (mw, mh) = (master.width(), master.height());
+        let last = master.level_count().saturating_sub(1);
+        if last == 0 {
+            return None;
+        }
+        let level = self
+            .proxy_level_of(bm, (mw, mh), derived, last + 1)
+            .clamp(1, last);
+        let lv = master.level(level);
+        let recipe = scale_recipe(recipe.clone(), (mw, mh), (lv.width, lv.height));
+        let (width, height, data) =
+            xarast_image::photo::evaluate(lv.width, lv.height, &lv.data, &recipe)?;
+        Some((
+            level,
+            LevelBuf {
+                width,
+                height,
+                data: Arc::new(data),
+            },
+        ))
+    }
+
+    /// [`proxy_level`] for `bm` as the frame being walked shows it.
+    fn proxy_level_of(
+        &self,
+        bm: &xarast_doc::BitmapNode,
+        (mw, mh): (u32, u32),
+        derived: (u32, u32),
+        levels: usize,
+    ) -> usize {
+        let scale = self.frame_scale;
+        let on_screen = |v: Vector| f64::from(v.dx.0).hypot(f64::from(v.dy.0)) * scale;
+        proxy_level(
+            mw,
+            mh,
+            derived,
+            (on_screen(bm.major), on_screen(bm.minor)),
+            levels,
+        )
     }
 
     /// Registers every bitmap with the renderer, decoding it first when
@@ -1237,16 +1352,8 @@ impl SceneWalker {
             self.proxy_info.push(info);
             return Some(master);
         }
-        let (dw, dh) = ops.derived_size(mw, mh);
-        let scale = self.frame_scale;
-        let on_screen = |v: Vector| f64::from(v.dx.0).hypot(f64::from(v.dy.0)) * scale;
-        let level = proxy_level(
-            mw,
-            mh,
-            (dw, dh),
-            (on_screen(bm.major), on_screen(bm.minor)),
-            base.level_count(),
-        );
+        let derived = ops.derived_size(mw, mh);
+        let level = self.proxy_level_of(bm, (mw, mh), derived, base.level_count());
         info.level = level;
         let key = (bm.image, ops.hash(), level);
         if let Some(p) = self.proxies.iter_mut().find(|p| p.key == key) {
@@ -1319,6 +1426,12 @@ impl SceneWalker {
         }
     }
 }
+
+/// The smallest derived image, in pixels, that a walker made
+/// [`SceneWalker::with_deferred_derived`] registers deferred: about a
+/// megapixel, ≈ 10 ms of evaluation and pyramid at ≈ 11 ns a pixel
+/// (`image.md`). Anything smaller is evaluated on the walk, as before.
+pub const DEFER_MIN_PIXELS: u64 = 1 << 20;
 
 /// The largest proxy a slider drag evaluates, in pixels: about a full-HD
 /// screen. At ≈ 3 ns a pixel for the fused table (`image.md`) that is a
@@ -1495,22 +1608,30 @@ fn derive(
     recipe: xarast_image::photo::Recipe,
     budget: &Arc<PixelBudget>,
 ) -> Option<ImageRef> {
-    let run = {
-        let master = master.clone();
-        move || {
-            let base = master.level(0);
-            xarast_image::photo::evaluate(base.width, base.height, &base.data, &recipe)
-        }
-    };
-    let (w, h, data) = run()?;
-    let source: Arc<dyn PixelSource> = Arc::new(FnSource::expensive(move || {
-        run()
-            .filter(|&(dw, dh, _)| (dw, dh) == (w, h))
-            .map(|(_, _, d)| d)
-    }));
+    let (w, h) = recipe.output_size(master.width(), master.height())?;
+    let source = derived_source(master, recipe, (w, h));
+    let data = source.materialise()?;
     let image = ImageRef::with_budget(w, h, data, budget, Some(source));
     image.prepare();
     Some(image)
+}
+
+/// The source of a derived image of `size`: `recipe` evaluated on the
+/// master's base. The one evaluation [`derive`] runs at once and a
+/// deferred image ([`SceneWalker::with_deferred_derived`]) runs when it
+/// is first sampled, so both give the same bytes.
+fn derived_source(
+    master: &ImageRef,
+    recipe: xarast_image::photo::Recipe,
+    size: (u32, u32),
+) -> Arc<dyn PixelSource> {
+    let master = master.clone();
+    Arc::new(FnSource::expensive(move || {
+        let base = master.level(0);
+        xarast_image::photo::evaluate(base.width, base.height, &base.data, &recipe)
+            .filter(|&(w, h, _)| (w, h) == size)
+            .map(|(_, _, d)| d)
+    }))
 }
 
 /// What decoding a bitmap needs: its encoded bytes and, for tag 71, the

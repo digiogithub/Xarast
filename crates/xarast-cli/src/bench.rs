@@ -57,6 +57,9 @@ SCENARIOS
     pan        Draft pan frames through the scheduler, --iterations frames
     zoom       Draft wheel-zoom frames through the scheduler
     export     PNG export at 4000 px wide through the export registry
+    photo      photo panel slider frames on a large photograph (--photo),
+               through the render thread: intent, walk and repaint per
+               frame; then the release that commits the chain
     leak       open, walk, render, edit, undo, save and close the
                document --iterations times; resident growth after the
                first close
@@ -72,6 +75,7 @@ OPTIONS
                     (default 200), leak cycles (default 50)
     --size WxH      the canvas (default 1920x1080)
     --zoom F        pan/zoom/render: zoom by F about the page fit (default 1)
+    --photo WxH     photo: the photograph's size (default 6000x4000)
 
 ENVIRONMENT
     XARAST_BENCH_DIR  where scenarios write their files (default /dev/shm
@@ -106,6 +110,8 @@ pub enum Scenario {
     Export,
     /// Resident growth over open/close cycles.
     Leak,
+    /// Photo panel slider frames and their release.
+    Photo,
 }
 
 impl Scenario {
@@ -121,6 +127,7 @@ impl Scenario {
             "zoom" => Scenario::Zoom,
             "export" => Scenario::Export,
             "leak" => Scenario::Leak,
+            "photo" => Scenario::Photo,
             _ => return None,
         })
     }
@@ -137,6 +144,7 @@ impl Scenario {
             Scenario::Zoom => "zoom",
             Scenario::Export => "export",
             Scenario::Leak => "leak",
+            Scenario::Photo => "photo",
         }
     }
 }
@@ -159,6 +167,8 @@ pub struct BenchArgs {
     pub size: (u32, u32),
     /// Zoom about the page fit.
     pub zoom: f64,
+    /// The photograph of the `photo` scenario, in pixels.
+    pub photo: (u32, u32),
 }
 
 /// Parses `bench`'s arguments.
@@ -178,6 +188,7 @@ pub fn parse(argv: &[String]) -> Result<BenchArgs, String> {
         iterations: None,
         size: (1920, 1080),
         zoom: 1.0,
+        photo: (6000, 4000),
     };
     while let Some(arg) = it.next_arg() {
         match arg.as_str() {
@@ -186,14 +197,8 @@ pub fn parse(argv: &[String]) -> Result<BenchArgs, String> {
             "--runs" => a.runs = it.parsed("--runs")?,
             "--iterations" => a.iterations = Some(it.parsed("--iterations")?),
             "--zoom" => a.zoom = it.parsed("--zoom")?,
-            "--size" => {
-                let v = it.value("--size")?;
-                a.size = v
-                    .split_once(['x', 'X'])
-                    .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
-                    .filter(|&(w, h): &(u32, u32)| w > 0 && h > 0)
-                    .ok_or_else(|| format!("--size: `{v}` is not WIDTHxHEIGHT"))?;
-            }
+            "--size" => a.size = dimensions(&it.value("--size")?, "--size")?,
+            "--photo" => a.photo = dimensions(&it.value("--photo")?, "--photo")?,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -207,6 +212,14 @@ pub fn parse(argv: &[String]) -> Result<BenchArgs, String> {
         return Err("--nodes must be at least 100".into());
     }
     Ok(a)
+}
+
+/// `WIDTHxHEIGHT`, both positive.
+fn dimensions(v: &str, flag: &str) -> Result<(u32, u32), String> {
+    v.split_once(['x', 'X'])
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .filter(|&(w, h): &(u32, u32)| w > 0 && h > 0)
+        .ok_or_else(|| format!("{flag}: `{v}` is not WIDTHxHEIGHT"))
 }
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
@@ -238,6 +251,7 @@ pub fn run(a: &BenchArgs) -> Exit {
         Scenario::Pan | Scenario::Zoom => viewport(a, &mut report),
         Scenario::Export => export(a, &mut report),
         Scenario::Leak => leak(a, &mut report),
+        Scenario::Photo => photo(a, &mut report),
     };
     let _ = std::fs::remove_dir_all(scratch_dir());
     match result {
@@ -568,6 +582,133 @@ fn leak(a: &BenchArgs, r: &mut Report) -> Result<(), String> {
     Ok(())
 }
 
+/// The photo panel on a large photograph (T10.6.5, XARA-T-0304): a
+/// procedural `--photo` picture filling a `--size` view, selected. Each
+/// run drags a tone slider through `--iterations` values and releases it.
+/// A frame is what the window waits for: the intent, the walk (the proxy
+/// evaluation included) and the render thread's frame (a repaint of the
+/// object's damage). `median_ms`/`p95_ms` are the slider frames,
+/// `release_*` the frame after the release, `walk_*` and `release_walk_*`
+/// the intent and walk alone; `converge_*` is how long the release takes
+/// to reach an exact frame.
+fn photo(a: &BenchArgs, r: &mut Report) -> Result<(), String> {
+    use xarast_app::photo_panel::PhotoPanelOp;
+    use xarast_doc::photo::{PhotoOp, PhotoOps};
+    use xarast_doc::resources::{BitmapData, BitmapInfo, BitmapResource};
+
+    let (pw, ph) = a.photo;
+    let (w, h) = a.size;
+    let mut s = Session::new_empty(DocumentId(1));
+    s.apply(Intent::Resize(DeviceSize::new(w, h)))
+        .map_err(|e| e.to_string())?;
+    let rgba: Vec<u8> = (0..pw * ph)
+        .flat_map(|i| {
+            let (x, y) = (i % pw, i / pw);
+            [(x * 255 / pw) as u8, (y * 255 / ph) as u8, 90, 255]
+        })
+        .collect();
+    let image = s.doc.resources.insert_bitmap(BitmapResource {
+        name: std::sync::Arc::from("photo"),
+        info: BitmapInfo {
+            width: pw,
+            height: ph,
+            bpp: 32,
+            dpi_x: 96,
+            dpi_y: 96,
+        },
+        pixels: std::sync::Arc::new(BitmapData {
+            pixels: std::sync::Arc::from(rgba),
+            palette: std::sync::Arc::from(Vec::new()),
+        }),
+        original: None,
+        procedural: None,
+        transparent_index: None,
+    });
+    s.place_resource(image, None, "Place")
+        .map_err(|e| e.to_string())?;
+    s.apply(Intent::ZoomTo(ZoomTarget::Selection))
+        .map_err(|e| e.to_string())?;
+    let (tx, rx) = mpsc::channel();
+    let tx = Mutex::new(tx);
+    let mut rt = RenderThread::spawn(Box::new(move || {
+        let _ = tx.lock().map(|t| t.send(()));
+    }))
+    .map_err(|e| e.to_string())?;
+    // At rest: the master registered and its pyramid built, off the clock.
+    s.rebuild_scene(None).map_err(|e| e.to_string())?;
+    photo_frame(&mut rt, &rx, &mut s)?;
+    reset_peak_rss();
+
+    let slider = |i: usize| PhotoOps {
+        ops: vec![
+            PhotoOp::Brightness(-0.3 + 0.002 * i as f32),
+            PhotoOp::Contrast(0.2),
+            PhotoOp::Gamma(1.3),
+            PhotoOp::Saturation(-0.4),
+        ],
+    };
+    let frames = a.iterations.unwrap_or(30);
+    let (mut times, mut walks) = (Vec::new(), Vec::new());
+    let (mut release, mut release_walk, mut converge) = (Vec::new(), Vec::new(), Vec::new());
+    let mut step = 0;
+    for _ in 0..a.runs {
+        for _ in 0..frames {
+            step += 1;
+            let t = Instant::now();
+            s.apply(Intent::PhotoPanel(PhotoPanelOp::Preview(slider(step))))
+                .map_err(|e| e.to_string())?;
+            s.rebuild_scene(None).map_err(|e| e.to_string())?;
+            walks.push(ms(t.elapsed()));
+            photo_frame(&mut rt, &rx, &mut s)?;
+            times.push(ms(t.elapsed()));
+        }
+        let t = Instant::now();
+        s.apply(Intent::PhotoPanel(PhotoPanelOp::Commit))
+            .map_err(|e| e.to_string())?;
+        s.rebuild_scene(None).map_err(|e| e.to_string())?;
+        release_walk.push(ms(t.elapsed()));
+        let mut f = photo_frame(&mut rt, &rx, &mut s)?;
+        release.push(ms(t.elapsed()));
+        while !f.exact {
+            rx.recv_timeout(WAIT)
+                .map_err(|_| "no exact frame in time")?;
+            if let Some(next) = rt.take_latest() {
+                f = next;
+            }
+        }
+        converge.push(ms(t.elapsed()));
+    }
+    rt.shutdown();
+    r.samples("", &times);
+    r.samples("walk", &walks);
+    r.samples("release", &release);
+    r.samples("release_walk", &release_walk);
+    r.samples("converge", &converge);
+    r.info_num("photo_mpx", f64::from(pw) * f64::from(ph) / 1e6);
+    r.info_num("frames", times.len() as f64);
+    if let Some(p) = s.photo_proxies().first() {
+        r.info_num("proxy_level", p.level as f64);
+    }
+    Ok(())
+}
+
+/// Submits the session's scene as a `Final` and waits for that frame.
+fn photo_frame(
+    rt: &mut RenderThread,
+    rx: &mpsc::Receiver<()>,
+    s: &mut Session,
+) -> Result<xarast_app::render_thread::RenderedFrame, String> {
+    let mut job = s.frame_job(BACKDROP.pasteboard, BACKDROP.page);
+    job.view.quality = RenderQuality::Final;
+    let g = rt.submit(job);
+    loop {
+        rx.recv_timeout(WAIT).map_err(|_| "no frame in time")?;
+        if let Some(f) = rt.take_latest().filter(|f| f.generation >= g) {
+            return Ok(f);
+        }
+    }
+}
+
 // ── Set-up shared by the scenarios ──────────────────────────────────────────
 
 const BACKDROP: Backdrop = Backdrop {
@@ -739,10 +880,14 @@ impl Report {
     fn new(a: &BenchArgs) -> Report {
         Report {
             scenario: a.scenario.name(),
-            doc: a.doc.as_deref().map_or_else(
-                || format!("synthetic:{}", a.nodes),
-                |p| p.display().to_string(),
-            ),
+            doc: if a.scenario == Scenario::Photo {
+                format!("photo:{}x{}", a.photo.0, a.photo.1)
+            } else {
+                a.doc.as_deref().map_or_else(
+                    || format!("synthetic:{}", a.nodes),
+                    |p| p.display().to_string(),
+                )
+            },
             runs: a.runs,
             metrics: Vec::new(),
             info: Vec::new(),
@@ -908,5 +1053,34 @@ mod tests {
         undo(&a, &mut r).unwrap();
         let keys: Vec<&str> = r.metrics.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"median_ms") && keys.contains(&"edit_median_ms"));
+    }
+
+    #[test]
+    fn a_small_photo_run_reports_its_metrics() {
+        let a = parse(&argv(&[
+            "photo",
+            "--photo",
+            "300x200",
+            "--size",
+            "320x240",
+            "--runs",
+            "2",
+            "--iterations",
+            "3",
+        ]))
+        .unwrap();
+        assert_eq!(a.photo, (300, 200));
+        let mut r = Report::new(&a);
+        photo(&a, &mut r).unwrap();
+        let keys: Vec<&str> = r.metrics.iter().map(|(k, _)| k.as_str()).collect();
+        for k in [
+            "median_ms",
+            "p95_ms",
+            "release_median_ms",
+            "converge_max_ms",
+        ] {
+            assert!(keys.contains(&k), "{k} in {keys:?}");
+        }
+        assert!(parse(&argv(&["photo", "--photo", "0x5"])).is_err());
     }
 }

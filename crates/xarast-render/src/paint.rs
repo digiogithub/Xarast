@@ -553,6 +553,75 @@ impl ImageRef {
         }
     }
 
+    /// An image whose pixels are produced later, by `source` (a photo
+    /// chain evaluated at full resolution, say): registration costs
+    /// nothing, and so does drawing it on the interactive render thread.
+    ///
+    /// - Under [`MissingLevels::Materialise`] (export, thumbnails, the
+    ///   tests) the first sampler produces the base in place, and every
+    ///   level is then the exact reduction of it: the output is
+    ///   byte-identical to [`ImageRef::with_budget`] over the same bytes.
+    /// - Under [`MissingLevels::Substitute`] a sampler draws `standin`
+    ///   instead — an approximation about the size of level `.0`, never
+    ///   served as a level — and the image is stamped like any
+    ///   substitution. [`ImageRef::rematerialise`] then produces the base
+    ///   and the whole pyramid, and the stand-in is dropped
+    ///   (`pixel_budget`, "Drawing without waiting"). With no stand-in
+    ///   such a sampler waits for the base.
+    ///
+    /// `source` must return the same `width · height · 4` bytes every
+    /// time; its base is spilled on its first eviction, like any
+    /// expensive source's.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the stand-in's data is not `width · height · 4` bytes
+    /// of its own size.
+    #[must_use]
+    pub fn deferred(
+        width: u32,
+        height: u32,
+        budget: &Arc<PixelBudget>,
+        source: Arc<dyn PixelSource>,
+        standin: Option<(usize, LevelBuf)>,
+    ) -> ImageRef {
+        if let Some((_, l)) = &standin {
+            assert_eq!(
+                l.data.len(),
+                l.width as usize * l.height as usize * 4,
+                "stand-in data must be width * height * 4 bytes"
+            );
+        }
+        ImageRef {
+            width,
+            height,
+            store: ImageStore::deferred(width, height, budget, source, standin),
+        }
+    }
+
+    /// Whether this is a [deferred](ImageRef::deferred) image whose base
+    /// has not been produced yet.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.store.is_pending()
+    }
+
+    /// Content equality that never produces a base to find out: two
+    /// images of which one is still [pending](ImageRef::is_pending) are
+    /// reported different unless they share their store. What damage
+    /// wants — a false "different" costs a repaint, while producing the
+    /// base would put a full evaluation on the render thread.
+    #[must_use]
+    pub fn eq_without_producing(&self, other: &ImageRef) -> bool {
+        if self.width != other.width || self.height != other.height {
+            return false;
+        }
+        if Arc::ptr_eq(&self.store, &other.store) {
+            return true;
+        }
+        !self.is_pending() && !other.is_pending() && self == other
+    }
+
     /// Width in pixels.
     #[must_use]
     pub const fn width(&self) -> u32 {
