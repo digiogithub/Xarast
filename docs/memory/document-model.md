@@ -559,6 +559,21 @@ The lesson: **a repair that can fail must check its own result.** Every
 Clean rerun afterwards: 10 minutes, 3.8 M execs at ~6 300 exec/s, no
 findings.
 
+**Dropping the redo branch destroyed nodes inside a subtree the commit had
+just deleted** (XARA-T-0295, 2026-09-24). `History::commit` drops the
+future *after* the new transaction's actions ran; `reap` destroyed every
+retained node that was unreachable. A redo transaction retains the nodes
+it moves (an undone Enter retains the paragraph break it moved to the new
+line); when the commit deletes their story, those nodes are unreachable
+yet still inside the subtree the commit retains for its own undo, and one
+undo gave back a story missing its final line. `reap` now destroys only
+**detached roots** (unreachable *and* parentless); a nested node goes when
+the root it hangs from is reaped. Invariant: a retained node is destroyed
+only as (part of) a detached root no live step retains. Pinned by
+`text_edit::tests::deleting_a_story_after_undoing_a_break_keeps_it_whole_for_undo`
+and `tests/text_tool.rs`
+`deleting_a_story_after_undoing_a_break_undoes_to_the_whole_story`.
+
 ## Dead ends (do not retry)
 
 - **`Box<dyn Node>` + `Any`.** Reproduces the original's constant downcasting

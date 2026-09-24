@@ -484,15 +484,18 @@ step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
 
-## Removing an emptied story (XARA-T-0237, as built)
+## Removing an emptied story (XARA-T-0237, XARA-T-0295, as built)
 
-Maintainer's decision (2026-09-24): a story emptied by deletion is removed,
-as the original does, **in the same undo step as the deletion**. Code:
-`xarast-doc/src/text_edit.rs` (`is_story_empty`, `remove_empty_story`,
-`EmptyStory`), `xarast-app/src/ops.rs` (`remove_if_emptied`, called by
-`TypeText`, `DeleteText`, `CutText` and a `PasteText` of nothing),
-`text_tool.rs` (`Emptying`, `after_commands`); tool side: `tools.md`
-decision 70.
+Maintainer's decisions (2026-09-24): a story emptied by deletion is
+removed, as the original does, **in the same undo step as the deletion**
+(T-0237); and a story holding **no characters, only paragraph breaks**, is
+removed too, **also when editing ends** (T-0295). Code:
+`xarast-doc/src/text_edit.rs` (`holds_no_characters`, `is_story_empty`,
+`remove_empty_story`, `EmptyStory`), `xarast-app/src/ops.rs`
+(`remove_if_emptied`, called by `DeleteText`, `CutText`, and `TypeText`/
+`PasteText` of nothing; `EditCommand::RemoveEmptyStory`), `text_tool.rs`
+(`Emptying`, `leave`, `edited`, `last_burst`, `after_commands`); tool side:
+`tools.md` decision 70 and invariant 11.
 
 Facts about the original (read, not copied): the empty story is removed by
 `OpDeleteTextStory` (`tools/textops.cpp:4266-4300`), which merges itself
@@ -505,20 +508,39 @@ not count; `:4321-4350`). A story on a path gives its path back: the
 story's attributes are localised, the path moved next to the story and
 deselected, then the story hidden (`:4281-4298`).
 
-- **Empty = nothing but the final break** (`StoryText::text` is `"\n"`).
-  Stricter than the original's "no characters": removing a story left with
-  only typed paragraph breaks, at the deletion, would pull the caret from
-  under a user still editing it.
-- **When: inside the deleting command**, not when editing ends. Our tool
-  never creates a story before the first character (the pending caret),
-  so the only way to empty one is to delete from it; doing it in that
-  transaction costs no extra step and merges with the Backspace burst
-  (`CoalesceKey` unchanged). A deletion of nothing never removes (an
-  imported empty story stays).
-- **Leaving the text removes nothing** (Esc, a tool switch, a click
-  elsewhere): leaving is not an edit (tools invariant 11). The difference
-  from the original is only a story holding nothing but paragraph breaks,
-  which stays.
+- **Empty = no characters** (`holds_no_characters`): `StoryText::text`
+  holds only `'\n'` (paragraph breaks) and `'\t'` (tabs). **Tabs do not
+  count**, as in the original (it searches for a `TextChar` and a tab is
+  not one); soft line breaks and kerns are not in the text at all. A space
+  is a character. (T-0237 first built "nothing but the final break";
+  T-0295 widened it to the original's rule.)
+- **When, 1: inside a deleting command.** `DeleteText`, `CutText`, and a
+  `TypeText`/`PasteText` that inserts nothing, remove the story in their own
+  transaction when they leave it without characters; that costs no extra
+  step and merges with the Backspace burst (`CoalesceKey` unchanged). A
+  deletion of nothing never removes. **Typing that inserts something**
+  (Enter over a selection of all the text) never removes at the command,
+  even when it leaves only breaks: the user is typing; the story goes when
+  editing ends.
+- **When, 2: when editing ends** (T-0295): Esc, a tool switch (the tool's
+  `on_deactivate`), a click on the canvas or into another story — every
+  path goes through `TextTool::set` changing the edited story, which calls
+  `leave`. The tool emits `EditCommand::RemoveEmptyStory` when the story
+  it leaves **was edited by the tool since the caret went into it**
+  (`edited`: typing, deleting, cut, paste, an infobar/ruler edit applied
+  to it, or the story typing/paste created), is still reachable and
+  editable, and holds no characters. **An imported empty story that was
+  only entered is never touched** (tested with `"\n"` and `"\n\n"`).
+- **Merging on leave.** The original merges its story deletion into the
+  previous operation, whatever it was. We merge only into the tool's own
+  last burst on that story: `RemoveEmptyStory { joins }` carries the
+  burst's `CoalesceKey` (`last_burst`, recorded in `after_commands`), and
+  the history merges only when the last step still has that key. When it
+  does not (the burst was undone, or a paste, cut or attribute edit came
+  last), the removal is **its own "Delete Text" step**: merging into an
+  unrelated step would make one undo take back more than the user did.
+  Enter ×3 at a new caret then Esc: one step ("New Text"), one undo gives
+  the digest from before the first Enter.
 - **The caret afterwards**: pending at the story's origin (matrix
   translation; column width kept; rotation and shear not kept), carrying
   the removed text's attributes that differ from the current ones as the
@@ -532,15 +554,34 @@ deselected, then the story hidden (`:4281-4298`).
 - **Selection**: the removed story is pruned from it; the freed path is
   not selected.
 - **Damage**: removal is an ordinary node deletion; the walker's text ink
-  goes with the scene, so the repaint is exact (asserted, below).
+  goes with the scene, so the repaint is exact (asserted, below, for both
+  the deletion and the leave paths).
+- **History bug found on the way (fixed in `history.rs` `reap`).** A
+  commit drops the redo branch *after* its own actions ran, and `reap`
+  destroyed every retained node that was unreachable. A redo branch
+  retains nodes it moves (the break an undone Enter moved), and a commit
+  deleting their story makes them unreachable but still inside the
+  subtree that commit's undo needs: one undo then gave back the story
+  without its final line. `reap` now destroys only detached roots (no
+  parent); a nested node goes with the root it hangs from. It affected any
+  object deletion after undoing an Enter, not only this feature.
 
-Tests: `xarast-doc` `text_edit::tests` (2: emptied story removed and one
-undo restores it, story on a path leaves a path that paints the same);
-`xarast-app/tests/text_tool.rs` (6: Select All + Delete removes the story in
-the one "Delete Text" step, pending caret at the origin, undo digest exact;
-typing on rebuilds it in place and style; a Backspace burst emptying a new
-story is one step; a story of only breaks survives leaving; on a path; the
-repaint equals a full render, and its undo the first frame);
+Tests: `xarast-doc` `text_edit::tests` (4: a deletion leaving only breaks
+removes the story and one undo restores it; story on a path leaves a path
+that paints the same; breaks and tabs are not characters; deleting a story
+after undoing a break undoes to the whole story); `xarast-app/tests/
+text_tool.rs` (T-0237: Select All + Delete removes the story in the one
+"Delete Text" step, pending caret at the origin, undo digest exact; typing
+on rebuilds it in place and style; a Backspace burst emptying a new story
+is one step; on a path; the repaint equals a full render, and its undo the
+first frame. T-0295: Enter ×3 then Esc removes the story merged into the
+typing step, one undo gives the digest from before; a tool switch, a click
+on the canvas and a click into another story remove a story of a tab and
+breaks; after the burst was undone the removal is its own "Delete Text"
+step; deleting every character but the breaks removes in that step; Enter
+over all the text keeps the story until Esc; an imported story of breaks
+survives being entered and left; the leave repaint equals a full render;
+a story deleted after undoing a break undoes whole);
 `tests/text_clipboard.rs` `cutting_all_the_text_removes_the_story_in_the_same_step`.
 
 ## IME composition and the text clipboard (T9.4.7–T9.4.8, as built, XARA-T-0224)
