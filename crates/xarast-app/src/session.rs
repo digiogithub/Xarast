@@ -737,6 +737,38 @@ impl Session {
         Ok(label)
     }
 
+    /// Replaces the photo operations of the bitmap object `node`
+    /// (`xarast_doc::photo`, W10.6) with `ops`, normalised: one undo step
+    /// labelled "Adjust Photo". The object's placement follows a crop or a
+    /// turn ([`xarast_doc::replaced_placement`]) when the master's size is
+    /// known. `Ok(None)`, and no step, when nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// [`xarast_doc::EditError::WrongKind`] when `node` is not a bitmap
+    /// object, [`xarast_doc::EditError::NotPermitted`] when it is locked
+    /// or its chain holds an operation this version does not know.
+    pub fn set_photo_ops(
+        &mut self,
+        node: xarast_doc::NodeId,
+        ops: &xarast_doc::PhotoOps,
+    ) -> Result<Option<&'static str>, SessionError> {
+        let Some(xarast_doc::NodeKind::Bitmap(b)) = self.doc.tree.kind(node) else {
+            return Err(xarast_doc::EditError::WrongKind(node).into());
+        };
+        if b.photo_ops.is_editable() && b.photo_ops == ops.normalised() {
+            return Ok(None);
+        }
+        let master = crate::place::bitmap_pixels(&self.doc, b.image).map(|(size, _)| size);
+        let label = self.dispatch(&xarast_doc::SetPhotoOps {
+            node,
+            ops: ops.clone(),
+            master,
+            label: "Adjust Photo",
+        })?;
+        Ok(Some(label))
+    }
+
     /// Applies one editing command, as a tool emitted it.
     ///
     /// A command that changes nothing ([`EditCommand::is_noop`]) records

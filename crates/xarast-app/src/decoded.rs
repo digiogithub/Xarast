@@ -40,6 +40,19 @@
 //! next time a walker of it registers images, so a deleted bitmap's
 //! pixels go with the last scene that used them. The decoded levels stay
 //! under the pixel budget like any other image.
+//!
+//! # Photo-adjusted images
+//!
+//! A bitmap object with photo operations (`xarast_doc::photo`) shows a
+//! **derived** image: the master put through the chain. Those are filed
+//! here too, keyed by the master's key plus the hash of the evaluable
+//! chain ([`xarast_doc::PhotoOps::hash`]), so that export and thumbnail
+//! walkers evaluate a chain the view already evaluated no more than they
+//! decode. A derived entry goes when its master does, and when no object
+//! attached to the document uses its chain any more
+//! ([`DecodedImages::retain_derived`], which the walker calls when the
+//! document changes): an undo that brings a chain back evaluates it
+//! again.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -85,6 +98,8 @@ struct Entry {
 #[derive(Default)]
 struct Inner {
     entries: HashMap<Key, Entry>,
+    /// Derived images, by master and chain hash.
+    derived: HashMap<(Key, [u8; 32]), Entry>,
     stats: DecodedImagesStats,
 }
 
@@ -97,6 +112,13 @@ pub struct DecodedImagesStats {
     pub decoded: u64,
     /// Entries dropped because their resource left the document.
     pub pruned: u64,
+    /// Photo-adjusted images a walker found here instead of evaluating.
+    pub derived_hits: u64,
+    /// Photo-adjusted images evaluated and filed.
+    pub derived: u64,
+    /// Photo-adjusted images dropped: their master left the document or
+    /// no attached object uses their chain any more.
+    pub derived_pruned: u64,
 }
 
 /// The decoded bitmaps of one document; cheap to clone (the clones share
@@ -214,22 +236,95 @@ impl DecodedImages {
         self.insert(res, budget, made)
     }
 
+    /// The derived image filed for `res` under the chain hashed `ops`:
+    /// as [`DecodedImages::get`].
+    pub(crate) fn get_derived(
+        &self,
+        res: &BitmapResource,
+        budget: &Arc<PixelBudget>,
+        ops: [u8; 32],
+    ) -> Option<Option<ImageRef>> {
+        let mut i = self.lock();
+        let found = i
+            .derived
+            .get(&(Key::of(res, budget), ops))
+            .map(|e| e.image.clone());
+        if found.is_some() {
+            i.stats.derived_hits += 1;
+        }
+        found
+    }
+
+    /// Files a derived image, as [`DecodedImages::insert`]: the first
+    /// filed wins.
+    pub(crate) fn insert_derived(
+        &self,
+        res: &BitmapResource,
+        budget: &Arc<PixelBudget>,
+        ops: [u8; 32],
+        image: Option<ImageRef>,
+    ) -> Option<ImageRef> {
+        let mut i = self.lock();
+        i.stats.derived += 1;
+        let e = i
+            .derived
+            .entry((Key::of(res, budget), ops))
+            .or_insert_with(|| Entry {
+                _pixels: Arc::clone(&res.pixels),
+                _original: res.original.clone(),
+                _budget: Arc::clone(budget),
+                image,
+            });
+        e.image.clone()
+    }
+
+    /// Drops every derived image whose (master, chain) pair is not among
+    /// `live`.
+    pub(crate) fn retain_derived<'a>(
+        &self,
+        live: impl Iterator<Item = (&'a BitmapResource, [u8; 32])>,
+    ) {
+        let live: HashSet<(ResourceId, [u8; 32])> =
+            live.map(|(res, ops)| (resource_of(res), ops)).collect();
+        let mut i = self.lock();
+        let before = i.derived.len();
+        i.derived
+            .retain(|(k, ops), _| live.contains(&(k.resource(), *ops)));
+        let gone = (before - i.derived.len()) as u64;
+        i.stats.derived_pruned += gone;
+    }
+
+    /// How many derived images are held (failures included).
+    #[must_use]
+    pub fn derived_len(&self) -> usize {
+        self.lock().derived.len()
+    }
+
     /// Drops every entry whose resource is not among `live`.
     pub(crate) fn retain<'a>(&self, live: impl Iterator<Item = &'a BitmapResource>) {
-        let live: HashSet<(usize, usize, u32, u32)> = live
-            .map(|res| {
-                (
-                    Arc::as_ptr(&res.pixels) as usize,
-                    res.original.as_ref().map_or(0, |o| Arc::as_ptr(o) as usize),
-                    res.info.width,
-                    res.info.height,
-                )
-            })
-            .collect();
+        let live: HashSet<(usize, usize, u32, u32)> = live.map(resource_of).collect();
         let mut i = self.lock();
         let before = i.entries.len();
         i.entries.retain(|k, _| live.contains(&k.resource()));
         let gone = (before - i.entries.len()) as u64;
         i.stats.pruned += gone;
+        let before = i.derived.len();
+        i.derived.retain(|(k, _), _| live.contains(&k.resource()));
+        let gone = (before - i.derived.len()) as u64;
+        i.stats.derived_pruned += gone;
     }
+}
+
+/// A resource's identity: the addresses of its pixels and original, and
+/// its declared size.
+type ResourceId = (usize, usize, u32, u32);
+
+/// A resource's identity as [`Key::resource`] spells it.
+fn resource_of(res: &BitmapResource) -> ResourceId {
+    (
+        Arc::as_ptr(&res.pixels) as usize,
+        res.original.as_ref().map_or(0, |o| Arc::as_ptr(o) as usize),
+        res.info.width,
+        res.info.height,
+    )
 }
