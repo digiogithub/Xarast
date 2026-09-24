@@ -830,3 +830,86 @@ fn eviction_keeps_the_state_serial_of_what_it_dropped() {
     assert_ne!(bottom, 0, "the oldest reachable state is not the fresh one");
     assert_ne!(bottom, top);
 }
+
+// XARA-T-0295 review: a step used to retain what the list it *produced*
+// would detach, and every node its actions ever detached, moves included.
+// These pin the net rule: a step retains the roots its last application
+// left detached, and nothing else.
+
+#[test]
+fn deleting_again_after_undoing_a_delete_can_still_be_undone() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let path = f.path;
+    let before = f.doc.canonical_digest();
+    bus.dispatch(&mut f.doc, &cmd("delete", move |tx| tx.delete(path)))
+        .unwrap();
+    bus.undo(&mut f.doc).unwrap();
+    // The redo step of the first delete is dropped here; it must not take
+    // the node the second delete retains with it.
+    bus.dispatch(&mut f.doc, &cmd("delete", move |tx| tx.delete(path)))
+        .unwrap();
+    assert!(f.doc.tree.contains(path));
+    bus.undo(&mut f.doc).unwrap();
+    assert_eq!(before, f.doc.canonical_digest());
+}
+
+#[test]
+fn deleting_a_node_after_undoing_its_move_can_still_be_undone() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let (path, layer_id) = (f.path, f.layer);
+    bus.dispatch(
+        &mut f.doc,
+        &cmd("move", move |tx| {
+            tx.move_node(path, layer_id, Attach::FirstChild)
+        }),
+    )
+    .unwrap();
+    bus.undo(&mut f.doc).unwrap();
+    let before = f.doc.canonical_digest();
+    bus.dispatch(&mut f.doc, &cmd("delete", move |tx| tx.delete(path)))
+        .unwrap();
+    assert!(f.doc.tree.contains(path));
+    bus.undo(&mut f.doc).unwrap();
+    assert_eq!(before, f.doc.canonical_digest());
+}
+
+#[test]
+fn a_dropped_redo_of_a_creation_destroys_the_node_it_kept() {
+    let mut f = fixture();
+    let mut bus = CommandBus::new();
+    let (layer_id, path) = (f.layer, f.path);
+    let made = std::cell::Cell::new(None);
+    bus.dispatch(
+        &mut f.doc,
+        &cmd("add", |tx| {
+            let n = tx.create(path_node(square(Point::raw(0, 0), 1_000)))?;
+            made.set(Some(n));
+            tx.attach(n, layer_id, Attach::LastChild)
+        }),
+    )
+    .unwrap();
+    let n = made.get().unwrap();
+    bus.undo(&mut f.doc).unwrap();
+    bus.dispatch(
+        &mut f.doc,
+        &cmd("flag", move |tx| tx.set_flags(path, NodeFlags::MAGNETIC)),
+    )
+    .unwrap();
+    assert!(!f.doc.tree.contains(n), "the dropped redo step leaked it");
+}
+
+#[test]
+fn clearing_after_a_redone_delete_destroys_the_node() {
+    let mut f = fixture();
+    let path = f.path;
+    let mut bus = CommandBus::new();
+    bus.dispatch(&mut f.doc, &cmd("delete", move |tx| tx.delete(path)))
+        .unwrap();
+    bus.undo(&mut f.doc).unwrap();
+    bus.redo(&mut f.doc).unwrap();
+    bus.history_mut().clear(&mut f.doc);
+    assert!(!f.doc.tree.contains(path), "the redone step leaked it");
+    f.doc.validate().assert_clean();
+}

@@ -574,6 +574,27 @@ only as (part of) a detached root no live step retains. Pinned by
 and `tests/text_tool.rs`
 `deleting_a_story_after_undoing_a_break_undoes_to_the_whole_story`.
 
+**The review of that fix found the real cause one level up** (XARA-T-0295
+review, 2026-09-24): `History::undo`/`redo` computed a step's `retained`
+from the list they *produced* (what redoing/undoing would detach, i.e.
+nodes attached now) instead of the list they *applied*, and every step
+retained each node it ever detached, moves included. Consequences, all
+pinned in `tests::undo`: delete → undo → delete → undo lost the node (the
+dropped redo-of-delete destroyed what the new delete retained); move →
+undo → delete → undo lost it the same way; add → undo → commit leaked the
+added node (the redo step retained nothing); delete → undo → redo → clear
+leaked it. Now `retained` is **the detached roots the step's last
+application left** (`detached_roots`/`keep_detached_roots`, applied in
+`Tx::commit`, `undo`, `redo` and after a coalescing merge), so a detached
+root is retained by exactly one step, the one that last detached it.
+`reap`'s parent guard is now defence in depth (removing it no longer fails
+anything). Invariant, checked after every step by
+`tests::props::the_history_neither_leaks_nor_destroys_a_node_it_still_needs`
+(random edits, undo, redo, clear, discard/hold/restore/release redo, small
+budgets that evict): **arena = reachable ∪ subtrees of live steps'
+retained roots**, every retained node exists, and every undo/redo lands on
+the digest recorded for that state serial.
+
 ## Dead ends (do not retry)
 
 - **`Box<dyn Node>` + `Any`.** Reproduces the original's constant downcasting

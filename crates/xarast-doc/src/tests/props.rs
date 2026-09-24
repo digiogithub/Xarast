@@ -425,3 +425,120 @@ proptest! {
         }
     }
 }
+
+/// One step of the history property: an edit, or a move through the
+/// history itself.
+#[derive(Clone, Debug)]
+enum Step {
+    Edit(Edit),
+    Undo,
+    Redo,
+    Clear,
+    DiscardRedo,
+    HoldRedo,
+    RestoreHeldRedo,
+    ReleaseHeldRedo,
+}
+
+fn step_strategy() -> impl Strategy<Value = Step> {
+    prop_oneof![
+        6 => edit_strategy().prop_map(Step::Edit),
+        4 => Just(Step::Undo),
+        2 => Just(Step::Redo),
+        1 => Just(Step::Clear),
+        1 => Just(Step::DiscardRedo),
+        1 => Just(Step::HoldRedo),
+        1 => Just(Step::RestoreHeldRedo),
+        1 => Just(Step::ReleaseHeldRedo),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        max_shrink_iters: 4096,
+        ..ProptestConfig::default()
+    })]
+
+    /// The arena holds exactly what the document reaches plus what a live
+    /// history step retains — no leak — and every state the history can
+    /// return to is byte for byte the state it was — no premature destroy.
+    /// Commits drop the redo branch, a small budget makes them evict, and the
+    /// colour editor's held redo branch (colour.md decision 24) is exercised
+    /// the way it is used: restored only at the serial it was held at.
+    #[test]
+    fn the_history_neither_leaks_nor_destroys_a_node_it_still_needs(
+        steps in prop::collection::vec(step_strategy(), 0..80),
+        budget in prop_oneof![Just(1_500usize), Just(6_000), Just(128 << 20)],
+    ) {
+        use std::collections::{HashMap, HashSet};
+
+        let mut f = fixture();
+        let mut bus = CommandBus::with_budget(budget);
+        let mut digests: HashMap<u64, _> = HashMap::new();
+        digests.insert(bus.history().state_serial(), f.doc.canonical_digest());
+        let mut held_at: Option<u64> = None;
+        for step in steps {
+            let moved = match step {
+                Step::Edit(e) => {
+                    let ids: Vec<NodeId> = f.doc.tree.preorder(f.doc.tree.root()).collect();
+                    if bus.dispatch(&mut f.doc, &EditCommand(e, ids)).is_ok() {
+                        digests.insert(bus.history().state_serial(), f.doc.canonical_digest());
+                    }
+                    false
+                }
+                Step::Undo => bus.undo(&mut f.doc).is_some(),
+                Step::Redo => bus.redo(&mut f.doc).is_some(),
+                Step::Clear => {
+                    bus.history_mut().clear(&mut f.doc);
+                    held_at = None;
+                    false
+                }
+                Step::DiscardRedo => {
+                    bus.history_mut().discard_redo(&mut f.doc);
+                    false
+                }
+                Step::HoldRedo => {
+                    bus.history_mut().hold_redo(&mut f.doc);
+                    held_at = Some(bus.history().state_serial());
+                    false
+                }
+                Step::RestoreHeldRedo => {
+                    if held_at == Some(bus.history().state_serial()) {
+                        bus.history_mut().restore_held_redo(&mut f.doc);
+                        held_at = None;
+                    }
+                    false
+                }
+                Step::ReleaseHeldRedo => {
+                    bus.history_mut().release_held_redo(&mut f.doc);
+                    held_at = None;
+                    false
+                }
+            };
+            if moved {
+                let serial = bus.history().state_serial();
+                prop_assert_eq!(
+                    digests.get(&serial),
+                    Some(&f.doc.canonical_digest()),
+                    "undo or redo did not return to the state it names"
+                );
+            }
+            let report = f.doc.validate();
+            prop_assert!(report.errors.is_empty(), "{:#?}", report.errors);
+
+            let tree = &f.doc.tree;
+            let retained = bus.history().retained_nodes();
+            for n in &retained {
+                prop_assert!(tree.contains(*n), "a live step's node {:?} was destroyed", n);
+            }
+            let mut expected: HashSet<NodeId> = tree.preorder(tree.root()).collect();
+            for n in retained {
+                expected.extend(tree.preorder(n));
+            }
+            let live: HashSet<NodeId> = tree.iter().map(|(id, _)| id).collect();
+            let leaked: Vec<_> = live.difference(&expected).collect();
+            prop_assert!(leaked.is_empty(), "leaked nodes: {:?}", leaked);
+        }
+    }
+}

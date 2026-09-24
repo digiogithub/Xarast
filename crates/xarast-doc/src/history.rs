@@ -382,6 +382,29 @@ impl Action {
     }
 }
 
+/// The nodes `actions`, just applied, left detached with no parent: the
+/// roots the step keeps alive.
+///
+/// A node the step detached and attached again (a move) or left inside a
+/// subtree it detached as a whole is not one. Retaining a moved node made a
+/// dropped redo step destroy it once a newer step deleted it, although that
+/// newer step retains it for its own undo (move, undo, delete, undo lost it).
+fn detached_roots(doc: &Document, actions: &[Action]) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    for a in actions {
+        a.retains(&mut out);
+    }
+    keep_detached_roots(doc, &mut out);
+    out
+}
+
+fn keep_detached_roots(doc: &Document, nodes: &mut Vec<NodeId>) {
+    let mut seen = std::collections::HashSet::new();
+    nodes.retain(|n| {
+        doc.tree.contains(*n) && doc.tree.links(*n).parent.is_none() && seen.insert(*n)
+    });
+}
+
 fn subtree_bytes(tree: &Tree, id: NodeId) -> usize {
     tree.preorder(id)
         .filter_map(|n| tree.get(n))
@@ -432,7 +455,9 @@ pub struct Transaction {
     /// The inverses, in the order the forward actions were applied. Undo
     /// applies them in reverse.
     pub inverses: Vec<Action>,
-    /// Detached nodes this transaction keeps alive.
+    /// The detached roots this transaction keeps alive: the nodes its last
+    /// application left with no parent. A node it moved, or one inside a
+    /// subtree it detached as a whole, is not listed.
     pub retained: Vec<NodeId>,
     /// The estimated retained cost.
     pub bytes: usize,
@@ -861,6 +886,7 @@ impl<'d> Tx<'d> {
         // transactions. Undo stays exact because the repair's own actions are
         // recorded in this transaction, before it is sealed.
         let _ = self.keep_one_active_layer();
+        keep_detached_roots(self.doc, &mut self.retained);
         self.committed = true;
         Transaction {
             label,
@@ -994,6 +1020,7 @@ impl History {
         if mergeable && let Some(last) = self.past.last_mut() {
             last.inverses.append(&mut tx.inverses);
             last.retained.append(&mut tx.retained);
+            keep_detached_roots(doc, &mut last.retained);
             last.bytes += tx.bytes;
             if let Some(s) = self.past_serials.last_mut() {
                 *s = serial;
@@ -1022,10 +1049,12 @@ impl History {
         self.bytes = self.bytes.saturating_sub(tx.bytes);
         let redo_inverses = apply_reversed(doc, &tx.inverses);
         let label = tx.label;
-        let mut retained = Vec::new();
-        for a in &redo_inverses {
-            a.retains(&mut retained);
-        }
+        // The redo step keeps alive what this undo just detached — the
+        // actions *applied*, as `Tx::commit` does — not what redoing would
+        // detach: those nodes are attached now, and retaining them let a
+        // dropped redo destroy a node a newer step deleted (delete, undo,
+        // delete, undo lost it) while leaking a node the undo detached.
+        let retained = detached_roots(doc, &tx.inverses);
         let bytes = tx.bytes;
         self.future.push(Transaction {
             label,
@@ -1045,10 +1074,8 @@ impl History {
         }
         let undo_inverses = apply_reversed(doc, &tx.inverses);
         let label = tx.label;
-        let mut retained = Vec::new();
-        for a in &undo_inverses {
-            a.retains(&mut retained);
-        }
+        // What this redo just detached, as in `History::undo`.
+        let retained = detached_roots(doc, &tx.inverses);
         self.bytes += tx.bytes;
         self.past.push(Transaction {
             label,
@@ -1122,6 +1149,19 @@ impl History {
     /// Off by default: see [`History::DEFAULT_CHECKPOINT_EVERY`].
     pub fn set_checkpoint_cadence(&mut self, every: Option<usize>) {
         self.checkpoint_every = every;
+    }
+
+    /// Every node a step still retains — undo, redo and a held redo branch —
+    /// for the leak property test.
+    #[cfg(test)]
+    pub(crate) fn retained_nodes(&self) -> Vec<NodeId> {
+        let held = self.held_redo.iter().flat_map(|(h, _)| h.iter());
+        self.past
+            .iter()
+            .chain(self.future.iter())
+            .chain(held)
+            .flat_map(|t| t.retained.iter().copied())
+            .collect()
     }
 
     /// Takes a checkpoint now, whatever the cadence.
@@ -1221,12 +1261,11 @@ impl History {
 
 /// Destroys the nodes a discarded transaction was keeping alive.
 ///
-/// Only a detached root (unreachable, with no parent) is destroyed. A
-/// retained node that still has a parent but is unreachable sits inside a
-/// subtree some other step detached — typically the very commit that is
-/// dropping this redo branch, deleting an ancestor (a node a redo would
-/// move, inside a story that is now being deleted) — and that step's undo
-/// needs it whole. It goes when the root it hangs from is reaped.
+/// Only a detached root (unreachable, with no parent) is destroyed. A step
+/// retains only such roots ([`detached_roots`]), so this is defence in
+/// depth: a retained node that has since gained a parent sits inside a
+/// subtree some other step detached, and that step's undo needs it whole.
+/// It goes when the root it hangs from is reaped.
 fn reap(doc: &mut Document, tx: &Transaction) {
     for node in &tx.retained {
         if doc.tree.contains(*node)
