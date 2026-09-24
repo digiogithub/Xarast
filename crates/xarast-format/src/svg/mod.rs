@@ -45,6 +45,7 @@ pub mod interchange;
 pub mod num;
 mod paint;
 pub mod pathdata;
+pub mod photo;
 pub mod read;
 mod style;
 mod text;
@@ -134,6 +135,35 @@ impl PartialEq for BitmapLinker {
 
 impl Eq for BitmapLinker {}
 
+/// Where an interchange SVG's photo-adjusted bitmaps go (W10.6): called
+/// once per bitmap object with photo operations, with the master's id
+/// and resource and the object's chain, it returns the `href` of the
+/// adjusted image, or `None` to show the master (counted in
+/// [`Stats::photo_ops_unbaked`]). Compared by identity.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+pub struct DerivedLinker(
+    pub  std::sync::Arc<
+        dyn Fn(BitmapId, &xarast_doc::BitmapResource, &xarast_doc::PhotoOps) -> Option<String>
+            + Send
+            + Sync,
+    >,
+);
+
+impl std::fmt::Debug for DerivedLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DerivedLinker(..)")
+    }
+}
+
+impl PartialEq for DerivedLinker {
+    fn eq(&self, other: &DerivedLinker) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for DerivedLinker {}
+
 /// Options for [`write_svg`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SvgOptions {
@@ -166,6 +196,9 @@ pub struct SvgOptions {
     /// Interchange only: where bitmaps go. `None` writes them into the
     /// resource index as `.xarast` does.
     pub bitmaps: Option<BitmapLinker>,
+    /// Interchange only: bakes the photo operations of a bitmap object
+    /// into an image of its own. `None` shows the master.
+    pub derived_bitmaps: Option<DerivedLinker>,
 }
 
 impl Default for SvgOptions {
@@ -180,6 +213,7 @@ impl Default for SvgOptions {
             background: None,
             minify: false,
             bitmaps: None,
+            derived_bitmaps: None,
         }
     }
 }
@@ -211,6 +245,11 @@ pub struct Stats {
     /// Bitmaps written in a container browsers cannot decode (BMP, the
     /// compressed BMP of `.xar`): referenced, but not rendered.
     pub images_unrenderable: usize,
+    /// Bitmap objects with photo operations (W10.6).
+    pub photo_ops: usize,
+    /// Interchange only: bitmap objects with photo operations shown
+    /// unadjusted, because no [`SvgOptions::derived_bitmaps`] baked them.
+    pub photo_ops_unbaked: usize,
     pub texts: usize,
     pub characters: usize,
     /// Stories on a path the base SVG shows on straight lines: no

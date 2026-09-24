@@ -31,6 +31,7 @@ fn is_ink_sidecar(c: &Elem) -> bool {
                     | "stroke-fill"
                     | "transparency"
                     | "stroke-transparency"
+                    | "photo-ops"
             ))
 }
 
@@ -381,7 +382,12 @@ impl<'d> Reader<'d, '_, '_> {
         let minor = self.vec(&cctx, 0, h);
         let frame = cctx.frame;
         let bounds = corners_box(frame.pt(origin), frame.vec(major), frame.vec(minor));
-        let href = attr(e, "", "href").or_else(|| attr(e, NS_XLINK, "href"));
+        let (photo_ops, master) = self.photo_ops(e);
+        // With a baked rendition in `href`, `xarast:master` names the
+        // master the chain applies to (`research/06 §6.9`).
+        let href = master
+            .or_else(|| attr(e, "", "href"))
+            .or_else(|| attr(e, NS_XLINK, "href"));
         let pixels = xa(e, "pixels").and_then(parse::floats);
         let image = self.bitmap_for(href, xa(e, "palette"), pixels.as_deref(), e.start);
         let kind = NodeKind::Bitmap(Box::new(BitmapNode {
@@ -389,7 +395,7 @@ impl<'d> Reader<'d, '_, '_> {
             origin,
             major,
             minor,
-            photo_ops: Default::default(),
+            photo_ops,
         }));
         let info = InkInfo {
             filled: false,
@@ -409,6 +415,49 @@ impl<'d> Reader<'d, '_, '_> {
         };
         self.ink_node(e, &cctx, kind, info, leftover, &known)?;
         Ok(true)
+    }
+
+    /// The `<xarast:photo-ops>` child of an `<image>` (W10.6), and its
+    /// `xarast:master`. A known operation is parsed; anything else —
+    /// another kind, or a known kind this reader cannot parse — is kept
+    /// as [`PhotoOp::Unknown`] with its text, to be written back as read.
+    /// An editable chain is normalised, as every edit stores it.
+    fn photo_ops(&mut self, e: &'d Elem) -> (xarast_doc::PhotoOps, Option<&'d str>) {
+        use xarast_doc::photo::PhotoOp;
+        let mut ops = xarast_doc::PhotoOps::new();
+        let mut master = None;
+        for c in &e.children {
+            let Child::Elem(k) = c else { continue };
+            let Some(x) = self.elem(*k) else { continue };
+            if !x.is(NS_XARAST, "photo-ops") {
+                continue;
+            }
+            master = xa(x, "master").or(master);
+            for oc in &x.children {
+                let Child::Elem(ok) = oc else { continue };
+                let Some(op) = self.elem(*ok) else { continue };
+                let kind = xa(op, "kind").unwrap_or("");
+                let known = if op.is(NS_XARAST, "op") {
+                    crate::svg::photo::parse_photo_op(kind, &|n| xa(op, n).map(str::to_owned))
+                } else {
+                    None
+                };
+                match known {
+                    Some(o) => ops.ops.push(o),
+                    None => {
+                        let Some(raw) = self.dom.fragment_in_xarast(*ok) else {
+                            continue;
+                        };
+                        ops.ops.push(PhotoOp::Unknown {
+                            kind: Arc::from(kind),
+                            raw: Arc::from(raw),
+                        });
+                    }
+                }
+            }
+        }
+        ops.normalise();
+        (ops, master)
     }
 
     /// The bitmap resource an `href` (and its `xarast:palette`) names,

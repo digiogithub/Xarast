@@ -206,6 +206,19 @@ impl<'a> Dom<'a> {
     /// would make the second save differ from the first (see the manifest's
     /// fuzz finding in `docs/memory/xarast-format.md`).
     pub fn fragment(&self, i: usize) -> Option<String> {
+        self.fragment_with(i, false)
+    }
+
+    /// [`Dom::fragment`] for a fragment that is written back inside a
+    /// Xarast element: the `xarast` prefix, when it is bound to the Xarast
+    /// namespace, is declared by every document the writer makes, so it
+    /// is not inserted — the fragment's text stays exactly as read (a
+    /// preserved photo operation, `research/06 §8.7`).
+    pub fn fragment_in_xarast(&self, i: usize) -> Option<String> {
+        self.fragment_with(i, true)
+    }
+
+    fn fragment_with(&self, i: usize, omit_xarast: bool) -> Option<String> {
         let e = self.elems.get(i)?;
         let raw = self.span(e.start, e.end);
         let mut used: Vec<Arc<str>> = Vec::new();
@@ -243,6 +256,9 @@ impl<'a> Dom<'a> {
             let Some(uri) = self.binding(e.parent, &p) else {
                 continue;
             };
+            if omit_xarast && &*p == "xarast" && &*uri == crate::svg::NS_XARAST {
+                continue;
+            }
             if p.is_empty() {
                 // Fragments are only ever written back inside a Xarast
                 // document, whose default namespace is SVG: declaring it
