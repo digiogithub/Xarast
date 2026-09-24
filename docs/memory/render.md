@@ -27,7 +27,8 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   twelve families possible at all.
 - **Paints:** solid; all six gradient shapes (linear, radial, conical,
   diamond, 3-colour and 4-colour mesh) × four repeat modes × affine and
-  perspective mappings; image fills with four repeat modes, three filters,
+  perspective mappings (meshes honour the repeat mode since XARA-T-0256;
+  the walker gives a tiled mesh `Mirror`, see "Meshes tile mirrored"); image fills with four repeat modes, three filters,
   contone and brightness/contrast/gamma/saturation adjustment. Images
   resample through one sampler (`resample.rs`, XARA-US-0052; minification
   in linear light, magnification in encoded sRGB):
@@ -44,7 +45,8 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   with 22 fractional bits, and an interning cache.
 - **Blends:** all twelve families, one 256 × 256 table each (768 KiB), one
   generator shared by both backends, plus the three analytic ones.
-  Graduated and bitmap-sourced transparency feed the same families.
+  Graduated, three-/four-colour (`TranspSource::Mesh`, per pixel) and
+  bitmap-sourced transparency feed the same families.
 - **Cache and incremental redraw:** content-hash keys, √2 scale quantisation,
   cost-weighted LRU under a hard byte budget, an admission policy, dirty-rect
   culling and `scroll_surface` reprojection. `scene_damage` diffs two scenes
@@ -1199,15 +1201,16 @@ Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
   2048 entries), `Repeat::Simple`.
 - **The graduated transparency uses the fill's own shape and frame** for
   the five scalar shapes, so the transparency sampler is tested per shape.
-  For flat and the two meshes it uses a diagonal linear frame: flat has no
-  frame, and a mesh-shaped `TranspSource::Gradient` evaluates to level 0
-  everywhere (`grad_param` returns `None` for meshes), which a golden
-  would silently lock in. The walker instead draws a mesh transparency as
-  the flat mean of its levels; per-pixel mesh transparency is
-  XARA-T-0256, whose goldens belong to that task.
-- **Mesh repeat is not exercised** (every cell is `Repeat::Simple`), so
-  XARA-T-0256's "mesh ignores repeat" does not show here; the matrix
-  neither exposes nor hides it.
+  Flat uses a diagonal linear frame (it has none). The two meshes use a
+  `TranspSource::Mesh` of their own kind on the fill's square frame,
+  levels 0/224/112 (and 176 at the fourth corner) — since XARA-T-0256,
+  which re-blessed those 20 cells; before it they used the diagonal
+  linear stand-in. A mesh-*shaped* `TranspSource::Gradient` still
+  evaluates to level 0 (`grad_param` has no scalar for a mesh); nothing
+  builds one.
+- **Mesh repeat is not exercised here** (every cell is `Repeat::Simple`);
+  the twelve `gradient_mesh*_{repeat,repeathq,mirror}_*` goldens of
+  `all_cases` and `tests/mesh_transparency.rs` cover it.
 - **Separate from `all_cases`** on purpose: export, PDF, determinism and
   parity iterate the corpus, and 160 more scenes would multiply their cost
   for no new coverage of their own concerns. 48 × 48, drawn at half a
@@ -1224,6 +1227,95 @@ Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
   fill. None of that is judged here.
 - No GPU parity: the GPU backend's compositing pass is deferred (TODO 2),
   so there is nothing on the GPU to compare the families with.
+
+### Meshes tile mirrored (XARA-T-0256, 2026-09-24)
+
+- **The sampler honours the repeat mode.** `paint::mesh_uv` folds both
+  frame axes through `apply_repeat`; `mesh3_channel`/`mesh4_channel` are
+  the one definition of the two meshes (the PDF exporter calls them
+  too). `Simple` is the old clamp, byte for byte.
+- **Tiled means mirrored.** The original has two mesh styles, "simple"
+  (mapping = do not repeat) and "tiled" (every other mapping, the
+  default included; `research/01 §8.3`). Which tiling "tiled" is was not
+  documented; the preview `Fill Types simple.xar` embeds settles it.
+  Rendered at the preview's 52 × 113 (8× supersampled, box-filtered) and
+  scored per cell, mean |Δ| against the preview:
+
+  | Cell | clamp | repeat | **mirror** |
+  |---|---:|---:|---:|
+  | 3-colour repeating (col 2) | 52.9 | 47.1 | **35.4** |
+  | 3-colour repeating (col 4) | 56.9 | **35.5** | 38.7 |
+  | 4-colour repeating (col 2) | 64.9 | 51.0 | **25.3** |
+  | 4-colour repeating (col 4) | 48.3 | 31.8 | **23.2** |
+  | 4-colour squashed (col 5, tiled) | 42.8 | 29.3 | **23.4** |
+  | untiled cells (1, 3, 5) | equal | equal | equal |
+
+  Visually the original's cells show diagonal stripes and checkers that
+  only the mirrored tiling reproduces. `xarast-app` `mesh_repeat` maps
+  tiled onto `Repeat::Mirror`; `Repeat`/`RepeatHq` stay available to the
+  API and are sampled as plain tiles.
+- **Mesh transparencies are per pixel**: `TranspSource::Mesh { mapping,
+  repeat, levels: MeshLevels }`, on the colour mesh's frame and corner
+  order, tiled the same way, in the family of `c0.mode` (it was the flat
+  mean in Mix, whatever the mode). `tests/mesh_transparency.rs` pins it
+  to the colour mesh (white mixed over black is `255 − t`) in all four
+  repeat modes, ±1 for halves rounding the other way. Fractal and noise
+  transparencies are still flat means, now in their own family.
+- **Export follows.** PDF: a mirrored mesh is one sampled function over
+  every period the shape covers, exact for four colours (a lattice of
+  corner samples *is* the mirrored bilinear mesh); plain repetition and
+  mesh transparencies are rasterised. SVG (`xarast-format` `bake.rs`):
+  rows mirrored per period plus `spreadMethod="reflect"`, and mesh
+  transparencies as luminance masks. Corpus export-check 0 failures;
+  SoftShadow.svg 4.1 → 1.20.
+- **Tile parity.** Tiled meshes cross many more rounding boundaries:
+  assembled-from-tiles frames of `gradient_mesh3_mirror_affine` differ
+  from the whole frame in 259 px, all by 1/255. `parity_tiles` now lets
+  any frame whose every difference is 1/255 pass; larger ones keep the
+  0.2 % budget.
+
+### Blend families against the original's previews (XARA-US-0018, 2026-09-24)
+
+The story's criteria need the original running (an x86-64 VM for the
+least-squares fit R4.4 and the `CalcTransparencyX` dump R4.5); there is
+none here, so they are **not met**. What *can* be judged is the preview
+each `.xar` embeds (tags 60–64: GIF87a, 256 colours, ≤ 128 px), which the
+original rendered. Method (scratch scripts, not committed; T-0248 owns a
+committed tool):
+
+1. Extract the preview; render our page at 60 dpi; find the crop of our
+   render that, box-filtered to the preview's size, matches it best
+   (coarse grid, then coordinate descent). Mean |Δ| after registration:
+   GardenPlan 5.0, BLUECAR 6.1, Watch4 13.0, scope3 20.0, WATCH2 20.9,
+   leafgirl 23.1, WATCH 30.6, Groucho2 44.3, SoftShadow 73.1 (live
+   effects, text and bevels dominate the worst).
+2. For each (file, mode) re-render with that mode's objects drawn in each
+   of the other ten families and in None (an experiment-only build), and
+   score every variant over the pixels where any variant moves by > 12.
+
+Which transparency modes the corpus uses at all (`xarast-cli inspect
+--fills`): Mix, Stained Glass (8 files), Bleach (7), Darken (Watch4, 2
+attributes), Brightness (Watch4, 4). **Contrast, Saturation, Lighten,
+Luminosity and Hue occur in no corpus file** — the previews cannot say
+anything about them, and those are exactly the families that are
+reconstructions.
+
+| Family | Evidence (mean |Δ| over the affected pixels; ours vs best alternative) | Verdict |
+|---|---|---|
+| Stained Glass | best of 11 in all six files it shows in: Watch4 1519 px 27.9 (Darken 32.7, Mix 33.6); Groucho2 2073 px 51.0 (Mix 52.6); scope3 7716 px 20.8 (Darken 21.0); BLUECAR 795 px 14.2 (Mix 17.0); leafgirl 3344 px 28.6 (Mix 33.7); WATCH 5669 px 26.8 (Mix 27.5) | consistent with the original; Darken is close only where sources are near grey |
+| Bleach | best in scope3 (7925 px, 20.6; Lighten ties, Mix 30.1) and BLUECAR (70 px, 21.2; Lighten ties); 2nd in Watch4 (284 px, 30.2 vs Mix 28.0, in a region dominated by the lid's missing engraving); 6th in SoftShadow, which misrenders overall | consistent; the Watch4 and SoftShadow counts are not evidence |
+| Darken | Watch4 only, 38 px: 36.7 vs Stained Glass 35.5, Mix 36.6 | inconclusive at preview size |
+| Brightness | Watch4 only: no pixel at preview size depends on it | no evidence |
+| Contrast, Saturation, Lighten, Luminosity, Hue, Bevel | not in the corpus | unverifiable here |
+| Luminance weights (R4.4) | a GIF palette of 256 colours at ≤ 128 px cannot resolve a 3-weight fit | unverifiable here |
+
+Two real mismatches were found on the way and fixed: a Hue transparency
+(type byte 31) read as Mix, because `TranspMode` had no Hue; and mesh
+transparencies drawn in Mix whatever their mode. Visual note on the
+fill × blend matrix: Hue interpolates the hue *byte* linearly, the long
+way round when the two hues straddle red, so a graduated Hue shows a
+sharp notch where the source's hue wraps (`mesh4_hue_graduated`'s right
+arm); whether CDraw does the same is one of the VM questions.
 
 ---
 
@@ -1404,8 +1496,8 @@ Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
 | 2 | The WGSL compositing pass: paint evaluation, family dispatch, LUT sampling, ping-pong destination reads (R5.3, R5.4). **Deferred** by the GPU decision; re-open on its trigger | XARA-T-0051 |
 | 15 | ~~Present the canvas through `GpuTileCache` (shell/app wiring, capability ladder)~~. **Done 2026-09-23**; see "The tiles in the viewer" | done (XARA-T-0050) |
 | 16 | The iGPU `write_texture` cliff: 1080p 0.6 ms, 4K 24 ms | XARA-T-0052 |
-| 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM |
-| 4 | Verify Contrast, Bevel, Saturation and Luminosity against those tables | after 3 |
+| 3 | Recover CDraw's luminance weights by least squares (R4.4) and extract the twelve tables via `GDraw::CalcTransparencyX` (R4.5) | needs an x86-64 VM (XARA-US-0018); the corpus previews cannot do it, see "Blend families against the original's previews" |
+| 4 | Verify Contrast, Bevel, Saturation, Luminosity, Hue and Lighten against those tables | after 3; no corpus file uses any of them |
 | 5 | Render the `.xar` corpus end to end and compare against the original at 25 %, 100 % and 400 % | our side done (`xarast-cli render --zoom`); the original cannot run here (closed CDraw, 2006 binaries), so XARA-T-0248 compares with the previews each `.xar` embeds and keeps the zoom comparison VM-gated |
 | 6 | Re-derive the cache admission threshold from corpus data | after 5 |
 | 7 | ~~`DisplayList::build` at 100k: 20.8 ms against 3 ms~~. **Done 2026-09-23**: 1.9 ms; the cause and the fix are under "Decisions taken". The 100k CPU full frame is 19 ms against 25 | done (XARA-US-0016) |
@@ -1419,7 +1511,7 @@ Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
 | 18 | ~~Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5)~~. **Done 2026-09-24**: 160 exact goldens; see "The fill × blend golden matrix" | done (XARA-T-0222) |
 | 19 | Document/per-bitmap smoothing flag → `Filter` (T10.4.4's remaining half) | XARA-T-0273 |
 | 20 | Bitmap-fill tile seams in resvg on exported SVG (the renderer has none) | XARA-T-0274 |
-| 21 | Mesh fills ignore `Repeat` (did not fall out of the image work: meshes do not go through the image sampler) | XARA-T-0256 |
+| 21 | ~~Mesh fills ignore `Repeat`; mesh transparencies are flat means~~. **Done 2026-09-24**: see "Meshes tile mirrored" | done (XARA-T-0256) |
 | 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
 | 23 | Re-materialisation of an evicted base is synchronous on the render thread; Draft `Nearest` reads the base even when minified. Draw the proxy, re-materialise on a worker | XARA-T-0281 |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |

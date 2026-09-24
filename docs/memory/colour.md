@@ -193,6 +193,16 @@ Plain round-to-nearest would get **545** of them wrong.
     `ramp_move` returns the new index so a tool keeps hold of the stop.
 17. **A transparency stop value is a level**; the stop keeps its mode.
     `SetTranspMode` rewrites every stop's mode.
+17a. **`TranspMode` has ten modes, Hue = 31 included** (XARA-US-0018,
+    2026-09-24). The original's transparency tool offers Mix … Luminosity
+    and then Hue, and writes Hue as type byte 31 (`TT_HUE`,
+    `Kernel/fillval.h:171`); without the variant `from_byte(31)` fell
+    through to Mix and a Hue transparency rendered as a plain mix.
+    `TRANSP_MODES` (the infobar menu) lists all ten, Hue last; the SVG
+    profile writes `mix-blend-mode:hue` / `xarast:blend="hue"`. Bevel
+    (34) stays renderer-internal: the tool never offers it. A mesh
+    transparency's mode is `c0.mode`, and it now renders in that family
+    (it was always Mix; see `render.md`, "Meshes tile mirrored").
 18. **`mutate_fill` follows the W8.2 table**: flat → gradient takes the
     bounding box (diagonal for linear, inscribed circle otherwise) and a
     caller-given far value (`desaturated` for colour, `clear_end` = 255 for
