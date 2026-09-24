@@ -952,15 +952,28 @@ fn rasterise_clip(
     tol_doc: f64,
 ) -> Vec<u8> {
     let mut mask = vec![0u8; band.area() as usize];
-    let guarded = DeviceRect::new(band.x0, band.y0 - BAND_GUARD, band.x1, band.y1 + BAND_GUARD);
+    // From the surface's left edge, whatever the band's, for the reason
+    // `draw_primitive` gives: a tile's clip is then the whole band's.
+    let guarded = DeviceRect::new(0, band.y0 - BAND_GUARD, band.x1, band.y1 + BAND_GUARD);
     let prim = Primitive::Fill { path, rule, xf };
     if !rasterise_coverage(ctx, scratch, resources, &prim, guarded, tol_doc) {
         return mask;
     }
     let w = band.width() as usize;
-    let skip = (band.y0 - guarded.y0) as usize * w;
-    for (dst, px) in mask.iter_mut().zip(scratch.pixmap.data()[skip..].iter()) {
-        *dst = px.a;
+    let gw = guarded.width() as usize;
+    // Both non-negative: `guarded` starts left of and above the band.
+    let (dx, dy) = (
+        usize::try_from(band.x0 - guarded.x0).unwrap_or(0),
+        usize::try_from(band.y0 - guarded.y0).unwrap_or(0),
+    );
+    let src = scratch.pixmap.data();
+    for (row, dst) in mask.chunks_mut(w.max(1)).enumerate() {
+        let o = (dy + row) * gw + dx;
+        if let Some(px) = src.get(o..o + dst.len()) {
+            for (d, p) in dst.iter_mut().zip(px) {
+                *d = p.a;
+            }
+        }
     }
     mask
 }
@@ -993,11 +1006,22 @@ fn draw_primitive(
         return 0;
     }
     // Rasterise with a guard band, composite without one.
+    //
+    // What is rasterised starts where a whole-frame render starts it: at
+    // the primitive's own left edge (or the surface's) and at the band's
+    // top, never at the draw area's corner. The rasteriser works in `f32`
+    // relative to the top left of what it is given, so moving that corner
+    // moves coverage by 1/255 here and there, and a column, a tile or a
+    // dirty rectangle came out different from the same pixels drawn whole
+    // (`coverage_does_not_depend_on_the_draw_area`). With the corner fixed,
+    // a rectangle repainted over a frame is exactly that frame's pixels
+    // (XARA-T-0221). The right edge does not matter: coverage accumulates
+    // from the left.
     let guarded = bounds.intersection(DeviceRect::new(
-        rect.x0,
-        rect.y0 - BAND_GUARD,
+        0,
+        band.y0 - BAND_GUARD,
         rect.x1,
-        rect.y1 + BAND_GUARD,
+        band.y1 + BAND_GUARD,
     ));
     if !rasterise_coverage(ctx, scratch, resources, &prim, guarded, tol_doc) {
         return 0;
