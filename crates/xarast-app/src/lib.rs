@@ -125,7 +125,9 @@ pub use edit::{
 };
 pub use geometry::{DevicePoint, DeviceSize, DocPoint, DocPointF, DocRect};
 pub use headless::{HeadlessError, HeadlessFrame, HeadlessOptions, HeadlessResult, render_to_png};
-pub use intent::{Changed, Dialog, Intent, PlatformRequest, PointerButton, PointerSample};
+pub use intent::{
+    Changed, Dialog, DockPane, Intent, PlatformRequest, PointerButton, PointerSample,
+};
 pub use ops::{CommandSink, EditCommand};
 pub use prefs::{Preferences, RendererPref, ThemePref, Unit};
 pub use prompt::{ChoiceRole, Prompt, PromptAnswer, PromptChoice};

@@ -16,7 +16,7 @@ use std::fmt;
 
 use crate::edit::ToolId;
 use crate::geometry::DevicePoint;
-use crate::intent::{Dialog, Intent};
+use crate::intent::{Dialog, DockPane, Intent};
 use crate::snap::SnapKind;
 use crate::structure::ZOrder;
 use crate::tool::ToolAction;
@@ -227,6 +227,10 @@ pub enum AppCommand {
     ShowGrid,
     /// View › Show guides.
     ShowGuides,
+    /// Window › a pane: show it, re-docking it when the layout lacks it,
+    /// and bring it to the front (`F9` colours, `F10` layers, `F11`
+    /// bitmaps, as in the original's galleries, `research/04 §4.7`).
+    ShowPane(DockPane),
 }
 
 /// How much one zoom-in or zoom-out step multiplies the zoom.
@@ -235,7 +239,7 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 53] = [
+    pub const ALL: [AppCommand; 58] = [
         AppCommand::Open,
         AppCommand::Import,
         AppCommand::Save,
@@ -289,6 +293,11 @@ impl AppCommand {
         AppCommand::Action(ToolAction::Break),
         AppCommand::Action(ToolAction::Join),
         AppCommand::ConvertToShapes,
+        AppCommand::ShowPane(DockPane::Layers),
+        AppCommand::ShowPane(DockPane::ColourEditor),
+        AppCommand::ShowPane(DockPane::ColourGallery),
+        AppCommand::ShowPane(DockPane::BitmapGallery),
+        AppCommand::ShowPane(DockPane::Photo),
     ];
 
     /// The menu label.
@@ -329,6 +338,7 @@ impl AppCommand {
             AppCommand::SnapToObjects => "Snap to objects",
             AppCommand::ShowGrid => "Show grid",
             AppCommand::ShowGuides => "Show guides",
+            AppCommand::ShowPane(p) => p.label(),
         }
     }
 
@@ -424,6 +434,10 @@ impl AppCommand {
         const SNAP_OBJECTS: &[KeyChord] = &[KeyChord::numpad('*')];
         const SHOW_GRID: &[KeyChord] = &[KeyChord::char('#')];
         const SHOW_GUIDES: &[KeyChord] = &[KeyChord::numpad('1')];
+        // The galleries, `research/04 §4.7`.
+        const COLOURS: &[KeyChord] = &[KeyChord::f(9)];
+        const LAYERS: &[KeyChord] = &[KeyChord::f(10)];
+        const BITMAPS: &[KeyChord] = &[KeyChord::f(11)];
         match self {
             AppCommand::Open => OPEN,
             AppCommand::Import => IMPORT,
@@ -491,6 +505,12 @@ impl AppCommand {
             AppCommand::SnapToObjects => SNAP_OBJECTS,
             AppCommand::ShowGrid => SHOW_GRID,
             AppCommand::ShowGuides => SHOW_GUIDES,
+            AppCommand::ShowPane(p) => match p {
+                DockPane::ColourGallery => COLOURS,
+                DockPane::Layers => LAYERS,
+                DockPane::BitmapGallery => BITMAPS,
+                DockPane::ColourEditor | DockPane::Photo => NONE,
+            },
         }
     }
 
@@ -504,7 +524,10 @@ impl AppCommand {
     /// menu greys such an item out when nothing is open.
     #[must_use]
     pub const fn needs_document(self) -> bool {
-        !matches!(self, AppCommand::Open | AppCommand::Quit)
+        !matches!(
+            self,
+            AppCommand::Open | AppCommand::Quit | AppCommand::ShowPane(_)
+        )
     }
 
     /// The intent the command raises. A keyboard or menu zoom has no
@@ -556,6 +579,7 @@ impl AppCommand {
             AppCommand::SnapToObjects => Intent::ToggleSnap(SnapKind::Object),
             AppCommand::ShowGrid => Intent::ToggleGrid,
             AppCommand::ShowGuides => Intent::ToggleGuides,
+            AppCommand::ShowPane(p) => Intent::ShowDialog(Dialog::Pane(p)),
         }
     }
 }
@@ -625,7 +649,13 @@ mod tests {
     fn every_command_has_a_label_and_a_menu_shortcut() {
         for c in AppCommand::ALL {
             assert!(!c.label().is_empty());
-            assert!(c.primary_shortcut().is_some(), "{c:?}");
+            // The panes the original has no gallery key for are reached
+            // from the Window menu alone.
+            let keyless = matches!(
+                c,
+                AppCommand::ShowPane(DockPane::ColourEditor | DockPane::Photo)
+            );
+            assert_eq!(c.primary_shortcut().is_none(), keyless, "{c:?}");
         }
         assert_eq!(
             AppCommand::Open.primary_shortcut().unwrap().to_string(),
@@ -639,6 +669,27 @@ mod tests {
             "D"
         );
         assert_eq!(KeyChord::plain(ChordKey::Home).to_string(), "Home");
+    }
+
+    #[test]
+    fn the_gallery_keys_show_their_panes_with_or_without_a_document() {
+        let key = |c: AppCommand| c.primary_shortcut().unwrap().to_string();
+        let c = DevicePoint::new(0.0, 0.0);
+        for (pane, k) in [
+            (DockPane::ColourGallery, "F9"),
+            (DockPane::Layers, "F10"),
+            (DockPane::BitmapGallery, "F11"),
+        ] {
+            assert_eq!(key(AppCommand::ShowPane(pane)), k);
+        }
+        for pane in DockPane::ALL {
+            let cmd = AppCommand::ShowPane(pane);
+            assert!(AppCommand::ALL.contains(&cmd));
+            assert!(!cmd.needs_document());
+            assert!(!cmd.works_in_drag());
+            assert_eq!(cmd.intent(c), Intent::ShowDialog(Dialog::Pane(pane)));
+            assert_eq!(cmd.label(), pane.label());
+        }
     }
 
     #[test]
