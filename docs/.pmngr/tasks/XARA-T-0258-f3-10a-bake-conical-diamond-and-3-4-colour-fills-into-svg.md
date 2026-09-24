@@ -2,14 +2,15 @@
 id: XARA-T-0258
 type: task
 title: F3.10a — bake conical, diamond and 3/4-colour fills into SVG geometry
-status: in_review
+status: done
 priority: medium
 parent: XARA-US-0043
 author: mcp
 labels: [phase-8, xarast-format, svg]
 created: 2026-09-24T00:01:54Z
-updated: 2026-09-24T00:06:11Z
+updated: 2026-09-24T00:15:02Z
 started: 2026-09-24T00:01:54Z
+closed: 2026-09-24T00:15:02Z
 ---
 
 ## Description

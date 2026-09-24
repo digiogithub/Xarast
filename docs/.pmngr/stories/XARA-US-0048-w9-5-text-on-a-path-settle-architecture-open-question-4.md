@@ -2,13 +2,14 @@
 id: XARA-US-0048
 type: story
 title: W9.5 — Text on a path (settle architecture open question 4)
-status: in_review
+status: done
 parent: XARA-EP-0010
 author: mcp
 labels: [phase-9, text, decision]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T23:51:51Z
+updated: 2026-09-24T00:15:02Z
 started: 2026-09-23T23:30:48Z
+closed: 2026-09-24T00:15:02Z
 ---
 
 ## Tasks (full table: phase-09 §W9.5)
