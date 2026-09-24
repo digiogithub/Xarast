@@ -291,7 +291,9 @@ reason the walker *reports*, which is its own test.
     scene epoch, resize, dpi, colours, rotation) is a full frame.
     `RenderedFrame::{reuse, exact}` say what happened; the viewer's
     screenshot waits for an exact frame. Scrolled and column-drawn frames
-    match a one-call render to within 1/255 (tests).
+    match a one-call render byte for byte (tests; they were within 1/255
+    until the rasteriser's origin was fixed, `render.md` invariant 15).
+    A new scene at the same view is decision 40.
 26. **A Draft zoom-out's border is left to the Final.** Rasterising it
     cost ~190 ms a frame over 100 000 objects: the border is short, wide
     strips, and the CPU backend runs a strip shorter than a band on one
@@ -386,6 +388,41 @@ reason the walker *reports*, which is its own test.
     in memory and never touch the user's state directory.
 
 39. **Saving (XARA-US-0084).** See the section below.
+
+40. **An edit repaints its damage, decided on the render thread**
+    (XARA-T-0221). `reuse::plan` asks `reuse::repaint` first: when the
+    job's transform is bit-identical to the kept frame's, the page rect
+    equal and the kept frame fully covered, the job's scene is diffed
+    against the kept frame's (`xarast_render::scene_damage`); for a `Final`
+    the kept frame's Draft rectangle (`Kept::inexact`) is added. Empty
+    damage under a new epoch reuses every pixel; up to four rectangles
+    under half the view are `Plan::Repaint` (`FrameReuse::Repainted`,
+    `fresh` = the rectangles, `base` = the kept generation); anything
+    bigger, or an edit during a pan or zoom, is a full frame.
+    * **Why on the render thread and not in `Session::after_mutation`.**
+      Only the worker knows which frame is on screen (decision 25 and the
+      dead end "Deciding pixel reuse on the main thread"), and a diff of
+      the scenes covers every command, undo, redo, preview and palette
+      redefinition without per-command extents. `after_mutation` still
+      marks the whole view in `Dirty`, which nothing narrower consumes;
+      it is an upper bound.
+    * **`Kept` holds the scene and resolver it was drawn from**, the page
+      rect and `inexact` (a rectangle holding every non-`Final` pixel;
+      `final_exact()` is its emptiness). A `Draft` repaint adds its
+      rectangles to `inexact`; a `Final` repaint includes it and clears it,
+      so the Final after a fill drag redraws the dragged area only.
+    * **The session double-buffers its scene** (`spare_scene`): the kept
+      frame holds the scene on screen, so after an edit the current scene
+      is always shared; the rebuild takes the spare once nobody else holds
+      it (`strong_count == 1`, which cannot rise behind our back) instead
+      of allocating a whole scene.
+    * **The shell keeps its tiles.** A frame whose epoch changed but whose
+      `base` is the last frame uploaded keeps the tiles of its level under
+      the view, restarts any tile with texels outside the view, forgets
+      every other tile and level, and uploads only `fresh`
+      (`xarast-shell/src/tiles.rs`, `TileStore::retain`).
+    * Measured over the corpus: repainted frames rasterise 4 % of the
+      pixels a full frame would (`perf.md`, "An edit repaints its damage").
 
 ---
 
@@ -536,6 +573,13 @@ placer (XARA-T-0259, 2026-09-24, ext4, load ≈ 3): ProbeX16 UI thread
     `emergency_shutdown` (which autosaves first). Every intent that closes
     documents goes through `request`.
 15. **An autosave entry's `holder` is written before its snapshot.**
+16. **A repaint is only ever drawn over the frame it was diffed against,
+    at its exact view.** `Plan::Repaint` requires the kept frame's
+    transform bit for bit, its page rect and full cover; the pixels
+    outside the damage are that frame's. Loosening any of these (a
+    whole-pixel pan plus an edit, say) needs the damage moved with the
+    pixels first. `tests/edit_damage.rs` in the shell checks every frame
+    and the tiles against a full render byte for byte.
 12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
     `InfobarEdit` (typed `InfobarValue`), `AutoScroll`,
     `SetCurrentAttribute`; pointer intents now drive the `ToolMachine`,

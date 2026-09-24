@@ -785,6 +785,48 @@ Reading them:
   first frames after a direction change, when the render thread's strips
   land in a burst; p99 stays inside budget.
 
+### An edit repaints its damage (XARA-T-0221, 2026-09-24)
+
+Before, every edit was a new scene epoch and so a full frame on the render
+thread and a full re-upload of the canvas tiles. Now the render thread
+diffs the new scene against the one on screen and rasterises only the
+damaged rectangles (`app-core.md` decision 40, `render.md` "Edit damage").
+
+**Measured over the corpus** (`xarast-shell/tests/edit_damage.rs`, all 59
+files, 320 × 240, 8 random edits each: fill recolours, moves, deletions,
+undo/redo, fill-tool drags with their preview in flight, a third of them
+drawn Draft first): **817 frames, 512 repainted, 126 full** (59 first
+frames, the rest edits damaging over half the view). The repainted frames
+rasterised **1.57 M pixels against 39.3 M** for the same frames drawn whole:
+**4.0 %, a 96 % saving**, and the tile planner uploaded exactly those 1.57 M
+pixels. Every frame, and the canvas composited from the tiles, equals a
+full render byte for byte.
+
+**What the diff costs.** Linear in the scene's ops: a prefix/suffix walk
+comparing ops (paths by `Arc` pointer first), plus hashing whatever differs.
+It runs on the render thread, before the repaint; bounds are computed only
+for unmatched leaves. Each repaint rectangle builds one culled display list
+(the XARA-T-0033 scan, 1–2 ms at 100k objects), hence the cap of four.
+
+**What the exactness cost.** Rasterising coverage from the primitive's own
+left edge instead of the draw area's (`render.md` invariant 15) makes a
+column, a tile or a strip re-rasterise the part of a wide primitive left of
+it. Viewport bench, same machine, back to back under concurrent load:
+
+| Frame | before | after |
+|---|---|---|
+| `fit/pan_draft` | 1.57 ms | 1.59 ms |
+| `zoomed/pan_draft` | 10.4 ms | 11.4 ms (two runs) |
+| `fit/final_after_idle` | 112.9 ms | 111.0 ms |
+| `zoomed/final_after_idle` | 91.1 ms | 95.7–99.0 ms |
+
+About +1 ms on a zoomed pan (still inside 16 ms) and +5–9 % on a Final at
+rest; one-call renders (export, goldens) are unchanged.
+
+**Memory.** The render thread keeps the scene of the frame on screen, and
+the session double-buffers its own (`Session::spare_scene`): two scenes
+are resident, where there was one plus a transient.
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape
