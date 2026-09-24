@@ -2,14 +2,15 @@
 id: XARA-T-0317
 type: task
 title: C10 — Bake feathers into SVG and .xarast so external viewers draw them
-status: in_review
+status: done
 priority: medium
 parent: XARA-US-0069
 author: mcp
 labels: [phase-13, live-effects, format, export]
 created: 2026-09-24T18:06:47Z
-updated: 2026-09-24T20:13:37Z
+updated: 2026-09-24T21:41:24Z
 started: 2026-09-24T19:59:53Z
+closed: 2026-09-24T21:41:24Z
 ---
 
 ## Description

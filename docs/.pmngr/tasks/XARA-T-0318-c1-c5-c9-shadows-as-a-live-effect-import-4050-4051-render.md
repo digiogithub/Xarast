@@ -2,14 +2,15 @@
 id: XARA-T-0318
 type: task
 title: "C1–C5, C9 — Shadows as a live effect: import 4050/4051, render wall/floor/glow, .xarast round trip"
-status: in_review
+status: done
 priority: high
 parent: XARA-US-0069
 author: mcp
 labels: [phase-13, live-effects, render, xar, format]
 created: 2026-09-24T19:33:15Z
-updated: 2026-09-24T21:04:30Z
+updated: 2026-09-24T21:41:24Z
 started: 2026-09-24T19:33:18Z
+closed: 2026-09-24T21:41:24Z
 ---
 
 ## Description
