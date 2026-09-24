@@ -2,12 +2,13 @@
 id: XARA-T-0221
 type: task
 title: T8.5.4 — dirty region for a fill edit
-status: backlog
+status: in_progress
 parent: XARA-US-0040
 author: mcp
 labels: [phase-8, render]
 created: 2026-09-23T21:18:03Z
-updated: 2026-09-23T21:18:03Z
+updated: 2026-09-24T01:21:39Z
+started: 2026-09-24T01:21:39Z
 ---
 
 ## Description

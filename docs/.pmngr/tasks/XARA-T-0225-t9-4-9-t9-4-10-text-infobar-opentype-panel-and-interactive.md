@@ -2,12 +2,13 @@
 id: XARA-T-0225
 type: task
 title: T9.4.9–T9.4.10 — Text infobar, OpenType panel and interactive ruler
-status: backlog
+status: in_progress
 parent: XARA-US-0047
 author: mcp
 labels: [phase-9, tools, text, ui]
 created: 2026-09-23T21:28:57Z
-updated: 2026-09-23T21:28:57Z
+updated: 2026-09-24T01:21:35Z
+started: 2026-09-24T01:21:35Z
 ---
 
 ## Description
