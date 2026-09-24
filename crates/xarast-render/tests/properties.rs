@@ -319,6 +319,71 @@ proptest! {
     }
 }
 
+/// [`render_into`] with a given backend, whose effect cache persists
+/// between calls.
+fn render_with(
+    backend: &mut CpuBackend,
+    scene: &Scene,
+    rect: Option<xarast_render::DeviceRect>,
+    target: &mut Surface,
+) {
+    let view = damage_view();
+    let dirty = rect.map_or(DirtyRect::NONE, DirtyRect::of);
+    let w = target.width() as usize;
+    let r = rect.unwrap_or_else(|| target.bounds());
+    let data = target.data_mut();
+    for y in r.y0..r.y1 {
+        let row = y as usize * w * 4;
+        data[row + r.x0 as usize * 4..row + r.x1 as usize * 4].fill(0);
+    }
+    let dl = DisplayList::build(scene, &view, &dirty);
+    backend
+        .render(&dl, &Resolver::new(), target)
+        .expect("renders");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// The damage property with the effect layer cache warm (XARA-T-0314):
+    /// one backend draws the old frame, repaints the damage of the edits,
+    /// then repaints a random rectangle and draws the whole new frame
+    /// again, so that the old scene's layers, layers valid over only part
+    /// of an effect, and assembled pieces are all in play. Every result is
+    /// the new frame a cold backend draws, byte for byte.
+    #[test]
+    fn repainting_the_damage_with_a_warm_effect_cache_gives_the_new_frame(
+        steps in prop::collection::vec(step(), 0..24),
+        edits in prop::collection::vec(edit(), 1..4),
+        extra in (0i32..60, 0i32..60, 1i32..40, 1i32..40),
+    ) {
+        let (old, _) = record(&steps);
+        let mut changed = steps.clone();
+        for e in &edits {
+            changed = apply_edit(&changed, e);
+        }
+        let (new, _) = record(&changed);
+        let mut backend = CpuBackend::new(CpuConfig::deterministic());
+        let mut frame = Surface::new(64, 64);
+        render_with(&mut backend, &old, None, &mut frame);
+        let res = Resolver::new();
+        let damage = xarast_render::scene_damage((&old, &res), (&new, &res), &damage_view(), 4)
+            .expect("comparable");
+        for r in &damage.rects {
+            render_with(&mut backend, &new, Some(*r), &mut frame);
+        }
+        let mut full = Surface::new(64, 64);
+        render_into(&new, None, &mut full);
+        prop_assert!(frame == full, "damage {:?} missed pixels", damage.rects);
+        let (x, y, w, h) = extra;
+        let r = xarast_render::DeviceRect::new(x, y, (x + w).min(64), (y + h).min(64));
+        render_with(&mut backend, &new, Some(r), &mut frame);
+        prop_assert!(frame == full, "repainting {r:?} changed the frame");
+        render_with(&mut backend, &new, None, &mut frame);
+        prop_assert!(frame == full, "a cached whole frame differs");
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
