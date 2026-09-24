@@ -25,6 +25,16 @@ macOS in phase 14). Specification in
   the `check` job installs `poppler-utils` so PDF render tests run. The
   nightly `export-corpus.yml` checks out the fork's corpus directories
   (`CORPUS_TOKEN` secret if private). Details in `export.md`.
+- **Performance gates (XARA-US-0061).** `ci.yml` job `perf`
+  (ubuntu-24.04, per push) builds `xarast-cli` + `xtask` in release and runs
+  `xtask perf --tier pr`; the nightly `perf-nightly.yml` (04:30 UTC, after
+  fuzz and export-corpus) runs `--tier nightly` with the corpus checked out
+  the same way as `export-corpus.yml`. Both upload the results JSON
+  (`perf-pr-<sha>`, `perf-nightly-<sha>-<run>`, 90 days) as the per-commit
+  history. No apt packages, no GPU, no new Rust dependency (`serde_json`
+  was already in the workspace). Gates, margins and noise control are in
+  `perf.md`, "CI gates". The AppImage size gate (≤ 80 MiB) stays where it
+  was, in `build-appimage.sh`.
 
 ## Size (2026-09-23, x86_64, commit 8646a5d)
 
@@ -199,4 +209,9 @@ The size with all of these linked in is recorded under **Size** above.
       headless render (and has no corpus file to render anyway). Tracked as
       XARA-T-0049.
 - [ ] GPG signing of the image and the zsync file (phase 12).
+- [ ] Phase 12 A5: a dedicated, pinned perf runner (the reference
+      machine as a self-hosted runner) so that the real-window cold start
+      and the GPU pan budgets can be gated too; today's `perf` jobs run on
+      shared GitHub runners, headless and CPU-only (see `perf.md`);
+      XARA-T-0298.
 - [x] Re-measure the size budget with the phase 5 stack: 7.7 MiB (above).

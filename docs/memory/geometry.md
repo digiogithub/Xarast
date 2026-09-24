@@ -741,6 +741,7 @@ flattener should go.
 - **Arc segments**, if `i_curve` is adopted.
 - **Cross-architecture `f64` determinism** is not gated. No `mul_add` and no
   fast-math anywhere in the geometry path, which is the precondition;
-  promote to a gate in phase 12.
+  promote to a gate in phase 12 (XARA-T-0300; not done in XARA-US-0061
+  because it cannot be verified without an aarch64 host).
 - **`insta` snapshots of SVG path data** for the corpus are not wired up; the
   corpus is exercised by assertions instead.
