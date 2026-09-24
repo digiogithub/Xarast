@@ -164,6 +164,29 @@ impl UiHost {
         self.tree = egui_tiles::Tree::new("xarast_dock", root, tiles);
     }
 
+    /// Builds the default layout as one right-hand column of **tab
+    /// groups**: each inner slice is one cell of the column, its panels
+    /// tabs of that cell with the first one showing. A single panel is a
+    /// plain pane, as [`UiHost::set_default_layout`] makes it.
+    pub fn set_default_layout_grouped(&mut self, groups: &[&[PanelId]]) {
+        let mut tiles = egui_tiles::Tiles::default();
+        let mut cells = Vec::new();
+        for group in groups {
+            let panes: Vec<_> = group
+                .iter()
+                .filter(|id| self.panels.contains_key(id.0))
+                .map(|id| tiles.insert_pane(Pane(id.0.to_owned())))
+                .collect();
+            match panes.len() {
+                0 => {}
+                1 => cells.push(panes[0]),
+                _ => cells.push(tiles.insert_tab_tile(panes)),
+            }
+        }
+        let root = tiles.insert_vertical_tile(cells);
+        self.tree = egui_tiles::Tree::new("xarast_dock", root, tiles);
+    }
+
     /// The saved form of the current layout.
     pub fn save_layout(&self) -> LayoutState {
         LayoutState {
@@ -232,6 +255,25 @@ impl egui_tiles::Behavior<Pane> for HostBehavior<'_, '_> {
             }
         }
         egui_tiles::UiResponse::None
+    }
+
+    fn on_tab_button(
+        &mut self,
+        tiles: &egui_tiles::Tiles<Pane>,
+        tile_id: egui_tiles::TileId,
+        button_response: egui::Response,
+    ) -> egui::Response {
+        // egui_tiles paints a tab's title without telling AccessKit: name
+        // the tab after its panel, so that a panel sharing a tab group
+        // (the photo panel beside the bitmap gallery) can be found and
+        // chosen without a pointer.
+        let title = self.tab_title_for_tile(tiles, tile_id).text().to_owned();
+        let ctx = button_response.ctx.clone();
+        ctx.accesskit_node_builder(button_response.id, |node| {
+            node.set_role(egui::accesskit::Role::Tab);
+            node.set_label(title);
+        });
+        button_response
     }
 
     fn tab_title_for_pane(&mut self, pane: &Pane) -> egui::WidgetText {

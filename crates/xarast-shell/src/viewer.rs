@@ -711,6 +711,7 @@ impl Viewer {
             colour_editor: self.app.active().and_then(Session::colour_editor_view),
             colour_bar,
             bitmap_gallery,
+            photo_panel: self.app.active().map(Session::photo_panel_view),
             imports: self.app.import_progress(),
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
@@ -969,6 +970,7 @@ impl Viewer {
                 ))
             }
             UiCommand::BitmapGallery(op) => Intent::BitmapGallery(op),
+            UiCommand::PhotoPanel(op) => Intent::PhotoPanel(op),
             UiCommand::BitmapDragAt { x, y } => {
                 use xarast_app::bitmap_gallery::{BitmapDragPoint, BitmapGalleryOp};
                 let at = PhysicalPos::new(f64::from(x) * ppp, f64::from(y) * ppp);
@@ -2238,6 +2240,23 @@ mod tests {
             .colour_editor
             .expect("a document has an editor");
         assert_eq!(editor.title, "Fill for new objects");
+    }
+
+    #[test]
+    fn photo_panel_commands_become_intents_and_the_model_shows_the_panel() {
+        let mut v = Viewer::new(Vec::new());
+        let op = xarast_app::photo_panel::PhotoPanelOp::Commit;
+        assert_eq!(
+            v.ui_intent(UiCommand::PhotoPanel(op.clone()), 1.0),
+            Some(Intent::PhotoPanel(op))
+        );
+        assert!(v.ui_model(1.0).photo_panel.is_none(), "no document");
+        v.app.new_document();
+        let panel = v
+            .ui_model(1.0)
+            .photo_panel
+            .expect("a document has a photo panel");
+        assert!(panel.node.is_none(), "nothing selected");
     }
 
     /// The colour bar (XARA-US-0042): its drag positions become canvas
