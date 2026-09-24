@@ -18,11 +18,11 @@ architecture open question 4 is closed (see "Text on a path" below).
 |---|---|---|
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
-| XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
+| XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback done for PDF and SVG (XARA-T-0245, see "Font embedding"), profile C open | in review |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr` done (XARA-T-0225), `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
 | XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). Text infobar, OpenType panel and interactive ruler (T9.4.9–T9.4.10) done (XARA-T-0225). IME, clipboard (T9.4.7–T9.4.8) open | in review |
 | XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
-| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType open (XARA-T-0218), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
+| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType done (XARA-T-0218, see "Font embedding"), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
 
 Public API (`crates/xarast-text/src/lib.rs`):
 
@@ -142,9 +142,11 @@ Public API (`crates/xarast-text/src/lib.rs`):
   Noto Sans weight gets the embedded face (synthesised bold if need be),
   never the installed family. Asserted against real system fonts in the
   opt-in test.
-- **Embedding denied** when `OS/2.fsType & 0xF == 2` (restricted licence)
-  or bit 9 (bitmap embedding only) is set; unreadable tables count as
-  installable, the OpenType default.
+- **Embedding denied** when the licence level of `OS/2.fsType` is
+  *restricted* (bit 1 without bits 2–3) or bit 9 (bitmap embedding only)
+  is set; unreadable tables count as installable, the OpenType default.
+  The rule lives in `embed::EmbedRights::from_fs_type` (see "Font
+  embedding"); `FontDb::embedding_denied` is its shorthand.
 - **Glyph outlines** are drawn unhinted at unit scale into `BezPath` and
   cached per `(face, glyph, coords)` with trailing zero coordinates
   stripped, so `[]` and `[0]` hit the same entry. The cache is cleared
@@ -154,6 +156,86 @@ Public API (`crates/xarast-text/src/lib.rs`):
 - **Coordinates are y up**, like the document: the first baseline is y = 0,
   later ones negative; x = 0 is the column's left edge (column mode) or the
   anchor (point mode). Glyph y offsets from parley (y down) are negated.
+
+## Font embedding (XARA-T-0218, XARA-T-0228, XARA-T-0233, XARA-T-0245, as built)
+
+One layer, `xarast-text/src/embed/` (`embed::{EmbedRights, Embedding,
+EmbedError, PdfFont, WebFont, woff2, with_fs_type}`), used by every
+writer: `.xarast` and SVG export (WOFF2 behind `@font-face`) and PDF
+export (subset `CIDFont`s). Nothing else decides licences or subsets.
+
+- **The `fsType` rule** (`EmbedRights::from_fs_type`): level = bit 9 →
+  `BitmapOnly` (refused: we embed outlines); else the least restrictive of
+  bits 3 (`Editable`), 2 (`PreviewPrint`), 1 (`Restricted`, refused); 0 →
+  `Installable`. Bit 8 = no subsetting → the **whole glyph set** is
+  embedded (`PdfFont::whole`, `WebFont::whole`; the web font's `cmap`
+  then maps every character the face maps). `PreviewPrint` *is* embedded
+  in `.xarast` too: Xarast only draws an embedded subset for display and
+  never installs it for editing (the reader does not register it).
+- **Subsetter: `subsetter` 0.2.6** (Typst, `MIT OR Apache-2.0`, default
+  features off so no second `skrifa`/`write-fonts`). It keeps outlines,
+  `head`/`hhea`/`hmtx`/`maxp`/`name`/`post` (+ `cvt`/`fpgm`/`prep` for
+  TrueType) and converts CFF to CID-keyed CFF with identity CIDs; it drops
+  `cmap` and `OS/2` because a PDF CID font brings its own maps. Glyphs are
+  handed to it sorted with `.notdef` first, so **new gid = index in the
+  kept list**; composite components it adds go after them. Panics inside
+  it are caught (`catch_unwind`) and become `EmbedError::Subset`: the
+  input is a system font, not ours to trust.
+- **PDF program** (`FontDb::pdf_font`): TrueType → the whole subset file
+  (`FontFile2`, `CIDFontType2`, `CIDToGIDMap /Identity`); CFF → the bare
+  `CFF ` table (`FontFile3 /CIDFontType0C`, `CIDFontType0`). Widths,
+  bbox, ascent/descent/cap height and italic angle from `skrifa`
+  metrics, in thousandths of an em; PostScript name from `name` ID 6.
+- **Web font** (`FontDb::web_font`): subset of the glyphs the drawn
+  characters map to, plus a **`cmap` we build** (`embed/cmap.rs`: format
+  4 for the BMP, format 12 added when a character is above U+FFFF; the
+  format-4 terminator maps U+FFFF to glyph 0 — a delta of 1, got wrong
+  once) and the face's **own `OS/2` unchanged** (browsers require it; its
+  `fsType` still states the licence). Then **our own WOFF2 writer**
+  (`embed/woff2.rs`, from the W3C spec): every table with the null
+  transform (`glyf`/`loca` version 3), `loca` right after `glyf`, one
+  Brotli stream (`brotli` 9, quality 11, font mode, single-threaded, so
+  deterministic). `woff2::decode` reads back null-transform files only
+  (ours); tests and `xtask` use it. Chrome loads these files (a probe
+  with a family name no system has renders the embedded glyphs: hebrew
+  mean |Δ| 0.85 vs our PNG; a corrupted `data:` URI changes the render by
+  21/255).
+- **Why not `ttf2woff2`** (MIT OR Apache-2.0, applies the `glyf`
+  transform): it refuses `OTTO` (CFF) fonts, and the pinned CJK face is
+  CFF. **Why not `fontcull`/`klippa`**: MIT-only, another
+  `read-fonts`/`write-fonts` line, C-bound WOFF2 (`woofwoof`).
+- **Cost** (release, this machine): Noto Sans subset, 95 characters →
+  6.3 KB WOFF2 in 7.5 ms (Brotli q11 is nearly all of it); CJK 14
+  characters → 2.3 KB in 3.6 ms; DejaVu Sans (760 KB face) 95
+  characters → 15 KB in 36 ms; a PDF program is microseconds.
+  `FontService::web_font` caches results by `(face, sorted chars)` (64
+  entries, cleared when full), so autosave and repeated saves of an
+  unchanged document subset nothing.
+- **Where the glyphs come from.** `.xarast`/SVG: `SvgTextPlacer::place`
+  (the walker's layout) reports `StoryPlacement::faces` (each face with
+  the characters it draws), `char_faces` (face of each character item)
+  and `denied` (requested families whose own face refuses embedding).
+  PDF: `build_story` keeps, per run, `ExportGlyph { face, id, transform
+  (font units → document), variable, text }` — `text` is the cluster's
+  text on its first glyph — and the underline bars; the walker records
+  the painted runs (`SceneWalker::scene_text`).
+- **Variable faces** are subset at their default instance (no
+  `variable-fonts` feature): a run drawn at another instance is not
+  *painted* as text in PDF (outlines + invisible text); in SVG the
+  browser draws the default instance.
+
+Evidence: `xarast-text/tests/embed.rs` (5: outlines of every drawn
+character identical after WOFF2 decode, Latin/CFF CJK/Hebrew; PDF widths
+and CFF program; refusal for fsType 2 and 0x200, preview & print allowed;
+no-subsetting embeds all glyphs; empty sets refused) + unit tests
+(`sfnt`, `woff2`, `fsType` table); `xarast-app/tests/font_embedding.rs`
+(4, end to end on a synthetic document, the corpus `embeddedFonts.xar`
+has no font data: PDF text/clip/invisible modes, one `FontFile2`,
+`ToUnicode`, `pdftotext` and `pdffonts` read it back, the refused face
+never embedded and reported; SVG export embeds one `@font-face` and
+outlines the refused story; `--text outlines`; `.xarast` has exactly one
+`resources/fonts/*.woff2`, `xarast:font-embed="denied"`, `xarast:fonts`
+in `meta.xml`, and re-saves byte-identical fresh and through raw copies).
 
 ## The text tool (W9.4, as built, XARA-US-0047)
 
@@ -941,7 +1023,8 @@ re-save bytes (59/59 render and bytes); corpus export-check TextCurve svg
 
 ## Invariants that must not be broken
 
-1. **Nothing outside `xarast-text` names a parley, fontique or skrifa type.**
+1. **Nothing outside `xarast-text` names a parley, fontique, skrifa, subsetter
+   or brotli type.**
    The public API uses our own types (`FaceData` wraps the blob).
 2. **Positions are accumulated in millipoints**, never in `f32` across a
    line. Only per-glyph values come from `f32`.
@@ -958,6 +1041,11 @@ re-save bytes (59/59 render and bytes); corpus export-check TextCurve svg
    passed to parley whole** (see above).
 6. **`LaidCluster`s are in logical order; glyph runs in visual order**, left
    to right.
+7. **One embedding layer.** Only `xarast_text::embed` reads `fsType` and
+   subsets; every writer (`.xarast`, SVG, PDF) goes through it, so a face
+   refused in one format is refused in all. Subsets are a function of the
+   face bytes and the glyph or character set only (byte-identical
+   re-saves depend on it).
 
 ## Test fonts (pinned set)
 
@@ -1072,8 +1160,18 @@ first story of a process waits for enumeration when nothing prewarmed
   the ruler a `.xar` line node carries; centre/right/decimal stops can be
   set but layout still treats every stop as left (T9.3.8); the ruler is not
   shown for turned, sheared or mirrored stories or text on a path.
-- Convert to shapes leftovers: T9.6.5 (outline fallback for export and
-  profile C, XARA-T-0245).
+- Convert to shapes leftovers: ~~T9.6.5 outline fallback for export~~
+  (done for PDF and SVG export, XARA-T-0245); conformance profile C
+  (outlines duplicated in `.xarast`) is not built — there is no profile C
+  writer yet.
+- Font embedding leftovers: the `.xarast` reader does not register the
+  embedded subsets (a machine without the face substitutes, as before; a
+  per-document overlay is needed first, and a subset must never be used
+  for editing); the `glyf` WOFF2 transform is not applied (files a few
+  per cent larger); a web font has no `GSUB`/`GPOS`, so a browser draws
+  ligatures and Arabic joining from the characters (positions stay
+  exact); `@font-face` declares the face's own weight/style, so a
+  browser may synthesise bold where Xarast does not.
 - Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
   straight (an SVG `transform` per character would need one element per
   character); ~~the GUI save passes no text placer~~ (done,
