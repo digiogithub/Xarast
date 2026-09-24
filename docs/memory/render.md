@@ -28,7 +28,13 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
 - **Paints:** solid; all six gradient shapes (linear, radial, conical,
   diamond, 3-colour and 4-colour mesh) × four repeat modes × affine and
   perspective mappings; image fills with four repeat modes, three filters,
-  contone and brightness/contrast/gamma/saturation adjustment.
+  contone and brightness/contrast/gamma/saturation adjustment. Images
+  resample through one sampler (`resample.rs`, XARA-US-0052; minification
+  in linear light, magnification in encoded sRGB):
+  Mitchell–Netravali magnification, a widened tent between 1× and 2×
+  minification, a lazily built mip pyramid with trilinear beyond, and an
+  aligned fast path; bitmap transparencies use the same sampler and filter.
+  See "Resampling quality".
 - **Ramps:** multi-stop, RGB / HSV-short / HSV-long, 256- and 2048-entry
   tables, the Schlick bias/gain profile, the fixed-point transparency path
   with 22 fractional bits, and an interning cache.
@@ -40,7 +46,7 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   culling and `scroll_surface` reprojection. `scene_damage` diffs two scenes
   into the device rectangles an edit changed (XARA-T-0221, "Edit damage"),
   and any rectangle drawn over a frame is exactly that frame's pixels.
-- **Validation:** a 120-scene generated feature corpus with committed goldens,
+- **Validation:** a 130-scene generated feature corpus with committed goldens,
   exact CPU goldens, determinism over 20 runs, the gradient matrix, the blend
   domain, the precision rule (measured *and* grepped), AA level counts and a
   supersampled comparison, and `criterion` benches per budget row.
@@ -808,6 +814,137 @@ WATCH 0.980 → 0.991, Spitfire 0.850 → 0.958, TestBitmapFill 0.985 → 0.999.
 No golden encoded the bug (none has a bitmap fill); pinned by
 `crates/xarast-app/tests/bitmap_orientation.rs`.
 
+### Resampling quality (XARA-US-0052, W10.4, 2026-09-24)
+
+`crates/xarast-render/src/resample.rs` is the one image sampler, behind
+`Paint::Image` (fills and placed bitmaps) and `TranspSource::Image`
+(which now carries a `Filter`, set by the walker from the quality like the
+colour fill's). `ImageSampler::new` inverts the mapping, picks a plan and
+builds the contone table once per primitive; `draw_image_cmd` used to
+rebuild a `PaintSampler` (a matrix inversion) and a `LevelSampler` per
+pixel.
+
+| `Filter` | ≤ 1 texel/px | 1–2 texels/px | ≥ 2 texels/px |
+|---|---|---|---|
+| `Nearest` (Draft) | point on the base | point on the base | point on the base |
+| `Bilinear` | bilinear | tent widened by the footprint | trilinear, pyramid |
+| `HighQuality` (Final, export) | Mitchell–Netravali (B = C = ⅓) | tent widened by the footprint | trilinear, pyramid |
+
+- **Minification in linear light, magnification in encoded sRGB — a
+  deliberate deviation from the phase document**, which asks for linear
+  light for every filter (§W10.4, "measurement wins"). Minified samples
+  and the pyramid go through a 256-entry decode table into *premultiplied*
+  linear `f32`, are weighted there, and come back through `encode`: a
+  binary search over the 255 linear values of the half-levels, so it
+  rounds to the nearest encoded level, is exact on the table's values and
+  makes no libm call per pixel. Magnification (bilinear, Mitchell) weights
+  premultiplied *encoded* values (`MAGNIFY_SPACE`): the harness measured
+  it better for every kernel on every one of the 16 image × ratio rows
+  (bilinear 19.54 vs 19.36 dB mean, Mitchell 19.69 vs 19.53) with less
+  ringing (Mitchell 0.109 vs 0.180), and linear light visibly leaked a
+  bright neighbour into a dark texel of a tiny bitmap blown up (Mitchell
+  gives a neighbour 5.6 % weight: 66/255 encoded in linear light, 28/255
+  encoded; `xarast-app/tests/bitmap_orientation.rs` caught it at its
+  40/255 tolerance). The seam at 1 texel per pixel between the two spaces
+  is at most the difference between a bilinear sample in either, and the
+  aligned case (below) removes it where it would show. Compositing is
+  untouched (invariant 2).
+- **Premultiplied, not straight.** The old bilinear lerped straight RGBA,
+  so a transparent texel's stored colour bled into its neighbours
+  (`transparent_texels_do_not_bleed_their_colour`).
+- **Footprint** = the longer pixel axis of the Jacobian of device →
+  texel (`FrameMap::jacobian`, analytic for perspective): once per
+  primitive for an affine mapping, per pixel for a perspective one.
+- **The pyramid** (`ImageRef::level`): 2 × 2 box in premultiplied linear
+  light down to 1 × 1, odd edges repeat their last row/column, stored as
+  straight sRGB RGBA8 so every level samples with the same code. Built on
+  first minified sample (`OnceLock`), shared by every clone of the
+  `ImageRef` (the render thread's resolver snapshot included), never for
+  magnification, `Nearest` or 1–2× footprints. +⅓ of the image's bytes.
+  `ImageRef` equality ignores it (damage compares images by content).
+- **The aligned case** (T10.3.7's fast path): an affine mapping with one
+  texel per pixel on each axis (mirroring allowed), within 1.5 × 10⁻⁸
+  relative, and texel centres on pixel centres within 10⁻⁶ texel, samples
+  every filter as a point, with integer texel arithmetic. That is the
+  original's rule too — smoothing only under rotation or scaling
+  (`research/03 §2.8`) — and without it Mitchell (not interpolating) would
+  soften a bitmap drawn at its own size. Pinned bit for bit to point
+  sampling through the frame map (`tests/resampling.rs`).
+- **Contone is per texel, before the kernel** — the original remaps inside
+  the sampling through its R, G, B tables (`research/03 §2.8`) — through a
+  256-entry table built per primitive with the same
+  `xarast_color::interpolate` call as before (it ran per *pixel*).
+  Brightness/contrast/gamma/saturation stay after the filter.
+- **GPU parity (T10.4.5)** holds by construction: `GpuBackend::render`
+  composites on the CPU (the WGSL paint pass is deferred, XARA-T-0051),
+  and `parity_gpu_cpu` runs over the ten new `resample_*` corpus cases.
+  When the WGSL pass is written it must mirror this sampler.
+
+**The kernel choice, by measurement (T10.4.3).** `tests/resampling.rs`,
+release, 128² synthetic set: zone-plate chart, 3-channel value-noise
+"photo", screenshot (flat blocks, 1-px lines, 1-px checker), logo (thin
+antialiased rings). Magnification is a round trip (exact area reduction in
+linear light, enlarge back, PSNR vs the original, encoded RGB) at ×1.5, 2,
+3, 4; ringing is the unclamped overshoot outside the 2 × 2 source texels,
+linear × 255, on screenshot + logo.
+
+| Space | Kernel | Mean PSNR | Mean ringing | Max ringing | ns/px |
+|---|---|---|---|---|---|
+| linear | bilinear | 19.36 | 0.000 | 0.0 | 72 |
+| linear | Mitchell–Netravali | 19.53 | 0.180 | 16.3 | 127 |
+| linear | Catmull–Rom | 19.99 | 0.502 | 34.5 | 128 |
+| linear | Lanczos-3 | 20.26 | 1.169 | 56.6 | 342 |
+| **encoded** | bilinear | 19.54 | 0.000 | 0.0 | 59 |
+| **encoded** | **Mitchell–Netravali** | 19.69 | **0.109** | 14.7 | 113 |
+| encoded | Catmull–Rom | 20.07 | 0.306 | 31.1 | 114 |
+| encoded | Lanczos-3 | 20.28 | 0.743 | 51.0 | 313 |
+
+(Ringing is × 255 in the space the kernel averaged in; ns/px are
+single-threaded and noisy on a shared machine.) The phase's kernel
+hypothesis holds: Mitchell rings 2.8× less than Catmull–Rom and 6.8×
+less than Lanczos on hard edges, which is most of what a vector editor
+places, still beats bilinear, and costs a third of Lanczos. Its space
+hypothesis (linear light) does not, for magnification: see above. On the
+"photo" alone Lanczos leads by ≈ 1 dB; if photographs ever dominate, a
+per-bitmap choice is the lever, not a different default.
+
+Minification, PSNR against the exact area average at ÷1.5, 2, 4, 8. The
+reference is a box — what the pyramid computes — so ÷2 is 99 dB by
+construction and ÷4/÷8 nearly; those rows prove the pyramid correct, not
+optimal. **÷1.5 is the honest comparison, and trilinear lost it on every
+image** (chart 23.7 vs the widened tent's 27.5, photo 49.7 vs 52.8,
+screenshot 29.1 vs 34.5, logo 28.3 vs 35.4), which is why 1–2× footprints
+use the tent widened by the footprint on the base (Mitchell widened wins
+photo and logo but loses the screenshot and costs 4×). Product overall:
+63.8 dB against 45.4 for bilinear with no prefilter; widened kernels
+34–36 dB at 0.4–3.2 µs/px.
+
+**Goldens.** The eight `image_1_*`/`image_2_*` goldens moved and were
+re-blessed with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
+--test golden_cpu`: `image_1_*` (Bilinear) by at most 1/255 in 75–290 px
+(premultiplied `f32` weights instead of per-channel `f64` lerps), the
+`image_2_*` (HighQuality) by at most 20/255 in 1 500–1 860 px — Mitchell
+instead of bilinear at the checker's edges, which is the point. The
+`image_0_*` (Nearest) goldens did not move. Thirteen of the fourteen
+`TextDesigns/` digests (`xarast-cli/tests/golden/text_designs.sha256`)
+moved too: each file places a bitmap of the original's own rendering,
+which is now Mitchell-magnified or prefiltered instead of plain bilinear.
+Checked against a render from 17e5767: every changed pixel is inside
+those bitmaps' text (SimpleText 7 100 px ≤ 63/255, Rotated 88 568 px ≤
+172/255 where a minified bitmap used to alias), the live text is
+untouched. Re-blessed with `XARAST_UPDATE_GOLDEN=1 XARAST_XAR_CORPUS=…
+cargo test -p xarast-cli --test text_designs`. Ten `resample_*` cases
+were added (minify either side of 2× per filter, a perspective plane,
+contone in the three effect spaces, the aligned case, a bitmap
+transparency): 130 cases.
+
+**Draft/Final and export (T10.4.4)** were already wired and are unchanged:
+`RenderQuality::image_filter` gives `Nearest` at Draft and `HighQuality`
+at Final; export always builds its scene at Final (`xarast-io` model).
+What is **not** wired is the document's smoothing flag
+(`TAG_DOCUMENTBITMAPSMOOTHING`, "pixelated" intent), which lives in
+`xarast-doc`/`xarast-app`: XARA-T-0273.
+
 **A two-row guard band on every band's coverage.** Without it the band height
 changed the picture by 1/255 at band boundaries, because the rasteriser's
 strips start at the viewport edge. Antialiasing influence is local to one
@@ -941,6 +1078,14 @@ run the shell's dependency turns it on).
     after every device, queue and resource. A helper that returns a device
     does not take the lock itself; its caller does.
 
+18. **Images are filtered premultiplied; minified in linear light,
+    magnified in encoded sRGB; composited in encoded sRGB.** Only
+    `resample.rs` converts, and only for minified samples and the
+    pyramid; `encode` must stay the exact inverse of `to_linear` on its
+    256 values.
+19. **An aligned mapping samples as a point under every filter.** Do not
+    "improve" a 1:1 bitmap with the magnification kernel; the fast path
+    and the golden `resample_aligned_hq` depend on it.
 ---
 
 ## Dead ends (do not retry)
@@ -1001,6 +1146,16 @@ run the shell's dependency turns it on).
   linear in the scene (6.5–10 ms at 900k ops), and the assembled frame is
   not byte-identical to a whole one. Rasterise one dirty rectangle and
   upload its pieces.
+- **Magnifying in linear light** (the phase document's literal rule).
+  Worse on every harness row than encoded sRGB, more ringing, and a
+  visible light leak into dark texels of a magnified tiny bitmap.
+- **Trilinear between the base and level 1 for 1–2× minification.**
+  Measured worse than the tent widened by the footprint on all four test
+  images at ÷1.5 (by 3–7 dB), and it builds the pyramid for no gain.
+- **Filtering straight (non-premultiplied) RGBA.** A transparent texel's
+  colour bleeds into the edge; filter premultiplied.
+- **Judging minification only at power-of-two ratios against a box
+  reference.** The pyramid wins those by construction (99 dB at ÷2).
 - **Unserialised GPU tests running in parallel.** Several `cargo test`
   processes (or parallel threads) opening devices on the display GPU at
   once hung the Wayland compositor and blacked out the desktop. Making the
@@ -1029,6 +1184,10 @@ run the shell's dependency turns it on).
 | 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
 | 17 | ~~Dirty region for a fill edit (T8.5.4)~~. **Done 2026-09-24**, for every edit: the render thread diffs scenes (`scene_damage`) and repaints only the damage; see "Edit damage" | done (XARA-T-0221) |
 | 18 | Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5) | XARA-T-0222 |
+| 19 | Document/per-bitmap smoothing flag → `Filter` (T10.4.4's remaining half) | XARA-T-0273 |
+| 20 | Bitmap-fill tile seams in resvg on exported SVG (the renderer has none) | XARA-T-0274 |
+| 21 | Mesh fills ignore `Repeat` (did not fall out of the image work: meshes do not go through the image sampler) | XARA-T-0256 |
+| 22 | The pyramid is built on the render thread on first minified frame (26 ms for 2048², single-threaded); precompute it off-thread with the decode | T10.5.2 (XARA-US-0053) |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
 ### Vector export (PDF, XARA-US-0059, 2026-09-23)

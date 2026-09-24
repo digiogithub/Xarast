@@ -207,6 +207,30 @@ passes. Real window (`xarast --screenshot`, GPU tiles, three runs each,
 the shell costs with no document work at all. ProbeX16 (no bitmaps) is
 unchanged at 1.2–1.5 s (XARA-T-0009).
 
+#### Resampling (XARA-US-0052, 2026-09-24)
+
+`cargo bench -p xarast-render --bench render -- images`: one 512 × 512
+frame covered by one placed noise image, `CpuConfig::interactive()`,
+pyramid prebuilt. Machine loaded by other agents' builds, so ±20 %.
+Before = the tree at 17e5767 with the same bench.
+
+| Case | Before | After | Why |
+|---|---|---|---|
+| aligned (1 texel/px), HighQuality | 3.86 ms | **0.83 ms** | sampler readied once per command (was a matrix inversion per pixel), integer texel arithmetic, opaque-replace write |
+| Nearest, 3× magnified | 2.10 ms | 1.07 ms | readied once per command |
+| Bilinear, 3× magnified | 3.83 ms | 1.57 ms | same |
+| HighQuality, 3× magnified | 3.20 ms (bilinear) | 5.80 ms | Mitchell, 4 × 4 taps: 22 ns/px |
+| HighQuality, ÷1.5 | 3.12 ms (aliasing) | 3.33 ms | widened tent in linear light, ≤ 4 × 4 taps |
+| HighQuality, ÷2.67 | 4.31 ms (aliasing) | 2.65 ms | trilinear in linear light, 8 taps |
+| pyramid, 2048² | — | 26 ms | once per image, single-threaded, on first minified frame |
+
+Single-threaded per output pixel (the harness, `tests/resampling.rs`,
+release, noisy): magnification in encoded sRGB bilinear 59 ns, Mitchell
+113, Catmull–Rom 114, Lanczos-3 313 (linear light costs 10–20 % more:
+the encode is a binary search); the product's minification 55 ns;
+kernels widened by the ratio 0.4–3.2 µs (why they are not the product's
+minifier beyond 2×).
+
 ### Document model
 
 `cargo bench -p xarast-doc --bench doc`, two runs. The figures are in the
