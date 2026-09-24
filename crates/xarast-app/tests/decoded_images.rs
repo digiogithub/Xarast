@@ -140,3 +140,82 @@ fn a_new_resource_misses_and_a_gone_one_is_dropped() {
     .expect("comparable");
     assert!(damage.rects.is_empty(), "{damage:?}");
 }
+
+/// Opens the bitmap gallery and waits for every thumbnail it asked for.
+fn gallery_thumbnails(app: &mut AppState) -> Vec<Option<Arc<xarast_app::bitmap_gallery::Thumb>>> {
+    app.bitmap_gallery_view().expect("a document is open");
+    app.settle_thumbnails(std::time::Duration::from_secs(60));
+    app.bitmap_gallery_view()
+        .unwrap()
+        .entries
+        .into_iter()
+        .map(|e| e.thumbnail)
+        .collect()
+}
+
+#[test]
+fn the_gallery_decodes_nothing_the_view_has_decoded() {
+    // XARA-T-0293: the thumbnails come from the session's decoded images.
+    let mut app = app();
+    let cache = session(&app).decoded_images().clone();
+    let _ = build_scene(session(&app), None);
+    let before = cache.stats();
+    assert_eq!(before.decoded, 2, "{before:?}");
+
+    let thumbs = gallery_thumbnails(&mut app);
+    assert_eq!(thumbs.len(), 2);
+    assert!(thumbs.iter().all(Option::is_some), "{thumbs:?}");
+    let after = cache.stats();
+    assert_eq!(after.decoded, before.decoded, "{after:?}");
+    assert_eq!(after.hits - before.hits, 2, "{after:?}");
+}
+
+#[test]
+fn the_view_decodes_nothing_the_gallery_has_decoded() {
+    // A bitmap the view has never walked: the gallery decodes and files
+    // it, and the next walk finds it there.
+    let mut app = app();
+    let _ = build_scene(session(&app), None);
+    let bytes = {
+        let mut out = Vec::new();
+        xarast_io::png::encode_png(
+            &mut out,
+            xarast_io::png::PngHeader {
+                width: 90,
+                height: 30,
+                colour: xarast_io::PngColour::Rgba,
+                depth: xarast_io::PngDepth::Eight,
+                interlace: false,
+                ppm: None,
+                level: 1,
+            },
+            &gradient(90, 30, 42),
+        )
+        .unwrap();
+        out
+    };
+    let img = xarast_app::place::image_from_bytes(Arc::from(bytes), "strip.png").unwrap();
+    app.active_mut()
+        .unwrap()
+        .doc
+        .resources
+        .insert_bitmap(img.resource);
+    let cache = session(&app).decoded_images().clone();
+    let before = cache.stats();
+
+    let thumbs = gallery_thumbnails(&mut app);
+    assert_eq!(thumbs.len(), 3);
+    let strip = thumbs[2].as_ref().expect("made");
+    assert_eq!((strip.width, strip.height), (64, 21));
+    let mid = cache.stats();
+    assert_eq!(mid.decoded - before.decoded, 1, "only the new one: {mid:?}");
+
+    let scene = build_scene(session(&app), None);
+    assert_eq!(scene.resolver.images.len(), 3);
+    let after = cache.stats();
+    assert_eq!(
+        after.decoded, mid.decoded,
+        "the walk decodes nothing: {after:?}"
+    );
+    assert_eq!(after.hits - mid.hits, 3, "{after:?}");
+}
