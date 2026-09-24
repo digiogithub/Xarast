@@ -212,7 +212,10 @@ pub struct Stats {
     pub images_unrenderable: usize,
     pub texts: usize,
     pub characters: usize,
-    /// Stories on a path, laid out as ordinary lines until Phase 9.
+    /// Stories on a path the base SVG shows on straight lines: no
+    /// [`TextPlacer`] placed them along the path (it cannot when the
+    /// characters are reflected or sheared). The others have each
+    /// character placed and turned on the path (T9.5.6).
     pub text_on_path: usize,
     pub clips: usize,
     /// ClipViews whose clipping shape is not a path or shape.
