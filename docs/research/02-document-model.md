@@ -1973,7 +1973,7 @@ Points of interest:
 
 - `GetOriginalBitmapRect()` (`nodebmp.h:214`) and `GetInstanceTransform()` (`nodebmp.h:215`) give the applied transformation.
 - `MakeContoneBitmap(UndoableOperation*)` (`nodebmp.h:178`) creates the duotone version; `SetStartColour`/`SetEndColour` (`nodebmp.h:189‑190`) are the two colours.
-- `ApplyDefaultBitmapAttrs(pOp, pTranspBitmap)` (`nodebmp.h:162`) automatically applies an `AttrBitmapColourFill` referencing the bitmap; that is, **`NodeBitmap` is drawn as a rectangle with a bitmap fill**.
+- `ApplyDefaultBitmapAttrs(pOp, pTranspBitmap)` (`nodebmp.h:162`) gives a new bitmap object three attributes as its own children: **no line colour, no (flat) fill colour and a zero line width** (`Kernel/nodebmp.cpp:997-1055`); the two colours are the contone pair, so "none" shows the image as it is. With `pTranspBitmap` it also attaches that bitmap transparency, non-repeating. It does *not* apply a bitmap colour fill: the object draws its image itself, as a rectangle with a bitmap fill would look (converting it to one uses its corners, `Kernel/nodebmp.cpp:1210-1212`). (Corrected in phase 10, XARA-T-0272.)
 - `GetEffectiveBitmapMinDPI(pBitmap)` (`nodebmp.h:147`) → used to decide at what resolution to export.
 - `CanSupplyDirectBitmap()` / `GetDirectBitmap(...)` (`nodebmp.h:219‑220`): a fast path that avoids rasterising.
 - `HasSimpleOrientation(RenderRegion*)` (`nodebmp.h:197`): if the parallelogram is an aligned rectangle, it can be blitted directly.

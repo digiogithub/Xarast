@@ -563,6 +563,97 @@ Numbered after phase 9's decisions because the colour bar landed later.
     `interior: Option<FillRule>`), an outline is hit within its half-width
     or 3 px. `pick`, `enclosed` and object snapping are unchanged.
 
+## Phase 10: bitmap fills and placing bitmaps (XARA-T-0271, XARA-T-0272)
+
+| Piece | Where | State |
+|---|---|---|
+| Bitmap fill virtual points, `move_bitmap_control`, `set_bitmap_dpi`, `bitmap_fill_dpi`, `natural_length`; commands `MoveBitmapControl`, `SetBitmapTiling`, `SetBitmapDpi` | `xarast-doc/src/bitmap_fill.rs` | done (T10.3.1) |
+| Bitmap fill handles (centre + edge middles; four corners in perspective), `stop_target` for a contone pair | `fill_handles.rs` | done (T10.3.2) |
+| Fill tool on bitmap fills: drag, Constrain about the centre, Adjust aspect lock, tiling with Repeat inverted, `BitmapDpi` field, Natural size button (`ToolAction::NaturalSize`) | `fill_tool.rs`, `tool.rs` | done |
+| `default_bitmap_attrs`, `bitmap_node_centred`, `PlaceBitmap` | `xarast-doc/src/bitmap_place.rs` | done (T10.3.6) |
+| `Intent::ImportImage` (drop), `Intent::PasteImage` (clipboard picture), `Session::place_image`, `place` module (decode once, store, natural size, `bitmap_pixels`) | `place.rs`, `app.rs`, `session.rs`, `intent.rs` | done (T10.3.8) |
+| Shell: image files in a drop are placed at the drop point; Paste falls back to the clipboard's picture | `xarast-shell/src/viewer.rs` | done |
+
+Tests: `tests/bitmap_fill.rs` (6: handle positions and arms; an edge drag
+previews without writing, commits one "Move Fill Handle" step
+pixel-identical to its preview, undo and redo exact; the centre moves the
+whole fill and Esc leaves nothing; Adjust locks the aspect; tiling offers
+Repeat inverted and writes both places; natural size and a typed
+resolution resize about the centre, undo exact); `tests/place_bitmap.rs`
+(4: paste at natural size in the view with the default attributes, one
+exact step, decoded by the walker; a drop centred on its point at the
+file's own 300 dpi; a non-image and a malformed picture change nothing;
+the same picture twice shares one resource); unit tests in
+`xarast-doc/src/bitmap_fill.rs` (6), `bitmap_place.rs` (1),
+`xarast-app/src/place.rs` (4); shell: viewer tests (4: a synthetic drop
+places at the drop point and still opens a `.xar` beside it, off-canvas
+goes to the view centre; a non-image drop; Ctrl+V with a fake clipboard
+picture is one undo step; our own copy wins over a picture) and
+`tests/bitmap_damage.rs` (2: every preview frame and the commit of a
+bitmap fill drag, and a placement, repaint only their object and match a
+full render byte for byte).
+
+64. **Bitmap fill handles are virtual points** (facts:
+    `Kernel/opgrad.cpp:3701-3747`, `Kernel/fillattr.cpp:14041-14215`).
+    The fill stores three corners (`origin` = bottom-left, `axis_x` =
+    bottom-right, `axis_y` = top-left); the canvas shows the centre (moves
+    the whole fill, `FillHandle::Centre`), the middle of the x-axis edge
+    (`End`) and of the y-axis edge (`End2`). A drag moves one virtual point
+    and the corners are rebuilt from the three (`bitmap_real_points`,
+    exact in integers), so the centre stays while an edge handle turns and
+    stretches its axis. `move_control` on a bitmap fill delegates here, so
+    `MoveFillControl` means the same thing. A fill **in perspective** shows
+    its four corners (`Start`, `End`, `End2` = the perspective's top-left,
+    which `axis_y` follows, `End3` = top-right) and the centre of the
+    quadrilateral — ours; the original's perspective bitmap handles were
+    not researched.
+65. **Constrain and Adjust on a bitmap edge handle**, as the original:
+    Constrain turns it about the centre (in our 15° steps, decision 50);
+    **Adjust locks the aspect** — the other axis turns with it, stays
+    perpendicular and scales by the same ratio. Ours: the lock keeps the
+    side the other axis was on, so a mirrored fill stays mirrored (the
+    original always turns +90°). Because the lock changes the result, the
+    commit is `MoveBitmapControl { lock_aspect }` (label "Move Fill
+    Handle"), not `MoveFillControl`: the command must reproduce the preview
+    exactly (invariant 10).
+66. **Bitmap tiling is written in both places.** The renderer lets a
+    fill's own `tiling` win over the mapping attribute (`image.md`), so
+    `SetBitmapTiling` sets both and neither can contradict the other. The
+    menu is Simple / Repeating / Repeat inverted for bitmap fills only
+    (decision 51 still holds for the others); unset shows as Repeating, the
+    original's default.
+67. **Resolution and natural size.** `SetBitmapDpi` keeps the centre and
+    the axis directions and gives each axis `pixels × 72 000 / dpi` mp
+    (`natural_length`, 96 dpi when unknown); labelled "Natural Size" when
+    the dpi is the image's own, "Bitmap Resolution" when typed. The field
+    shows the horizontal resolution the fill renders at, rounded. The
+    image's size comes from the resource's layout, or from a header probe
+    of its bytes when the `.xar` importer left the layout empty
+    (`place::bitmap_pixels`). Perspective fills are left alone.
+68. **Placing an image** (T10.3.8) is `Intent::ImportImage { path, at }`
+    (a drop) or `Intent::PasteImage { width, height, rgba }` (a clipboard
+    picture), both handled by `AppState` so a refusal becomes a notice
+    ("Could not place the image: …") that changes nothing. The image is
+    decoded once under `DecodeLimits::default()`; PNG, JPEG and GIF keep
+    their bytes, anything else is stored as a lossless PNG with its
+    resolution in `pHYs`; a clipboard picture has none and is 96 dpi. The
+    resource goes in **outside the history**, deduplicated by content, as a
+    pasted fragment's bitmaps do (decision 41); then `PlaceBitmap` (one
+    step, "Import Bitmap" or "Paste") puts a `BitmapNode` of the natural
+    size on the active layer, centred on the drop point or in the view, and
+    the session selects it. The object carries the original's default
+    bitmap attributes as its own children: **no line colour, no fill
+    colour, zero line width** (`Kernel/nodebmp.cpp:997-1055`, facts) — not
+    a bitmap fill as `research/02 §8.6` said; the object draws its image
+    itself.
+69. **Which drop is a placement, and which paste is a picture**
+    (`xarast-shell/src/viewer.rs`). A drop with a document open places
+    every file with an image extension (`place::is_image_path`) and opens
+    the rest as before; the drop point is mapped through the canvas region,
+    and a point off the canvas means "the view's centre". Paste asks the
+    clipboard for a picture only when its text is neither our own copy nor
+    SVG and no text caret is up; our copy therefore always wins.
+
 ## Provisional values (observe in the VM before trusting)
 
 - Segment grab = 4 + 3 device px; freehand chunk 96 samples; freehand
@@ -609,6 +700,11 @@ Numbered after phase 9's decisions because the colour bar landed later.
 14. An infobar attribute edit is at most one undo step, and none when the
     value is already in force; at a caret it merges into the typing step
     it styles.
+15. A bitmap fill handle drag emits nothing before release and commits
+    one step whose render equals the preview (`tests/bitmap_fill.rs`); a
+    placed bitmap is one step and adds at most one resource
+    (`tests/place_bitmap.rs`). Undo of a placement restores everything but
+    the resource table, which is outside the history (decision 68).
 
 ## Dead ends (do not retry)
 
@@ -630,15 +726,22 @@ Numbered after phase 9's decisions because the colour bar landed later.
       handle (T8.3.5); axis/aspect lock during a handle drag (rest of
       T8.3.6); status-line text and per-target cursors (T8.4.6); dropping a
       palette colour on a stop or the arm (W8.7); the Hue blend mode; the
-      original's double-click-then-drag conical; linear `end2` (skew) handle;
-      bitmap-fill handles (phase 10). Profile slider drags produce one undo
+      original's double-click-then-drag conical; linear `end2` (skew) handle.
+      Bitmap-fill handles are done (decision 64); a bitmap fill's
+      stroke slot and the original's perspective bitmap handles are not.
+      Profile slider drags produce one undo
       step per change outside a gesture (XARA-T-0220).
 
 - [x] **Incremental pick index** (decision 37). Image alpha picking
       is still open.
 - [ ] `image/svg+xml` and PNG flavours on the clipboard (needs a
-      data-control / X11 selection writer beside `arboard`), pasting
-      images; Inkscape paste checked manually per release.
+      data-control / X11 selection writer beside `arboard`); Inkscape
+      paste checked manually per release. Pasting a *picture* is done
+      (decision 68); pasting a copied image *file* (a file manager's
+      `text/uri-list`) is not.
+- [ ] Dropping a bitmap on an object to make it that object's bitmap fill
+      (the original's bitmap drag), and the gallery's drag-to-place, belong
+      with the bitmap gallery (XARA-US-0055).
 - [ ] Guide properties dialog; Delete all guides has no menu item yet;
       snapping of the shape editor's nodes (W6) and of guide drags.
 - [ ] Clone (Ctrl+K), duplicate-offset preference, Paste attributes.

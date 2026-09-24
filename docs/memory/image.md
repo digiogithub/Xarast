@@ -283,8 +283,38 @@ side:
 - Contone (duotone) is applied per texel through a 256-entry table, before
   filtering, as the original does in its sampler; bitmap transparencies
   are filtered like colour fills (`TranspSource::Image` has a `Filter`).
-- Not wired: the document's smoothing flag (XARA-T-0273); bitmap fill
-  editing (XARA-T-0271); placing a new bitmap (XARA-T-0272).
+- Not wired: the document's smoothing flag (XARA-T-0273).
+
+### Editing bitmap fills and placing bitmaps (XARA-T-0271, XARA-T-0272)
+
+Decisions in `tools.md` 64–69; what matters on this side:
+
+- **A placed image is decoded once, at placement**
+  (`xarast-app/src/place.rs`), under `DecodeLimits::default()`, only to
+  refuse what is not an image and to learn its size and resolution. The
+  decoded pixels are thrown away: the document keeps the encoded bytes
+  (`pixels` empty), and the walker decodes them like any opened file's.
+- **Stored bytes**: PNG, JPEG and GIF as they arrived (the formats the
+  document's `ImageFormat` and the walker's `decode_resource` know);
+  WebP, TIFF, BMP and PNM are converted once to a lossless 8-bit RGBA PNG
+  through `xarast_io::png::encode_png`, keeping the resolution in `pHYs`
+  (no `xarast-image` encoder exists yet, T10.2.5). A clipboard picture
+  (straight RGBA from `arboard`) becomes a PNG with no `pHYs`.
+- **Natural size** = `pixels × 72 000 / dpi` per axis
+  (`xarast_doc::bitmap_fill::natural_length`, the same rule as
+  `BitmapInfo::natural_width`); no resolution means 96 dpi. The document's
+  `BitmapInfo` of a placed image is filled in (size, 32 bpp, dpi), unlike
+  the `.xar` importer's; `place::bitmap_pixels` falls back to a header
+  probe of the bytes when it is empty.
+- The resource is added outside the undo history and deduplicated by
+  content; `collect_unused` keeps it while a redo step holds its object.
+- The object gets the original's default bitmap attributes — no line
+  colour, no fill colour, zero line width
+  (`xarast_doc::default_bitmap_attrs`).
+- Not done: EXIF orientation is applied by every decode of the stored
+  JPEG (the walker's included), so a rotated JPEG places upright but its
+  natural size is read from the oriented layout — consistent, but not
+  checked against a real rotated file.
 
 ## Dead ends (do not retry)
 
