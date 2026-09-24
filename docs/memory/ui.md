@@ -629,7 +629,7 @@ instrumentation), which was extended rather than replaced.
 | `decorations` | `DecorationPlan`, `DecorationMode` | Done; GNOME ⇒ CSD mandatory, KDE/wlroots ⇒ SSD expected, XWayland ⇒ SSD |
 | `input::event` | `ShellEvent` and everything under it | Done; the platform-neutral contract |
 | `input::keyboard` | `Modifiers` with the Xara roles, `Key`, `KeyEvent`, `ModifierTracker`, `Shortcut`, `ShortcutMap<C>` | Done |
-| `ime` | `ImeEvent`, `ImeState`, `ImeCursorArea` | Seam only, fully tested; phase 9 fills it |
+| `ime` | `ImeEvent`, `ImeState`, `ImeCursorArea` | Done: the viewer drives the text tool's composition through it (XARA-T-0224, decision 41); compositor behaviour not yet observed |
 | `input::tablet` | `ToolAxes`, `StrokeSample`, `normalise`, `TabletSource`, `MouseOnlySource`, `ScriptedSource` | Done; no backend supplies real axes yet (see the verdict above) |
 | `input::coalesce` | `SampleQueue` | Done; never drops a sample |
 | `input::translate` | `winit` 0.30 → `ShellEvent`, `parse_uri_list` | Done; **the only module phase 14 rewrites** |
@@ -958,8 +958,7 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
       3 # + -`, Space (momentary selector) and Tab type rather than act
       while a caret is up; plain character keys without text are still
       swallowed. Esc, F-keys and Ctrl chords still run their commands; Esc
-      leaves the text. IME composition (no `text` while composing) is
-      T9.4.7.
+      leaves the text. IME composition: decision 41.
     - **Caret.** `OverlayShape::Caret { from, to, primary, moved }` →
       `OverlayItem::Caret`: a black line with a white halo (1.5 hairline
       for the primary caret, 1 for the secondary half of a split caret)
@@ -974,6 +973,42 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
       are turned too).
     - **Pointer.** `CursorKind::Text` → `CursorShape::Text` (I-beam) over
       the whole canvas with the text tool.
+41. **IME and clipboard at the text caret** (XARA-T-0224, T9.4.7–T9.4.8).
+    - **The IME is on exactly while a caret wants it**:
+      `Viewer::ime_request(field)` is egui's focused text field (its
+      cursor rect in points × scale) or, when the canvas has the keyboard
+      (`canvas_has_keyboard`: no egui text input, canvas focused or
+      nothing focused), `Session::ime_cursor_area()` — the text caret's
+      box in canvas pixels, offset by the canvas origin; else `None`.
+      `platform_output` turns `set_ime_allowed` on/off on change only and
+      sends `set_ime_cursor_area` when the box moves (physical pixels,
+      the candidate window opens under the caret's bottom). Turning it off
+      drops a composition still shown (`ime_ended` → `TextPreedit(None)`).
+    - **Routing.** `ShellEvent::Ime` with a caret up and the canvas
+      holding the keyboard goes to `Viewer::ime_event`: the viewer's own
+      `ImeState` (egui keeps its own for its fields) turns
+      `PreeditChanged` into `Intent::TextPreedit(Some(Preedit { text,
+      cursor }))` (empty text → `None`), `Cancelled` into
+      `TextPreedit(None)`, and `Committed` into `Intent::TextInput(
+      Insert)` stamped with `IntentAdapter::now_ms`. Enabled alone does
+      nothing.
+    - **Keys while composing are the IME's**: with `ImeState::is_composing`
+      and a caret up, a pressed key is dropped before the text-caret
+      branch (no navigation, typing, shortcut or momentary switch). Most
+      platforms send none then; X11/XIM stacks may.
+    - **Clipboard**: nothing new in the shell. Ctrl+C/X/V reach the same
+      `AppCommand`s; the core decides text versus objects (`tools.md`
+      decision 63) and the existing `SetClipboardText`/`ReadClipboard`
+      requests carry plain text through `arboard` — no new dependency, so
+      the release binary's links are unchanged. Tests use a
+      `FakeClipboard` behind the `Clipboard` trait (`with_clipboard`) and
+      synthetic `winit::event::Ime` values through
+      `input::translate::translate_ime` (now `pub(crate)`).
+    - **Not yet observed on a compositor**: whether the candidate window
+      lands under the caret on GNOME (IBus via text-input-v3) and on a
+      wlroots compositor; whether any stack sends a key event *and* a
+      commit for one keystroke (would double the character). XARA-T-0267.
+
 ### Invariants that must not be broken
 
 1. **`winit` and `wgpu` appear only in `xarast-shell`** (architecture §2,

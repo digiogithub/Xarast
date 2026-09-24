@@ -20,7 +20,7 @@ architecture open question 4 is closed (see "Text on a path" below).
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr` done (XARA-T-0225), `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
-| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). Text infobar, OpenType panel and interactive ruler (T9.4.9–T9.4.10) done (XARA-T-0225). IME, clipboard (T9.4.7–T9.4.8) open | in review |
+| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). Text infobar, OpenType panel and interactive ruler (T9.4.9–T9.4.10) done (XARA-T-0225). IME composition and the text clipboard (T9.4.7–T9.4.8) done headlessly (XARA-T-0224, see "IME composition and the text clipboard"); the per-compositor check of the candidate window is open | in review |
 | XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType open (XARA-T-0218), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
 
@@ -291,6 +291,61 @@ burst ends, graphemes, selection replace + Enter, pending → story in one
 step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
+
+## IME composition and the text clipboard (T9.4.7–T9.4.8, as built, XARA-T-0224)
+
+Code: `xarast-app/src/text_clip.rs` (`StyledText`, `copy_range`,
+`paste_edits`, `TextClipOp`), `ops.rs` (`EditCommand::{PasteText,
+CutText}`, `PasteTarget`), `text_tool.rs` (composition, cut/paste),
+`text.rs` (`splice_text`), `walker.rs` (`paint_story` with a composition),
+`app.rs` (`TextClipboard`), `xarast-shell` `viewer.rs` (`ime_request`,
+`ime_event`). Shell and tool sides: `ui.md` decision 41, `tools.md`
+decision 63.
+
+- **A composition is a preview, never an edit.** `Intent::TextPreedit(
+  Option<Preedit>)` → `Tool::text_preedit`; the text tool puts
+  `Preview::text = TextPreview { story, at, text }` and the walker draws
+  that story with the text spliced in (`splice_text` on the collected
+  `StoryText`: the inserted text takes the style typing there would give
+  it — the character before, or the one after at a paragraph's start —
+  and every run, line start, item and kern after it moves along). The
+  spliced geometry is never cached and its content hash folds the
+  composition in. The tool lays out the same spliced story for the caret
+  (at the composition's cursor end), a plain underline (the bottom edges of
+  the composition's selection quads), and a highlight of the IME's
+  selected segment; `cursor: None` hides the caret. The composition shows
+  at the *start* of the selection, which its commit replaces.
+- **A commit is typing**: `ImeEvent::Commit` → `Intent::TextInput(Insert)`,
+  same burst rules, so a CJK run coalesces like typed Latin. Typing,
+  a paste or any caret change drops the composition and its preview.
+- **At a pending caret there is no story to draw it in**: the composition
+  is not shown (only the candidate window follows the caret); the commit
+  creates the story (XARA-T-0268).
+- **Copy with attributes.** `copy_range` keeps the plain text and, per run,
+  the values of `CHAR_SLOTS` (font, bold, italic, aspect, tracking,
+  underline, size, script, baseline, features) plus `PAINT_SLOTS` (fill,
+  line colour). Paragraph attributes are not carried: the text takes the
+  paragraph it lands in. Colours are dropped when pasting into another
+  document (`without_paint`): they may name the source palette.
+- **Paste writes only differences.** `PasteText` inserts the plain text
+  (so it takes the local style, as typing), re-collects the story and
+  sets, per carried slot, only the ranges whose value differs
+  (`paste_edits`): text slots through `set_text_attr`, colours as the
+  items' own attributes (`fill_edit::set_own_attr`). Pasting into text of
+  the same style adds no attribute node (asserted).
+- **One step each**, labelled "Paste" and "Cut"; a paste at a pending
+  caret creates the story in the same step (`PasteTarget::New`) and the
+  caret moves into it (`TextTool::adopt`, the `CreateText` pattern).
+
+Tests: `xarast-app/tests/text_clipboard.rs` (10: styled round trip and
+one-step undo, same-style paste adds no nodes, foreign text plain with
+CRLF normalised, cut, no copy/cut without a text selection, our object SVG
+refused in text, paste at a pending caret, composition drawn/undrawn with
+the walker's text ink, composition at a pending caret, a click ends the
+display), `xarast-app` `text::splice_tests`, `text_clip::tests`,
+`xarast-shell` `the_input_method_follows_the_text_caret_and_composes_in_the_story`
+(synthetic `winit::event::Ime` through `translate_ime`) and
+`ctrl_c_x_v_at_a_text_caret_move_text_not_objects` (a fake `Clipboard`).
 
 ## Text attributes: `SetTextAttr`, the infobar, the ruler (XARA-T-0225, as built)
 
@@ -1072,6 +1127,13 @@ first story of a process waits for enumeration when nothing prewarmed
   the ruler a `.xar` line node carries; centre/right/decimal stops can be
   set but layout still treats every stop as left (T9.3.8); the ruler is not
   shown for turned, sheared or mirrored stories or text on a path.
+- IME and clipboard leftovers (XARA-T-0224): the candidate window's
+  position and preedit behaviour are not yet observed on a real GNOME and
+  wlroots session (only headless, XARA-T-0267); a composition at a pending
+  caret is not drawn (XARA-T-0268); the system clipboard gets plain text
+  only (no HTML/RTF flavour), so styled text survives only inside Xarast,
+  and plain text pasted with no caret up is not turned into a new story
+  (it is read as SVG) (both XARA-T-0269).
 - Convert to shapes leftovers: T9.6.5 (outline fallback for export and
   profile C, XARA-T-0245).
 - Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
