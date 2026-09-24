@@ -75,6 +75,7 @@ same code. What Interchange changes, and where:
 | Foreign baggage (unknown data from a load) | re-emitted | not written; nodes counted in `Stats::foreign_omitted` → `Compromise::UnknownDataDropped` | `Emitter::common` / `fragment` |
 | Foreign namespace declarations | written | not written | `assemble` |
 | Bitmaps | `resources/…` in the `ResourceIndex` (+ palette blobs) | whatever `SvgOptions::bitmaps` (a `BitmapLinker`) returns | the href closure in `write_svg` |
+| Photo-adjusted bitmap objects (W10.6) | the master + `<xarast:photo-ops>` | the adjusted pixels baked into a PNG by `SvgOptions::derived_bitmaps` (a `DerivedLinker`); the master when none | `Emitter::bitmap` |
 | `href` + `xlink:href` on images | both | `xlink:href` only (the root says `version="1.1"`; stops a `data:` image being stored twice) | `interchange::write_attrs` |
 | Root frame | first spread's pages | `SvgOptions::area` (the export area, bleed included), same coordinates | `write_svg` → `ViewBox` |
 | Background | none | `SvgOptions::background` → a `<rect>` over the viewBox, first in the body | `assemble` |
@@ -111,6 +112,19 @@ behind `SvgOptions::dialect`; that list is the table above.
   the folder name sanitised to `[A-Za-z0-9._-]` (resvg does not
   percent-decode relative paths; with `%20` the images vanished, mean |Δ|
   1.5 → 12.6 on scope3). Each file is written atomically.
+- **Photo adjustments** (XARA-US-0054): a bitmap object with a chain is
+  written as a PNG of `xarast_io::photo::bake` over the master's pixels
+  (read as `pixels` reads any bitmap; the master's ICC profile goes in
+  `iCCP`), deduplicated with the other images by bytes. A JPEG master
+  therefore becomes a PNG — the report says `Simplified { "photo
+  adjustments baked into a PNG of the adjusted pixels", count }`; a chain
+  that cannot be baked shows the master and is `NotRendered { "photo
+  adjustments (the image is shown unadjusted)" }`. Raster exports and PDF
+  need nothing: they render the scene, whose image is already the
+  derived one (PDF rasterises placed images until T11.4.8 anyway, with
+  its existing `Rasterised` compromise). Tested:
+  `tests/svg.rs::photo_adjustments_are_baked_into_a_png_of_their_own`
+  (the sidecar PNG decodes to exactly `bake`'s pixels).
 - **Report**: the writer's counters become `NotRendered` (missing images,
   outline-less quick shapes, unsupported clips, unknown `.xar` records,
   arrowheads, feathering) and the new **`Compromise::Simplified { what,

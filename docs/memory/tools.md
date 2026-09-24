@@ -740,6 +740,19 @@ repaints nothing).
     still wins. File › Import… (Ctrl+Shift+I; Ctrl+I is the original's
     image slicer) raises the same `ImportImage` per chosen file.
 
+## Phase 10: photo adjustments (XARA-US-0054)
+
+No tool or panel yet (XARA-T-0301). The entry point the panel will call
+is `Session::set_photo_ops(node, &ops)`: it reads the master's size
+(`place::bitmap_pixels`), dispatches `xarast_doc::SetPhotoOps` as **one
+undo step labelled "Adjust Photo"**, and records nothing when the chain
+normalises to the one the object has (so re-applying a chain in another
+order is not a step). It refuses a non-bitmap node (`WrongKind`) and a
+chain holding an unknown operation (`NotPermitted`). A crop moves the
+object so the kept pixels stay put; a turn swaps its width and height
+about its centre (`image.md`, "Photo adjustments"). A slider drag must
+coalesce through a gesture or commit on release — the panel's job.
+
 ## Provisional values (observe in the VM before trusting)
 
 - Segment grab = 4 + 3 device px; freehand chunk 96 samples; freehand

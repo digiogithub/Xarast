@@ -1007,6 +1007,19 @@ rest; one-call renders (export, goldens) are unchanged.
 the session double-buffers its own (`Session::spare_scene`): two scenes
 are resident, where there was one plus a transient.
 
+### Photo adjustments (XARA-US-0054, 2026-09-24)
+
+Fused point-operation LUT (brightness + contrast + gamma) over a 24 Mpx
+straight-RGBA image, single thread, test profile (opt-level 2), this
+machine under the concurrent agents' load: **66 ms** (phase budget
+≤ 200 ms with rayon; `xarast-image/tests/photo.rs` prints it). Not
+parallelised: it is a table lookup per byte and already inside budget.
+The walker evaluates on the walk thread at full resolution, once per
+(master, chain), cached in `DecodedImages` for every other walker; the
+≤ 33 ms slider-latency budget needs the proxy-resolution preview of
+XARA-T-0301. The materialisation threshold of T10.6.6 (250 ms of
+regeneration) is not measured yet (XARA-T-0302).
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape

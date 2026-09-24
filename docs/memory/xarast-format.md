@@ -694,6 +694,53 @@ optional background `<rect>`, optional minify.
   output is byte-identical to before (the round-trip and corpus tests
   guard it).
 
+## Photo operations: `<xarast:photo-ops>` (XARA-US-0054, 2026-09-24)
+
+`svg/photo.rs` writes and parses a bitmap object's chain
+(`xarast_doc::photo`, `image.md` "Photo adjustments"; `research/06
+§6.9`) as a child of its `<image>`:
+
+```xml
+<image … href="resources/images/b3-….png" …><xarast:photo-ops>
+  <xarast:op xarast:kind="crop" xarast:rect="x y w h"/>
+  <xarast:op xarast:kind="orient" xarast:turns="1" xarast:flip="true"/>
+  <xarast:op xarast:kind="levels" xarast:channel="rgb|red|green|blue" xarast:input="lo hi" xarast:output="lo hi"/>
+  <xarast:op xarast:kind="gamma|brightness|contrast|saturation" xarast:value="…"/>
+  <xarast:op xarast:kind="greyscale"/>
+</xarast:photo-ops></image>
+```
+
+- **`href` stays the master**; the object's placement maps the derived
+  image. So a browser shows the master unadjusted (stretched after a crop
+  or a quarter turn) — the graceful-degradation gap is XARA-T-0302, which
+  also owns `resources/derived/` renditions. The reader already honours
+  `xarast:master` on `<xarast:photo-ops>` (the master when `href` names a
+  rendition), as `research/06 §6.9`'s example writes it.
+- Written only when the chain is non-empty (nothing changes for the
+  corpus: 59/59 byte-identical still holds, no `.xar` import has a
+  chain). Numbers are Rust's shortest `f32` spelling (`{}`), which parses
+  back to the same bits; the chain is stored normalised, so a reload and
+  a re-save are a fixed point (`tests/photo_ops.rs`). A hand-written,
+  unnormalised chain is normalised on read and settles after one save.
+- **Unknown kinds** — and a known kind the parser cannot read — become
+  `PhotoOp::Unknown { kind, raw }` with the element's text via
+  `Dom::fragment_in_xarast`, and are written back verbatim in place:
+  criterion 14 (a hand-written `curves` op with its own spacing and a
+  child survives an edit of the object and two saves character for
+  character). `fragment_in_xarast` is `fragment` minus the declaration of
+  the `xarast` prefix when it is bound to our namespace — every document
+  the writer makes declares it on the root, and inserting it would change
+  the text. A known op's unknown extra attributes are *not* kept.
+- The registry kind `brightness-contrast` (`research/06 §14.3`) is read
+  as an unknown op (kept, not rendered); XARA-T-0302 decides it.
+- **Interchange** drops the element with the rest of the `xarast:`
+  vocabulary; `SvgOptions::derived_bitmaps` (a `DerivedLinker`,
+  export-only like `bitmaps`) supplies the `href` of the baked image
+  instead of the master's. `Stats::photo_ops` / `photo_ops_unbaked`
+  count the objects. The normal form prints the chain (`photo-ops=`).
+- `photo-ops` is an ink sidecar (`is_ink_sidecar`), so it never lands in
+  foreign baggage.
+
 ## Decisions taken (and why)
 
 - **`zip` 8.6** (current stable major; 9.0 is pre-release), `MIT`, **every
