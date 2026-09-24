@@ -1613,10 +1613,17 @@ Each bevel **parameter** is additionally an independent attribute (`attrbev.h`):
 
 ```
 NodeClipViewController (NodeGroup)  ndclpcnt.h:146
+ ├── keyhole(s): the clipping objects, bottom-most in z-order
  ├── NodeClipView                   nodeclip.h:123   (the one that applies the clip)
- ├── clipping object (the topmost one in the stack)
  └── clipped objects
 ```
+
+Corrected in XARA-T-0306: an earlier version of this diagram put the
+clipping object *after* the `NodeClipView` and called it the topmost. The
+class comment (`ndclpcnt.h:123-133`) and every keyhole walk
+(`ndclpcnt.cpp:328-339`, `:1955-1990`) put the keyholes **before** it. The
+keyholes are rendered as ordinary objects and the clip is the union of
+their filled areas (`research/01 §4.8`, "ClipView structure").
 
 `NodeClipView` (`nodeclip.h:179‑212`):
 

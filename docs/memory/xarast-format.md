@@ -113,7 +113,10 @@ stats, foreign_count, foreign_digest }`.
 - **Bitmap transparency / contone for browsers** (`§6.9.2`): a bitmap
   transparency also gets a `<mask>` (rect of the image pattern through
   `<filter xarast:filter="transparency-mask">`, `1 − BT.601 luma`, alpha
-  forced to 1 — what the CPU renderer's `LevelSampler` reads); a contone
+  forced to 1 — what the CPU renderer's `LevelSampler` reads; with levels
+  other than 0..255 (XARA-T-0307) the matrix row is
+  `1 − (start + (end − start)·luma)`, the profile not applied, and the
+  default row is byte-identical to before); a contone
   pattern's `<image>` goes through `<filter xarast:filter="contone">`
   (luma matrix + `feComponentTransfer` tables from the key colours as
   written: 2 entries for a fade, 17 for rainbows). The reader knows a

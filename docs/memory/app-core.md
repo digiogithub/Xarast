@@ -520,6 +520,17 @@ reason the walker *reports*, which is its own test.
     that a trapezoid's far edge is where `p3` says.
 45. **A sine fill mapping is eased on the canvas**: see `render.md`,
     "Sine-mapped ramps".
+46. **A bitmap transparency composites in its mode, between its levels**
+    (XARA-T-0307, 2026-09-24). `TranspPaint::Bitmap::contone` holds the
+    start and end levels and the mode (`xar-import.md` finding 18);
+    `paint::transparency` draws it in `family_of(mode)` (`None` →
+    opaque, as a flat one) and maps luminance through
+    `bitmap_level_ramp` (black → start, white → end, the fill's profile
+    applied). A transparency with no pair — written before the importer
+    kept one — is Mix over 0..255, as before. Imported ClipViews
+    (XARA-T-0306) need nothing new here: the importer emits the model's
+    shape, a group with the painted keyholes and a ClipView whose first
+    child is their union (`xar-import.md` finding 17).
 
 ---
 

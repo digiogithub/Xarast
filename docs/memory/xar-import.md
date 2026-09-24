@@ -15,7 +15,7 @@ Normative format reference: `docs/research/01-xar-format.md`.
 | Record numbering and `Ref` resolution | Done |
 | `DOWN`/`UP` tree, tolerant of imbalance, depth-capped | Done |
 | `TAG_ATOMICTAGS` / `TAG_ESSENTIALTAGS` and the three-way unknown-tag policy | Done |
-| Typed decoding of 167 tags (the ~45-tag minimum set and the families that share its codecs) | Done |
+| Typed decoding of 169 tags (the ~45-tag minimum set and the families that share its codecs, plus the ClipView pair 4084/4085) | Done |
 | **Mapping into `xarast-doc` (`src/import.rs`)** | **Done** |
 | `xar-dump`, including `--model` and `--validate` | Done |
 | Facts-only snapshots, corpus harness | Done |
@@ -622,8 +622,8 @@ shadows) of the 59 files, for clip and mask constructs:
 
 | Construct | Records | Files | State |
 |---|---|---|---|
-| `TAG_CLIPVIEWCONTROLLER` / `TAG_CLIPVIEW` / `TAG_CLIPVIEW_PATH` (4084/4085/4137) | **0** | — | the importer does not map them (below) |
-| Bitmap transparency (171), a bitmap used as a mask | 3 | JagSS100 simple, scope3 simple | renders (XARA-T-0171) |
+| `TAG_CLIPVIEWCONTROLLER` / `TAG_CLIPVIEW` / `TAG_CLIPVIEW_PATH` (4084/4085/4137) | **0** | — | mapped since XARA-T-0306 (finding 17); 4137 is never written |
+| Bitmap transparency (171), a bitmap used as a mask | 3 | JagSS100 simple, scope3 simple | renders (XARA-T-0171), with its levels and mode since XARA-T-0307 (finding 18) |
 | `TAG_FEATHER` (4086), a soft-edge mask | 75 | Groucho2 63, feathers 9, Watch4 3 | imported as an attribute, drawn unfeathered (Phase 13) |
 | Shadow (4050) / bevel (4052) / contour (4066) controllers | 98 / 22 / 4 | Groucho2, Girard_simple, SoftShadow, Watch4, testimp1 | live objects, Phase 13 |
 | Perspective / envelope moulds (108 / 107) | 129 / 68 | Watch4, ProbeX16, scope3 simple, TextCurve, testimp1 | live objects, Phase 13 |
@@ -634,18 +634,102 @@ transparency; `smoke-open` reports every file complete with
 after the ClipView work. The ClipView *rendering* fixes (`app-core.md`
 decision 43) serve `.xarast` files and the editor.
 
-**Gap (not exercised):** 4084/4085 are not mapped to
-`NodeKind::ClipView`. The original's controller keeps the clipping object
-as its **topmost** (last) child (`research/02` §6.11), while our model
-takes the **first** child; an importer must reorder. Filed under
-XARA-T-0306 (under XARA-US-0020). The original has no "keep the outside" mode; that is
-ours.
+~~**Gap (not exercised):** 4084/4085 are not mapped to
+`NodeKind::ClipView`.~~ Closed by XARA-T-0306, finding 17. The premise
+here was wrong: the keyholes come **first**, not last (see there).
 
 There is no perspective gradient in the corpus either: no `.xar` fill
 record carries perspective corners. A perspective fill exists only
 inside a mould, which the original re-moulds on load.
 
+### 17. ClipViews: the keyholes come first and are painted (XARA-T-0306, 2026-09-24)
+
+`research/02 §6.11` used to say the clipping object is the controller's
+**topmost (last)** child. The original's source says the opposite, and
+`research/01 §4.8` ("ClipView structure") now records the facts: the
+controller's ink children **before** its `TAG_CLIPVIEW` marker are the
+keyholes, the ones after it are clipped; the keyholes are **drawn as
+ordinary objects**, beneath the rest and unclipped; the clip is the
+**union of their filled areas**, outlines left out; only the first marker
+counts. Both tags are on the atomic list Xara LX writes, so before this
+the whole controller was dropped from real files; now that they have
+decoders the declaration no longer strips them.
+
+The model's ClipView takes its first child as the clipping path and
+never paints it, so `Mapper::emit_clip_view` maps a controller onto
+
+```
+Group                 (the controller; its attributes)
+  keyholes…           painted as the original paints them
+  ClipView (Inside)
+    Path              union of the keyholes' outlines, filled, unpainted
+    clipped objects…
+```
+
+* The union is read back from the nodes just emitted (read-only
+  `builder.document()`; the builder is still the only writer). A single
+  path or quick shape under the group's winding rule is copied verbatim;
+  anything else — two keyholes, a keyhole with its own `TAG_WINDINGRULE`,
+  a group, a bitmap's parallelogram — goes through
+  `xarast_geom::self_union` then `boolean(Union)` into non-overlapping,
+  consistently oriented contours. Above 200 000 keyhole points the first
+  keyhole clips alone (a hostile file cannot make the import crawl).
+* `DiagCode::ClipViewDegraded`, detail: 0 a controller with no marker (a
+  plain group, as the original draws it); 1 a stray marker outside a
+  controller (ignored, its children stay in place); 2 a keyhole with no
+  outline here (text, live, opaque), left out of the union; 3 no keyhole
+  outline at all, so the clipped objects are drawn unclipped rather than
+  hidden; 4 the point cap above.
+* Always `ClipViewMode::Inside`: the original has no outside mode.
+* Pinned by `crates/xarast-app/tests/xar_clips_and_masks.rs` (pixel
+  probes: clipped inside, keyhole painted, clipped away outside, a
+  two-keyhole union, a marker-less controller) and by import tests in
+  `import.rs` (structure, verbatim clip, even-odd union area, every
+  degenerate shape with balanced accounting). Fuzz seed `clip-view`;
+  `fuzz_xar_import` ran 1.46 M executions (4 min) clean on the new seeds.
+
+The corpus has no ClipView (finding 16), so the 59-file numbers do not
+move.
+
+### 18. Bitmap transparencies keep their levels and mode (XARA-T-0307, 2026-09-24)
+
+`TAG_BITMAPTRANSPARENTFILL` (171) carries a start level, an end level and
+a mode byte, which the decoder read and the importer dropped
+(`contone: None`), so every bitmap transparency was drawn in Mix with the
+bitmap's luminance read straight as the level. They now land in
+`TranspPaint::Bitmap::contone` as `(start, end)`, each with the mode.
+**Direction, from the original's table builder**
+(`Kernel/gradtbl.cpp:1421-1458`, `wxOil/grndrgn.cpp:4225-4316`): the
+grey value of the bitmap indexes a 256-entry table running from the start
+level at **black** to the end level at **white**, shaped by the fill's
+profile. The walker composites in `family_of(mode)` and maps luminance
+through an interned transparency ramp (`TranspSource::Image::ramp`,
+`render.md`); the identity (0..255, no profile) keeps `None` so every
+older render is unchanged. The SVG writer's browser mask follows the
+levels too (`xarast-format.md`). `inspect --fills` keeps naming it
+`bitmap` (not `contone`) and always prints its mode.
+
+The three corpus records are all Mix, with start levels 115 (JagSS100
+simple), 191 and 204 (scope3 simple), end 255, palettised PNGs without
+alpha (so the original's alpha-channel path, `TranspStyle | 0x8000`, does
+not apply). Against the embedded previews (T-0248's method, 60 dpi page
+render, registered crop, mean |Δ|):
+
+| File | Before | After | Pixels the change moves: before → after | Reversed direction (counterfactual) |
+|---|---:|---:|---|---:|
+| JagSS100 simple | 10.89 (9.42 on the after registration) | **5.27** | 401 px: 80.97 → **7.37** | 15.91 |
+| scope3 simple | 18.41 | **18.39** | 156 px: 27.47 → **23.26** | 18.78 |
+
+The car's shadow in JagSS100 was a near-black band; it is now the
+original's light grey. Corpus export check: 59 files, 118 comparisons, 0
+failures (qpdf not installed locally).
+
 ## Dead ends (do not retry)
+
+- **Making the keyhole the ClipView's first (unpainted) child.** The
+  original paints its keyholes; the clip is a separate union path.
+- **Treating the clipping object as the controller's last child**
+  (`research/02 §6.11` before XARA-T-0306). It is the first.
 
 - Storing a regular shape's edge path as its outline (finding 12).
 - Zlib-wrapped inflate (`windowBits = 15`). The stream is raw.
