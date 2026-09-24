@@ -628,17 +628,37 @@ embedding"); this crate only places them.
   face carries `xarast:font-embed="denied"`. Criterion 13 of US-0050 is
   `xarast-app/tests/font_embedding.rs`: unzip, one `.woff2` (not the
   refused face's: decoded, its `fsType` allows embedding), one mark.
-- **Reading.** `Stylesheet::add` skips `@font-face` blocks silently (no
-  "unsupported selector" warning); `xarast:font-embed` is a run twin the
-  reader ignores; the resources stay in the index and are re-inserted,
-  same bytes, on the next save. So the normal form is unchanged and a
+- **Reading** (XARA-T-0276). `Stylesheet::add` parses each `@font-face`
+  block (`FontFaceRule`: `font-family` unquoted, `font-weight` number or
+  `normal`/`bold`, `font-style` italic/oblique, the first `url(…)` of
+  `src`; a `;` inside `url()` or quotes does not split a declaration)
+  without an "unsupported selector" warning. `Reader::embedded_fonts`
+  (after the metadata) fetches each `src` — a `resources/…` entry
+  through the package fetch, a `data:…;base64,` URI (the interchange
+  dialect) decoded, anything else skipped; at most 32 MB per file — and
+  hands it to `DocumentBuilder::define_font` as an `EmbeddedFont
+  { family, weight, italic, data }` in `DocumentResources::fonts()`
+  (deduplicated by family + bytes; counted against `max_bytes`). A
+  missing file is a `DanglingReference` warning. The model never
+  interprets the bytes: the application's per-document font overlay
+  does (`docs/memory/text.md`, "Embedded fonts on read").
+  `xarast:font-embed` is still a run twin the reader ignores; the
+  resources stay in the index and are re-inserted, same bytes, on the
+  next save. So the normal form is unchanged and a
   re-save is byte-identical — fresh (`save_to`) and through raw copies
   (`save_opened_to`); the corpus round trip (59/59 model, bytes, render)
   and `app_save` (59/59) pass with embedding on.
 - **`meta.xml`**: `xarast:fonts="N"` in `<xarast:statistics>`, written
   only when N > 0 so documents without text keep their pinned bytes.
-- The reader does **not** register embedded fonts (a subset must never
-  back editing; a per-document font overlay does not exist yet).
+- The document keeps the files, the app decides: the writer does not
+  write `DocumentResources::fonts()` itself. A re-save embeds what the
+  placer reports, and the app's placer lays a document out with its
+  overlay, so a document opened where its face is missing re-embeds the
+  subset of its own subset (same glyphs). A save **without** a text
+  placer drops the embedded fonts (as it drops every placed position).
+- **WOFF2 files** since XARA-T-0276 carry the `glyf` transform
+  (`xarast_text::embed::woff2`), so a re-save of an older package writes
+  new font resource names (content hashes); old packages still read.
 
 ## The `SvgDialect` seam (phase 11 W11.3, XARA-US-0058)
 

@@ -279,12 +279,13 @@ pub(crate) fn resolve_families(
                     // Warm the blob map, so the faces parley loads through the
                     // same source cache are recognised as ours.
                     let _ = db.face_data(m.face);
+                    let family = db.parley_family(&m);
                     if let Some(s) = m.substitution
                         && !subs.contains(&s)
                     {
                         subs.push(s);
                     }
-                    m.family
+                    family
                 }
                 None => r.font.family.clone(),
             };
@@ -332,6 +333,11 @@ pub(crate) fn shape_paragraph(
     // Byte offset in `shaped_text` → story offset.
     let to_story = |i: usize| (i + para.start).saturating_sub(shift);
 
+    let fallbacks: HashMap<Arc<str>, Arc<str>> = req
+        .families
+        .iter()
+        .filter_map(|f| Some((f.clone(), db.document_family_fallback(f)?)))
+        .collect();
     let mut layout = {
         let mut b = st.lcx.ranged_builder(&mut db.fcx, &shaped_text, 1.0, false);
         b.push_default(StyleProperty::FontSize(NOMINAL_SIZE));
@@ -349,11 +355,15 @@ pub(crate) fn shape_paragraph(
                 .get(i)
                 .cloned()
                 .unwrap_or_else(|| r.font.family.clone());
+            // A document's face is a subset: what it lacks comes from the
+            // machine's face of the same family first, when there is one.
+            let mut chain = vec![FontFamilyName::Named(Cow::Owned(family.to_string()))];
+            if let Some(real) = fallbacks.get(&family) {
+                chain.push(FontFamilyName::Named(Cow::Owned(real.to_string())));
+            }
+            chain.push(FontFamilyName::Generic(parley::GenericFamily::SansSerif));
             b.push(
-                StyleProperty::FontFamily(FontFamily::List(Cow::Owned(vec![
-                    FontFamilyName::Named(Cow::Owned(family.to_string())),
-                    FontFamilyName::Generic(parley::GenericFamily::SansSerif),
-                ]))),
+                StyleProperty::FontFamily(FontFamily::List(Cow::Owned(chain))),
                 range.clone(),
             );
             b.push(

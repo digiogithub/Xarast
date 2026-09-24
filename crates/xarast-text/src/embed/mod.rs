@@ -27,6 +27,7 @@
 mod cmap;
 pub(crate) mod sfnt;
 pub mod woff2;
+mod woff2_glyf;
 
 use std::collections::BTreeMap;
 use std::fmt;

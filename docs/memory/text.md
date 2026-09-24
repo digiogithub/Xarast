@@ -33,6 +33,9 @@ Public API (`crates/xarast-text/src/lib.rs`):
   `query_with_panose()` → `FontMatch { face, family, substitution, embedded,
   synthesis }`, `fallback_for(c, base)`, `set_fallback_preference(script,
   families)`, `set_generic_families()`, `register_embedded(name, bytes)`,
+  `overlay()` + `register_document_face(family, bytes)` +
+  `is_document_face()` (a document's faces, display only: "Embedded
+  fonts on read"),
   `face_data()` → `FaceData` (shared blob + face index), `face_info()`,
   `embedding_denied()` (fsType), `substitutions()`, `glyph_outline()`,
   `glyph_outline_normalized()`, `normalized_coords()`, `units_per_em()`.
@@ -171,7 +174,8 @@ export (subset `CIDFont`s). Nothing else decides licences or subsets.
   embedded (`PdfFont::whole`, `WebFont::whole`; the web font's `cmap`
   then maps every character the face maps). `PreviewPrint` *is* embedded
   in `.xarast` too: Xarast only draws an embedded subset for display and
-  never installs it for editing (the reader does not register it).
+  never installs it for editing (the reader registers it for display
+  only: "Embedded fonts on read" below).
 - **Subsetter: `subsetter` 0.2.6** (Typst, `MIT OR Apache-2.0`, default
   features off so no second `skrifa`/`write-fonts`). It keeps outlines,
   `head`/`hhea`/`hmtx`/`maxp`/`name`/`post` (+ `cvt`/`fpgm`/`prep` for
@@ -192,17 +196,34 @@ export (subset `CIDFont`s). Nothing else decides licences or subsets.
   format-4 terminator maps U+FFFF to glyph 0 — a delta of 1, got wrong
   once) and the face's **own `OS/2` unchanged** (browsers require it; its
   `fsType` still states the licence). Then **our own WOFF2 writer**
-  (`embed/woff2.rs`, from the W3C spec): every table with the null
-  transform (`glyf`/`loca` version 3), `loca` right after `glyf`, one
-  Brotli stream (`brotli` 9, quality 11, font mode, single-threaded, so
-  deterministic). `woff2::decode` reads back null-transform files only
-  (ours); tests and `xtask` use it. Chrome loads these files (a probe
-  with a family name no system has renders the embedded glyphs: hebrew
-  mean |Δ| 0.85 vs our PNG; a corrupted `data:` URI changes the render by
-  21/255).
+  (`embed/woff2.rs` + `embed/woff2_glyf.rs`, from the W3C spec): the
+  **`glyf`/`loca` transform** (§5.1–5.3, version 0; XARA-T-0276) for
+  TrueType faces, every other table with the null transform, `loca`
+  right after `glyf`, one Brotli stream (`brotli` 9, quality 11, font
+  mode, single-threaded, so deterministic). A `glyf` that does not parse
+  falls back to the null transform (version 3); CFF faces have none.
+  The transform packs each point as a triplet (the shortest of the
+  spec's 128 classes), stores a box only when it is not the points' own
+  (always for composites), keeps instructions and the overlap bit, and
+  gains 14 % on the pinned Latin subset (26 516 → 22 728 bytes), 7 % on
+  the Arabic one; a synthetic 5-glyph face grows by 8 bytes (kept anyway:
+  real subsets always gained). `woff2::decode` reads any single-font
+  WOFF2: null transforms, the `glyf`/`loca` transform (its own `glyf`
+  flag packing, padding 2 or 4 by `indexFormat`, coordinates checked to
+  `i16`) and the `hmtx` transform (§5.4, dropped bearings = the glyph's
+  `xMin`); collections are refused. It is checked against **another
+  writer's file** (`tests/fonts/NotoSans-Bold.subset.ttf2woff2.woff2`,
+  made once by `ttf2woff2` 0.13.3 outside the workspace: every other
+  table byte-identical, every outline, advance and box equal) and
+  against byte flips and truncations of a transformed `glyf` (no panic).
+  Chrome loads the null-transform files (a probe with a family name no
+  system has renders the embedded glyphs: hebrew mean |Δ| 0.85 vs our
+  PNG; a corrupted `data:` URI changes the render by 21/255); the
+  probe has **not** been re-run on transformed files (XARA-T-0276
+  report).
 - **Why not `ttf2woff2`** (MIT OR Apache-2.0, applies the `glyf`
   transform): it refuses `OTTO` (CFF) fonts, and the pinned CJK face is
-  CFF. **Why not `fontcull`/`klippa`**: MIT-only, another
+  CFF; it has no decoder either. It only made the decoder's fixture. **Why not `fontcull`/`klippa`**: MIT-only, another
   `read-fonts`/`write-fonts` line, C-bound WOFF2 (`woofwoof`).
 - **Cost** (release, this machine): Noto Sans subset, 95 characters →
   6.3 KB WOFF2 in 7.5 ms (Brotli q11 is nearly all of it); CJK 14
@@ -227,8 +248,11 @@ export (subset `CIDFont`s). Nothing else decides licences or subsets.
 Evidence: `xarast-text/tests/embed.rs` (5: outlines of every drawn
 character identical after WOFF2 decode, Latin/CFF CJK/Hebrew; PDF widths
 and CFF program; refusal for fsType 2 and 0x200, preview & print allowed;
-no-subsetting embeds all glyphs; empty sets refused) + unit tests
-(`sfnt`, `woff2`, `fsType` table); `xarast-app/tests/font_embedding.rs`
+no-subsetting embeds all glyphs; empty sets refused; since XARA-T-0276
+also another writer's transformed WOFF2 decodes to the same font, and
+our web fonts are `glyf`-transformed) + unit tests (`sfnt`, `woff2`,
+`woff2_glyf`: triplet classes, `255UInt16`, `hmtx`, corruption, a
+second pass is stable; `fsType` table); `xarast-app/tests/font_embedding.rs`
 (4, end to end on a synthetic document, the corpus `embeddedFonts.xar`
 has no font data: PDF text/clip/invisible modes, one `FontFile2`,
 `ToUnicode`, `pdftotext` and `pdffonts` read it back, the refused face
@@ -236,6 +260,92 @@ never embedded and reported; SVG export embeds one `@font-face` and
 outlines the refused story; `--text outlines`; `.xarast` has exactly one
 `resources/fonts/*.woff2`, `xarast:font-embed="denied"`, `xarast:fonts`
 in `meta.xml`, and re-saves byte-identical fresh and through raw copies).
+
+## Embedded fonts on read (XARA-T-0276, as built)
+
+A `.xarast` carries a WOFF2 subset per face its text draws with
+(`resources/fonts/`, one `@font-face` each). The format reader keeps the
+files in `DocumentResources::fonts()` (`EmbeddedFont { family, weight,
+italic, data }`, `docs/memory/xarast-format.md`); the application lays
+the document out with them where the machine lacks the face.
+
+- **Per-document overlay, not the process database.**
+  `FontDb::register_embedded` shadows a family for everyone, so it is
+  not used. `FontDb::overlay()` makes a new database over a *clone* of
+  the base database's `fontique` collection (the system data is behind
+  `Arc`s: no second enumeration; registered faces, generic families and
+  fallback preferences come along) with its own face table, LRU and
+  source cache — face ids are the overlay's own. `FontService`s over
+  overlays come from `fonts::for_document(base, doc)`: `base` itself when
+  the document embeds nothing (or `base` already is its overlay),
+  otherwise an overlay with every file decoded (`woff2::decode`, or used
+  as is when it is an OpenType file) and registered. Eight are
+  remembered, keyed by `Arc::ptr_eq` of the base and of each file's
+  bytes (so a document and its clones share one; the cache holds the
+  `Arc`s, so no pointer is ever reused). Two documents embedding
+  different faces under one family get two overlays: neither sees the
+  other's face, and the base sees neither (test
+  `documents_embedding_different_faces_of_one_family_do_not_interfere`).
+- **Private family.** `register_document_face(family, bytes)` registers
+  the face under `U+F8FF` + the lower-case normalised family, a name no
+  real family has: it never shadows the machine's family, `families()`
+  filters it out (the font list never offers a subset for editing), and
+  no fallback chain names it. `FaceInfo::family` is the real name, so
+  the writer's `@font-face` and substitution reports read normally.
+  `doc_faces` maps each handed-out document face to its private family:
+  `DbInner::parley_family` is what the shaper asks `parley` for.
+- **Priority rule** (`DbInner::match_family`, used by every rung of the
+  ladder): a document face of family F is used only when the machine has
+  **no face of F with the same weight, style and width** as the document
+  face that best matches the query; otherwise the machine's match wins,
+  even when the document has a face too. Why: the machine's face has
+  every glyph (the subset has only the characters drawn at save time)
+  and its `GSUB`/`GPOS` (the web font has none, so a document face loses
+  kerning, ligatures and joining); where the machine has that exact face
+  the layout is the writer's own. Where it lacks it, the document face
+  beats a synthesis: the writer drew Bold, a reader with only Regular
+  would embolden it, the embedded Bold is the real thing. Comparing
+  attributes, not versions: a different version of the same face on the
+  reader still wins (it is complete). A variable machine face matches
+  on its default instance.
+- **Typing outside the subset.** The shaper's family chain for a
+  document face is `[private family, the machine's F (when it exists),
+  sans-serif]`; `parley` picks per cluster, so a character the subset
+  lacks comes from the machine's face of F, then the usual fallback —
+  never `.notdef` (test `typing_outside_the_subset_uses_a_real_face`:
+  `Q`, `z`, `!` from real faces, `bold` from the subset, no glyph 0).
+- **Who uses it.** The walker keeps its base service (`with_fonts` or
+  the shared one) and lays stories out with `story_fonts(doc)` =
+  `for_document(base, doc)`, dropped with the story cache when
+  `fonts::serves` says it no longer fits the document (another document,
+  other files); `scene_text` hands exporters the overlay's database
+  (the glyphs' face ids are its). Also: the text tool (`doc_fonts`),
+  picking, convert to shapes (command and `EditCommand`), the fit of
+  `headless::render_with_fonts` and of `drawing_rect` without explicit
+  fonts, `xarast-cli` export's outline fallback, and the `.xarast`/SVG
+  text placer (`SvgTextPlacer` places each document with its overlay and
+  remembers `(service, face)` per `PlacedFace::key`; keys of a single
+  service are the face indexes as before, so re-saves stay
+  byte-identical). A re-save on a machine without the face therefore
+  embeds the subset of the document's subset again.
+- **Evidence** (`xarast-app/tests/embedded_fonts_read.rs`, pinned fonts
+  with and without `NotoSans-Bold` in a `from_dir` directory, which is
+  what `XARAST_FONT_DIR` builds): a bold + regular document saved with
+  the full set, reopened, renders **pixel-identical** with the bold face
+  removed; the same document without its embedded faces renders
+  differently there (synthetic bold); the overlay uses the document's
+  bold only on the machine without it, never the regular; `families()`
+  is unchanged; the re-save carries both faces again and renders the
+  same. The corpus round trip (59/59) and TextDesigns digests are
+  unchanged: with the pinned fonts every embedded face exists on the
+  machine, so the rule picks the machine's.
+- **Dead end: registering into the shared service** (what
+  `register_embedded` does) — a document's subset would shadow the
+  machine's family for every open document, and typing would find no
+  glyphs.
+- Open: `viewport::drawing_rect_with` with explicit `&FontService`
+  cannot build an overlay (no `Arc`), so its callers pass one already
+  (headless does); a document face is laid out without `GSUB`/`GPOS`.
 
 ## The text tool (W9.4, as built, XARA-US-0047)
 
@@ -1226,14 +1336,16 @@ first story of a process waits for enumeration when nothing prewarmed
   (done for PDF and SVG export, XARA-T-0245); conformance profile C
   (outlines duplicated in `.xarast`) is not built — there is no profile C
   writer yet.
-- Font embedding leftovers: the `.xarast` reader does not register the
-  embedded subsets (a machine without the face substitutes, as before; a
-  per-document overlay is needed first, and a subset must never be used
-  for editing); the `glyf` WOFF2 transform is not applied (files a few
-  per cent larger); a web font has no `GSUB`/`GPOS`, so a browser draws
-  ligatures and Arabic joining from the characters (positions stay
-  exact); `@font-face` declares the face's own weight/style, so a
-  browser may synthesise bold where Xarast does not.
+- Font embedding leftovers: ~~the `.xarast` reader does not register
+  the embedded subsets~~ (done, XARA-T-0276, "Embedded fonts on read");
+  ~~the `glyf` WOFF2 transform is not applied~~ (done, XARA-T-0276); a
+  web font has no `GSUB`/`GPOS`, so a browser draws ligatures and Arabic
+  joining from the characters (positions stay exact) and **Xarast itself
+  lays out a document face without them** (kerning, ligatures, joining
+  lost where the face is missing); `@font-face` declares the face's own
+  weight/style, so a browser may synthesise bold where Xarast does not;
+  a substituted family's embedded face is used only when the reader's
+  ladder reaches the same family.
 - Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
   straight (an SVG `transform` per character would need one element per
   character); ~~the GUI save passes no text placer~~ (done,

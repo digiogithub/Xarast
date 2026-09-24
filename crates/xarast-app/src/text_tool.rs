@@ -360,6 +360,12 @@ impl TextTool {
         self.fonts.clone().unwrap_or_else(crate::fonts::shared)
     }
 
+    /// The fonts `doc`'s stories are laid out with, as the walker lays
+    /// them out: [`TextTool::fonts`] plus the faces the document embeds.
+    fn doc_fonts(&self, doc: &Document) -> Arc<FontService> {
+        crate::fonts::for_document(&self.fonts(), doc)
+    }
+
     fn cache(&self) -> MutexGuard<'_, Cache> {
         self.cache
             .lock()
@@ -378,7 +384,7 @@ impl TextTool {
             return v.clone();
         }
         let v = if doc.tree.contains(story) && doc.tree.is_reachable(story) {
-            StoryView::build(doc, story, &self.fonts(), None).map(Arc::new)
+            StoryView::build(doc, story, &self.doc_fonts(doc), None).map(Arc::new)
         } else {
             None
         };
@@ -396,7 +402,8 @@ impl TextTool {
         {
             return v.clone();
         }
-        let v = StoryView::build(doc, p.story, &self.fonts(), Some((p.at, &p.text))).map(Arc::new);
+        let v = StoryView::build(doc, p.story, &self.doc_fonts(doc), Some((p.at, &p.text)))
+            .map(Arc::new);
         cache.composing = Some((p.clone(), v.clone()));
         v
     }

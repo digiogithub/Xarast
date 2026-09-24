@@ -26,6 +26,10 @@ impl FaceLru {
         self.map.len()
     }
 
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub(crate) fn get(&mut self, id: FaceId) -> Option<FaceData> {
         self.tick = self.tick.wrapping_add(1);
         let tick = self.tick;

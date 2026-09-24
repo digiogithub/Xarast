@@ -7,7 +7,6 @@
 //! enough to run in CI on a machine with no `/dev/dri` at all.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use xarast_color::Rgba8;
 use xarast_render::{
@@ -137,9 +136,12 @@ pub fn render_with_fonts(
     opts: &HeadlessOptions,
     fonts: Option<std::sync::Arc<crate::fonts::FontService>>,
 ) -> Result<HeadlessResult, HeadlessError> {
+    // The document's embedded faces on top: the frame is fitted to the
+    // text as the walk lays it out.
+    let fonts = fonts.map(|f| crate::fonts::for_document(&f, &session.doc));
     let view = framed_view(session, opts, fonts.as_deref());
-    let walker = match &fonts {
-        Some(f) => crate::walker::SceneWalker::with_fonts(Arc::clone(f)),
+    let walker = match fonts {
+        Some(f) => crate::walker::SceneWalker::with_fonts(f),
         None => crate::walker::SceneWalker::new(),
     };
     render_framed(session, opts, &view, walker)
@@ -148,6 +150,8 @@ pub fn render_with_fonts(
 /// [`render`] with a walker the caller set up: tests pass one that
 /// registers bitmaps under a pixel budget of their own
 /// ([`SceneWalker::with_pixel_budget`](crate::walker::SceneWalker::with_pixel_budget)).
+/// The frame is fitted with the walker's fonts plus the document's
+/// embedded faces, the same ones the walk lays text out with.
 ///
 /// # Errors
 ///
@@ -157,10 +161,16 @@ pub fn render_with_walker(
     opts: &HeadlessOptions,
     walker: crate::walker::SceneWalker,
 ) -> Result<HeadlessResult, HeadlessError> {
-    let view = framed_view(session, opts, None);
+    let fonts = walker
+        .base_fonts()
+        .map(|f| crate::fonts::for_document(f, &session.doc));
+    let view = framed_view(session, opts, fonts.as_deref());
     render_framed(session, opts, &view, walker)
 }
 
+/// The session's viewport resized to the output and framed as `opts`
+/// asks. With no `fonts`, text is measured with the process's service
+/// plus the document's embedded faces ([`crate::fonts::document`]).
 fn framed_view(
     session: &Session,
     opts: &HeadlessOptions,

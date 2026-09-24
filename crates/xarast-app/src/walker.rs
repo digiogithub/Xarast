@@ -136,6 +136,9 @@ pub struct SceneWalker {
     /// The fonts stories are laid out with; the process's shared service
     /// unless [`SceneWalker::with_fonts`] chose one.
     fonts: Option<Arc<FontService>>,
+    /// The fonts the document last walked is laid out with: `fonts` plus
+    /// the faces the document embeds ([`crate::fonts::for_document`]).
+    text_fonts: Option<Arc<FontService>>,
     /// Laid-out stories by node, dropped when the document's epoch moves:
     /// the derived text cache, outside the arena.
     stories: HashMap<NodeId, Arc<StoryGeometry>>,
@@ -191,6 +194,14 @@ impl SceneWalker {
         self
     }
 
+    /// The fonts this walker was given ([`SceneWalker::with_fonts`]),
+    /// before the document's embedded faces go on top; `None` while it
+    /// falls back to the process's shared service.
+    #[must_use]
+    pub(crate) const fn base_fonts(&self) -> Option<&Arc<FontService>> {
+        self.fonts.as_ref()
+    }
+
     /// Every font substitution the walks so far made, each once, in the
     /// order first seen. The UI reports them; they are never written back
     /// into the document.
@@ -207,7 +218,7 @@ impl SceneWalker {
         if self.painted_text.is_empty() {
             return None;
         }
-        let fonts = self.fonts.as_ref()?;
+        let fonts = self.text_fonts.as_ref()?;
         Some(xarast_io::SceneText {
             fonts: Arc::clone(fonts.db()),
             runs: self.painted_text.clone(),
@@ -259,6 +270,7 @@ impl SceneWalker {
         self.failed.clear();
         self.attr_cache.clear();
         self.attr_epoch = Epoch::default();
+        self.text_fonts = None;
         // Substitutions are kept: they are a history the UI reports once,
         // not a cache.
         self.stories.clear();
@@ -493,12 +505,32 @@ impl SceneWalker {
         Ok(stats)
     }
 
+    /// The fonts `doc`'s stories are laid out with: the walker's (or the
+    /// process's) service, plus the faces the document embeds.
+    fn story_fonts(&mut self, doc: &Document) -> Arc<FontService> {
+        if let Some(f) = &self.text_fonts {
+            return Arc::clone(f);
+        }
+        let base = self.fonts.get_or_insert_with(crate::fonts::shared).clone();
+        let fonts = crate::fonts::for_document(&base, doc);
+        self.text_fonts = Some(Arc::clone(&fonts));
+        fonts
+    }
+
     /// Drops the caches that a document change invalidated.
     fn sync_caches(&mut self, doc: &Document) {
         if self.attr_epoch != doc.epoch {
             self.attr_cache.clear();
             self.stories.clear();
             self.attr_epoch = doc.epoch;
+        }
+        // Another document, or the same one with other embedded faces:
+        // stories laid out with the previous fonts are stale.
+        if let Some(f) = &self.text_fonts
+            && !crate::fonts::serves(f, self.fonts.as_ref(), doc)
+        {
+            self.text_fonts = None;
+            self.stories.clear();
         }
         self.register_images(doc);
     }
@@ -780,7 +812,7 @@ impl SceneWalker {
                 return;
             };
             let st = crate::text::splice_text(&st, p.at, &p.text);
-            let fonts = self.fonts.get_or_insert_with(crate::fonts::shared).clone();
+            let fonts = self.story_fonts(doc);
             let mut g = crate::text::build_story(&fonts, &doc.tree, &st, story);
             // The composition is part of what the node draws.
             g.version = mix64(g.version, text_fingerprint(&p.text, p.at));
@@ -797,7 +829,7 @@ impl SceneWalker {
             }) else {
                 return;
             };
-            let fonts = self.fonts.get_or_insert_with(crate::fonts::shared).clone();
+            let fonts = self.story_fonts(doc);
             let g = Arc::new(crate::text::build_story(&fonts, &doc.tree, &st, story));
             for s in &g.substitutions {
                 if !self.substitutions.contains(s) {

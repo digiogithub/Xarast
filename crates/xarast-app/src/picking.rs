@@ -332,7 +332,7 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
                 Some(NodeKind::TextStory(_)) => {
                     // A story has no outline the picker keeps: it is picked
                     // by the box of its laid-out lines (phase 9, T9.4.1).
-                    let fonts = crate::fonts::shared();
+                    let fonts = crate::fonts::document(doc);
                     let bounds = crate::text::story_rect(&fonts, tree, node, stack);
                     if !bounds.is_empty() {
                         out.push(Found {

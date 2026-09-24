@@ -43,6 +43,25 @@ pub enum ResourceRef {
     Arrow(ArrowId),
 }
 
+/// A font file a document carries for display only: one face of a
+/// `.xarast` package's `resources/fonts/` (`research/06 §6.7` rule 2),
+/// as its `@font-face` rule names it.
+///
+/// The model never draws with it or interprets it: the application lays
+/// the document's text out with these faces only where the machine lacks
+/// the face itself (`docs/memory/text.md`, "Embedded fonts on read").
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct EmbeddedFont {
+    /// The family the face was drawn as (its `@font-face` `font-family`).
+    pub family: Arc<str>,
+    /// CSS weight the rule declares.
+    pub weight: u16,
+    /// Whether the rule declares an italic (or oblique) style.
+    pub italic: bool,
+    /// The file as stored: WOFF2, or a plain OpenType file.
+    pub data: Arc<[u8]>,
+}
+
 /// How a bitmap's pixels are laid out.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, Default)]
 pub struct BitmapInfo {
@@ -168,6 +187,8 @@ pub struct DocumentResources {
     dashes: SlotMap<DashId, xarast_geom::DashPattern>,
     arrows: SlotMap<ArrowId, ArrowSpec>,
     bitmap_by_hash: HashMap<[u8; 32], BitmapId>,
+    /// Faces carried for display, in the order first seen.
+    fonts: Vec<EmbeddedFont>,
 }
 
 impl DocumentResources {
@@ -253,6 +274,26 @@ impl DocumentResources {
     /// Every arrowhead, in slot order.
     pub fn arrows(&self) -> impl Iterator<Item = (ArrowId, &ArrowSpec)> + '_ {
         self.arrows.iter()
+    }
+
+    /// Adds a face carried for display. The same family with the same
+    /// bytes is kept once; returns whether it was new.
+    pub fn insert_font(&mut self, font: EmbeddedFont) -> bool {
+        if self
+            .fonts
+            .iter()
+            .any(|f| f.family == font.family && f.data == font.data)
+        {
+            return false;
+        }
+        self.fonts.push(font);
+        true
+    }
+
+    /// The faces carried for display, in the order first seen.
+    #[must_use]
+    pub fn fonts(&self) -> &[EmbeddedFont] {
+        &self.fonts
     }
 
     /// Whether a reference resolves.

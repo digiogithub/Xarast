@@ -23,6 +23,10 @@
 //! a face whose `OS/2.fsType` forbids embedding gets no file, and the
 //! families that asked for it are listed so that their runs say
 //! `xarast:font-embed="denied"`.
+//!
+//! A document that embeds faces is placed with its overlay
+//! ([`fonts::for_document`]), so a re-save of a document opened on a
+//! machine without its faces embeds them again, from its own subsets.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -37,9 +41,12 @@ use crate::text::{layout_text, path_fit, story_input};
 
 /// Lays stories out with a [`FontService`] for the SVG writer.
 pub struct SvgTextPlacer {
+    /// The base service; a document's stories are placed with
+    /// [`fonts::for_document`] over it.
     fonts: Arc<FontService>,
-    /// The faces handed out as [`PlacedFace::key`]s.
-    faces: Mutex<HashMap<u64, FaceId>>,
+    /// The faces handed out as [`PlacedFace::key`]s, with the service
+    /// they belong to.
+    faces: Mutex<HashMap<u64, (Arc<FontService>, FaceId)>>,
 }
 
 impl std::fmt::Debug for SvgTextPlacer {
@@ -59,13 +66,20 @@ impl SvgTextPlacer {
     }
 
     /// The face as the writer knows it, remembered for [`TextPlacer::font_file`].
-    fn placed_face(&self, face: FaceId) -> Option<PlacedFace> {
-        let info = self.fonts.db().face_info(face)?;
-        let key = u64::from(face.index());
-        self.faces
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(key, face);
+    fn placed_face(&self, fonts: &Arc<FontService>, face: FaceId) -> Option<PlacedFace> {
+        let info = fonts.db().face_info(face)?;
+        let mut faces = self.faces.lock().unwrap_or_else(PoisonError::into_inner);
+        // Faces of one service keep their index; another service's (a
+        // second document written with this placer) are numbered after.
+        let mut key = u64::from(face.index());
+        while let Some((f, id)) = faces.get(&key) {
+            if Arc::ptr_eq(f, fonts) && *id == face {
+                break;
+            }
+            key = key.wrapping_add(1 << 32);
+        }
+        faces.insert(key, (Arc::clone(fonts), face));
+        drop(faces);
         Some(PlacedFace {
             family: info.family,
             weight: info.weight,
@@ -112,7 +126,8 @@ impl TextPlacer for SvgTextPlacer {
         if let Some(f) = &fit {
             input.mode = f.story_mode();
         }
-        let layout = self.fonts.ready().layout(&StoryInput {
+        let fonts = fonts::for_document(&self.fonts, doc);
+        let layout = fonts.ready().layout(&StoryInput {
             text: layout_text(&st),
             runs: &input.runs,
             paragraphs: &input.paragraphs,
@@ -209,7 +224,7 @@ impl TextPlacer for SvgTextPlacer {
             if chars.is_empty() {
                 continue;
             }
-            if let Some(f) = self.placed_face(face) {
+            if let Some(f) = self.placed_face(&fonts, face) {
                 index.insert(face, placement.faces.len());
                 placement.faces.push((f, chars.into_iter().collect()));
             }
@@ -219,7 +234,7 @@ impl TextPlacer for SvgTextPlacer {
             .filter_map(|(node, face)| Some((node, *index.get(&face)?)))
             .collect();
         // The requested families whose own face refuses embedding.
-        let db = self.fonts.db();
+        let db = fonts.db();
         for r in &input.runs {
             if placement.denied.contains(&r.font.family) {
                 continue;
@@ -234,12 +249,13 @@ impl TextPlacer for SvgTextPlacer {
     }
 
     fn font_file(&self, face: &PlacedFace, chars: &[char]) -> Option<FontFile> {
-        let id = *self
+        let (fonts, id) = self
             .faces
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&face.key)?;
-        Some(match self.fonts.web_font(id, chars) {
+            .get(&face.key)
+            .cloned()?;
+        Some(match fonts.web_font(id, chars) {
             Ok(w) => FontFile::Woff2(w.woff2),
             Err(e @ EmbedError::Denied(_)) => FontFile::Denied(Arc::from(e.to_string())),
             Err(e) => FontFile::Unavailable(Arc::from(e.to_string())),
