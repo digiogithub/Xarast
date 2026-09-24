@@ -41,9 +41,11 @@
 //!
 //! # Layouts
 //!
-//! The tool lays stories out itself, with the same bridge as the walker
-//! ([`crate::text::story_input`]), and keeps them in a cache keyed by the
-//! document's epoch: any committed edit (undo included) drops them all.
+//! The tool lays stories out itself, as the walker does
+//! ([`crate::text::lay_story`]), and keeps them in a cache keyed by the
+//! document's epoch: any committed edit (undo included) drops them all. A
+//! story on a path keeps its fit, so the caret, hit tests and highlight
+//! follow the drawn text ([`CaretMap::on_path`]).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,7 +56,6 @@ use xarast_doc::{
     AttrValue, Document, NodeId, NodeKind, StoryText, TextCursor, TextLayout, TextStoryNode,
 };
 use xarast_geom::{Matrix, Mp, Vector};
-use xarast_text::StoryInput;
 
 use crate::edit::{SelectMode, ToolId};
 use crate::fonts::FontService;
@@ -205,36 +206,37 @@ impl StoryView {
         let st = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
             Arc::new(a.value.clone())
         })?;
-        let input = crate::text::story_input(&doc.tree, &st, node);
+        // The walker's own layout: on a path, the path's column and the fit.
+        let (_, layout, fit) = crate::text::lay_story(fonts, &doc.tree, &st, node);
         let text = crate::text::layout_text(&st).to_owned();
-        let layout = fonts.ready().layout(&StoryInput {
-            text: &text,
-            runs: &input.runs,
-            paragraphs: &input.paragraphs,
-            kerns: &input.kerns,
-            mode: input.mode,
-        });
         let xf = node.transform.to_affine();
         let inv = if xf.determinant().abs() > f64::EPSILON {
             xf.inverse()
         } else {
             Affine::IDENTITY
         };
-        Some(StoryView {
-            map: CaretMap::new(text, layout),
-            xf,
-            inv,
-        })
+        let map = match fit {
+            Some(fit) => CaretMap::on_path(text, layout, fit),
+            None => CaretMap::new(text, layout),
+        };
+        Some(StoryView { map, xf, inv })
     }
 
-    fn to_doc(&self, x: Mp, y: Mp) -> DocPoint {
-        let p = self.xf * kurbo::Point::new(x.to_f64(), y.to_f64());
+    fn to_doc(&self, p: kurbo::Point) -> DocPoint {
+        let p = self.xf * p;
         DocPoint::from_f64_round(p.x, p.y)
     }
 
-    fn to_story(&self, p: DocPoint) -> (Mp, Mp) {
-        let q = self.inv * kurbo::Point::new(p.x.to_f64(), p.y.to_f64());
-        (Mp::from_f64_round(q.x), Mp::from_f64_round(q.y))
+    fn to_story(&self, p: DocPoint) -> kurbo::Point {
+        self.inv * kurbo::Point::new(p.x.to_f64(), p.y.to_f64())
+    }
+
+    /// The caret a document point hits, and whether it is on the story
+    /// (within `tol` document units of a line or, on a path, of a fitted
+    /// cluster).
+    fn hit(&self, p: DocPoint, tol: f64) -> (Caret, bool) {
+        let (caret, dist) = self.map.hit_point(self.to_story(p));
+        (caret, dist <= tol * self.story_scale())
     }
 
     /// Story units per document unit: how far a device tolerance reaches
@@ -242,22 +244,6 @@ impl StoryView {
     fn story_scale(&self) -> f64 {
         let d = self.inv.determinant().abs().sqrt();
         if d.is_finite() && d > 0.0 { d } else { 1.0 }
-    }
-
-    /// Whether a story-space point is on a line box, within `tol`.
-    fn contains(&self, x: Mp, y: Mp, tol: f64) -> bool {
-        let layout = self.map.layout();
-        layout.lines.iter().enumerate().any(|(i, l)| {
-            let (bottom, top) = self.map.line_band(i);
-            let (x0, x1) = l.clusters.iter().fold((l.x, l.x), |(a, b), c| {
-                (a.min(c.x), b.max(c.x.saturating_add(c.width)))
-            });
-            let (x, y) = (x.to_f64(), y.to_f64());
-            x >= x0.to_f64() - tol
-                && x <= x1.to_f64() + tol
-                && y >= bottom.to_f64() - tol
-                && y <= top.to_f64() + tol
-        })
     }
 }
 
@@ -337,16 +323,18 @@ impl TextTool {
     }
 
     /// The topmost editable story under a document point.
-    fn story_at(&self, cx: &ToolCtx<'_>, at: DocPoint) -> Option<(NodeId, Arc<StoryView>)> {
+    /// The topmost editable story under a document point, and the caret
+    /// the point hits in it.
+    fn story_at(&self, cx: &ToolCtx<'_>, at: DocPoint) -> Option<(NodeId, Arc<StoryView>, Caret)> {
         let tol = STORY_HIT_PX * cx.device_px();
         let mut found = None;
         for id in editable_stories(cx.doc) {
             let Some(v) = self.view(cx.doc, id) else {
                 continue;
             };
-            let (x, y) = v.to_story(at);
-            if v.contains(x, y, tol * v.story_scale()) {
-                found = Some((id, v));
+            let (caret, on) = v.hit(at, tol);
+            if on {
+                found = Some((id, v, caret));
             }
         }
         found
@@ -418,12 +406,10 @@ impl TextTool {
     }
 
     fn click(&mut self, at: DocPoint, count: u8, cx: &mut ToolCtx<'_>) {
-        let Some((story, v)) = self.story_at(cx, at) else {
+        let Some((story, v, hit)) = self.story_at(cx, at) else {
             self.pending(at, None, cx);
             return;
         };
-        let (x, y) = v.to_story(at);
-        let hit = v.map.hit(x, y);
         match count {
             1 => {
                 let anchor = match self.current(cx.doc) {
@@ -716,9 +702,7 @@ impl Tool for TextTool {
             GestureEvent::DragStart { from, .. } => {
                 let before = self.editing;
                 self.drag = Some(match self.story_at(cx, *from) {
-                    Some((story, v)) => {
-                        let (x, y) = v.to_story(*from);
-                        let hit = v.map.hit(x, y);
+                    Some((story, _, hit)) => {
                         let anchor = match self.current(cx.doc) {
                             Some((s, _)) if cx.modifiers.adjust && s.story == story => s.anchor,
                             _ => hit,
@@ -742,8 +726,7 @@ impl Tool for TextTool {
                 Some(Drag::Select { story, anchor, .. }) => {
                     let (story, anchor) = (*story, *anchor);
                     if let Some(v) = self.view(cx.doc, story) {
-                        let (x, y) = v.to_story(*to);
-                        let head = v.map.hit(x, y);
+                        let head = v.map.hit_point(v.to_story(*to)).0;
                         self.set(
                             Some(TextEditing::Story(TextSelection {
                                 story,
@@ -826,29 +809,24 @@ impl Tool for TextTool {
                 };
                 let map = &v.map;
                 let (anchor, head) = (map.snap(sel.anchor), map.snap(sel.head));
-                for r in map.selection_rects(anchor.byte, head.byte) {
+                // In story space: on a path, bent with the fitted text.
+                for q in map.selection_quads(anchor.byte, head.byte) {
                     out.push(OverlayShape::Highlight {
-                        corners: [
-                            v.to_doc(r.x0, r.bottom),
-                            v.to_doc(r.x1, r.bottom),
-                            v.to_doc(r.x1, r.top),
-                            v.to_doc(r.x0, r.top),
-                        ],
+                        corners: q.map(|p| v.to_doc(p)),
                     });
                 }
-                let g = map.caret_geometry(head);
+                let (primary, secondary) = map.caret_segments(head);
                 out.push(OverlayShape::Caret {
-                    from: v.to_doc(g.x, g.bottom),
-                    to: v.to_doc(g.x, g.top),
+                    from: v.to_doc(primary.bottom),
+                    to: v.to_doc(primary.top),
                     primary: true,
                     moved: self.moved,
                 });
-                if let Some(x) = g.split {
+                if let Some(s) = secondary {
                     // The secondary caret: half height, from the baseline side.
-                    let mid = g.bottom.midpoint(g.top);
                     out.push(OverlayShape::Caret {
-                        from: v.to_doc(x, g.bottom),
-                        to: v.to_doc(x, mid),
+                        from: v.to_doc(s.bottom),
+                        to: v.to_doc(s.bottom.midpoint(s.top)),
                         primary: false,
                         moved: self.moved,
                     });
