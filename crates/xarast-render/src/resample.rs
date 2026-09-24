@@ -32,8 +32,11 @@
 //! The footprint (texels per device pixel) comes from the Jacobian of the
 //! device → texel mapping: once per primitive for an affine mapping, per
 //! pixel for a perspective one. The pyramid is a 2 × 2 box in premultiplied
-//! linear light, built lazily the first time an image is minified and
-//! shared by every clone of the [`ImageRef`].
+//! linear light ([`reduce_level`]), built on the walker's decode threads
+//! ([`ImageRef::prepare`]) or else the first time an image is minified,
+//! and shared by every clone of the [`ImageRef`]. A sampler pins the
+//! levels its primitive can reach when it is made; a level the pixel
+//! budget evicted comes back byte for byte (`pixel_budget`).
 //!
 //! # The aligned case
 //!
@@ -49,6 +52,7 @@ use std::sync::LazyLock;
 use xarast_color::Rgba8;
 
 use crate::paint::{Filter, FrameMap, GradMapping, ImageRef, Repeat};
+use crate::pixel_budget::LevelBuf;
 use crate::precision::Point64;
 use crate::ramp::EffectSpace;
 
@@ -274,56 +278,40 @@ impl Level<'_> {
     }
 }
 
-/// A reduced level the pyramid owns.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MipLevel {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) data: Vec<u8>,
-}
-
-/// Builds every reduced level of an image down to 1 × 1: each texel the
-/// mean of a 2 × 2 block of the level above in premultiplied linear light.
-/// An odd edge repeats its last row or column, so a level is
-/// `⌈w/2⌉ × ⌈h/2⌉`.
-pub(crate) fn build_pyramid(width: u32, height: u32, data: &[u8]) -> Vec<MipLevel> {
+/// One pyramid step: the level below a `width × height` level, each texel
+/// the mean of a 2 × 2 block in premultiplied linear light. An odd edge
+/// repeats its last row or column, so the result is `⌈w/2⌉ × ⌈h/2⌉`.
+/// Returns `(width, height, data)`.
+///
+/// Deterministic: a level rebuilt after an eviction (`pixel_budget`) is
+/// the same bytes as the first time.
+pub(crate) fn reduce_level(w: u32, h: u32, src: &[u8]) -> (u32, u32, Vec<u8>) {
     let t = &*TO_LINEAR;
-    let mut out: Vec<MipLevel> = Vec::new();
-    let (mut w, mut h) = (width, height);
-    while w > 1 || h > 1 {
-        let src: &[u8] = out.last().map_or(data, |l| &l.data);
-        let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
-        let mut next = Vec::with_capacity(nw as usize * nh as usize * 4);
-        let at = |x: u32, y: u32| -> Rgba8 {
-            let o = (y as usize * w as usize + x as usize) * 4;
-            Rgba8 {
-                r: src[o],
-                g: src[o + 1],
-                b: src[o + 2],
-                a: src[o + 3],
-            }
-        };
-        for y in 0..nh {
-            let (y0, y1) = (2 * y, (2 * y + 1).min(h - 1));
-            for x in 0..nw {
-                let (x0, x1) = (2 * x, (2 * x + 1).min(w - 1));
-                let mut acc = [0.0f32; 4];
-                madd(&mut acc, lin(t, at(x0, y0)), 0.25);
-                madd(&mut acc, lin(t, at(x1, y0)), 0.25);
-                madd(&mut acc, lin(t, at(x0, y1)), 0.25);
-                madd(&mut acc, lin(t, at(x1, y1)), 0.25);
-                let c = encode_premul(acc);
-                next.extend_from_slice(&[c.r, c.g, c.b, c.a]);
-            }
+    let (nw, nh) = (w.div_ceil(2), h.div_ceil(2));
+    let mut next = Vec::with_capacity(nw as usize * nh as usize * 4);
+    let at = |x: u32, y: u32| -> Rgba8 {
+        let o = (y as usize * w as usize + x as usize) * 4;
+        Rgba8 {
+            r: src[o],
+            g: src[o + 1],
+            b: src[o + 2],
+            a: src[o + 3],
         }
-        out.push(MipLevel {
-            width: nw,
-            height: nh,
-            data: next,
-        });
-        (w, h) = (nw, nh);
+    };
+    for y in 0..nh {
+        let (y0, y1) = (2 * y, (2 * y + 1).min(h - 1));
+        for x in 0..nw {
+            let (x0, x1) = (2 * x, (2 * x + 1).min(w - 1));
+            let mut acc = [0.0f32; 4];
+            madd(&mut acc, lin(t, at(x0, y0)), 0.25);
+            madd(&mut acc, lin(t, at(x1, y0)), 0.25);
+            madd(&mut acc, lin(t, at(x0, y1)), 0.25);
+            madd(&mut acc, lin(t, at(x1, y1)), 0.25);
+            let c = encode_premul(acc);
+            next.extend_from_slice(&[c.r, c.g, c.b, c.a]);
+        }
     }
-    out
+    (nw, nh, next)
 }
 
 /// A reconstruction kernel. The product uses [`Kernel::Triangle`]
@@ -677,6 +665,11 @@ fn contone_table(start: Rgba8, end: Rgba8, space: EffectSpace) -> Box<[Rgba8; 25
 #[derive(Debug, Clone)]
 pub struct ImageSampler<'a> {
     img: &'a ImageRef,
+    /// The levels this primitive can reach, pinned once: `first..` of the
+    /// image's pyramid. Holding them keeps them alive through an eviction
+    /// (`pixel_budget`), and sampling takes no lock.
+    pins: Vec<LevelBuf>,
+    first: usize,
     frame: FrameMap,
     repeat: Repeat,
     filter: Filter,
@@ -714,14 +707,32 @@ impl<'a> ImageSampler<'a> {
         } else {
             Plan::PerPixel
         };
+        // The levels the plan can touch: the base for everything but a
+        // fixed minification, which reads two adjacent reduced levels; a
+        // perspective plane may reach any level.
+        let (first, last) = match plan {
+            Plan::Fixed(Lod::Minify { level, .. }) => (level, level + 1),
+            Plan::PerPixel => (0, img.level_count() - 1),
+            _ => (0, 0),
+        };
+        let pins = img.pin_levels(first, last);
         Some(ImageSampler {
             img,
+            pins,
+            first,
             frame,
             repeat,
             filter,
             remap: contone.map(|(s, e, sp)| contone_table(s, e, sp)),
             plan,
         })
+    }
+
+    /// A pinned level; `i` is always in the pinned range by construction.
+    #[inline]
+    fn lvl(&self, i: usize) -> Level<'_> {
+        let k = i.saturating_sub(self.first).min(self.pins.len() - 1);
+        self.pins[k].as_level()
     }
 
     /// Whether the sampler takes the aligned fast path.
@@ -739,7 +750,7 @@ impl<'a> ImageSampler<'a> {
             Plan::Aligned { sx, ox, sy, oy } => {
                 let (x, y) = (floor_i64(p.x), floor_i64(p.y));
                 fetch(
-                    self.img.level(0),
+                    self.lvl(0),
                     remap,
                     sx.saturating_mul(x).saturating_add(ox),
                     sy.saturating_mul(y).saturating_add(oy),
@@ -755,7 +766,7 @@ impl<'a> ImageSampler<'a> {
                     v * f64::from(self.img.height()) - 0.5,
                 );
                 fetch(
-                    self.img.level(0),
+                    self.lvl(0),
                     remap,
                     x.round() as i64,
                     y.round() as i64,
@@ -789,12 +800,12 @@ impl<'a> ImageSampler<'a> {
         }
         let remap = self.remap.as_deref();
         let at = |level: usize, space: Space| -> Linear {
-            let l = self.img.level(level);
+            let l = self.lvl(level);
             let (x, y) = (u * f64::from(l.width) - 0.5, v * f64::from(l.height) - 0.5);
             bilinear(space.table(), l, remap, x, y, self.repeat)
         };
         let base = || {
-            let l = self.img.level(0);
+            let l = self.lvl(0);
             let (x, y) = (u * f64::from(l.width) - 0.5, v * f64::from(l.height) - 0.5);
             (l, x, y)
         };
@@ -904,20 +915,25 @@ mod tests {
         let data = [
             0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
         ];
-        let p = build_pyramid(2, 2, &data);
-        assert_eq!(p.len(), 1);
-        assert_eq!(p[0].data, vec![188, 188, 188, 255]);
+        let (w, h, d) = reduce_level(2, 2, &data);
+        assert_eq!((w, h), (1, 1));
+        assert_eq!(d, vec![188, 188, 188, 255]);
     }
 
     #[test]
     fn the_pyramid_goes_down_to_one_texel_through_odd_sizes() {
         let (w, h) = (13u32, 5u32);
         let data = vec![200u8; (w * h * 4) as usize];
-        let p = build_pyramid(w, h, &data);
-        let dims: Vec<_> = p.iter().map(|l| (l.width, l.height)).collect();
+        let image = ImageRef::new(w, h, data);
+        let dims: Vec<_> = (1..image.level_count())
+            .map(|i| {
+                let l = image.level(i);
+                // A flat image stays flat.
+                assert!(l.data.iter().all(|&b| b == 200));
+                (l.width, l.height)
+            })
+            .collect();
         assert_eq!(dims, vec![(7, 3), (4, 2), (2, 1), (1, 1)]);
-        // A flat image stays flat.
-        assert!(p.iter().all(|l| l.data.iter().all(|&b| b == 200)));
     }
 
     #[test]

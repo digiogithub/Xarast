@@ -222,7 +222,7 @@ Before = the tree at 17e5767 with the same bench.
 | HighQuality, 3× magnified | 3.20 ms (bilinear) | 5.80 ms | Mitchell, 4 × 4 taps: 22 ns/px |
 | HighQuality, ÷1.5 | 3.12 ms (aliasing) | 3.33 ms | widened tent in linear light, ≤ 4 × 4 taps |
 | HighQuality, ÷2.67 | 4.31 ms (aliasing) | 2.65 ms | trilinear in linear light, 8 taps |
-| pyramid, 2048² | — | 26 ms | once per image, single-threaded, on first minified frame |
+| pyramid, 2048² | — | 26 ms | once per image, single-threaded; since XARA-US-0053 on the walker's decode threads, not the render thread |
 
 Single-threaded per output pixel (the harness, `tests/resampling.rs`,
 release, noisy): magnification in encoded sRGB bilinear 59 ns, Mitchell
@@ -230,6 +230,60 @@ release, noisy): magnification in encoded sRGB bilinear 59 ns, Mitchell
 the encode is a binary search); the product's minification 55 ns;
 kernels widened by the ratio 0.4–3.2 µs (why they are not the product's
 minifier beyond 2×).
+
+#### Pixel memory budget (XARA-US-0053, 2026-09-24)
+
+**The proxy rule (final, as the phase asks to record it).** Each image's
+proxy is one level of its mip pyramid; that level and every smaller one
+are never evicted once built. It starts as the largest level whose long
+edge is ≤ **256** texels (an image not yet drawn costs at most ~256 KiB
+of resident proxy, plus its smaller levels: +⅓). Each time a primitive
+*draws* the image and pins levels `lo..`, the proxy moves up to
+`max(lo, cap)` if that is larger, `cap` being the largest level with a
+long edge ≤ **2048**. So the proxy tracks the image's on-canvas size (the
+level actually sampled, which comes from the device footprint — zoom
+included), grows when the image is scaled up or zoomed into, never
+shrinks, and never exceeds 2048 on the long edge (16 MiB). The phase's
+"rounded up to a power of two" becomes "a pyramid level", which is the
+image's own halving sequence. Consequences: an image ≤ 2048 on its long
+edge that has been drawn at or above its own size keeps its base
+resident for good (nothing to evict); a 24 Mpx photograph shown small
+keeps a few hundred KiB; worst case, 200 photographs each zoomed into
+once pin 200 × 16 MiB × 4⁄3 ≈ 4.2 GiB of proxies — the phase's 3.2 GB
+figure plus the smaller levels — which is the case T10.5.6's stress test
+(XARA-T-0282) must look at before this rule is called final for huge
+documents.
+
+**The limit.** Evictable bytes only (proxies are reported, not limited):
+`XARAST_PIXEL_BUDGET_MB`, else ¼ of `MemTotal` clamped to 512 MiB – 4 GiB
+(this machine: 4 GiB). Read at the first use of the global budget.
+
+**Costs** (`cargo bench -p xarast-render --bench render -- images/`,
+2048² = 16 MiB base, load ≈ 30–98 from other agents, so pessimistic;
+spill numbers are page-cache hot, a cold disk read will be slower):
+
+| Operation | Time |
+|---|---|
+| Build the whole pyramid (`prepare`), single-threaded | 25.6 ms |
+| Evict with a spill write (base + level 1, 20 MiB freed, 16 MiB written) | 2.9 ms |
+| Re-materialise the base from its spill file (then dropped again) | 1.24 ms |
+
+**Where the pyramid time went.** Release `xarast-cli smoke-open`, first
+walk, three runs with and two without (same load) the walker's
+`prepare`: leafgirl 28.7 → 31.8 ms, Groucho2 34.9 → 40.4 ms, scope3
+23.4 → 26.4 ms, Spitfire 8.6 → 12.8 ms (+3–5 ms on the walker's decode
+threads, in parallel) — in exchange the render thread no longer builds
+any pyramid on the first minified frame. (These walks are several times
+the XARA-T-0129 table's at the same files, *without* `prepare` too: the
+machine was at load ≈ 30–98 from other agents, so compare only within
+this pair.)
+
+**Corpus under a tiny budget** (`xarast-app/tests/pixel_budget.rs`, 24
+files × Final/Draft at 640 × 480, limit 0, everything above 1 × 1
+evictable): 297 evictions freeing 197 MiB, 209 base re-materialisations,
+69 level rebuilds, 88 spill writes (53 MiB), 0 lost, pixels identical.
+Peak resident under that budget: 7.6 MiB spilling, 4.1 MiB re-decoding
+(pins in flight only).
 
 ### Document model
 
@@ -903,3 +957,6 @@ that will recur:
       a calibration bench.
 - [ ] Measure bytes per node excluding payloads, so the 160 B budget can
       actually be judged.
+- [ ] Pixel budget under load: the 40 × 24 Mpx stress test (XARA-T-0282)
+      and a cold-disk spill read; decide whether the 2048 proxy cap needs a
+      global proxy ceiling for huge documents (see "Pixel memory budget").

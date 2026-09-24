@@ -245,10 +245,9 @@ fn images(c: &mut Criterion) {
         let mut res = Resolver::new();
         let img = res.images.insert(noisy_image(n, n));
         // The pyramid is built once per image, outside the timing.
-        let _ = res
-            .images
-            .get(img)
-            .map(xarast_render::ImageRef::level_count);
+        if let Some(i) = res.images.get(img) {
+            i.prepare();
+        }
         let mp = f64::from(Mp::PER_PT);
         let mapping = GradMapping::Affine {
             a: Point64::new(0.0, 0.0),
@@ -285,9 +284,47 @@ fn images(c: &mut Criterion) {
         // A fresh image each time: the pyramid is cached per image.
         b.iter_batched(
             || xarast_render::ImageRef::new(2048, 2048, base.level(0).data.to_vec()),
-            |img| black_box(img.level_count()),
+            |img| {
+                img.prepare();
+                black_box(img)
+            },
             criterion::BatchSize::LargeInput,
         );
+    });
+    // The pixel budget (W10.5), 2048² (16 MiB) bases, spilled under the
+    // default spill root (on disk, not tmpfs).
+    g.bench_function("budget_evict_spill_2048", |b| {
+        let base = noisy_image(2048, 2048).level(0).data.to_vec();
+        b.iter_batched(
+            || {
+                let budget =
+                    xarast_render::PixelBudget::new(xarast_render::BudgetConfig::unlimited());
+                let img =
+                    xarast_render::ImageRef::with_budget(2048, 2048, base.clone(), &budget, None);
+                (budget, img)
+            },
+            |(budget, img)| {
+                // Evicts the base (and level 1): a 16 MiB spill write.
+                budget.set_limit(0);
+                black_box((budget, img))
+            },
+            criterion::BatchSize::LargeInput,
+        );
+    });
+    g.bench_function("budget_rematerialise_spill_2048", |b| {
+        let budget = xarast_render::PixelBudget::new(xarast_render::BudgetConfig {
+            limit_bytes: 0,
+            ..xarast_render::BudgetConfig::unlimited()
+        });
+        let img = xarast_render::ImageRef::with_budget(
+            2048,
+            2048,
+            noisy_image(2048, 2048).level(0).data.to_vec(),
+            &budget,
+            None,
+        );
+        // Read back from the spill file, then dropped again by the budget.
+        b.iter(|| black_box(img.level(0).data.len()));
     });
     g.finish();
 }

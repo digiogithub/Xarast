@@ -49,8 +49,9 @@ use xarast_doc::{
 };
 use xarast_geom::{Cap, FillRule, Join, Mp, Path, Point, Rect, StrokeStyle, Vector};
 use xarast_render::{
-    CacheHint, ContentHash, DeviceRect, ImageId, ImageRef, PathRef, RenderQuality, Resolver, Scene,
-    SceneBuilder, SceneError, SceneNodeId, SceneStats, Transparency,
+    CacheHint, ContentHash, DeviceRect, FnSource, ImageId, ImageRef, PathRef, PixelBudget,
+    PixelSource, RenderQuality, Resolver, Scene, SceneBuilder, SceneError, SceneNodeId, SceneStats,
+    Transparency,
 };
 use xarast_text::FontSubstitution;
 
@@ -150,6 +151,9 @@ pub struct SceneWalker {
     /// a fold of the tag and content revision of every attribute node
     /// pushed in the enclosing scopes, in order. See [`content_hash`].
     scope: u64,
+    /// The pixel budget decoded bitmaps are registered under; `None` is
+    /// the process-wide one ([`PixelBudget::global`]).
+    pixel_budget: Option<Arc<PixelBudget>>,
 }
 
 /// What a scope opened in the scene, so that `LeaveScope` can close it.
@@ -177,6 +181,14 @@ impl SceneWalker {
             fonts: Some(fonts),
             ..SceneWalker::default()
         }
+    }
+
+    /// Registers this walker's bitmaps under `budget` instead of the
+    /// process-wide one: tests and tools that must not share it.
+    #[must_use]
+    pub fn with_pixel_budget(mut self, budget: Arc<PixelBudget>) -> SceneWalker {
+        self.pixel_budget = Some(budget);
+        self
     }
 
     /// Every font substitution the walks so far made, each once, in the
@@ -507,17 +519,15 @@ impl SceneWalker {
             if self.images.contains_key(&id) || self.failed.contains(&id) {
                 continue;
             }
-            let (w, h) = (res.info.width, res.info.height);
-            let expected = w as usize * h as usize * 4;
-            if expected != 0 && res.pixels.pixels.len() == expected {
-                let image = ImageRef::new(w, h, res.pixels.pixels.to_vec());
-                let rid = self.resolver.images.insert(image);
-                self.images.insert(id, rid);
-            } else if res.pixels.pixels.is_empty() && res.original.is_some() {
+            if has_native_pixels(res) || (res.pixels.pixels.is_empty() && res.original.is_some()) {
                 todo.push((id, res));
             }
         }
-        for (id, decoded) in decode_all(&todo) {
+        let budget = self
+            .pixel_budget
+            .clone()
+            .unwrap_or_else(|| Arc::clone(PixelBudget::global()));
+        for (id, decoded) in decode_all(&todo, &budget) {
             match decoded {
                 Some(image) => {
                     let rid = self.resolver.images.insert(image);
@@ -907,24 +917,36 @@ impl SceneWalker {
     }
 }
 
-/// Decodes a batch of encoded bitmaps, in parallel when there is more
+/// Whether a resource carries its pixels decoded (`w·h·4` bytes).
+fn has_native_pixels(res: &xarast_doc::BitmapResource) -> bool {
+    let expected = res.info.width as usize * res.info.height as usize * 4;
+    expected != 0 && res.pixels.pixels.len() == expected
+}
+
+/// Makes a batch of bitmaps ready to draw, in parallel when there is more
 /// than one, and returns them in input order (`None` for a failure).
 ///
-/// Every decode runs under `DecodeLimits::default()`, which bounds its
-/// memory and wall clock whatever the bytes claim. Spreading a document's
+/// Encoded bitmaps are decoded here. Every decode runs under
+/// `DecodeLimits::default()`, which bounds its memory and wall clock
+/// whatever the bytes claim. Every image then builds its mip pyramid
+/// here too ([`ImageRef::prepare`], T10.5.2), so that the render thread
+/// never pays for it on the first minified frame. Spreading a document's
 /// bitmaps over the cores keeps the first frame of a bitmap-heavy file
 /// close to the cost of its largest image rather than the sum of all.
 fn decode_all(
     todo: &[(BitmapId, &xarast_doc::BitmapResource)],
+    budget: &Arc<PixelBudget>,
 ) -> Vec<(BitmapId, Option<ImageRef>)> {
+    let ready = |res: &xarast_doc::BitmapResource| {
+        let image = make_image(res, budget)?;
+        image.prepare();
+        Some(image)
+    };
     let threads = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(todo.len());
     if threads <= 1 {
-        return todo
-            .iter()
-            .map(|(id, res)| (*id, decode_resource(res)))
-            .collect();
+        return todo.iter().map(|(id, res)| (*id, ready(res))).collect();
     }
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut out: Vec<(BitmapId, Option<ImageRef>)> =
@@ -937,7 +959,7 @@ fn decode_all(
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let Some((_, res)) = todo.get(i) else { break };
-                        mine.push((i, decode_resource(res)));
+                        mine.push((i, ready(res)));
                     }
                     mine
                 })
@@ -955,32 +977,69 @@ fn decode_all(
     out
 }
 
-/// Decodes one resource's encoded original into straight RGBA.
+/// One resource as a renderer image under `budget`, with the source an
+/// evicted base comes back from (`xarast_render::pixel_budget`).
 ///
-/// The `.xar` wrappings are chosen from what the importer recorded: a
-/// JPEG that arrived with a reconstruction palette is tag 71
-/// (JPEG8BPP), a `Bmp` may be a headerless DIB (tag 65), and `Unknown` is
-/// the importer's name for the zlib-wrapped DIB (tag 69). The decoded
-/// dimensions are used, not `res.info`, which the importer leaves zeroed.
-fn decode_resource(res: &xarast_doc::BitmapResource) -> Option<ImageRef> {
-    use xarast_doc::resources::ImageFormat as F;
-    use xarast_image::xar::decode_xar_bitmap;
-    let original = res.original.as_ref()?;
-    let bytes: &[u8] = &original.bytes;
-    let limits = xarast_image::DecodeLimits::default();
-    let decoded = match original.format {
-        F::Jpeg if !res.pixels.palette.is_empty() => {
-            let palette: Vec<[u8; 3]> =
-                res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect();
-            decode_xar_bitmap(71, bytes, &palette, &limits)
-        }
-        F::Png | F::Jpeg | F::Gif => xarast_image::decode(bytes, &limits),
-        F::Bmp => decode_xar_bitmap(65, bytes, &[], &limits),
-        F::Unknown => decode_xar_bitmap(69, bytes, &[], &limits),
+/// Native pixels are registered as they are; their source is a copy of
+/// the document's, which it holds anyway, so evicting them costs no disk.
+/// An encoded original is decoded, and its source decodes it again: the
+/// decoders are deterministic, so the bytes are the same, and the budget
+/// spills such a base rather than pay for the decode twice.
+fn make_image(res: &xarast_doc::BitmapResource, budget: &Arc<PixelBudget>) -> Option<ImageRef> {
+    if has_native_pixels(res) {
+        let (w, h) = (res.info.width, res.info.height);
+        let pixels = Arc::clone(&res.pixels.pixels);
+        let source: Arc<dyn PixelSource> = Arc::new(FnSource::cheap(move || Some(pixels.to_vec())));
+        let data = res.pixels.pixels.to_vec();
+        return Some(ImageRef::with_budget(w, h, data, budget, Some(source)));
     }
-    .ok()?;
-    let d = decoded.data;
-    (d.width > 0 && d.height > 0).then(|| ImageRef::new(d.width, d.height, d.to_straight_rgba8()))
+    let encoded = Encoded {
+        original: Arc::clone(res.original.as_ref()?),
+        palette: res.pixels.palette.iter().map(|c| [c.r, c.g, c.b]).collect(),
+    };
+    let (w, h, data) = encoded.decode()?;
+    let source: Arc<dyn PixelSource> = Arc::new(FnSource::expensive(move || {
+        encoded
+            .decode()
+            .filter(|&(dw, dh, _)| (dw, dh) == (w, h))
+            .map(|(_, _, d)| d)
+    }));
+    Some(ImageRef::with_budget(w, h, data, budget, Some(source)))
+}
+
+/// What decoding a bitmap needs: its encoded bytes and, for tag 71, the
+/// palette it is snapped to.
+struct Encoded {
+    original: Arc<xarast_doc::resources::OriginalEncoded>,
+    palette: Vec<[u8; 3]>,
+}
+
+impl Encoded {
+    /// Decodes into straight RGBA: `(width, height, bytes)`.
+    ///
+    /// The `.xar` wrappings are chosen from what the importer recorded: a
+    /// JPEG that arrived with a reconstruction palette is tag 71
+    /// (JPEG8BPP), a `Bmp` may be a headerless DIB (tag 65), and `Unknown`
+    /// is the importer's name for the zlib-wrapped DIB (tag 69). The
+    /// decoded dimensions are used, not `res.info`, which the importer
+    /// leaves zeroed.
+    fn decode(&self) -> Option<(u32, u32, Vec<u8>)> {
+        use xarast_doc::resources::ImageFormat as F;
+        use xarast_image::xar::decode_xar_bitmap;
+        let bytes: &[u8] = &self.original.bytes;
+        let limits = xarast_image::DecodeLimits::default();
+        let decoded = match self.original.format {
+            F::Jpeg if !self.palette.is_empty() => {
+                decode_xar_bitmap(71, bytes, &self.palette, &limits)
+            }
+            F::Png | F::Jpeg | F::Gif => xarast_image::decode(bytes, &limits),
+            F::Bmp => decode_xar_bitmap(65, bytes, &[], &limits),
+            F::Unknown => decode_xar_bitmap(69, bytes, &[], &limits),
+        }
+        .ok()?;
+        let d = decoded.data;
+        (d.width > 0 && d.height > 0).then(|| (d.width, d.height, d.to_straight_rgba8()))
+    }
 }
 
 /// Wraps one emission in its transparency scope, and only when the
