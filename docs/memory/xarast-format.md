@@ -241,7 +241,16 @@ stats, foreign_count, foreign_digest }`.
   / `y` lists from the real layout and substituted families join the
   `font-family` chain (+ `xarast:font-substitute`, informative); without
   it the old line-per-baseline fallback (`x=0`, `y` += line height,
-  `text-anchor`). Stories on a path are still laid out as lines.
+  `text-anchor`). **Stories on a path** (T9.5.6, XARA-T-0252): the placer
+  lays them out as the walker does and sets `StoryPlacement::along_path`;
+  `chars` are then glyph origins on the path and `rotations` their turns,
+  and each run gets a `rotate` list (SVG degrees) next to `x` / `y`. No
+  `<textPath>` (see `text.md`, "Base SVG along the path": resvg and
+  Inkscape 1.2 cannot draw a multi-run story through it). Reflected or
+  sheared characters (`PathFit::is_plain` false) and saves without a
+  placer stay on straight lines and count in `Stats::text_on_path`. The
+  reader ignores `rotate` like `x` / `y` (derived); the corpus round trip
+  saves with the placer and checks the re-save bytes (59/59).
 
 ### Passes 4–5: hoisted paint and CSS classes (XARA-T-0101) — the reader contract
 
@@ -876,8 +885,12 @@ the file means", not crashes; each input is now a unit test in
 - Text leftovers (XARA-T-0172): the builder's Info diagnostic "an
   attribute follows an ink node" fires on every multi-run line (text items
   count as ink in `validate`); run-level foreign attributes and elements
-  are dropped (runs are not nodes); text on a path is still a straight
-  line in the base SVG (`<textPath>`, W9.5); a gradient or bitmap fill on
+  are dropped (runs are not nodes); ~~text on a path is still a straight
+  line in the base SVG~~ (done, XARA-T-0252; reflected or sheared
+  characters still are); **the app's own save (`xarast-app/src/save.rs`)
+  passes no `SvgOptions::text`**, so a `.xarast` saved from the GUI shows
+  every story (on a path or not) on the fallback lines in a browser —
+  only `xarast-cli convert` places text; a gradient or bitmap fill on
   text is written in the spread frame, so browsers misplace it under the
   story's transform (the twin is exact); fonts are not embedded
   (`@font-face`/WOFF2, §6.7 rule 2) and no generic family is guessed from

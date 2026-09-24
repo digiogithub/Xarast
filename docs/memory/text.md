@@ -21,7 +21,7 @@ architecture open question 4 is closed (see "Text on a path" below).
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
 | XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
 | XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
-| XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246). T9.5.5 editing (reverse, fit/remove commands, path editing) and T9.5.6 `<textPath>` open | in review |
+| XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
 | XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
 
 Public API (`crates/xarast-text/src/lib.rs`):
@@ -748,8 +748,62 @@ the cluster inwards instead.
 
 Not done (tracker tasks): editing (T9.5.5, XARA-T-0251: fit text to
 a path, remove from path, reverse, drag the indents; word wrap on a
-path); `.xarast` base SVG as `<textPath>` (T9.5.6, XARA-T-0252; browsers
-still see straight lines, `SvgStats::text_on_path`).
+path).
+
+### Base SVG along the path (T9.5.6, as built, XARA-T-0252)
+
+**Decision: each character is placed and turned, no `<textPath>`.** The
+SVG text placer (`xarast-app/src/svg_text.rs`) lays a story on a path out
+exactly as the walker does (`path_fit` → `PathFit::story_mode`) and, when
+`PathFit::is_plain` (not reflected, shear tangent ≤ `PLAIN_SHEAR` = 0.005),
+reports per character item its glyph origin carried by
+`PathFit::cluster_transform` and the turn of that transform
+(`StoryPlacement { along_path: true, chars, rotations }`). The writer adds
+a `rotate` list to each run next to `x` / `y` (`research/06 §6.7.1` rules
+0 and 6). Same output in `.xarast` and SVG export (no dialect branch).
+Glyph *origins* are placed, so kerns, tracking, justification, wrap on a
+closed path, the straight extension past an open path's ends, the
+parallel copies for later lines and baseline shifts all come out exact;
+only the renderer's own glyph shapes differ.
+
+**Dead end: `<textPath>`** (built, measured, dropped the same day). A
+`<textPath href>` per line over a derived path in a `<defs>` (moved to the
+line's baseline, extended or lapped so no glyph falls off) with per-glyph
+`x` distances along it:
+
+- **resvg 0.45** follows the path only until the first child *element* of
+  the `<textPath>` closes (`usvg` resets its text flow to linear after
+  every element child): a line `<tspan>` holding several run `<tspan>`s,
+  or a line starting with an empty kern-only run, came out straight.
+  Working around it needs one `<textPath>` per run, which Inkscape cannot
+  draw:
+- **Inkscape 1.2**: it ignores `x` lists inside `<textPath>` (glyphs laid
+  end to end with its own advances) and draws nothing sensible when a
+  `<text>` has several `<textPath>` children — every multi-line or
+  multi-run story on `TextCurve.xar` vanished. It also follows only
+  `xlink:href`, not `href`.
+- Measured on `TextCurve.xar` (SVG export vs our PNG, resvg): straight
+  16.27 → one `<textPath>` per line 8.01 → one per run 3.47 → per-character
+  `rotate` **3.06**; Inkscape and resvg both draw the per-character version
+  on the curves. It needs no reader change (the reader ignores `rotate`,
+  like `x` / `y`), no derived `<defs>`, no new structure.
+
+Kept limitation: reflected or sheared characters cannot be said per
+character in SVG (a mirror or a slant is not a rotation), so those stories
+stay on straight lines and count in `svg::Stats::text_on_path` (none in
+the corpus; `TextCurve.xar`'s one story with a shear has 0.11°, under
+`PLAIN_SHEAR`). The app's own save passes no placer (`xarast-format.md`,
+text leftovers), so only `xarast-cli convert` and SVG export place text.
+
+Evidence: `xarast-text` `path::tests::a_fit_is_plain_unless_characters_are_mirrored_or_visibly_sheared`;
+`xarast-format` `tests/svg_text.rs`
+`text_on_a_path_is_placed_and_turned_per_character_and_reads_back_unchanged`
+(read back, normal form, byte-identical re-save, interchange, the
+straight fallback counted); `xarast-app` `tests/svg_text_path.rs` (up a
+vertical path: origins on it, turned −90°; reflected stays straight);
+`tests/xarast_roundtrip.rs` now saves with the placer and checks the
+re-save bytes (59/59 render and bytes); corpus export-check TextCurve svg
+3.06 (limit removed).
 
 ## Invariants that must not be broken
 
@@ -849,6 +903,10 @@ first story of a process waits for enumeration when nothing prewarmed
   loaded after the clone are invisible to it (the system handle is per
   clone). Keeping the font context inside the database is simpler.
 - **"Roman" as a style suffix**: it strips "Times New Roman" to "Times New".
+- **`<textPath>` for text on a path in the base SVG** (T9.5.6): resvg
+  loses the path after the first element inside it and Inkscape 1.2
+  cannot draw several `<textPath>`s in one `<text>`; per-character `x` /
+  `y` / `rotate` works in both (see "Base SVG along the path").
 - **A layout-aware pass for text on a path** (spike B: respacing by the
   curvature at each position): it departs from the original by up to 5.8
   advances on the fixtures (above). Do not reopen it for fidelity; only
@@ -873,6 +931,10 @@ first story of a process waits for enumeration when nothing prewarmed
   type as characters, not breaks.
 - Convert to shapes leftovers: T9.6.5 (outline fallback for export and
   profile C, XARA-T-0245).
+- Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
+  straight (an SVG `transform` per character would need one element per
+  character); the GUI save (`xarast-app/src/save.rs`) passes no text
+  placer, so its `.xarast` files show no placed text at all in browsers.
 
 ## The `.xarast` text writer (XARA-T-0172, done)
 

@@ -33,7 +33,7 @@ pub use font::{
 };
 pub use layout::{DEFAULT_TAB_INTERVAL, GlyphRun, LaidCluster, LaidLine, Layout, PlacedGlyph};
 pub use metrics::{CharMetrics, FaceMetrics, FontMetrics, ScaledMetrics};
-pub use path::{PathFit, PathFitStyle, TextPath};
+pub use path::{PLAIN_SHEAR, PathFit, PathFitStyle, TextPath};
 pub use segment::{WordSegment, next_grapheme, prev_grapheme, word_segments};
 pub use shape::{NOMINAL_SIZE, Shaper};
 pub use style::{

@@ -23,10 +23,8 @@ TestBitmapFill pdf 6.5
 # Feathering is approximated by an SVG blur.
 SoftShadow svg 4.8
 
-# Text on a path: PNG and PDF follow the path (XARA-US-0048, PDF 1.55),
-# but the SVG writes each story as straight lines until the base SVG
-# carries <textPath> (T9.5.6, XARA-T-0252). Measured 16.27.
-TextCurve svg 18.7
+# (Text on a path: SVG places and turns each character on the path since
+# T9.5.6, XARA-T-0252: TextCurve 16.27 -> 3.06, under the default now.)
 
 # Small text (5-9 px glyphs at 72 dpi) drawn as filled outlines: Poppler
 # and Ghostscript both paint thin features darker than our coverage

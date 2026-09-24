@@ -47,11 +47,20 @@ pub trait TextPlacer: Send + Sync {
 pub struct StoryPlacement {
     /// The position of each character item (`TextItem::Char` or `Tab`) in
     /// story space (y up, the first baseline at 0): the left edge of its
-    /// box on its baseline, shifts included. Items not listed are placed
-    /// after the previous one.
+    /// box on its baseline, shifts included; for a story placed along its
+    /// path, the origin of its glyphs on the path. Items not listed are
+    /// placed after the previous one.
     pub chars: HashMap<NodeId, (Mp, Mp)>,
     /// Families that were not available, with the family used instead.
     pub substitutions: Vec<(Arc<str>, Arc<str>)>,
+    /// Whether a story on a path was placed along its path (T9.5.6): each
+    /// character at its own position, turned by its entry in `rotations`.
+    /// `false` for a story on a path laid out on straight lines.
+    pub along_path: bool,
+    /// For a story placed along its path, the turn of each character item
+    /// about its position, in degrees counter-clockwise (y up). Items not
+    /// listed do not turn.
+    pub rotations: HashMap<NodeId, f64>,
 }
 
 /// A shared [`TextPlacer`] in [`super::SvgOptions`], compared by identity.
