@@ -24,13 +24,13 @@
 use std::collections::HashMap;
 
 use xarast_color::{Colour, ColourTable, FillEffect, Rgba8, TranspMode};
-use xarast_doc::fill::{FillGeometry, Perspective, Ramp, Tiling};
+use xarast_doc::fill::{FillGeometry, Perspective, Ramp, RampMapping, Tiling};
 use xarast_doc::resources::BitmapId;
 use xarast_geom::Point;
 use xarast_render::{
     BitmapAdjust, BlendFamily, EffectSpace, GradMapping, GradRamp, GradShape, ImageId, Paint,
-    Point64, Profile, RampLength, Repeat, Resolver, Stop, TranspSource, TranspStop, Transparency,
-    build_transparency_ramp,
+    Point64, Profile, RampEase, RampLength, Repeat, Resolver, Stop, TranspSource, TranspStop,
+    Transparency, build_transparency_ramp_eased,
 };
 
 /// Everything the mapping needs that is not the fill itself.
@@ -195,6 +195,16 @@ fn bitmap_repeat(own: Tiling, attr: Tiling) -> Repeat {
     }
 }
 
+/// The renderer's easing for a ramp's fill mapping. A sine mapping is
+/// eased before the profile, as `Ramp::sample` does, so the canvas agrees
+/// with the SVG export and the fill tool (XARA-US-0017).
+fn ease_of(m: RampMapping) -> RampEase {
+    match m {
+        RampMapping::Linear => RampEase::Linear,
+        RampMapping::Sin => RampEase::Sin,
+    }
+}
+
 fn space_of(e: FillEffect) -> EffectSpace {
     match e {
         FillEffect::Fade => EffectSpace::Rgb,
@@ -296,6 +306,7 @@ pub(crate) fn colour_paint(
                 repeat,
                 &colour_stops(from, to, ramp, ctx.colours),
                 ramp.profile,
+                ease_of(ramp.mapping),
                 space,
                 len,
                 ctx,
@@ -321,6 +332,7 @@ pub(crate) fn colour_paint(
                 repeat,
                 &colour_stops(from, to, ramp, ctx.colours),
                 ramp.profile,
+                ease_of(ramp.mapping),
                 space,
                 len,
                 ctx,
@@ -338,6 +350,7 @@ pub(crate) fn colour_paint(
             repeat,
             &colour_stops(from, to, ramp, ctx.colours),
             ramp.profile,
+            ease_of(ramp.mapping),
             space,
             len,
             ctx,
@@ -361,6 +374,7 @@ pub(crate) fn colour_paint(
                 repeat,
                 &colour_stops(from, to, ramp, ctx.colours),
                 ramp.profile,
+                ease_of(ramp.mapping),
                 space,
                 len,
                 ctx,
@@ -471,11 +485,15 @@ fn gradient(
     repeat: Repeat,
     stops: &[Stop],
     profile: Profile,
+    ease: RampEase,
     space: EffectSpace,
     len: RampLength,
     ctx: &mut PaintCtx<'_>,
 ) -> Paint {
-    let ramp = ctx.resolver.ramps.intern(stops, profile, space, len);
+    let ramp = ctx
+        .resolver
+        .ramps
+        .intern_eased(stops, profile, ease, space, len);
     Paint::Gradient {
         shape,
         mapping,
@@ -637,7 +655,7 @@ fn graduated(
     ctx: &mut PaintCtx<'_>,
 ) -> Transparency {
     let stops = transparency_stops(from, to, ramp);
-    let id = intern_transparency_ramp(&stops, ramp.profile, ctx);
+    let id = intern_transparency_ramp(&stops, ramp.profile, ease_of(ramp.mapping), ctx);
     Transparency {
         family: family_of(from.mode),
         source: TranspSource::Gradient {
@@ -653,6 +671,7 @@ fn graduated(
 fn intern_transparency_ramp(
     stops: &[TranspStop],
     profile: Profile,
+    ease: RampEase,
     ctx: &mut PaintCtx<'_>,
 ) -> xarast_render::RampId {
     // The key is the levels as greys, which makes two transparency ramps
@@ -675,13 +694,14 @@ fn intern_transparency_ramp(
     let id = ctx
         .resolver
         .ramps
-        .intern(&grey, profile, EffectSpace::Rgb, len);
+        .intern_eased(&grey, profile, ease, EffectSpace::Rgb, len);
     let slot = id.index() as usize;
     if ctx.resolver.transparency_ramps.len() <= slot {
         ctx.resolver.transparency_ramps.resize(slot + 1, Vec::new());
     }
     if ctx.resolver.transparency_ramps[slot].len() != len.len() {
-        ctx.resolver.transparency_ramps[slot] = build_transparency_ramp(stops, profile, len);
+        ctx.resolver.transparency_ramps[slot] =
+            build_transparency_ramp_eased(stops, profile, ease, len);
     }
     id
 }
