@@ -997,7 +997,8 @@ draws proxies only (its timing is the perf gate `photo-slider-24mpx`).
       on an **outline** stop or arm (the colour bar resolves interior sets
       only, decision 78); dragging out a new outline fill; the original's
       perpendicular follow of an elliptical radial's minor axis without
-      Adjust (decision 76); the document's own nudge size (tag 4114).
+      Adjust (decision 76); the document's own nudge size (tag 4114) —
+      all in XARA-T-0308.
       Done in XARA-T-0220: outline handles, nudges, axis/aspect locks,
       status line and cursors, the double-click conical, one-step infobar
       slider drags (decisions 76–81); Hue came with T-0256. Bitmap-fill
