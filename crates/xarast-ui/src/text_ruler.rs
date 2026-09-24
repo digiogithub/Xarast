@@ -479,4 +479,57 @@ mod tests {
                 .any(|c| matches!(c, UiCommand::InfobarEdit { .. }))
         );
     }
+
+    fn escape() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn esc_during_a_marker_drag_or_a_guide_pull_makes_no_edit() {
+        // egui ends the drag itself on `Esc` and reports the stop in that
+        // frame: it must not read as the release (XARA-T-0305).
+        let mut w = CanvasWidget::new();
+        w.set_text_ruler(Some(TextRuler {
+            origin: Mp::from_pt(100.0),
+            ..ruler()
+        }));
+        let region = region_of(&mut w);
+        let (a, b) = (on_strip(region, 110.0), on_strip(region, 150.0));
+        let (cmds, _) = run(
+            &mut w,
+            vec![
+                vec![egui::Event::PointerMoved(a)],
+                vec![button(a, true)],
+                vec![egui::Event::PointerMoved(b)],
+                vec![escape()],
+                vec![egui::Event::PointerMoved(on_strip(region, 170.0))],
+                vec![button(on_strip(region, 170.0), false)],
+                vec![],
+            ],
+        );
+        assert!(cmds.is_empty(), "{cmds:?}");
+
+        let from = on_strip(region, 600.0);
+        let to = egui::pos2(region.min.x + 600.0, region.min.y + 200.0);
+        let (cmds, _) = run(
+            &mut w,
+            vec![
+                vec![egui::Event::PointerMoved(from)],
+                vec![button(from, true)],
+                vec![egui::Event::PointerMoved(egui::pos2(from.x + 12.0, from.y))],
+                vec![egui::Event::PointerMoved(to)],
+                vec![escape()],
+                vec![button(to, false)],
+                vec![],
+            ],
+        );
+        assert!(cmds.is_empty(), "{cmds:?}");
+        assert!(!w.is_dragging_guide());
+    }
 }
