@@ -1164,6 +1164,47 @@ would not reach SVG export. A derived image is evaluated once and then
 sampled, filtered and budgeted like any other image (an expensive
 `PixelSource`, spilled on first eviction).
 
+### Deferred images (XARA-T-0304, 2026-09-24)
+
+`ImageRef::deferred(w, h, budget, source, standin)`: an image whose base
+its source produces when first needed — the walker's committed photo
+chain on a large picture (`image.md`, "The release, off the walk
+thread"). The store starts with **no level resident** and `pending`;
+`standin` is an approximation about the size of level `.0`, kept
+**outside** `levels`, so nothing but a `Substitute` sampler ever sees it.
+
+- **`Materialise`** (export, thumbnails, headless, tests): the first pin
+  produces the base in place and reduces the levels it needs from it —
+  the same bytes and the same levels as `with_budget` over the source's
+  bytes (tested at four sizes × two filters, and level by level).
+- **`Substitute`**: a pin that needs the base and finds no smaller
+  resident level gets the stand-in (`Pinned::Substitute`, `Plan::
+  Fallback`, which samples a level by its own size, so the stand-in's
+  size need not be a pyramid size) and stamps the image, exactly like an
+  evicted base; `rematerialise` then produces the base **and every
+  level** (a pending store only: the render thread must not pay the
+  ≈ 200 ms pyramid of a 24 Mpx image on its repair), drops the stand-in
+  and clears `pending`.
+- **`rematerialise` works unlocked** (for every store, not only deferred
+  ones): it reads the spill handle (now `Arc<SpillFile>`) under the
+  lock, produces the base and the pyramid with it released, and installs
+  whatever is still missing. Before, it held the store's mutex through a
+  decode, so a render thread pinning that image waited for the whole
+  decode anyway. Tested with a source that blocks until told: a
+  `Substitute` render finishes while it is blocked.
+- **Accounting.** A stand-in counts as proxy bytes (never evicted, only
+  dropped when the base arrives); a pending store has nothing evictable,
+  so `evict` leaves it alone. Once made it is an ordinary image with an
+  expensive source: spilled on first eviction.
+- **Damage never produces a base.** `ImageRef == ImageRef` compares the
+  bases when the stores differ, which for a pending image means running
+  the evaluation — on the render thread, inside `scene_damage`, when an
+  undo parks another derived image of the same size in the same slot.
+  `scene_damage` now uses `ImageRef::eq_without_producing`: same store,
+  or both made and equal; a pending image is "different" (a false
+  "different" costs one repaint of the object). `PartialEq` itself is
+  unchanged and exact.
+
 ### GPU tests: on by default, serialised machine-wide (2026-09-24)
 
 Tests that open a real `wgpu` device run by default again;
@@ -1425,6 +1466,13 @@ arm); whether CDraw does the same is one of the VM questions.
     Export, thumbnails, goldens and every byte-for-byte test use
     `Materialise`; only the interactive render thread substitutes, and it
     never publishes such a frame as exact (`app-core.md` invariant 17).
+22. **A deferred image's stand-in is never a level.** It lives outside
+    `levels`, only a `Substitute` pin may return it, and producing the
+    base drops it. Seeding a level with an approximation would make a
+    later `Materialise` render (export) sample it and break byte
+    identity. Nothing that runs on the render thread outside a sampler
+    may produce a pending base either: compare with
+    `eq_without_producing`, never `==`.
 ---
 
 ## Dead ends (do not retry)
@@ -1527,7 +1575,7 @@ arm); whether CDraw does the same is one of the VM questions.
 | 20 | Bitmap-fill tile seams in resvg on exported SVG (the renderer has none) | XARA-T-0274 |
 | 21 | ~~Mesh fills ignore `Repeat`; mesh transparencies are flat means~~. **Done 2026-09-24**: see "Meshes tile mirrored" | done (XARA-T-0256) |
 | 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
-| 23 | Re-materialisation of an evicted base is synchronous on the render thread; Draft `Nearest` reads the base even when minified. Draw the proxy, re-materialise on a worker | XARA-T-0281 |
+| 23 | ~~Re-materialisation of an evicted base is synchronous on the render thread~~. **Done 2026-09-24** (XARA-T-0281), and since XARA-T-0304 the helper no longer holds the image's lock while it decodes | done |
 | 24 | ~~`RampMapping::Sin` ignored; `ClipViewMode::Outside` dropped~~. **Done 2026-09-24**: `RampEase` (above) and the walker's outside clip (`app-core.md` decision 34); the renderer still clips only to a path's inside, on purpose | done (XARA-US-0017) |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
