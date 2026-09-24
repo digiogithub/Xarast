@@ -2,13 +2,14 @@
 id: XARA-T-0252
 type: task
 title: "T9.5.6 .xarast base SVG: text on a path as textPath"
-status: in_review
+status: done
 parent: XARA-US-0048
 author: mcp
 labels: [phase-9, text, format]
 created: 2026-09-23T23:43:49Z
-updated: 2026-09-24T01:07:18Z
+updated: 2026-09-24T01:20:40Z
 started: 2026-09-24T00:15:48Z
+closed: 2026-09-24T01:20:40Z
 ---
 
 ## Description

@@ -2,13 +2,15 @@
 id: XARA-T-0259
 type: task
 title: GUI save passes the text placer so saved .xarast shows placed text in browsers
-status: backlog
+status: done
 priority: high
 parent: XARA-US-0084
 author: mcp
 labels: [phase-6, xarast-format, text]
 created: 2026-09-24T01:08:08Z
-updated: 2026-09-24T01:08:08Z
+updated: 2026-09-24T01:20:40Z
+started: 2026-09-24T01:09:42Z
+closed: 2026-09-24T01:20:40Z
 ---
 
 ## Description
