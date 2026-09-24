@@ -2,12 +2,13 @@
 id: XARA-T-0305
 type: task
 title: "Colour editor: Esc during a slider drag may commit instead of cancel"
-status: in_review
+status: done
 author: mcp
 labels: [phase-8, ui, bug]
 created: 2026-09-24T14:59:17Z
-updated: 2026-09-24T16:43:02Z
+updated: 2026-09-24T17:18:35Z
 started: 2026-09-24T16:17:19Z
+closed: 2026-09-24T17:18:35Z
 ---
 
 ## Description

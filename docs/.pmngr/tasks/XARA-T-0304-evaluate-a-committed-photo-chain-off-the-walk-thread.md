@@ -2,13 +2,14 @@
 id: XARA-T-0304
 type: task
 title: Evaluate a committed photo chain off the walk thread (release hitch on large photos)
-status: in_review
+status: done
 parent: XARA-US-0054
 author: mcp
 labels: [phase-10, image, perf]
 created: 2026-09-24T14:59:05Z
-updated: 2026-09-24T16:52:56Z
+updated: 2026-09-24T17:18:35Z
 started: 2026-09-24T16:08:22Z
+closed: 2026-09-24T17:18:35Z
 ---
 
 ## Description
