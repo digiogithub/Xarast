@@ -11,7 +11,7 @@
 //! present, and the status bar says so when a copy happens rather than
 //! pretending the data is safe.
 
-use crate::model::UiModel;
+use crate::model::{CommandSink, UiCommand, UiModel};
 use crate::panel::PanelCtx;
 use crate::theme::STATUS_BAR_HEIGHT;
 use crate::units::format_measure;
@@ -40,7 +40,7 @@ impl StatusBar {
 
     /// Draws the bar.
     pub fn ui(&mut self, ui: &mut egui::Ui, ctx: &mut PanelCtx<'_>) {
-        status_bar_ui(ui, ctx.model, self.note.as_deref());
+        status_bar_row(ui, ctx.model, self.note.as_deref(), Some(ctx.out));
     }
 }
 
@@ -88,8 +88,55 @@ pub fn cache_text(pressure: f32) -> String {
     format!("Cache {pct:.0} % ({word})")
 }
 
+/// The text beside the import progress bar: the oldest import's own
+/// words, and how many more are queued behind it.
+pub fn import_text(model: &UiModel) -> Option<String> {
+    let first = model.imports.first()?;
+    let more = model.imports.len() - 1;
+    Some(if more == 0 {
+        first.label()
+    } else {
+        format!("{} (+{more} more)", first.label())
+    })
+}
+
+/// The background imports (T10.7.5): a progress bar with its label and a
+/// Cancel button, drawn right to left.
+fn imports_ui(ui: &mut egui::Ui, model: &UiModel, out: &mut CommandSink) {
+    let (Some(first), Some(text)) = (model.imports.first(), import_text(model)) else {
+        return;
+    };
+    let cancel = ui
+        .button("Cancel")
+        .on_hover_text("Stop importing: nothing is added to the document");
+    crate::a11y::set_label(ui.ctx(), cancel.id, "Cancel the import");
+    if cancel.clicked() {
+        out.push(UiCommand::CancelImports);
+    }
+    let bar = ui.add(
+        egui::ProgressBar::new(first.fraction())
+            .desired_width(120.0)
+            .animate(true),
+    );
+    crate::a11y::set_label(ui.ctx(), bar.id, &text);
+    ui.label(text);
+    // The bar moves while the worker reads; keep frames coming.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(100));
+}
+
 /// Draws the status bar into the space available.
 pub fn status_bar_ui(ui: &mut egui::Ui, model: &UiModel, note: Option<&str>) {
+    status_bar_row(ui, model, note, None);
+}
+
+/// The status bar; with a sink it also offers the imports' Cancel.
+fn status_bar_row(
+    ui: &mut egui::Ui,
+    model: &UiModel,
+    note: Option<&str>,
+    out: Option<&mut CommandSink>,
+) {
     ui.set_min_height(STATUS_BAR_HEIGHT);
     ui.horizontal(|ui| {
         ui.label(coordinate_text(model))
@@ -107,6 +154,9 @@ pub fn status_bar_ui(ui: &mut egui::Ui, model: &UiModel, note: Option<&str>) {
             .on_hover_text("The renderer tier the shell selected");
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(out) = out {
+                imports_ui(ui, model, out);
+            }
             if model.status.problem_count > 0 {
                 let text = format!("{} problems", model.status.problem_count);
                 if ui
@@ -187,6 +237,24 @@ mod tests {
         assert_eq!(cache_text(0.95), "Cache 95 % (full)");
         assert_eq!(cache_text(5.0), "Cache 100 % (full)");
         assert_eq!(cache_text(f32::NAN), "Cache 0 % (ok)");
+    }
+
+    #[test]
+    fn imports_show_progress_and_a_cancel_that_asks_the_core() {
+        let mut m = model(Unit::Millimetre, None);
+        assert_eq!(import_text(&m), None);
+        let p = |id, name: &str| xarast_app::import::ImportProgress {
+            id,
+            name: name.to_owned(),
+            read: 512 * 1024,
+            total: 1024 * 1024,
+            decoding: false,
+        };
+        m.imports = vec![p(1, "photo.jpg"), p(2, "other.png")];
+        assert_eq!(
+            import_text(&m).as_deref(),
+            Some("Importing photo.jpg: read 512 of 1024 KB\u{2026} (+1 more)")
+        );
     }
 
     #[test]

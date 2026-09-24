@@ -347,6 +347,12 @@ pub struct UiModel {
     /// the drag in flight included. `None` with no document open: the bar
     /// then draws [`UiModel::palette`].
     pub colour_bar: Option<xarast_app::colour_bar::ColourBarView>,
+    /// What the bitmap gallery shows (phase 10, W10.7), the bitmap drag in
+    /// flight included. `None` with no document open.
+    pub bitmap_gallery: Option<xarast_app::bitmap_gallery::BitmapGalleryView>,
+    /// The background imports still running (T10.7.5), for the status
+    /// bar's progress and its Cancel button.
+    pub imports: Vec<xarast_app::import::ImportProgress>,
     /// The status bar.
     pub status: StatusInfo,
     /// The theme preference.
@@ -487,6 +493,21 @@ pub enum UiCommand {
         /// `Shift` held: an outline takes the line colour.
         shift: bool,
     },
+    /// An operation of the bitmap gallery (phase 10, W10.7): place,
+    /// delete, a drag and its drop.
+    BitmapGallery(xarast_app::bitmap_gallery::BitmapGalleryOp),
+    /// A bitmap drag is over a point of the window, in logical points from
+    /// the window's top-left. The shell turns it into
+    /// [`xarast_app::bitmap_gallery::BitmapDragPoint::Canvas`] over the
+    /// canvas, and `Elsewhere` otherwise.
+    BitmapDragAt {
+        /// Points right.
+        x: f32,
+        /// Points down.
+        y: f32,
+    },
+    /// Stop the background imports (the status bar's Cancel).
+    CancelImports,
     /// Change the theme preference.
     SetTheme(Theme),
     /// Open the problem list — the non-modal importer diagnostics.

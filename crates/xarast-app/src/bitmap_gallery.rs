@@ -38,9 +38,10 @@ use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
+pub use xarast_doc::BitmapId;
 use xarast_doc::fill::{FillGeometry, Tiling};
 use xarast_doc::fill_edit::{FillValue, PaintSlot, SetFillGeometry};
-use xarast_doc::{BitmapId, BitmapResource, Document, NodeId, NodeKind};
+use xarast_doc::{BitmapResource, Document, NodeId, NodeKind};
 use xarast_geom::Point;
 
 use crate::fill_tool::FillCommand;
