@@ -148,6 +148,17 @@ fn style_range(range: std::ops::Range<usize>, a: &ResolvedAttrs) -> StyleRange {
     if let AttrValue::AspectRatio(x) = a.get(AttrSlot::TxtAspectRatio) {
         r.aspect = *x;
     }
+    if let AttrValue::FontFeatures(f) = a.get(AttrSlot::TxtFeatures)
+        && !f.is_empty()
+    {
+        r.features = f
+            .iter()
+            .map(|s| xarast_text::FontFeature {
+                tag: s.tag,
+                value: s.value,
+            })
+            .collect();
+    }
     if let AttrValue::Baseline(b) = a.get(AttrSlot::TxtBaseline) {
         r.baseline_shift = *b;
     }

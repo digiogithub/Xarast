@@ -534,6 +534,13 @@ impl Canon for AttrValue {
                     h.add(m);
                 }
             },
+            AttrValue::FontFeatures(f) => {
+                h.len(f.len());
+                for s in f.iter() {
+                    h.bytes(&s.tag);
+                    h.u32(u32::from(s.value));
+                }
+            }
             AttrValue::Ruler(r) => {
                 h.len(r.len());
                 for t in r.iter() {

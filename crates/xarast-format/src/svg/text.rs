@@ -251,5 +251,19 @@ pub(crate) fn run_text_attrs(
     {
         out.push(("xarast:ruler", ruler_text(r)));
     }
+    if let AttrValue::FontFeatures(f) = a.get(AttrSlot::TxtFeatures)
+        && !f.is_empty()
+    {
+        out.push(("xarast:features", features_text(f)));
+    }
     out
+}
+
+/// OpenType feature settings as `xarast:features` spells them: `tag:value`
+/// pairs separated by spaces, in tag order (`liga:0 smcp:1`).
+pub(crate) fn features_text(f: &[xarast_doc::FeatureSetting]) -> String {
+    f.iter()
+        .map(|s| format!("{}:{}", s.tag_str(), s.value))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
