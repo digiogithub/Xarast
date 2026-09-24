@@ -53,7 +53,9 @@ SCENARIOS
     save       File > Save to .xarast: snapshot, restore, SVG, package
     undo       one undo + redo of a move of one object, per operation;
                also the move itself (edit_median_ms)
-    render     one full Final frame on the render thread, no reuse
+    render     one Final frame of the same scene on the render thread,
+               per run; without --whole the thread reuses the pixels it
+               kept (the damage of an unchanged scene is empty)
     pan        Draft pan frames through the scheduler, --iterations frames
     zoom       Draft wheel-zoom frames through the scheduler
     export     PNG export at 4000 px wide through the export registry
@@ -76,6 +78,10 @@ OPTIONS
     --size WxH      the canvas (default 1920x1080)
     --zoom F        pan/zoom/render: zoom by F about the page fit (default 1)
     --photo WxH     photo: the photograph's size (default 6000x4000)
+    --whole         render: rasterise every frame whole (the backdrop
+                    changes between frames, so no pixel is reused); the
+                    backend's caches, such as the effect layer cache,
+                    stay warm across frames
 
 ENVIRONMENT
     XARAST_BENCH_DIR  where scenarios write their files (default /dev/shm
@@ -169,6 +175,9 @@ pub struct BenchArgs {
     pub zoom: f64,
     /// The photograph of the `photo` scenario, in pixels.
     pub photo: (u32, u32),
+    /// `render`: rasterise every frame whole (`--whole`), so that the
+    /// render thread cannot reuse the pixels on screen.
+    pub whole: bool,
 }
 
 /// Parses `bench`'s arguments.
@@ -189,6 +198,7 @@ pub fn parse(argv: &[String]) -> Result<BenchArgs, String> {
         size: (1920, 1080),
         zoom: 1.0,
         photo: (6000, 4000),
+        whole: false,
     };
     while let Some(arg) = it.next_arg() {
         match arg.as_str() {
@@ -199,6 +209,7 @@ pub fn parse(argv: &[String]) -> Result<BenchArgs, String> {
             "--zoom" => a.zoom = it.parsed("--zoom")?,
             "--size" => a.size = dimensions(&it.value("--size")?, "--size")?,
             "--photo" => a.photo = dimensions(&it.value("--photo")?, "--photo")?,
+            "--whole" => a.whole = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -433,10 +444,17 @@ fn render(a: &BenchArgs, r: &mut Report) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     reset_peak_rss();
     let mut times = Vec::new();
-    // A fresh scene epoch on every job defeats reuse: every frame is drawn
-    // whole.
+    // A fresh scene epoch on every job only makes the thread diff the
+    // scenes (XARA-T-0221): the same scene has no damage, so after the
+    // first frame every pixel is reused. `--whole` changes the pasteboard
+    // by one level between frames, which the reuse planner treats as a
+    // full frame; the backend and its caches stay the same.
     for epoch in 0..a.runs as u64 {
-        let mut job = s.frame_job(BACKDROP.pasteboard, BACKDROP.page);
+        let mut pasteboard = BACKDROP.pasteboard;
+        if a.whole && epoch % 2 == 1 {
+            pasteboard[0] ^= 1;
+        }
+        let mut job = s.frame_job(pasteboard, BACKDROP.page);
         job.view.quality = RenderQuality::Final;
         job.scene_epoch = 1_000_000 + epoch;
         let t = Instant::now();
@@ -1004,6 +1022,8 @@ mod tests {
         .unwrap();
         assert_eq!(a.scenario, Scenario::Open);
         assert_eq!((a.nodes, a.runs, a.size), (1000, 3, (640, 480)));
+        assert!(!a.whole);
+        assert!(parse(&argv(&["render", "--whole"])).unwrap().whole);
         assert!(parse(&argv(&["nope"])).is_err());
         assert!(parse(&argv(&["open", "--runs", "0"])).is_err());
         assert!(parse(&argv(&["open", "--size", "0x5"])).is_err());

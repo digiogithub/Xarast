@@ -146,6 +146,8 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
 | `probex16-open-rss` | nightly | MiB | 640 | — | 508 | 508 | — |
 | `probex16-save` (app save job, tmpfs) | nightly | median ms | 2200 | 1000 | 1100 | 1083–1281 | st |
 | `spitfire-first` (first text document) | nightly | first ms | 200 | — | 100 | 100–108 | st |
+| `render-feathers` (whole Final frames, effect cache warm; corpus) | pr | median ms | 12 | — | 3.5 | 3.3–4.0 | mt |
+| `render-groucho2` (same) | nightly | median ms | 16 | — | 6.5 | 5.8–6.7 | mt |
 
 "100k" is `--nodes 250000` (105 852 objects), "10k" `--nodes 25000`
 (10 520). The pr tier takes ~20 s of scenarios here; the nightly ~45 s
@@ -153,6 +155,18 @@ the budgets file records; both tiers passed, 12/12 and 27/27):
 
 **Reading it.**
 
+- **`render` without `--whole` measures pixel reuse, not a raster**
+  (found 2026-09-24, XARA-T-0314). The scenario gives every job a fresh
+  scene epoch to defeat reuse, but since XARA-T-0221 the render thread
+  diffs the scenes instead, finds no damage in an unchanged scene and
+  reuses every pixel: after the first frame each "frame" is ~0.4–2 ms of
+  plumbing. `render-10k` (ref 2.1 ms) and `render-100k` (24.8 ms, the
+  first frame dominates less at 100k) were calibrated in that state.
+  `render --whole` flips one level of the pasteboard between frames,
+  which the planner treats as a full frame: 10k is then 12–15 ms here
+  at load ~15. The two old gates were left as they are (they still
+  catch a regression in the reuse path); re-basing them on `--whole` is
+  a separate decision. The effect gates use `--whole`.
 - **Known breaches, gated on regression only:** ProbeX16 open-to-first-
   paint 0.75 s vs 500 ms (XARA-T-0009), ProbeX16 app save 1.08–1.28 s vs
   1 s (XARA-T-0215: the snapshot restore), the CPU tier's zoomed pan
@@ -1202,6 +1216,38 @@ Corpus, `xarast-cli render`, 100 %, warm: Groucho2 **50 → 129 ms**
 recomputed on every frame and repaint that reaches it — colour and
 silhouette passes, an erosion and a blur — until the layer cache lands
 (XARA-T-0314).
+
+### The effect layer cache (XARA-T-0314, 2026-09-24)
+
+Design in `render.md`, "The effect layer cache". `xarast-cli bench
+render --whole` (whole `Final` frames of the same scene and view on the
+render thread, 1920 × 1080, page fit, interactive configuration, 11
+runs), release, this machine at **load 13–16**, before (e0d8abe) and
+after run interleaved, two rounds each:
+
+| Document | Before median | After median | Before first | After first | Peak RSS before → after |
+|---|---:|---:|---:|---:|---:|
+| Groucho2 (63 feathers) | 26.7 / 26.8 ms | **6.2 / 6.7 ms** | 32.8 / 35.4 ms | 35.3 / 31.6 ms | 56.5 → 55.4–56.1 MiB |
+| feathers.xar (9 feathers) | 42.1 / 46.4 ms | **3.3 / 3.6 ms** | 41.7 / 48.2 ms | 41.2 / 53.4 ms | 40.2–40.9 → 46.9–47.9 MiB |
+
+- **Warm frames: 4.2× (Groucho2), 12× (feathers).** What is left is the
+  frame without the effects' offscreen passes: the four columns'
+  display-list builds and bands, and the composite of each layer.
+- **The first frame is unchanged** (within noise): it misses and stores.
+  Nothing is cheaper when an effect's content or the view changes: a
+  slider on a feathered object, a zoom, a pan's strips (render.md, "Pans
+  are not served from it") recompute as before.
+- **Memory:** feathers.xar holds ~7 MiB of layers at 1080p (its feathers
+  cover much of the page); Groucho2's is within RSS noise. The ceiling
+  is 128 MiB.
+- **One-shot renders are unchanged** (`xarast-cli render --zoom 100`: a
+  fresh backend per file, so nothing to reuse; Groucho2 + feathers
+  94.6 → 99.9 ms, noise), and the PNGs are byte-identical.
+- **Gates:** `render-feathers` (pr, limit 12 ms, ref 3.5) and
+  `render-groucho2` (nightly, limit 16 ms, ref 6.5), both on
+  `--whole`; the pre-cache binary fails both (39.6 and 26.5 ms), so they
+  catch a cache that stops hitting. They need the corpus; the pr job
+  on GitHub has none and skips them.
 
 ## Things that were slow, and why
 

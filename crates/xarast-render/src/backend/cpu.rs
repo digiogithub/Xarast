@@ -27,6 +27,7 @@
 //! mapping exist at all, none of which any rasteriser library offers.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -42,9 +43,11 @@ use xarast_geom::{Cap, FillRule, Join, StrokeStyle};
 use crate::backend::{BackendError, FrameTimings, LayerId, Rasterizer, RasterizerCaps};
 use crate::blend::{BlendFamily, BlendLuts, LumaWeights, TranspSource, Transparency, composite};
 use crate::display_list::{DisplayList, DrawCmd, DrawItem, ListParts, SCENE_PAINT};
+use crate::effect::LayerEffect;
+use crate::effect_cache::{Cover, EffectCache, Piece, Probe};
 use crate::paint::{FrameMap, GradMapping, ImageId, ImageRegistry, Paint, PaintSampler};
 use crate::path::PathRef;
-use crate::pixel_budget::MissingLevels;
+use crate::pixel_budget::{MissingLevels, substitution_tick};
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
 use crate::scene::{LayerKind, RenderQuality, SceneOp};
@@ -185,17 +188,40 @@ impl Resolver {
 pub struct CpuBackend {
     cfg: CpuConfig,
     luts: BlendLuts,
+    /// Live effects' offscreen results, reused across renders
+    /// ([`crate::effect_cache`]).
+    effects: EffectCache,
 }
 
 impl CpuBackend {
     /// Builds a backend. Constructing the twelve blend tables costs about a
     /// millisecond and happens once.
+    ///
+    /// The backend keeps live effects' offscreen results across renders
+    /// in an [`EffectCache`] of [`DEFAULT_EFFECT_CACHE_BYTES`]
+    /// (`crate::effect_cache`); the output is byte for byte what
+    /// recomputing them gives.
+    ///
+    /// [`DEFAULT_EFFECT_CACHE_BYTES`]: crate::effect_cache::DEFAULT_EFFECT_CACHE_BYTES
     #[must_use]
     pub fn new(cfg: CpuConfig) -> CpuBackend {
         CpuBackend {
             luts: BlendLuts::build(cfg.weights),
             cfg,
+            effects: EffectCache::default(),
         }
+    }
+
+    /// The live-effect layer cache.
+    #[must_use]
+    pub const fn effect_cache(&self) -> &EffectCache {
+        &self.effects
+    }
+
+    /// The live-effect layer cache, to change its ceiling or empty it. A
+    /// ceiling of zero turns it off.
+    pub const fn effect_cache_mut(&mut self) -> &mut EffectCache {
+        &mut self.effects
     }
 
     /// The configuration in force.
@@ -267,7 +293,18 @@ impl CpuBackend {
 
         let t_raster = Instant::now();
         let cmds = dl.commands();
-        let effects = materialise(dl, cmds, res, luts, &cfg, area, rows_per_band, 0);
+        self.effects.begin_frame();
+        let effects = materialise(
+            dl,
+            cmds,
+            res,
+            luts,
+            &cfg,
+            area,
+            rows_per_band,
+            0,
+            Some(&mut self.effects),
+        );
         let pass = Pass {
             dl,
             cmds,
@@ -377,7 +414,18 @@ impl CpuBackend {
         let cfg = self.cfg;
         let luts = &self.luts;
         let cmds = dl.commands();
-        let effects = materialise(dl, cmds, res, luts, &cfg, area, rows_per_band, 0);
+        self.effects.begin_frame();
+        let effects = materialise(
+            dl,
+            cmds,
+            res,
+            luts,
+            &cfg,
+            area,
+            rows_per_band,
+            0,
+            Some(&mut self.effects),
+        );
         let pass = Pass {
             dl,
             cmds,
@@ -489,11 +537,12 @@ pub(crate) struct Effects {
     spans: HashMap<usize, (usize, Option<EffectLayer>)>,
 }
 
-/// An effect's result: premultiplied RGBA8 over `rect`, in device space.
+/// An effect's result over the pixels a render keeps of it, in device
+/// space: disjoint pieces, each from one offscreen layer (a fresh one, or
+/// one the effect cache held).
 #[derive(Debug)]
 struct EffectLayer {
-    rect: DeviceRect,
-    pixels: Vec<u8>,
+    pieces: Vec<Piece>,
 }
 
 /// The index of the `PopEffect` closing the push at `at`, or the end of
@@ -517,7 +566,9 @@ fn matching_pop(cmds: &[DrawCmd], at: usize) -> usize {
 
 /// Renders every outermost effect of `cmds` that reaches `area` (nested
 /// ones are rendered by their parent's own pass). `rows_per_band` is the
-/// frame's band grid, which the offscreen regions reuse.
+/// frame's band grid, which the offscreen regions reuse. With a `cache`,
+/// results are looked up and stored there (a frame's outermost effects;
+/// nested ones are never cached, their parent's result is).
 #[allow(
     clippy::too_many_arguments,
     reason = "a band's state is genuinely this wide"
@@ -531,6 +582,7 @@ pub(crate) fn materialise(
     area: DeviceRect,
     rows_per_band: usize,
     left: i32,
+    mut cache: Option<&mut EffectCache>,
 ) -> Effects {
     let mut out = Effects::default();
     let mut i = 0;
@@ -551,6 +603,7 @@ pub(crate) fn materialise(
                     area,
                     rows_per_band,
                     left,
+                    cache.as_deref_mut(),
                 )
             };
             out.spans.insert(i, (end, layer));
@@ -578,6 +631,7 @@ fn render_effect(
     area: DeviceRect,
     rows_per_band: usize,
     left: i32,
+    cache: Option<&mut EffectCache>,
 ) -> Option<EffectLayer> {
     let DrawItem::PushEffect {
         effect,
@@ -587,14 +641,108 @@ fn render_effect(
     else {
         return None;
     };
-    let scale = xf.max_scale();
-    let reach = effect.reach_px(scale);
-    let growth = effect.growth_px(scale);
-    // The pixels kept, and every pixel their kernels read.
+    let DrawCmd::PushEffect { op, .. } = *push else {
+        return None;
+    };
+    let growth = effect.growth_px(xf.max_scale());
+    // The pixels kept.
     let keep = content.inflated(growth).intersection(area);
     if keep.is_empty() {
         return None;
     }
+    let fresh = |keep: DeviceRect| {
+        render_fresh(
+            dl,
+            effect,
+            xf,
+            content,
+            inner,
+            res,
+            luts,
+            cfg,
+            keep,
+            rows_per_band,
+            left,
+        )
+    };
+    let probe = cache
+        .as_ref()
+        .and_then(|_| Probe::new(dl, op, xf, left, rows_per_band, cfg, res));
+    let (Some(cache), Some(probe)) = (cache, probe) else {
+        let (rect, pixels) = fresh(keep)?;
+        return Some(EffectLayer {
+            pieces: vec![Piece {
+                clip: keep,
+                rect,
+                pixels: Arc::new(pixels),
+            }],
+        });
+    };
+    // Whatever cached layers of this very content cover of `keep`, and
+    // one fresh layer for the rest. Every pixel of a layer's valid
+    // rectangle is what a render over any other area would give
+    // (invariant 23), so the pieces assemble the recomputed result.
+    let Cover {
+        mut pieces,
+        missing,
+    } = match cache.find(&probe) {
+        Some(at) => cache.cover(at, keep),
+        None => Cover {
+            pieces: Vec::new(),
+            missing: vec![keep],
+        },
+    };
+    cache.count(!pieces.is_empty(), !missing.is_empty());
+    if missing.is_empty() {
+        return Some(EffectLayer { pieces });
+    }
+    let sub = missing.iter().fold(DeviceRect::EMPTY, |a, r| a.union(*r));
+    let tick = substitution_tick();
+    let (rect, pixels) = fresh(sub)?;
+    let pixels = Arc::new(pixels);
+    // A render that drew a substitute for an evicted image level is not
+    // the exact picture: it is repaired later and must not be kept. The
+    // clock is process-wide, so another thread's substitution refuses a
+    // result too, which is only a lost reuse; under `Materialise` nothing
+    // substitutes and the clock is not consulted.
+    if cfg.missing_levels == MissingLevels::Materialise || substitution_tick() == tick {
+        cache.store(&probe, sub, rect, Arc::clone(&pixels));
+    } else {
+        cache.refuse();
+    }
+    pieces.extend(missing.into_iter().map(|clip| Piece {
+        clip,
+        rect,
+        pixels: Arc::clone(&pixels),
+    }));
+    Some(EffectLayer { pieces })
+}
+
+/// Renders one effect afresh over the pixels `keep` (inside what it wraps
+/// and grows into): what it wraps, offscreen, at the view's resolution,
+/// over `keep` plus its reach; then the effect. Returns the region
+/// rendered and its premultiplied pixels, exact over `keep`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
+fn render_fresh(
+    dl: &DisplayList,
+    effect: &LayerEffect,
+    xf: Transform2D,
+    content: DeviceRect,
+    inner: &[DrawCmd],
+    res: &Resolver,
+    luts: &BlendLuts,
+    cfg: &CpuConfig,
+    keep: DeviceRect,
+    rows_per_band: usize,
+    left: i32,
+) -> Option<(DeviceRect, Vec<u8>)> {
+    let scale = xf.max_scale();
+    let reach = effect.reach_px(scale);
+    let growth = effect.growth_px(scale);
+    // Every pixel the kept pixels' kernels read.
     let need = keep
         .inflated(reach)
         .intersection(content.inflated(reach.saturating_add(growth)));
@@ -611,7 +759,7 @@ fn render_effect(
     // every pixel the region can hold.
     let left = left.min(dl.view().viewport.x0).saturating_sub(reach);
     let (w, h) = (region.width() as usize, region.height() as usize);
-    let nested = materialise(dl, inner, res, luts, cfg, region, rows_per_band, left);
+    let nested = materialise(dl, inner, res, luts, cfg, region, rows_per_band, left, None);
     let never = || false;
     let target = Offscreen {
         region,
@@ -632,10 +780,7 @@ fn render_effect(
         None
     };
     effect.apply(&mut colour, silhouette.as_deref(), w, h, scale);
-    Some(EffectLayer {
-        rect: region,
-        pixels: colour,
-    })
+    Some((region, colour))
 }
 
 /// Where an offscreen render goes: its device rectangle, the band grid its
@@ -715,14 +860,36 @@ fn composite_effect(
     clip: Option<&[u8]>,
     dst: &mut [u8],
 ) -> u64 {
-    let rect = layer.rect.intersection(band).intersection(draw);
-    let lw = layer.rect.width() as usize;
+    layer
+        .pieces
+        .iter()
+        .map(|p| composite_piece(p, band, draw, width, clip, dst))
+        .sum()
+}
+
+/// Composites one piece of an effect's result: its layer's pixels inside
+/// the piece's clip rectangle. Pieces are disjoint, so each pixel is
+/// composited once.
+fn composite_piece(
+    piece: &Piece,
+    band: DeviceRect,
+    draw: DeviceRect,
+    width: u32,
+    clip: Option<&[u8]>,
+    dst: &mut [u8],
+) -> u64 {
+    let rect = piece
+        .rect
+        .intersection(piece.clip)
+        .intersection(band)
+        .intersection(draw);
+    let lw = piece.rect.width() as usize;
     let mut touched = 0u64;
     for y in rect.y0..rect.y1 {
-        let lrow = (y - layer.rect.y0) as usize * lw;
+        let lrow = (y - piece.rect.y0) as usize * lw;
         for x in rect.x0..rect.x1 {
-            let li = (lrow + (x - layer.rect.x0) as usize) * 4;
-            let Some(src) = layer.pixels.get(li..li + 4) else {
+            let li = (lrow + (x - piece.rect.x0) as usize) * 4;
+            let Some(src) = piece.pixels.get(li..li + 4) else {
                 continue;
             };
             if src[3] == 0 {

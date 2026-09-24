@@ -183,7 +183,17 @@ pub fn render_subtree_to_layer(
     );
     let cfg = *backend.config();
     let luts = backend.luts();
-    let effects = materialise(&dl, dl.commands(), res, luts, &cfg, region, ROWS, left);
+    let effects = materialise(
+        &dl,
+        dl.commands(),
+        res,
+        luts,
+        &cfg,
+        region,
+        ROWS,
+        left,
+        None,
+    );
     let target = Offscreen {
         region,
         rows_per_band: ROWS,

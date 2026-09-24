@@ -68,6 +68,7 @@ pub mod corpus;
 pub mod damage;
 pub mod display_list;
 pub mod effect;
+pub mod effect_cache;
 pub mod export;
 pub mod golden;
 #[doc(hidden)]
@@ -102,6 +103,7 @@ pub use compose::{
 pub use damage::{Damage, image_damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use effect::LayerEffect;
+pub use effect_cache::{DEFAULT_EFFECT_CACHE_BYTES, EffectCache, EffectCacheStats};
 pub use layer::{LayerContent, LayerRequest, LayerTarget, render_subtree_to_layer};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
