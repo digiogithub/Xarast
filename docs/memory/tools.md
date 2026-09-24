@@ -525,9 +525,10 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     session treats `PasteTarget::New` as a creation (selected, reported to
     `after_commands`).
 70. **A story emptied by deletion is removed (XARA-T-0237, maintainer's
-    decision 2026-09-24).** `DeleteText`, `CutText`, and `TypeText`/
-    `PasteText` replacing a range with nothing, remove the story *inside
-    their own transaction* when it is left holding only its final break
+    decision 2026-09-24; widened by XARA-T-0295).** `DeleteText`,
+    `CutText`, and `TypeText`/`PasteText` replacing a range with nothing,
+    remove the story *inside their own transaction* when it is left
+    holding no characters, only paragraph breaks and tabs
     (`xarast_doc::remove_empty_story`), so the removal is part of the step
     that emptied it and merges with the rest of a Backspace burst: one
     `Ctrl+Z` restores story and text (the original gets the same effect by
@@ -543,11 +544,19 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     `tools/textops.cpp:4281-4293`) and editing ends — there is no straight place for a caret. Selection:
     the story is pruned from it (the session prunes after every command),
     the freed path is not selected (the original deselects it). **Leaving
-    the text (Esc, a tool switch, a click elsewhere) removes nothing**: that
-    keeps invariant 11 (leaving is no edit, no hidden undo step), and the
-    only stories that can be left empty-looking are ones holding nothing but
-    paragraph breaks (typed Enter), which the original would remove on
-    leaving — a deliberate difference.
+    the text removes a story of breaks (XARA-T-0295, revising T-0237's
+    "leaving removes nothing").** Esc, a tool switch or a click elsewhere
+    (all through `TextTool::set` → `leave`) emits
+    `EditCommand::RemoveEmptyStory` ("Delete Text") when the story left
+    holds no characters *and the tool edited it since the caret went in*
+    (`edited`), as the original does when editing ends
+    (`tools/texttool.cpp:1570`, `:2403`). It carries the key of the tool's
+    last burst on that story (`joins`) and merges into it when that is
+    still the last undo step (the original merges into the previous
+    operation unconditionally); otherwise it is a step of its own. Enter
+    typed over the whole text is typing, not deletion: the story stays
+    until editing ends. An imported empty story only entered and left is
+    never touched.
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
@@ -776,9 +785,13 @@ repaints nothing).
     preparing a new story and choosing a character attribute at a caret
     leave the canonical digest and the undo history as they were
     (`tests/text_tool.rs`, `tests/text_infobar.rs`); a click on empty
-    canvas never creates an empty story, and leaving the text never
-    removes one. A deletion that empties a story removes it in that same
-    undo step (decision 70).
+    canvas never creates an empty story. A deletion that leaves a story
+    without characters removes it in that same undo step (decision 70).
+    **The one exception to "leaving is no edit" (XARA-T-0295):** leaving
+    a story the tool edited that now holds only paragraph breaks (and
+    tabs) removes it, merged into the burst that left it so when that is
+    still the last step, else as its own "Delete Text" step; a story only
+    entered is never touched.
 12. While a text caret is up, Delete/Backspace/Enter never reach the
     object-level commands.
 13. A typing burst is one undo step and one `Ctrl+Z` restores the digest

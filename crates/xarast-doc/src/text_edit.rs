@@ -609,12 +609,24 @@ pub fn new_story(
     Ok(story)
 }
 
-/// Whether a story holds no text: nothing but the final paragraph break
-/// every story ends with. `None` when `story` is not a story.
+/// Whether `text` (a story's text, as [`StoryText`] spells it) holds no
+/// characters: nothing but paragraph breaks (`'\n'`) and tabs (`'\t'`).
+/// Line breaks and kerns have no place in the text at all. This is the
+/// original's rule for an empty story: it looks for a character and finds
+/// none, and neither a break nor a tab is one (`text.md`, "Removing an
+/// emptied story").
+#[must_use]
+pub fn holds_no_characters(text: &str) -> bool {
+    text.chars().all(|c| c == '\n' || c == '\t')
+}
+
+/// Whether a story holds no characters ([`holds_no_characters`]): only
+/// paragraph breaks and tabs, the final break every story ends with
+/// included. `None` when `story` is not a story.
 #[must_use]
 pub fn is_story_empty(doc: &crate::Document, story: NodeId) -> Option<bool> {
     let st = StoryText::collect_simple(&doc.tree, &doc.defaults, story)?;
-    Some(st.text.strip_suffix('\n').unwrap_or(&st.text).is_empty())
+    Some(holds_no_characters(&st.text))
 }
 
 /// What [`remove_empty_story`] did.
@@ -629,10 +641,10 @@ pub enum EmptyStory {
     },
 }
 
-/// Deletes `story` when it holds no text ([`is_story_empty`]), inside the
-/// caller's transaction, so the deletion that emptied it and the removal
-/// are one undo step (the original merges its story removal into the
-/// operation before it). A story on a path leaves the path it followed in
+/// Deletes `story` when it holds no characters ([`is_story_empty`]: only
+/// paragraph breaks and tabs), inside the caller's transaction, so the
+/// deletion that emptied it and the removal are one undo step (the
+/// original merges its story removal into the operation before it). A story on a path leaves the path it followed in
 /// its place as an ordinary path, carrying as its own attributes the
 /// non-text attributes it painted with (the story's included), so it looks
 /// exactly as it did under the text; text attributes mean nothing to a
@@ -1036,12 +1048,13 @@ mod tests {
         let (mut doc, story) = doc();
         let before = doc.canonical_digest();
         let mut bus = CommandBus::new();
-        // Leaving any text, or only paragraph breaks and text, keeps it.
+        // Leaving any character keeps it.
         bus.dispatch(&mut doc, &DeleteAndTidy(story, 0..4)).unwrap();
         assert_eq!(text(&doc, story).text, "\nef\n");
         assert!(doc.tree.is_reachable(story));
         assert_eq!(is_story_empty(&doc, story), Some(false));
-        bus.dispatch(&mut doc, &DeleteAndTidy(story, 0..3)).unwrap();
+        // Leaving only paragraph breaks removes it.
+        bus.dispatch(&mut doc, &DeleteAndTidy(story, 1..3)).unwrap();
         assert!(!doc.tree.is_reachable(story), "the empty story is gone");
         assert!(crate::validate::validate_document(&doc).errors.is_empty());
         bus.undo(&mut doc).unwrap();
@@ -1054,6 +1067,56 @@ mod tests {
         assert_eq!(remove_empty_story(&mut tx, story), Ok(EmptyStory::Kept));
         drop(tx);
         assert_eq!(doc.canonical_digest(), before);
+    }
+
+    /// Deletes a node, as a step of its own.
+    #[derive(Debug)]
+    struct Remove(NodeId);
+
+    impl Command for Remove {
+        fn label(&self) -> &'static str {
+            "Delete"
+        }
+
+        fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+            tx.delete(self.0)
+        }
+    }
+
+    #[test]
+    fn deleting_a_story_after_undoing_a_break_keeps_it_whole_for_undo() {
+        // The undone break's redo branch retains the break it moved; the
+        // deletion drops that branch while the story is detached, and
+        // must not destroy the break inside it.
+        let (mut doc, story) = doc();
+        let mut bus = CommandBus::new();
+        let len = text(&doc, story).text.len() - 1;
+        bus.dispatch(
+            &mut doc,
+            &InsertText {
+                story,
+                at: len,
+                text: "\n".into(),
+                coalesce: None,
+            },
+        )
+        .unwrap();
+        bus.undo(&mut doc).unwrap();
+        let before = doc.canonical_digest();
+        bus.dispatch(&mut doc, &Remove(story)).unwrap();
+        assert!(!doc.tree.is_reachable(story));
+        bus.undo(&mut doc).unwrap();
+        assert_eq!(doc.canonical_digest(), before);
+        assert!(crate::validate::validate_document(&doc).errors.is_empty());
+    }
+
+    #[test]
+    fn breaks_and_tabs_are_not_characters() {
+        assert!(holds_no_characters(""));
+        assert!(holds_no_characters("\n"));
+        assert!(holds_no_characters("\n\n\t\n"));
+        assert!(!holds_no_characters("\n \n"), "a space is a character");
+        assert!(!holds_no_characters("a\n"));
     }
 
     #[test]

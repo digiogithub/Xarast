@@ -1220,9 +1220,19 @@ impl History {
 }
 
 /// Destroys the nodes a discarded transaction was keeping alive.
+///
+/// Only a detached root (unreachable, with no parent) is destroyed. A
+/// retained node that still has a parent but is unreachable sits inside a
+/// subtree some other step detached — typically the very commit that is
+/// dropping this redo branch, deleting an ancestor (a node a redo would
+/// move, inside a story that is now being deleted) — and that step's undo
+/// needs it whole. It goes when the root it hangs from is reaped.
 fn reap(doc: &mut Document, tx: &Transaction) {
     for node in &tx.retained {
-        if doc.tree.contains(*node) && !doc.tree.is_reachable(*node) {
+        if doc.tree.contains(*node)
+            && doc.tree.links(*node).parent.is_none()
+            && !doc.tree.is_reachable(*node)
+        {
             doc.tree.destroy_subtree(*node);
         }
     }
