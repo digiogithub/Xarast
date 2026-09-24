@@ -836,6 +836,39 @@ is indexed by ramp id and rebuilt when its length is wrong). The render
 thread's resolver is a snapshot clone, untouched by eviction. A cache that
 never calls `begin_frame` (export, corpus tools) never evicts.
 
+### GPU tests: on by default, serialised machine-wide (2026-09-24)
+
+Tests that open a real `wgpu` device run by default again;
+`XARAST_GPU_TESTS=0` skips them with a message. Commit 70272a2 had made
+them opt-in after several agents ran `cargo test --workspace` at once and
+the parity tests hit the display GPU concurrently (COSMIC Wayland, RTX 4000
++ Intel iGPU): the compositor hung and the desktop blacked out. Opt-in only
+hid the tests; the cause was concurrency, so the fix is a lock.
+
+`xarast_render::gpu_test_lock` (`#[doc(hidden)]`, std only, no dependency,
+never called by the library or the binary) returns a guard from
+`acquire(who)`. The guard holds a process-wide `Mutex` (parallel test
+threads) and an exclusive `File::lock` (flock on Linux) on
+`$XDG_RUNTIME_DIR/xarast-gpu-tests.lock`, or the same name in
+`std::env::temp_dir()` (separate binaries, `cargo` runs and checkouts). The
+kernel drops the flock when a process dies, so a killed test never leaves
+it stuck. A waiting test prints `waiting for the GPU test lock …` every
+30 s and panics after `XARAST_GPU_LOCK_TIMEOUT_SECS` (default 900), so one
+hung GPU test fails the others rather than hanging them too. Users today:
+`tests/parity_gpu_cpu.rs`, `tests/parity_tiles.rs` (both tests),
+`benches/tiles.rs`, `benches/spike.rs` (GPU half), and in `xarast-shell`
+`tiles::tests::the_gpu_tier_composites_byte_for_byte_as_the_cpu_tier` and
+`gpu_errors::tests::a_validation_error_on_a_real_device_is_counted_not_fatal`.
+CI needs no switch and never set `XARAST_GPU_TESTS`: as before 70272a2 the
+tests skip on a runner with no adapter (or run on a software one; llvmpipe
+passes the tile parity byte for byte here). Checked on the
+reference machine by holding the file with `flock(1)`: the test waits and
+times out without touching the GPU.
+
+Note for `cargo test -p xarast-render`: the two parity files are
+`#![cfg(feature = "gpu")]`; alone, pass `--features gpu` (in a workspace
+run the shell's dependency turns it on).
+
 ---
 
 ## Invariants that must not be broken
@@ -901,6 +934,12 @@ never calls `begin_frame` (export, corpus tools) never evicts.
     The walker's hash is per node version and scope and does not see
     viewport-dependent output or a reused ramp slot; op equality plus the
     resource check does.
+17. **Every real-GPU test takes the machine-wide GPU lock.** Any test or
+    bench that creates a `wgpu` instance, enumerates adapters or opens a
+    device first binds `let Some(_gpu) = gpu_test_lock::acquire("…") else
+    { return };` and keeps the guard alive, bound first so that it drops
+    after every device, queue and resource. A helper that returns a device
+    does not take the lock itself; its caller does.
 
 ---
 
@@ -962,6 +1001,10 @@ never calls `begin_frame` (export, corpus tools) never evicts.
   linear in the scene (6.5–10 ms at 900k ops), and the assembled frame is
   not byte-identical to a whole one. Rasterise one dirty rectangle and
   upload its pieces.
+- **Unserialised GPU tests running in parallel.** Several `cargo test`
+  processes (or parallel threads) opening devices on the display GPU at
+  once hung the Wayland compositor and blacked out the desktop. Making the
+  tests opt-in only hid them; take the GPU lock (invariant 17) instead.
 
 ---
 
