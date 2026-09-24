@@ -28,7 +28,7 @@ fn minimal_xar() -> Vec<u8> {
 /// Each case gets its own directory, so that `--corpus` sees exactly the
 /// files that case wrote.
 fn write_temp(name: &str, bytes: &[u8]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xarast-xar-dump-{name}"));
+    let dir = std::env::temp_dir().join(format!("xarast-xar-dump-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join("case.xar");
     std::fs::write(&p, bytes).unwrap();

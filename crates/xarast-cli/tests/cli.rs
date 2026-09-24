@@ -36,9 +36,10 @@ fn stderr(o: &Output) -> String {
 }
 
 /// A fresh directory per test, so tests running in parallel never share
-/// a file.
+/// a file. The process id keeps two concurrent `cargo test` runs (say, in
+/// two worktrees) from deleting each other's output mid-export.
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("xarast-cli-test-{name}"));
+    let dir = std::env::temp_dir().join(format!("xarast-cli-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
