@@ -459,6 +459,20 @@ New in Phase 2:
     `ProceduralParams` canon (floats by their bits: one ulp is another
     bitmap). The generator version in the key is phase 13 H6's "freeze
     it": an old bitmap can never be served under a new algorithm.
+48. **A shadow is a controller whose generated node stays empty**
+    (XARA-T-0318). `regenerate` returns `LiveOutput::Stored` for it for
+    good: the renderer computes the pixels at the resolution shown, so
+    nothing goes through `RegenQueue` (XARA-T-0316's wiring is not needed
+    by shadows). `ShadowParams` carries everything the original splits
+    between the controller and the shadow node, **including the colour**
+    (the shadow node's fill in the original): an attribute on a node with
+    no ink would not survive `.xarast`. `glow_width` joined it, all
+    fields are kept whatever the kind (switching kinds finds the old
+    settings, as in the original), and `Default` is the original's new
+    shadow. `silhouette_map` / `extent` give the document-space geometry;
+    `bounds::compute_bounds_with` makes a shadow controller's box cover
+    its shadow (culling and damage need it). The digest covers the two
+    new fields.
 
 ## The `.xar` attribute tag reconciliation
 
