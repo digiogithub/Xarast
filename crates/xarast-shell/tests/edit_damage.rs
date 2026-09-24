@@ -593,3 +593,151 @@ fn redefining_a_named_colour_repaints_its_users_only() {
         );
     }
 }
+
+/// A colour dragged from the colour bar and dropped on an object repaints
+/// that object only and matches a full render (XARA-US-0042 over
+/// XARA-T-0221). The drag in flight changes nothing: its frames repaint
+/// nothing. A named colour dropped, then redefined by dropping a colour on
+/// its swatch, repaints the objects that use it.
+#[test]
+fn a_colour_drop_repaints_its_target_and_matches_a_full_render() {
+    use xarast_app::colour_bar::{ColourBarOp, ColourSource, DragPoint};
+    use xarast_app::colour_editor::PaletteCommand;
+    use xarast_color::ColourDef;
+    let mut s = Session::new_empty(DocumentId(5));
+    s.apply_edit(EditCommand::Palette(PaletteCommand::Create {
+        def: ColourDef::normal(ColourValue::rgbt(0.2, 0.4, 0.9, 0.0)).named("Sea"),
+    }))
+    .expect("palette");
+    let sea = s.doc.resources.colours.by_name("Sea").expect("named");
+    let spread = s.doc.active_spread();
+    let layer = s.doc.active_layer(spread).expect("a layer");
+    for i in 0..3 {
+        s.apply_edit(EditCommand::CreateShape {
+            layer,
+            shape: Box::new(xarast_app::shapes::rectangle(
+                Point::raw(150_000 + 120_000 * i, 300_000),
+                40_000.0,
+                30_000.0,
+            )),
+            attrs: Vec::new(),
+        })
+        .expect("shape");
+    }
+    s.apply(Intent::Resize(DeviceSize::new(W, H)))
+        .expect("resize");
+    s.apply(Intent::ZoomTo(xarast_app::ZoomTarget::Page))
+        .expect("zoom");
+    let objs: Vec<NodeId> = xarast_app::edit::selectable_objects(&s.doc).collect();
+    assert_eq!(objs.len(), 3);
+    let (rt, woken) = thread();
+    let mut b = Bench {
+        s,
+        rt,
+        woken,
+        planner: TilePlanner::new(TS),
+        store: CpuTileStore::new(TS, xarast_shell::tiles::capacity_for(W, H, TS)),
+        draft: DeviceRect::EMPTY,
+    };
+    let mut tally = Tally::default();
+    b.check(RenderQuality::Final, "first", &mut tally);
+    let bounds = |b: &Bench, n: NodeId| {
+        xarast_app::viewport::device_rect_of(
+            &b.s.viewport,
+            xarast_app::viewport::nodes_rect(&b.s.doc, [n]),
+        )
+    };
+
+    // Drops `source` at `to` (an object or a swatch), checking
+    // the frames of the drag in flight, then returns the repainted
+    // rectangles of the drop's frame after checking it is exact.
+    let mut drop = |b: &mut Bench, source: ColourSource, to: DragPoint, what: &str| {
+        let op = |b: &mut Bench, op: ColourBarOp| {
+            b.s.apply(Intent::ColourBar(op)).expect("colour bar op");
+        };
+        op(b, ColourBarOp::DragBegin(source));
+        op(b, ColourBarOp::DragTo(DragPoint::Elsewhere));
+        op(b, ColourBarOp::DragTo(to));
+        let before = tally.repaint_px;
+        b.check(
+            RenderQuality::Final,
+            &format!("{what}: in flight"),
+            &mut tally,
+        );
+        assert_eq!(
+            tally.repaint_px, before,
+            "{what}: the drag in flight repainted pixels"
+        );
+        op(b, ColourBarOp::DragDrop);
+        assert!(b.s.needs_scene(), "{what}: the drop left the scene alone");
+        b.s.rebuild_scene(None).expect("scene");
+        let mut job = b.s.frame_job(BG, PAGE);
+        job.view.quality = RenderQuality::Final;
+        b.rt.submit(job.clone());
+        let f = next_frame(&b.rt, &b.woken);
+        assert_eq!(f.reuse, FrameReuse::Repainted, "{what}");
+        let fin = reference(&job, RenderQuality::Final);
+        assert!(
+            f.surface == fin,
+            "{what}: the drop's frame differs from a full render in {} pixels: {:?}",
+            diff_pixels(&f.surface, &fin),
+            first_diffs(&f.surface, &fin),
+        );
+        // Keep the planner in step with the frame on screen.
+        let tiled = TiledFrame {
+            surface: f.surface.clone(),
+            transform: f.view.transform,
+            content: (f.doc.0, f.scene_epoch),
+            generation: f.generation,
+            base: f.base,
+            covered: f.covered,
+            fresh: f.fresh.clone(),
+        };
+        let up = b.planner.accept(&tiled, &mut b.store);
+        assert!(up.incremental, "{what}: a drop re-uploaded {up:?}");
+        f.fresh
+    };
+    let touched = |b: &Bench, fresh: &[DeviceRect]| -> Vec<bool> {
+        objs.iter()
+            .map(|n| {
+                let r = bounds(b, *n);
+                fresh.iter().any(|x| !x.intersection(r).is_empty())
+            })
+            .collect()
+    };
+    let over = |b: &Bench, n: NodeId| {
+        let r = bounds(b, n);
+        DragPoint::Canvas {
+            at: DevicePoint::new(f64::from(r.x0 + r.x1) / 2.0, f64::from(r.y0 + r.y1) / 2.0),
+            shift: false,
+        }
+    };
+    // A direct colour on the first object.
+    let at = over(&b, objs[0]);
+    let fresh = drop(
+        &mut b,
+        ColourSource::Direct(ColourValue::rgbt(0.9, 0.1, 0.1, 0.0)),
+        at,
+        "direct drop",
+    );
+    assert_eq!(touched(&b, &fresh), [true, false, false], "{fresh:?}");
+
+    // The named colour on the last two.
+    for (k, n) in [objs[1], objs[2]].into_iter().enumerate() {
+        let at = over(&b, n);
+        let fresh = drop(&mut b, ColourSource::Named(sea), at, "named drop");
+        let mut want = [false, true, true];
+        want[2 - k] = false;
+        assert_eq!(touched(&b, &fresh), want, "{fresh:?}");
+    }
+
+    // A colour dropped on the named colour's swatch redefines it: both
+    // users repaint, the first object does not.
+    let fresh = drop(
+        &mut b,
+        ColourSource::Direct(ColourValue::rgbt(0.1, 0.8, 0.3, 0.0)),
+        DragPoint::Entry(sea),
+        "redefine drop",
+    );
+    assert_eq!(touched(&b, &fresh), [false, true, true], "{fresh:?}");
+}

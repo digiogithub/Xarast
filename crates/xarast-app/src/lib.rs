@@ -64,6 +64,7 @@
 
 pub mod app;
 pub mod autosave;
+pub mod colour_bar;
 pub mod colour_editor;
 pub mod command;
 pub mod commands;

@@ -10,16 +10,18 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
+use xarast_app::colour_bar::{ColourBarView, ColourSource, Swatch};
 use xarast_app::colour_editor::{
     ColourChange, ColourEditorOp, ColourEditorView, ColourTarget, Derivation, NamedColour,
     PaintSlot,
 };
 use xarast_color::{ColourDef, ColourModel, ColourTable, ColourValue};
+use xarast_ui::colour_bar::ColourBar;
 use xarast_ui::model::{
     CommandSink, DocumentView, LayerInfo, PaletteEntry, StatusInfo, UiCommand, UiModel,
 };
 use xarast_ui::panel::{Panel, PanelCtx};
-use xarast_ui::panels::{ColourPanel, LayerPanel};
+use xarast_ui::panels::{ColourGallery, ColourPanel, LayerPanel};
 use xarast_ui::theme::{ResolvedTheme, ThemeTokens};
 
 fn model() -> UiModel {
@@ -157,10 +159,92 @@ fn the_layer_panel_is_a_labelled_list_not_a_run_of_anonymous_buttons() {
     );
 }
 
+/// The colour bar and the gallery (phase 8, W8.7): every swatch is a
+/// button named after its colour, a document colour says so, and each
+/// publishes its resolved sRGB value (`phase-08`, "Accessibility").
 #[test]
-fn the_colour_panel_names_every_swatch_and_marks_document_colours() {
+fn the_colour_bar_and_the_gallery_name_every_swatch_with_its_value() {
     let mut m = model();
-    m.palette[1].named = true;
+    let v = editor_view();
+    let (brand, paper) = (v.named[0].id, v.named[1].id);
+    let sw = |source, name: &str, value, named, parent| Swatch {
+        source,
+        name: name.to_owned(),
+        value,
+        named,
+        parent,
+        kind: if parent.is_some() { "Tint" } else { "Normal" },
+    };
+    m.colour_bar = Some(ColourBarView {
+        swatches: vec![
+            sw(ColourSource::NoColour, "No colour", None, false, None),
+            sw(
+                ColourSource::Named(brand),
+                "Brand red",
+                Some(ColourValue::rgb(0.8, 0.1, 0.1)),
+                true,
+                None,
+            ),
+            sw(
+                ColourSource::Named(paper),
+                "Paper",
+                Some(ColourValue::rgb(1.0, 1.0, 0.95)),
+                true,
+                Some(brand),
+            ),
+            sw(
+                ColourSource::Direct(ColourValue::rgb(0.0, 0.0, 1.0)),
+                "Blue",
+                Some(ColourValue::rgb(0.0, 0.0, 1.0)),
+                false,
+                None,
+            ),
+        ],
+        drag: None,
+    });
+    let tokens = ThemeTokens::of(ResolvedTheme::Light);
+    let mut bar = ColourBar::new();
+    let mut gallery = ColourGallery::new();
+    let mut sink = CommandSink::new();
+    let mut harness = Harness::builder()
+        .with_size(egui::vec2(420.0, 300.0))
+        .build_ui(|ui| {
+            let mut ctx = PanelCtx {
+                model: &m,
+                tokens: &tokens,
+                out: &mut sink,
+            };
+            bar.ui(ui, &mut ctx);
+            ui.separator();
+            gallery.ui(ui, &mut ctx);
+        });
+    harness.run();
+
+    let value = |label: &str| {
+        harness
+            .get_all_by_label(label)
+            .map(|n| n.accesskit_node().value().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(value("No colour"), vec!["none"]);
+    // In the bar and in the gallery.
+    assert_eq!(
+        value("Brand red (document colour)"),
+        vec!["#CC1A1A", "#CC1A1A"]
+    );
+    assert_eq!(value("Paper (document colour)").len(), 2);
+    assert_eq!(value("Blue"), vec!["#0000FF"]);
+    harness.get_by_label("Previous colours");
+    harness.get_by_label("More colours");
+    harness.get_by_label("Colour menu");
+    // The gallery lists the tint under its parent, and names its rows.
+    harness.get_by_label("Paper (tint)");
+    assert_all_named(&harness);
+}
+
+#[test]
+fn the_colour_panel_names_every_editor_control() {
+    let m = model();
     let tokens = ThemeTokens::of(ResolvedTheme::Light);
     let mut panel = ColourPanel::new();
     let mut sink = CommandSink::new();
@@ -176,9 +260,6 @@ fn the_colour_panel_names_every_swatch_and_marks_document_colours() {
         });
     harness.run();
 
-    harness.get_by_label("No colour");
-    harness.get_by_label("Brand red (document colour)");
-    harness.get_by_label("Paper");
     // The editor: the 2D field and its slider are sliders with names, the
     // numeric entries spin buttons named after their component.
     harness.get_by_role_and_label(egui::accesskit::Role::Slider, "Red slider");

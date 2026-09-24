@@ -91,6 +91,9 @@ enum Geometry {
 struct Leaf {
     geometry: Geometry,
     fill: Option<FillRule>,
+    /// The fill rule of a closed interior, painted or not: what a colour
+    /// drop tests.
+    interior: Option<FillRule>,
     stroke: Option<StrokeStyle>,
     top: NodeId,
     z: u64,
@@ -263,6 +266,7 @@ struct Found {
     bounds: DocRect,
     geometry: Geometry,
     fill: Option<FillRule>,
+    interior: Option<FillRule>,
     stroke: Option<StrokeStyle>,
 }
 
@@ -287,14 +291,18 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
             _ => (true, true),
         };
         let bitmap = matches!(kind, NodeKind::Bitmap(_));
+        let rule = match stack.get(AttrSlot::WindingRule) {
+            AttrValue::WindingRule(r) => *r,
+            _ => FillRule::NonZero,
+        };
         let fill = (filled
             && (bitmap
                 || matches!(stack.get(AttrSlot::FillGeometry),
                     AttrValue::Fill(p) if paints(doc, p))))
-        .then(|| match stack.get(AttrSlot::WindingRule) {
-            AttrValue::WindingRule(r) => *r,
-            _ => FillRule::NonZero,
-        });
+        .then_some(rule);
+        // A closed interior painted with "no colour": not picked, but a
+        // colour can still be dropped into it.
+        let interior = fill.or((filled && !bitmap).then_some(rule));
         let stroke = (stroked
             && matches!(stack.get(AttrSlot::StrokeColour),
                 AttrValue::StrokeColour(p) if paints(doc, p)))
@@ -311,6 +319,7 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
             bounds,
             geometry: Geometry::Path(path),
             fill,
+            interior,
             stroke,
         });
     };
@@ -331,6 +340,7 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
                             bounds,
                             geometry: Geometry::Bounds,
                             fill: None,
+                            interior: None,
                             stroke: None,
                         });
                     }
@@ -358,6 +368,7 @@ fn collect_top(doc: &Document, top: NodeId, stack: &mut AttrStack) -> Vec<Found>
                 bounds,
                 geometry: Geometry::Bounds,
                 fill: None,
+                interior: None,
                 stroke: None,
             });
         }
@@ -429,6 +440,7 @@ impl Built {
                 Leaf {
                     geometry: f.geometry,
                     fill: f.fill,
+                    interior: f.interior,
                     stroke: f.stroke,
                     top,
                     z,
@@ -753,6 +765,49 @@ impl Picker {
                     } else {
                         leaf.top
                     },
+                    part,
+                })
+            })
+        })
+    }
+
+    /// What a colour dropped at `at` lands on (`phase-08 §W8.7`): the
+    /// topmost leaf, as [`Picker::pick`] in [`PickMode::Leaf`] finds it,
+    /// except that a closed interior painted with "no colour" still counts
+    /// as the fill — a colour is dropped into an empty shape as often as
+    /// onto a filled one — and an outline is hit within its own half-width
+    /// or `outline_px` device pixels of its centreline, whichever is wider.
+    /// Goes through the index: the cost is the objects near the pointer.
+    #[must_use]
+    pub fn pick_drop(
+        &self,
+        doc: &Document,
+        at: DocPoint,
+        outline_px: f64,
+        mp_per_px: f64,
+    ) -> Option<HitResult> {
+        let tol = HitTolerance::new(0.0, 2.0 * outline_px * mp_per_px);
+        let radius = Mp::from_f64_round(tol.min_stroke_width);
+        self.with(doc, |b| {
+            b.index.candidates_at(at, radius).find_map(|(node, _)| {
+                let leaf = b.leaves.get(&node)?;
+                let part = match &leaf.geometry {
+                    Geometry::Bounds => HitPart::Bounds,
+                    Geometry::Path(path) => match (HitShape {
+                        path,
+                        transform: Matrix::IDENTITY,
+                        fill: leaf.interior,
+                        stroke: leaf.stroke.as_ref(),
+                    })
+                    .hit(at, tol)?
+                    {
+                        ShapeHit::Fill => HitPart::Fill,
+                        ShapeHit::Stroke => HitPart::Stroke,
+                    },
+                };
+                Some(HitResult {
+                    node,
+                    top_group: leaf.top,
                     part,
                 })
             })

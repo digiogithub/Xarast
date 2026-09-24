@@ -577,6 +577,7 @@ impl Viewer {
             .app
             .active()
             .map(|s| document_view(s, scale, &mut self.layer_keys, &mut self.guide_keys));
+        let colour_bar = self.app.active().map(Session::colour_bar_view);
         let editing = self.app.active().map(|s| EditingView {
             tool: s.tools().current(),
             undo: s.undo_label().map(str::to_owned),
@@ -591,7 +592,13 @@ impl Viewer {
             status: StatusInfo {
                 quality: xarast_ui::model::RenderQuality::Final,
                 renderer: self.renderer_label.clone(),
-                message: self.message.clone(),
+                // While a colour is dragged the status line says what a
+                // drop would do (`phase-08 §W8.7`).
+                message: colour_bar
+                    .as_ref()
+                    .and_then(|v| v.drag.as_ref())
+                    .map(|d| d.status.clone())
+                    .or_else(|| self.message.clone()),
                 problem_count: self.app.diagnostics.entries().len(),
                 ..StatusInfo::default()
             },
@@ -599,6 +606,7 @@ impl Viewer {
             prompt: self.app.prompt().cloned(),
             palette: vec![xarast_ui::model::PaletteEntry::none()],
             colour_editor: self.app.active().and_then(Session::colour_editor_view),
+            colour_bar,
             system_scheme: match self.scheme {
                 ColorScheme::NoPreference => xarast_ui::ColorScheme::NoPreference,
                 ColorScheme::Dark => xarast_ui::ColorScheme::Dark,
@@ -731,6 +739,7 @@ impl Viewer {
     /// Maps an interface command onto an intent. The interface speaks in
     /// logical points; intents are device pixels.
     fn ui_intent(&self, cmd: UiCommand, ppp: f64) -> Option<Intent> {
+        let line = matches!(cmd, UiCommand::SetLine(_));
         let layer = |k: LayerKey| {
             usize::try_from(k.0)
                 .ok()
@@ -770,6 +779,33 @@ impl Viewer {
             UiCommand::AnswerPrompt(a) => Intent::AnswerPrompt(a),
             UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
             UiCommand::ColourEditor(op) => Intent::ColourEditor(op),
+            UiCommand::ColourBar(op) => Intent::ColourBar(op),
+            UiCommand::ColourDragAt { x, y, shift } => {
+                let at = PhysicalPos::new(f64::from(x) * ppp, f64::from(y) * ppp);
+                let canvas = self.adapter.canvas();
+                Intent::ColourBar(xarast_app::colour_bar::ColourBarOp::DragTo(
+                    if canvas.contains(at) {
+                        xarast_app::colour_bar::DragPoint::Canvas {
+                            at: canvas.to_canvas(at),
+                            shift,
+                        }
+                    } else {
+                        xarast_app::colour_bar::DragPoint::Elsewhere
+                    },
+                ))
+            }
+            UiCommand::SetFill(v) | UiCommand::SetLine(v) => {
+                use xarast_app::colour_bar::{ColourBarOp, ColourSource};
+                use xarast_app::colour_editor::PaintSlot;
+                Intent::ColourBar(ColourBarOp::Apply {
+                    source: v.map_or(ColourSource::NoColour, ColourSource::Direct),
+                    slot: if line {
+                        PaintSlot::Stroke
+                    } else {
+                        PaintSlot::Fill
+                    },
+                })
+            }
             UiCommand::Align(spec) => Intent::Align(spec),
             UiCommand::AddGuide(g) => Intent::Guides(GuideOp::Add {
                 horizontal: g.axis == xarast_ui::guides::Axis::Horizontal,
@@ -1957,6 +1993,57 @@ mod tests {
             .colour_editor
             .expect("a document has an editor");
         assert_eq!(editor.title, "Fill for new objects");
+    }
+
+    /// The colour bar (XARA-US-0042): its drag positions become canvas
+    /// points or "elsewhere", and the status line says what a drop does.
+    #[test]
+    fn colour_drags_resolve_against_the_canvas_and_speak_in_the_status_line() {
+        use xarast_app::colour_bar::{ColourBarOp, ColourSource, DragPoint};
+        let mut v = primed_viewer();
+        assert!(v.ui_model(1.0).colour_bar.is_some());
+        // Window points at a scale of 2: (60, 60) pt is (120, 120) px, 100
+        // px into a canvas that starts at (20, 20).
+        assert_eq!(
+            v.ui_intent(
+                UiCommand::ColourDragAt {
+                    x: 60.0,
+                    y: 60.0,
+                    shift: true
+                },
+                2.0
+            ),
+            Some(Intent::ColourBar(ColourBarOp::DragTo(DragPoint::Canvas {
+                at: xarast_app::DevicePoint::new(100.0, 100.0),
+                shift: true
+            })))
+        );
+        assert_eq!(
+            v.ui_intent(
+                UiCommand::ColourDragAt {
+                    x: 5.0,
+                    y: 5.0,
+                    shift: false
+                },
+                1.0
+            ),
+            Some(Intent::ColourBar(ColourBarOp::DragTo(DragPoint::Elsewhere)))
+        );
+        assert_eq!(
+            v.ui_intent(UiCommand::SetLine(None), 1.0),
+            Some(Intent::ColourBar(ColourBarOp::Apply {
+                source: ColourSource::NoColour,
+                slot: xarast_app::colour_editor::PaintSlot::Stroke
+            }))
+        );
+        v.apply(vec![Intent::ColourBar(ColourBarOp::DragBegin(
+            ColourSource::NoColour,
+        ))]);
+        let m = v.ui_model(1.0);
+        let status = m.status.message.expect("the drag speaks");
+        assert!(status.contains("Nothing here"), "{status}");
+        v.apply(vec![Intent::ColourBar(ColourBarOp::DragCancel)]);
+        assert!(v.ui_model(1.0).status.message.is_none());
     }
 
     /// A viewer with one open document and a primed 800×600 canvas, as

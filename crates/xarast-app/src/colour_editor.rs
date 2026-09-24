@@ -47,7 +47,7 @@ use xarast_doc::fill_edit::{
     FillChannel, FillValue, SetStopValue, StopTarget, StopValue, fill_in_force, stop_value,
 };
 use xarast_doc::palette::{
-    CreateColour, DeleteColour, RedefineColour, RenameColour, ReparentColour,
+    CreateColour, DeleteColour, MoveColour, RedefineColour, RenameColour, ReparentColour,
 };
 use xarast_doc::{AttrSlot, AttrValue, Command, EditError, NodeId, Tx};
 
@@ -223,6 +223,13 @@ pub enum PaletteCommand {
         /// What happens to its uses.
         policy: OnDelete,
     },
+    /// Moves a named entry along the colour line (phase 8, W8.7).
+    Move {
+        /// The entry.
+        id: ColourId,
+        /// Its new position in [`xarast_color::ColourTable::listed`].
+        to: usize,
+    },
 }
 
 impl PaletteCommand {
@@ -235,6 +242,7 @@ impl PaletteCommand {
             PaletteCommand::Rename { .. } => "Rename Colour",
             PaletteCommand::Derive { .. } => "Link Colour",
             PaletteCommand::Delete { .. } => "Delete Colour",
+            PaletteCommand::Move { .. } => "Move Colour",
         }
     }
 
@@ -246,7 +254,8 @@ impl PaletteCommand {
             PaletteCommand::Redefine { id, .. }
             | PaletteCommand::Rename { id, .. }
             | PaletteCommand::Derive { id, .. }
-            | PaletteCommand::Delete { id, .. } => Some(*id),
+            | PaletteCommand::Delete { id, .. }
+            | PaletteCommand::Move { id, .. } => Some(*id),
         }
     }
 
@@ -307,6 +316,7 @@ impl PaletteCommand {
                 policy: *policy,
             }
             .run(tx),
+            PaletteCommand::Move { id, to } => MoveColour { id: *id, to: *to }.run(tx),
         }
     }
 }
@@ -473,6 +483,14 @@ fn slot_attr(slot: PaintSlot) -> AttrSlot {
 /// fill start (a flat fill's colour) or line colour, else the current
 /// attribute, else the document default.
 fn selection_colour(session: &Session, slot: PaintSlot) -> Colour {
+    if slot == PaintSlot::Fill
+        && let Some((nodes, target)) = crate::colour_bar::selected_stop(session)
+        && let Some(&n) = nodes.first()
+        && let FillValue::Colour(g) = fill_in_force(&session.doc, n, slot, FillChannel::Colour)
+        && let Some(c) = stop_value(&g, target)
+    {
+        return c;
+    }
     let paint = match selected(session).first() {
         Some(&n) => match fill_in_force(&session.doc, n, slot, FillChannel::Colour) {
             FillValue::Colour(g) => Some(g),
@@ -590,8 +608,11 @@ pub fn view(session: &Session) -> Option<ColourEditorView> {
     let title = match ed.target {
         ColourTarget::Selection(slot) => {
             let what = match slot {
-                PaintSlot::Fill => "Fill",
-                PaintSlot::Stroke => "Line",
+                PaintSlot::Fill => match crate::colour_bar::selected_stop(session) {
+                    Some((_, t)) => format!("Fill {}", crate::colour_bar::stop_label(t)),
+                    None => "Fill".to_owned(),
+                },
+                PaintSlot::Stroke => "Line".to_owned(),
             };
             if objects == 0 {
                 format!("{what} for new objects")
@@ -734,6 +755,12 @@ fn set_selection_colour(
             Changed::empty()
         });
     }
+    // The fill tool's selected handle, when there is one, is what the
+    // colour goes to (XARA-T-0247); otherwise the start colour.
+    let (nodes, target) = match crate::colour_bar::selected_stop(session) {
+        Some(stop) if slot == PaintSlot::Fill => stop,
+        _ => (nodes, StopTarget::From),
+    };
     let edits = nodes
         .into_iter()
         .map(|node| {
@@ -741,7 +768,7 @@ fn set_selection_colour(
                 node,
                 slot,
                 channel: FillChannel::Colour,
-                target: StopTarget::From,
+                target,
                 value: StopValue::Colour(colour.clone()),
             })
         })
@@ -825,6 +852,18 @@ pub(crate) fn settle(session: &mut Session) -> Changed {
     let mut ed = std::mem::take(&mut session.colour_editor);
     let changed = commit(session, &mut ed);
     session.colour_editor = ed;
+    changed
+}
+
+/// A named colour is about to go: the editor stops editing it (and ends a
+/// drag in flight) so that it never shows a colour that is not there.
+pub(crate) fn forget_entry(session: &mut Session, id: ColourId) -> Changed {
+    let mut changed = settle(session);
+    if session.colour_editor.target == ColourTarget::Entry(id) {
+        session.colour_editor.target = ColourTarget::default();
+        session.colour_editor.shown = None;
+        changed |= Changed::UI;
+    }
     changed
 }
 

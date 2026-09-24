@@ -231,6 +231,9 @@ pub struct Session {
     last_edit: Option<EditCommand>,
     /// The colour editor's target, model and live drag (phase 8, W8.6).
     pub(crate) colour_editor: crate::colour_editor::ColourEditorModel,
+    /// A colour dragged from the colour bar or the gallery (phase 8,
+    /// W8.7): never undone, never saved.
+    pub(crate) colour_drag: Option<crate::colour_bar::ColourDrag>,
     /// Where the drag in flight last snapped, for the feedback marker.
     last_snap: Option<crate::snap::SnapHit>,
     /// The document changed since the viewport's scroll bounds were
@@ -296,6 +299,7 @@ impl Session {
             picker: crate::tool::Picker::new(),
             last_edit: None,
             colour_editor: crate::colour_editor::ColourEditorModel::default(),
+            colour_drag: None,
             last_snap: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
@@ -803,6 +807,13 @@ impl Session {
         crate::colour_editor::view(self)
     }
 
+    /// What the colour bar and the colour gallery show this frame
+    /// (phase 8, W8.7).
+    #[must_use]
+    pub fn colour_bar_view(&self) -> crate::colour_bar::ColourBarView {
+        crate::colour_bar::view(self)
+    }
+
     /// The tools and the interaction machine, read-only.
     #[must_use]
     pub const fn tools(&self) -> &ToolMachine {
@@ -1291,6 +1302,9 @@ impl Session {
                 if self.edit.current.set(value) {
                     changed |= Changed::UI;
                 }
+            }
+            Intent::ColourBar(op) => {
+                changed |= crate::colour_bar::run(self, op)?;
             }
             Intent::ColourEditor(op) => {
                 changed |= crate::colour_editor::run(self, op)?;

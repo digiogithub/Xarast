@@ -110,8 +110,8 @@ pub use live::{
     LiveNode, LiveRole, MouldKind, MouldParams, RegenState, ShadowKind, ShadowParams,
 };
 pub use palette::{
-    ColourUses, CreateColour, DeleteColour, PaletteResolver, RedefineColour, RenameColour,
-    ReparentColour,
+    ColourUses, CreateColour, DeleteColour, MoveColour, PaletteResolver, RedefineColour,
+    RenameColour, ReparentColour,
 };
 pub use resources::{
     ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, DashId, DocumentResources,

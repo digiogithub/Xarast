@@ -527,6 +527,20 @@ Known ones stay: Ctrl+Shift+Z is Redo (original: zoom
 to selection, here `3`); `<`/`>` for undo/redo not bound. Ctrl+D is
 duplicate while plain `D` is fit drawing — different chords.
 
+## Phase 8: colour drops (XARA-US-0042)
+
+Numbered after phase 9's decisions because the colour bar landed later.
+
+61. **The fill tools report their selected handle** (XARA-US-0042):
+    `Tool::fill_selection` (default `None`) → `FillSelection { channel,
+    nodes, handle }`, read through `ToolMachine::fill_selection`. The
+    colour bar's click and the colour editor use it to target that stop
+    (`colour.md` decisions 27, 32); the tool itself is unchanged.
+62. **`Picker::pick_drop`** is the colour-drop variant of `pick`: leaf
+    mode, an unpainted closed interior counts as the fill (leaves keep
+    `interior: Option<FillRule>`), an outline is hit within its half-width
+    or 3 px. `pick`, `enclosed` and object snapping are unchanged.
+
 ## Provisional values (observe in the VM before trusting)
 
 - Segment grab = 4 + 3 device px; freehand chunk 96 samples; freehand

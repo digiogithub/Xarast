@@ -196,6 +196,10 @@ pub enum Intent {
     /// An operation of the colour editor (phase 8, W8.6): a live change, a
     /// commit, a cancel, a new target. See [`crate::colour_editor`].
     ColourEditor(crate::colour_editor::ColourEditorOp),
+    /// An operation of the colour bar or the colour gallery (phase 8,
+    /// W8.7): a click, a colour drag and its drop, a reorder, a rename, a
+    /// delete. See [`crate::colour_bar`].
+    ColourBar(crate::colour_bar::ColourBarOp),
     /// A value typed into a field of the active tool's infobar.
     InfobarEdit {
         /// Which field.
