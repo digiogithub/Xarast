@@ -8,14 +8,14 @@
 //! `xarast-cli <SUBCOMMAND> [ARGS]`. Each subcommand is one module with a
 //! `USAGE` string, a `parse` function over its own arguments and a `run`
 //! function that returns an [`Exit`] code. [`run`] only dispatches, so a new
-//! subcommand — the Phase 12 `bench` is the next one — is one module and one
-//! match arm.
+//! subcommand is one module and one match arm.
 //!
 //! Everything here goes through `xarast-app`'s public headless API
 //! (`Session`, `headless::render`); the CLI owns argument parsing, framing
 //! and reporting, never rendering.
 
 pub mod args;
+pub mod bench;
 pub mod convert;
 pub mod export;
 pub mod fixtures;
@@ -54,6 +54,7 @@ USAGE:
     xarast-cli <SUBCOMMAND> --help
 
 SUBCOMMANDS
+    bench        run one performance scenario and print JSON (cargo xtask perf)
     convert      convert .xar documents to .xarast packages
     export       export documents to PNG, JPEG, WebP, PDF or SVG
     fixtures     export the built-in test documents (CI's export checks)
@@ -86,6 +87,7 @@ pub fn run(argv: &[String]) -> Exit {
             println!("xarast-cli {}", env!("CARGO_PKG_VERSION"));
             Exit::Ok
         }
+        "bench" => dispatch(rest, bench::USAGE, bench::parse, bench::run),
         "convert" => dispatch(rest, convert::USAGE, convert::parse, convert::run),
         "export" => dispatch(rest, export::USAGE, export::parse, export::run),
         "fixtures" => dispatch(rest, fixtures::USAGE, fixtures::parse, fixtures::run),
