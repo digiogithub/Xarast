@@ -552,6 +552,12 @@ with it.
 
 ## Invariants that must not be broken
 
+- **Test scratch directories are per process.** The `xarast-cli` test
+  helpers (`scratch`, `write_temp`) put the process id in their
+  `/tmp/xarast-*` path. With fixed names, two `cargo test` runs at once
+  (parallel worktrees) wiped each other's output mid-export. That caused
+  the old "SoftShadow.xar: No such file" flake in
+  `corpus_exports_to_every_format_with_no_failure`.
 - **Determinism contract**: same `ExportRequest` + same document → same
   bytes, across runs, processes, thread counts and strip budgets.
   Guarded by `xarast-render/tests/export.rs` (runs, strip budgets, 1 vs 8
