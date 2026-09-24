@@ -52,6 +52,9 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   culling and `scroll_surface` reprojection. `scene_damage` diffs two scenes
   into the device rectangles an edit changed (XARA-T-0221, "Edit damage"),
   and any rectangle drawn over a frame is exactly that frame's pixels.
+  Live effects' offscreen results are kept across renders by the
+  backend's `EffectCache` (XARA-T-0314, "The effect layer cache"). The
+  Phase 4 `RenderCache` (`cache.rs`) is still not used by any frame.
 - **Validation:** a 130-scene generated feature corpus with committed goldens,
   the 160-scene fill shape × blend family × {flat, graduated} matrix
   (XARA-T-0222), exact CPU goldens, determinism over 20 runs, the gradient matrix, the blend
@@ -1425,9 +1428,11 @@ Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
   zoom in and the feather is recomputed at the new resolution.
 - **Why per frame and not a cached bitmap in the scene:** a bitmap made
   at one zoom and resampled at another is the fidelity loss phase 13
-  exists to avoid, and the scene is view-independent. The cost is that
-  an effect is recomputed on every frame and every repaint that reaches
-  it (no layer cache yet: B9, XARA-T-0314).
+  exists to avoid, and the scene is view-independent. The cost was that
+  an effect was recomputed on every frame and every repaint that reached
+  it; since XARA-T-0314 the backend keeps its results at the exact view
+  and reuses them while its content is unchanged ("The effect layer
+  cache", below).
 - **Exactness under repaint (invariant 23).** A pixel an effect keeps
   depends only on the view and the scene, never on the draw area:
   (1) coverage inside the region starts at a left edge fixed by the view
@@ -1508,7 +1513,96 @@ Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
 - **Cost** (`benches/render.rs`, group `effects`): disc blur r = 20 px over 1024² **5.9 ms** (budget ≤ 12 ms), Gaussian σ = 10 px 6.0 ms, erosion r = 20 px 5.7 ms, a 512² frame with one 40 pt feather 3.6 ms (release, this machine, other agents building). The
   corpus render (release, 100 %, warm): Groucho2 50 → 129 ms, feathers
   5 → 26 ms, Watch4 58 → 60 ms; every effect renders its region twice
-  (colour and silhouette) plus an erosion and a blur, every frame.
+  (colour and silhouette) plus an erosion and a blur, every frame. Since
+  XARA-T-0314 only a frame whose effect content or view changed pays it.
+
+### The effect layer cache (XARA-T-0314, phase 13 B9, 2026-09-24)
+
+`effect_cache.rs`; `CpuBackend` owns one `EffectCache`
+(`effect_cache()`, `effect_cache_mut()`), on by default. Results are
+byte for byte what recomputing gives.
+
+- **Key = everything a kept pixel depends on** (invariant 23): the scene
+  ops from the effect's push through its pop, compared by **op
+  equality** (the effect's parameters are the push op), plus every ramp
+  and image those ops name, compared by content with the damage diff's
+  own rule (`damage::ramp_tables`, `damage::same_image`, factored out of
+  `scene_damage` for this; a pending deferred image is "different",
+  never produced); the effect's device transform and the view's
+  transform **bit for bit**, viewport, quality and dpi; the pass's
+  coverage left edge, band height, SIMD pin and luminance weights. A
+  cheap hash (`damage::key` per op) finds the candidate, equality
+  decides. Not the walker's `ContentHash` (invariant 16), and no
+  quantised scale: a layer from another zoom would be the resampling
+  the offscreen pipeline exists to avoid.
+- **Invalidation is the key.** A change under an effect changes the key
+  exactly when `scene_damage` would call the effect's pixels damage
+  (an op, a resource, an ancestor transform); anything else leaves it.
+  There is no invalidation call to forget.
+- **The draw area is not in the key; valid rectangles are.** A result
+  rendered for one area is exact over its `keep` (the effect's content
+  ∩ that area), for any later area. A key holds up to 8 layers, each with
+  its valid rectangle. A lookup cuts the new `keep` by every layer's edges,
+  takes each cell from the first layer that contains it (runs along a row
+  merged into one `Piece`), and renders the union of the uncovered cells
+  as one more layer. So the four columns of a `Final` each store their
+  own layer, and a later repaint that straddles two columns is assembled
+  from both. `composite_effect` composites each piece clipped to its own
+  rectangle; pieces are disjoint. Clipping even a fresh layer to `keep`
+  changes nothing: outside `content ⊕ growth` an effect's output is
+  transparent.
+- **Only outermost effects are cached.** A nested effect is rendered by
+  its parent's pass and lives in the parent's layer.
+- **Substituted images are not kept.** Under `MissingLevels::Substitute`
+  (the render thread), a result is stored only if the process-wide
+  `substitution_tick()` did not move while it was rendered; otherwise the
+  repair after `rematerialise` would be served the stand-in. Another
+  thread's substitution only loses a reuse. Under `Materialise` the
+  clock is not consulted (it made the tests flaky when a parallel test
+  substituted).
+- **Memory: its own ceiling**, `DEFAULT_EFFECT_CACHE_BYTES` = 128 MiB
+  (≈ 32 Mpx, fifteen 1080p frames of layers), `set_limit(0)` turns it
+  off. It counts layer pixels, each key's copy of its ops and resource
+  tables (not path geometry shared by `Arc`). Not the image
+  `PixelBudget`: that budgets decoded image levels with a spill and
+  re-materialisation path, which a layer (cheaper to recompute than to
+  spill) does not need. LRU by layer, **except that a layer used in the
+  current frame (render call) is never evicted to make room**: a frame
+  whose effects do not fit keeps what fits and recomputes the rest,
+  instead of evicting its own layers in a cycle and hitting nothing.
+- **Pans are not served from it (decision).** The transform is in the
+  key, so a translated view misses. Reusing a translated layer would
+  need the layer's pixels to be translation-covariant, and they are not
+  guaranteed to be: invariant 23 fixes the coverage origin by the
+  *view* (`left = min(parent, viewport.x0) − reach`) and the rows by the
+  frame's band grid, not by the content, so after a pan by (dx, dy) the
+  same content is rasterised from a different origin relative to it (a
+  primitive clipped at `viewport.x0 − reach` starts there; a vertical
+  pan that is not a multiple of the band height moves the band tops; the
+  `f64` device geometry of a translated transform can round differently
+  into `f32`). Invariant 15's history shows that such shifts move
+  antialiased pixels by 1/255. Making it covariant would mean an origin
+  fixed by the content, which re-opens invariant 23. And the gain is
+  nil: a whole-pixel pan already moves the pixels on screen
+  (`scroll_surface`), and the strips it exposes were outside the old
+  view, where no kept pixel was ever computed. Zooming back to a view
+  it has seen (bit-identical transform) does hit.
+- **Tests.** `tests/effect_cache.rs`: the eight `effect_*` corpus cases ×
+  {deterministic, interactive}: repeated whole frames byte-identical to
+  a cold backend's (hit counts asserted); columns, the determinism
+  test's five rectangles and a strip drawn over the frame with one warm
+  backend, byte-identical after every rectangle; a colour or feather
+  change under the effect misses and a change beside it hits; a reused
+  ramp slot misses; a pan misses and stays exact; a zero ceiling stores
+  nothing and a one-effect ceiling keeps its first layer; a deferred
+  image drawn from its stand-in is not kept and the frame after
+  `rematerialise` is exact. `properties::repainting_the_damage_with_a_
+  warm_effect_cache_gives_the_new_frame` (512 cases): one backend draws
+  the old frame, the new damage, a random rectangle and a whole frame,
+  each byte-identical to a cold full render. Mutation-checked: comparing
+  only the op count instead of the ops fails the property; compositing a
+  piece's whole layer instead of its clip fails the assembly test.
+- **Numbers** in `perf.md`, "The effect layer cache".
 
 ---
 
@@ -1623,6 +1717,14 @@ Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
 24. **Effects are cut from the silhouette, not from alpha.** A feather or
     a shadow of a transparent object is shaped by its outline; using its
     alpha makes a half-transparent object feather to nothing.
+25. **An effect's result depends on its key and nothing else.** Anything
+    new an effect's pixels come to depend on (a resource kind, a view
+    field, a configuration field, an input outside its push … pop range)
+    must go into `effect_cache::Probe` too, or the cache serves a stale
+    layer; and a cached layer is trusted only over its valid rectangle.
+    `tests/effect_cache.rs` and the warm-cache damage property hold it.
+    A new effect kind needs nothing: it is a `LayerEffect` variant inside
+    the push op, compared by equality like any other parameter.
 ---
 
 ## Dead ends (do not retry)
@@ -1726,7 +1828,7 @@ Phase 13's B1–B4 and the first consumer, feathering. Modules `blur.rs`,
 | 21 | ~~Mesh fills ignore `Repeat`; mesh transparencies are flat means~~. **Done 2026-09-24**: see "Meshes tile mirrored" | done (XARA-T-0256) |
 | 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
 | 23 | ~~Re-materialisation of an evicted base is synchronous on the render thread~~. **Done 2026-09-24** (XARA-T-0281), and since XARA-T-0304 the helper no longer holds the image's lock while it decodes | done |
-| 25 | Offscreen effect cache (B9): an effect is recomputed on every frame and repaint that reaches it; key by (content hash, quantised pixel width, quality, variant), share the Phase 4 budget | XARA-T-0314 |
+| 25 | ~~Offscreen effect cache (B9)~~. **Done 2026-09-24**: keyed by op equality + resources + exact view, not a content hash or a quantised scale, with its own 128 MiB ceiling rather than the Phase 4 budget; see "The effect layer cache" | done (XARA-T-0314) |
 | 26 | Blur radius above the 100 px ceiling: render the silhouette at a reduced resolution and scale up, as the original does for feathers (B7) | XARA-T-0315 |
 | 27 | GPU blur (B6): not needed while the GPU only composites CPU tiles; lands with the WGSL pass | XARA-T-0051 |
 | 24 | ~~`RampMapping::Sin` ignored; `ClipViewMode::Outside` dropped~~. **Done 2026-09-24**: `RampEase` (above) and the walker's outside clip (`app-core.md` decision 34); the renderer still clips only to a path's inside, on purpose | done (XARA-US-0017) |
