@@ -237,7 +237,8 @@ stats, foreign_count, foreign_digest }`.
   item-less line writes one empty run from the state **outside** the line
   scope (what `StoryText` resolves for it). Placement: with
   `SvgOptions::text` (a `Placer` over a `TextPlacer`; `xarast-app`'s
-  `svg_text::placer()`, used by `xarast-cli convert`) every run gets `x`
+  `svg_text::placer()`, used by `xarast-cli convert`, SVG export and,
+  since XARA-T-0259, the app's `SaveJob`) every run gets `x`
   / `y` lists from the real layout and substituted families join the
   `font-family` chain (+ `xarast:font-substitute`, informative); without
   it the old line-per-baseline fallback (`x=0`, `y` += line height,
@@ -505,6 +506,30 @@ seeds with a text story added to `fuzz_seeds`): 5 min, 379 577 runs,
 under load avg 18–50, best of 4 interleaved 0.95 s vs 0.92 s for the
 previous build in the same conditions (+≈ 30 ms: system font enumeration
 and 48 layouts); `save_to` without a placer adds nothing.
+
+**App save places text (XARA-T-0259).** `xarast_app::save::SaveJob`
+carries `text: Option<Placer>`, `Some(svg_text::placer())` by default
+(the process's shared font service), and hands it to `prepare_save` /
+`prepare_resave` in `SvgOptions::text`. Stories are laid out while the
+SVG is serialised, **on the save thread** over the restored document;
+the interface thread's `save_job` only clones an `Arc`. So File › Save,
+Save As, a save before closing and the periodic autosave write the same
+`document.svg` as `xarast-cli convert`. `SaveJob::without_text_placer()`
+is used only by `AppState::emergency_shutdown` (the signal path must not
+wait for font enumeration; only Xarast reads a recovery snapshot and the
+reader ignores placement). Evidence: `xarast-cli`
+`tests/app_save.rs` — over the 59-file corpus, an app save
+(`save_job(Document).deterministic().without_thumbnail()`) is
+**byte-identical** to `convert_one(--deterministic)` (59/59; 2 files turn
+characters along a path); with the thumbnail only `thumbnail.png` is
+added (same `document.svg`), and an autosave writes the same SVG at
+deflate 1. `xarast-app` `tests/save.rs` now compares the snapshot path
+against a direct save *with* the placer (59/59, first save and raw-copy
+re-save). Cost (`examples/save_probe.rs`, release, ext4, load avg ≈ 3,
+3 runs): ProbeX16 UI thread 30–38 ms (unchanged), save thread without
+thumbnail 970–984 ms with the placer vs 965–991 ms without (noise);
+TextCurve 7–8 ms vs 5 ms (package 22 271 B vs 6 046 B); Rotated
+6–8 ms vs 4 ms.
 
 Text conformance, resvg vs the CPU reference (`render --frame page`,
 8 × 8 grey SSIM, system fonts both sides), 20 text files, before → after:
@@ -887,10 +912,10 @@ the file means", not crashes; each input is now a unit test in
   count as ink in `validate`); run-level foreign attributes and elements
   are dropped (runs are not nodes); ~~text on a path is still a straight
   line in the base SVG~~ (done, XARA-T-0252; reflected or sheared
-  characters still are); **the app's own save (`xarast-app/src/save.rs`)
-  passes no `SvgOptions::text`**, so a `.xarast` saved from the GUI shows
-  every story (on a path or not) on the fallback lines in a browser —
-  only `xarast-cli convert` places text; a gradient or bitmap fill on
+  characters still are); ~~the app's own save passes no
+  `SvgOptions::text`~~ (done, XARA-T-0259: File › Save, Save As and
+  autosave place text as `xarast-cli convert` does; see "App save places
+  text" below); a gradient or bitmap fill on
   text is written in the spread frame, so browsers misplace it under the
   story's transform (the twin is exact); fonts are not embedded
   (`@font-face`/WOFF2, §6.7 rule 2) and no generic family is guessed from

@@ -407,9 +407,17 @@ serial it wrote). A recovered snapshot has `clean_serial = None`.
 ~50 ms) and the source package bytes; `SaveJob::run` (on a `SaveWorker`
 thread) restores a document from it (~130 ms), renders `thumbnail.png`
 on a scoped thread while `xarast_format::prepare_save`/`prepare_resave`
-serialise the SVG, then writes atomically. Over the corpus the snapshot
-path writes **byte-identical** packages to a direct save of the live
-document, first save and raw-copy re-save alike (`tests/save.rs`).
+serialise the SVG, then writes atomically. The SVG is written **with the
+text placer** (`svg_text::placer()` in `SvgOptions::text`, XARA-T-0259),
+so stories are laid out on the save thread and an app save places text
+for browsers exactly as `xarast-cli convert` does; `save_job` itself only
+clones the placer's `Arc`. `without_text_placer()` exists for
+`emergency_shutdown` alone (no wait on font enumeration on the signal
+path). Over the corpus the snapshot path writes **byte-identical**
+packages to a direct save of the live document with the same placer,
+first save and raw-copy re-save alike (`tests/save.rs`), and to
+`xarast-cli convert --deterministic` (`xarast-cli` `tests/app_save.rs`,
+59/59; File › Save adds only `thumbnail.png`).
 The live document is never touched by a save: a failure is a status line
 and a problem-list entry, the document stays modified, the target file is
 untouched (`write_atomic`).
@@ -487,7 +495,10 @@ thumbnail, 1.05 s without (restore 126 ms + `xarast_format::save` 856 ms
 of which serialise 507 ms, package 327 ms). Groucho2 — 15 ms. On the
 99 %-full md RAID of the dev machine the fsync alone added 0.5–7 s:
 measure on tmpfs. The ≤ 1 s budget is missed by ~9 % on ProbeX16 — the
-restore is the part the app adds (follow-up task filed).
+restore is the part the app adds (follow-up task filed). With the text
+placer (XARA-T-0259, 2026-09-24, ext4, load ≈ 3): ProbeX16 UI thread
+30–38 ms, save thread 1.05–1.07 s with thumbnail, 970–984 ms without
+(965–991 ms without the placer: within noise); TextCurve +2–3 ms.
 
 ---
 

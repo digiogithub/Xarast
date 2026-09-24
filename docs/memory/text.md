@@ -792,8 +792,11 @@ Kept limitation: reflected or sheared characters cannot be said per
 character in SVG (a mirror or a slant is not a rotation), so those stories
 stay on straight lines and count in `svg::Stats::text_on_path` (none in
 the corpus; `TextCurve.xar`'s one story with a shear has 0.11°, under
-`PLAIN_SHEAR`). The app's own save passes no placer (`xarast-format.md`,
-text leftovers), so only `xarast-cli convert` and SVG export place text.
+`PLAIN_SHEAR`). The app's own save places text too since XARA-T-0259
+(`SaveJob` passes `svg_text::placer()`, on the save thread;
+`xarast-format.md`, "App save places text"), so File › Save, Save As,
+autosave, `xarast-cli convert` and SVG export all write the same base
+SVG; only the emergency snapshot on a signal skips the placer.
 
 Evidence: `xarast-text` `path::tests::a_fit_is_plain_unless_characters_are_mirrored_or_visibly_sheared`;
 `xarast-format` `tests/svg_text.rs`
@@ -933,8 +936,8 @@ first story of a process waits for enumeration when nothing prewarmed
   profile C, XARA-T-0245).
 - Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
   straight (an SVG `transform` per character would need one element per
-  character); the GUI save (`xarast-app/src/save.rs`) passes no text
-  placer, so its `.xarast` files show no placed text at all in browsers.
+  character); ~~the GUI save passes no text placer~~ (done,
+  XARA-T-0259).
 
 ## The `.xarast` text writer (XARA-T-0172, done)
 
@@ -949,8 +952,9 @@ first story of a process waits for enumeration when nothing prewarmed
   (`text::story_input`, `layout_text`) and reports each character item's
   cluster box left edge on its baseline (`PlacedGlyph::y` of the
   cluster's first glyph; the line baseline when it has none). The app's
-  save path (not written yet) should pass `svg_text::placer()` in
-  `SvgOptions::text`, as `xarast-cli convert` does.
+  save path (`save::SaveJob`) passes `svg_text::placer()` in
+  `SvgOptions::text`, as `xarast-cli convert` does (XARA-T-0259; bytes
+  pinned equal over the corpus by `xarast-cli` `tests/app_save.rs`).
 - An empty `TextLine` resolves its line attributes from the state *after*
   its scope closes (`StoryText::end_line`), so its own attributes never
   matter; the format writes and reads that outer state at story level.
