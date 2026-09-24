@@ -210,6 +210,18 @@ pub enum Intent {
         /// Where it was dropped, in canvas device pixels.
         at: Option<crate::geometry::DevicePoint>,
     },
+    /// File › Import…: ask the platform for image files to place (phase
+    /// 10, T10.7.4). Each file chosen comes back as
+    /// [`Intent::ImportImage`] with no point, so it lands in the middle of
+    /// the view.
+    ShowImportDialog,
+    /// Stop every background import still running (T10.7.5): nothing of
+    /// theirs reaches the document.
+    CancelImports,
+    /// An operation of the bitmap gallery (phase 10, W10.7): place, delete
+    /// an unused bitmap, or drag one onto the canvas. See
+    /// [`crate::bitmap_gallery`].
+    BitmapGallery(crate::bitmap_gallery::BitmapGalleryOp),
     /// `Esc`: cancel the gesture in flight, or, when there is none,
     /// select nothing (`research/04 §4.1`).
     Cancel,
@@ -326,6 +338,9 @@ pub enum Intent {
 pub enum PlatformRequest {
     /// Show a file chooser for opening a document.
     ShowOpenDialog,
+    /// Show a file chooser for images to import. Each file chosen comes
+    /// back as [`Intent::ImportImage`].
+    ShowImportDialog,
     /// End the application.
     Quit,
     /// Show a file chooser for saving a document. The answer comes back as

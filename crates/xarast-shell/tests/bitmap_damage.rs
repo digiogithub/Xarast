@@ -1,8 +1,9 @@
-//! Bitmap edits repaint only their object (XARA-T-0271, XARA-T-0272), in
-//! the manner of `edit_damage.rs`: a bitmap fill handle drag — its preview
-//! frames and its commit — and a placed bitmap each repaint the edited
-//! object's device bounds, never the viewport, and every repainted frame
-//! equals a full render of the same job byte for byte.
+//! Bitmap edits repaint only their object (XARA-T-0271, XARA-T-0272,
+//! XARA-US-0055), in the manner of `edit_damage.rs`: a bitmap fill handle
+//! drag — its preview frames and its commit — a placed bitmap, and a
+//! bitmap dropped from the gallery (as a fill, or as a new object) each
+//! repaint the edited object's device bounds, never the viewport, and every
+//! repainted frame equals a full render of the same job byte for byte.
 //!
 //! CPU tier only, on a document built here; no corpus needed.
 
@@ -252,6 +253,67 @@ fn a_placed_bitmap_repaints_only_where_it_lands() {
     assert_eq!(f.reuse, FrameReuse::Repainted);
     let object = b.device(placed);
     within(&f.fresh, object, "the placement");
+    assert!(
+        f.fresh
+            .iter()
+            .all(|r| r.intersection(b.device(b.filled)).is_empty()
+                && r.intersection(b.device(b.other)).is_empty()),
+        "the other objects are not repainted: {:?}",
+        f.fresh
+    );
+}
+
+/// Drags the document's bitmap from the gallery and drops it on `p`.
+fn gallery_drop(b: &mut Bench, p: Point) {
+    use xarast_app::bitmap_gallery::{BitmapDragPoint, BitmapGalleryOp};
+    let image = b.s.doc.resources.bitmaps().next().expect("a bitmap").0;
+    let at = b.s.viewport.doc_to_device(p);
+    for op in [
+        BitmapGalleryOp::DragBegin(image),
+        BitmapGalleryOp::DragTo(BitmapDragPoint::Canvas(at)),
+    ] {
+        b.s.apply(Intent::BitmapGallery(op)).unwrap();
+    }
+    // Nothing changes before the drop: the kept frame is reused whole.
+    let f = b.frame(RenderQuality::Final);
+    assert!(
+        f.fresh.is_empty(),
+        "a drag in flight repaints nothing: {:?}",
+        f.fresh
+    );
+    b.s.apply(Intent::BitmapGallery(BitmapGalleryOp::DragDrop))
+        .unwrap();
+}
+
+#[test]
+fn a_gallery_bitmap_dropped_on_an_object_repaints_only_that_object() {
+    let mut b = Bench::new();
+    let object = b.device(b.other);
+    let filled = b.device(b.filled);
+    gallery_drop(&mut b, Point::raw(400_000, 300_000));
+    assert_eq!(b.s.undo_label(), Some("Set Fill"));
+    let f = b.frame(RenderQuality::Final);
+    assert_eq!(f.reuse, FrameReuse::Repainted);
+    within(&f.fresh, object, "the bitmap fill drop");
+    assert!(
+        f.fresh.iter().all(|r| r.intersection(filled).is_empty()),
+        "the other object is not repainted: {:?}",
+        f.fresh
+    );
+    b.s.apply(Intent::Undo).unwrap();
+    let f = b.frame(RenderQuality::Final);
+    within(&f.fresh, object, "its undo");
+}
+
+#[test]
+fn a_gallery_bitmap_dropped_on_empty_canvas_repaints_only_where_it_lands() {
+    let mut b = Bench::new();
+    gallery_drop(&mut b, Point::raw(280_000, 420_000));
+    assert_eq!(b.s.undo_label(), Some("Place Bitmap"));
+    let placed = b.s.edit.selection().next().expect("selected");
+    let f = b.frame(RenderQuality::Final);
+    assert_eq!(f.reuse, FrameReuse::Repainted);
+    within(&f.fresh, b.device(placed), "the gallery placement");
     assert!(
         f.fresh
             .iter()

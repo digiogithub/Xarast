@@ -26,7 +26,7 @@ use crate::menus::AppMenu;
 use crate::model::{CommandSink, DocumentView, UiCommand, UiModel};
 use crate::overlay::OverlayItem;
 use crate::panel::{LayoutState, Panel, PanelCtx, PanelId, UiHost};
-use crate::panels::{ColourGallery, ColourPanel, LayerPanel, StatusBar};
+use crate::panels::{BitmapGallery, ColourGallery, ColourPanel, LayerPanel, StatusBar};
 use crate::scale::Scale;
 use crate::theme::{self, ResolvedTheme, ThemeTokens};
 
@@ -67,10 +67,12 @@ impl Workspace {
         host.register(Box::new(LayerPanel::new()));
         host.register(Box::new(ColourPanel::new()));
         host.register(Box::new(ColourGallery::new()));
+        host.register(Box::new(BitmapGallery::new()));
         host.set_default_layout(&[
             crate::panels::layers::ID,
             crate::panels::colour::ID,
             crate::panels::gallery::ID,
+            crate::panels::bitmaps::ID,
         ]);
         Workspace {
             host,

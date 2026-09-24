@@ -285,6 +285,45 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   the colour editor. `F9` does not show it
   yet: the dock has no show/focus plumbing (XARA-T-0254).
 
+### Bitmap gallery, File › Import… and import progress (phase 10, XARA-US-0055)
+
+- **Seam**: `UiModel::bitmap_gallery: Option<BitmapGalleryView>` (entries,
+  total, drag in flight) and `UiModel::imports: Vec<ImportProgress>` in;
+  `UiCommand::BitmapGallery(BitmapGalleryOp)`, `UiCommand::BitmapDragAt
+  { x, y }` (window points) and `UiCommand::CancelImports` out. The shell
+  maps them onto `Intent::BitmapGallery` / `BitmapDragPoint::Canvas` (via
+  `CanvasRegion`, `Elsewhere` off the canvas) / `Intent::CancelImports`.
+  What an operation does is `xarast-app`'s (`tools.md` decisions 70–73).
+- **Panel** (`panels::bitmaps`, "Bitmap gallery", the fourth dock pane
+  under the colour gallery): a header ("2 bitmaps, 2.3 MB in memory"), a
+  filter field ("Filter bitmaps by name"), a sort combo (document order,
+  name, size, memory, uses), Place and Delete ("Place the chosen
+  bitmap", "Delete the chosen bitmap"; Delete is disabled with a reason
+  in its tooltip unless `GalleryEntry::deletable`). One painted row per
+  bitmap: the thumbnail centred in a 64 pt box (uploaded once per content
+  hash as an egui texture, dropped when the hash leaves the view), the
+  name, and `details()` — size, depth, dpi, format, colour space, stored
+  and decoded bytes, uses. Each row is one `click_and_drag` response named
+  "Bitmap NAME: details" with its list position; double click = Place.
+- **Drag** (`bitmaps::drive_drag`): the colour drag's plumbing again —
+  the owner and a cancelled flag in egui temp memory under their own id,
+  `Esc` → `DragCancel`, release → `DragDrop` unless cancelled, the
+  pointer reported every frame, `Copy`/`NoDrop` from
+  `BitmapDragView::allowed`. The status line shows the drag's status (the
+  viewer puts it in `StatusInfo::message` after a colour drag's).
+- **Import progress**: `StatusBar::ui` (which has the sink) draws, right
+  to left, "Cancel" ("Cancel the import"), a 120 pt animated
+  `ProgressBar` and `import_text` (the oldest job's words, "+N more");
+  `status_bar_ui` (no sink) draws none of it. While shown it asks egui for
+  a repaint every 100 ms, which reaches the shell as a `RedrawAfter`.
+- Tests: `tests/bitmap_gallery.rs` (6, `egui_kittest` over the AccessKit
+  tree and synthetic pointer events: named rows, Place/Delete, filter,
+  drag to canvas, `Esc`, File › Import…, Cancel) and unit tests in
+  `panels::bitmaps` (2) and `panels::status` (1). An animated progress
+  bar never settles, so its test uses `run_steps`, not `run`.
+- **F11 does not show the gallery yet**: the same missing dock show/focus
+  plumbing as F9 (XARA-T-0254; tracked for the gallery in XARA-T-0292).
+
 ## Panels and canvas
 
 ### Current state
@@ -304,6 +343,7 @@ integration) in about a tenth of a second.
 | `panels::colour` | The phase-8 colour editor over `xarast_app::colour_editor` (target, 2D field, numbers, derivation, Redefine/Apply) |
 | `colour_bar` | The colour bar under the canvas (paging, menu, click = fill / right = line, colour drag shared with the gallery) |
 | `panels::gallery` | The colour gallery: named colours as a derivation tree, New/Edit/Rename/Delete, draggable swatches |
+| `panels::bitmaps` | The bitmap gallery: thumbnails and details, filter, sort, Place, Delete (unused only), rows dragged onto the canvas (XARA-US-0055) |
 | `colour_field` | The editor's field/strip meshes, axes per model, component ranges and units, press tracking |
 | `panels::status` | Coordinates in the document's unit, zoom, quality, cache pressure, renderer tier |
 | `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState` |
@@ -315,7 +355,7 @@ integration) in about a tenth of a second.
 | `menus` | `AppMenu`: the in-window File/View/Help menu bar, the About box, and `empty_state` (Open… + recent files) (XARA-US-0082) |
 
 **Stubbed or absent on purpose:** the command palette, the problem list
-(needs the diagnostics feed), the galleries other than colour, and
+(needs the diagnostics feed), the galleries other than colour and bitmap, and
 anything Phase 7 and later own. No tool handles are produced — the overlay takes them, it does not
 invent them.
 
@@ -402,6 +442,17 @@ invent them.
     and no text caret is up, then answers `Intent::PasteImage`; tests use
     a synthetic `Dropped` event and the viewer's `FakeClipboard` (now with
     an `image`), never a real window or clipboard.
+29. **A file manager's copy is files, not a picture** (XARA-US-0055).
+    When the clipboard text names image files
+    (`xarast_app::place::image_paths_in_text`: `text/uri-list`, GNOME's
+    `copy`/`cut` + URIs, or absolute paths, every line a local file), the
+    shell does not ask for a picture even if one is offered beside it; it
+    answers `PasteText` and the core imports the files, one step each.
+    `arboard`'s text getter is the route. **Not observed on a desktop**:
+    which flavour Nautilus/Dolphin put under `text/plain` for a file
+    copy (paths or URIs — both parse); if one offers only `text/uri-list`
+    or `x-special/gnome-copied-files`, the shell needs a data-control
+    reader for them (XARA-T-0047's territory).
 
 ### Invariants that must not be broken
 
@@ -1027,6 +1078,18 @@ first frame ~440 ms (budget 400 ms, XARA-T-0010).
       lands under the caret on GNOME (IBus via text-input-v3) and on a
       wlroots compositor; whether any stack sends a key event *and* a
       commit for one keystroke (would double the character). XARA-T-0267.
+42. **File › Import… and background imports** (XARA-US-0055, T10.7.4,
+    T10.7.5). `AppCommand::Import` (Ctrl+Shift+I; the original's Ctrl+I
+    is its image slicer) → `PlatformRequest::ShowImportDialog` → one
+    parented `PortalHandle::open_files` at a time (`import_dialog`, apart
+    from the Open chooser), title "Import", `multiple: true`, filters
+    "Images (PNG, JPEG, GIF, WebP, TIFF, BMP, PNM)" and "All files". Each
+    chosen path becomes `Intent::ImportImage { at: None }` (the view's
+    centre); a portal failure goes to the status bar and the problem list
+    as Open's does. `housekeeping` calls `AppState::poll_imports` beside
+    `poll_saves` (the same waker wakes the loop for both, and for
+    thumbnails) and redraws when `poll_thumbnails` says one arrived.
+    Tests: `PortalService::offline` and synthetic `FilesChosen` answers.
 
 ### Invariants that must not be broken
 
@@ -1210,6 +1273,17 @@ isolated GNOME session on a private bus:
   same `.xarast` in a second `xarast` → "Document in use" with read-only /
   copy / force; `kill -TERM` a session with unsaved work → next start
   offers "Recover unsaved work".
+- [ ] **The live File › Import… chooser, a file-manager copy and the
+  bitmap gallery have not been seen in a window** (XARA-US-0055): tests
+  use `PortalService::offline`, `FakeClipboard` and synthetic drags.
+  Manual check: open a `.xar`, Ctrl+Shift+I → a chooser titled "Import"
+  attached to the window, "Images (…)" selected, several files
+  selectable; pick two PNGs → both land in the middle of the view, one
+  undo step each; pick a > 1 MB photograph → the status bar shows
+  "Importing …" with a bar and Cancel, then it lands (Cancel → nothing);
+  copy two images in Nautilus, Ctrl+V → both placed; drag a row of the
+  bitmap gallery onto a rectangle → it takes a bitmap fill, onto empty
+  canvas → a new bitmap there; the gallery's thumbnails appear.
 - [ ] **The live File › Open dialog has not been driven end to end**
   (XARA-US-0082): tests use `PortalService::offline` and synthetic
   `PortalEvent`s; opening a real dialog needs a click or Ctrl+O on a

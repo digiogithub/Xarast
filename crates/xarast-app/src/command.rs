@@ -155,6 +155,9 @@ impl fmt::Display for KeyChord {
 pub enum AppCommand {
     /// File › Open…: ask the platform for a file to open.
     Open,
+    /// File › Import…: ask the platform for image files to place in the
+    /// document (phase 10, T10.7.4).
+    Import,
     /// File › Save: write the active document to its `.xarast`, asking
     /// for a name the first time.
     Save,
@@ -232,8 +235,9 @@ pub const ZOOM_STEP: f64 = std::f64::consts::SQRT_2;
 impl AppCommand {
     /// Every command, in menu order, then the tools in palette order.
     /// Tools reserved for later phases are not here: they have no key yet.
-    pub const ALL: [AppCommand; 52] = [
+    pub const ALL: [AppCommand; 53] = [
         AppCommand::Open,
+        AppCommand::Import,
         AppCommand::Save,
         AppCommand::SaveAs,
         AppCommand::Close,
@@ -292,6 +296,7 @@ impl AppCommand {
     pub const fn label(self) -> &'static str {
         match self {
             AppCommand::Open => "Open…",
+            AppCommand::Import => "Import…",
             AppCommand::Save => "Save",
             AppCommand::SaveAs => "Save As…",
             AppCommand::Close => "Close",
@@ -345,6 +350,9 @@ impl AppCommand {
     #[must_use]
     pub const fn shortcuts(self) -> &'static [KeyChord] {
         const OPEN: &[KeyChord] = &[KeyChord::ctrl('o')];
+        // The original's Ctrl+I is its image slicer (`research/04 §4.8`),
+        // which may come later; Ctrl+Shift+I leaves it free.
+        const IMPORT: &[KeyChord] = &[KeyChord::ctrl_shift('i')];
         const SAVE: &[KeyChord] = &[KeyChord::ctrl('s')];
         const SAVE_AS: &[KeyChord] = &[KeyChord::ctrl_shift('s')];
         const CLOSE: &[KeyChord] = &[KeyChord::ctrl('w')];
@@ -418,6 +426,7 @@ impl AppCommand {
         const SHOW_GUIDES: &[KeyChord] = &[KeyChord::numpad('1')];
         match self {
             AppCommand::Open => OPEN,
+            AppCommand::Import => IMPORT,
             AppCommand::Save => SAVE,
             AppCommand::SaveAs => SAVE_AS,
             AppCommand::Close => CLOSE,
@@ -505,6 +514,7 @@ impl AppCommand {
     pub fn intent(self, centre: DevicePoint) -> Intent {
         match self {
             AppCommand::Open => Intent::ShowOpenDialog,
+            AppCommand::Import => Intent::ShowImportDialog,
             AppCommand::Save => Intent::Save,
             AppCommand::SaveAs => Intent::SaveAs,
             AppCommand::Close => Intent::CloseDocument,
@@ -572,6 +582,12 @@ mod tests {
         assert_eq!(key(AppCommand::Undo), "Ctrl+Z");
         assert_eq!(key(AppCommand::Save), "Ctrl+S");
         assert_eq!(key(AppCommand::SaveAs), "Ctrl+Shift+S");
+        assert_eq!(key(AppCommand::Import), "Ctrl+Shift+I");
+        assert!(AppCommand::Import.needs_document());
+        assert_eq!(
+            AppCommand::Import.intent(DevicePoint::new(0.0, 0.0)),
+            Intent::ShowImportDialog
+        );
         assert_eq!(key(AppCommand::ConvertToShapes), "Ctrl+Shift+C");
         assert_eq!(
             AppCommand::Save.intent(DevicePoint::new(0.0, 0.0)),

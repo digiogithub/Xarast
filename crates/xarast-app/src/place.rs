@@ -40,6 +40,9 @@ pub enum PlaceError {
     /// A clipboard picture whose buffer does not match its size.
     #[error("the pasted picture is malformed")]
     Malformed,
+    /// The user cancelled a background import (T10.7.5).
+    #[error("the import was cancelled")]
+    Cancelled,
 }
 
 /// An image ready to place: the document resource and its natural size.
@@ -90,6 +93,72 @@ pub fn is_image_path(path: &std::path::Path) -> bool {
                     | "pam"
             )
         })
+}
+
+/// The image files a clipboard text names, when the text is a list of
+/// files — what a file manager's Copy leaves there (phase 10, T10.7.4):
+/// `text/uri-list` (`file:///…`, percent-encoded, `#` comments), GNOME's
+/// `x-special/gnome-copied-files` (a first line `copy` or `cut`, then
+/// URIs), or plain absolute paths one per line. Every line must name a
+/// local file, so ordinary text never reads as a list; of those, only the
+/// images ([`is_image_path`]) are returned. Empty when the text is not a
+/// file list or lists no image.
+#[must_use]
+pub fn image_paths_in_text(text: &str) -> Vec<std::path::PathBuf> {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .peekable();
+    if lines.peek().is_some_and(|l| *l == "copy" || *l == "cut") {
+        lines.next();
+    }
+    let mut out = Vec::new();
+    let mut any = false;
+    for line in lines {
+        any = true;
+        let path = if let Some(rest) = line.strip_prefix("file://") {
+            // `file://host/path`: an empty or `localhost` authority is ours.
+            let path = match rest.find('/') {
+                Some(0) => rest,
+                Some(i) if &rest[..i] == "localhost" => &rest[i..],
+                _ => return Vec::new(),
+            };
+            percent_decode(path)
+        } else if line.starts_with('/') {
+            line.to_owned()
+        } else {
+            return Vec::new();
+        };
+        let path = std::path::PathBuf::from(path);
+        if is_image_path(&path) {
+            out.push(path);
+        }
+    }
+    if any { out } else { Vec::new() }
+}
+
+/// `%XX` escapes to bytes; anything malformed is kept as it is.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && let (Some(hi), Some(lo)) = (
+                char::from(b[i + 1]).to_digit(16),
+                char::from(b[i + 2]).to_digit(16),
+            )
+        {
+            out.push(u8::try_from(hi * 16 + lo).unwrap_or(b'%'));
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn doc_format(f: ImageFormat) -> Option<xarast_doc::ImageFormat> {
@@ -246,6 +315,38 @@ mod tests {
         }
         for p in ["a.xar", "b.xarast", "c.svg", "noext"] {
             assert!(!is_image_path(std::path::Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn a_file_managers_copy_names_its_images() {
+        use std::path::PathBuf;
+        let uri_list =
+            "# a comment\r\nfile:///home/a/My%20Photo.JPG\r\nfile:///home/a/notes.txt\r\n";
+        assert_eq!(
+            image_paths_in_text(uri_list),
+            [PathBuf::from("/home/a/My Photo.JPG")]
+        );
+        let gnome = "copy\nfile://localhost/tmp/x.png\nfile:///tmp/y.webp";
+        assert_eq!(
+            image_paths_in_text(gnome),
+            [PathBuf::from("/tmp/x.png"), PathBuf::from("/tmp/y.webp")]
+        );
+        assert_eq!(
+            image_paths_in_text("/tmp/a.png\n/tmp/b.gif\n"),
+            [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.gif")]
+        );
+        // Ordinary text, a remote file, a list with no image, nothing.
+        for t in [
+            "see /tmp/a.png",
+            "a.png",
+            "file://server/share/a.png",
+            "file:///tmp/a.txt",
+            "copy",
+            "",
+            "<svg/>",
+        ] {
+            assert!(image_paths_in_text(t).is_empty(), "{t:?}");
         }
     }
 
