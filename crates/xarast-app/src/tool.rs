@@ -151,6 +151,10 @@ pub enum GestureEvent {
         from: DocPoint,
         /// What was under the press.
         hit: Option<HitResult>,
+        /// 1 for a plain press, 2 when the press is the second of a double
+        /// click (a double click held and dragged), and so on — counted as
+        /// [`GestureEvent::Click::count`] is.
+        count: u8,
     },
     /// The drag moved, or a modifier changed mid-drag.
     DragUpdate {
@@ -1315,6 +1319,9 @@ struct Press {
     device: DevicePoint,
     doc: DocPoint,
     hit: Option<HitResult>,
+    /// Which press of a click sequence this is: 1, or 2 after a click
+    /// just before it in the same place.
+    count: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1458,6 +1465,21 @@ impl ToolMachine {
         }
     }
 
+    /// The count a click (or a press) at `at` and `time_ms` has: one more
+    /// than the click just before it when that one was near enough in time
+    /// and place, else 1.
+    fn follows_click(&self, at: DevicePoint, time_ms: u64) -> u8 {
+        match self.last_click {
+            Some(c)
+                if time_ms.saturating_sub(c.time_ms) <= DOUBLE_CLICK_MS
+                    && (c.device.x - at.x).hypot(c.device.y - at.y) <= DOUBLE_CLICK_SLOP_PX =>
+            {
+                c.count.saturating_add(1)
+            }
+            _ => 1,
+        }
+    }
+
     fn doc_point(vp: &Viewport, at: DevicePoint) -> DocPoint {
         vp.device_to_doc_f64(at).to_doc_point()
     }
@@ -1470,7 +1492,7 @@ impl ToolMachine {
             CanvasInput::Down {
                 button: PointerButton::Primary,
                 at,
-                ..
+                time_ms,
             } => {
                 if self.is_pressed() {
                     return false;
@@ -1481,6 +1503,7 @@ impl ToolMachine {
                     device: at,
                     doc,
                     hit,
+                    count: self.follows_click(at, time_ms),
                 });
                 self.last = Some(at);
                 self.armed.clear();
@@ -1509,6 +1532,7 @@ impl ToolMachine {
                             &GestureEvent::DragStart {
                                 from: p.doc,
                                 hit: p.hit,
+                                count: p.count,
                             },
                             cx,
                         );
@@ -1560,16 +1584,7 @@ impl ToolMachine {
                 let doc = Self::doc_point(cx.viewport, at);
                 match self.state {
                     InteractionState::ArmedDrag => {
-                        let count = match self.last_click {
-                            Some(c)
-                                if time_ms.saturating_sub(c.time_ms) <= DOUBLE_CLICK_MS
-                                    && (c.device.x - at.x).hypot(c.device.y - at.y)
-                                        <= DOUBLE_CLICK_SLOP_PX =>
-                            {
-                                c.count.saturating_add(1)
-                            }
-                            _ => 1,
-                        };
+                        let count = self.follows_click(at, time_ms);
                         self.last_click = Some(LastClick {
                             device: at,
                             time_ms,
@@ -1896,6 +1911,39 @@ mod tests {
             300 + DOUBLE_CLICK_MS + 2,
         );
         assert_eq!(click_counts(&r.events()), vec![1, 1]);
+    }
+
+    #[test]
+    fn a_drag_from_the_second_press_of_a_double_click_says_so() {
+        let mut r = Rig::new();
+        let drag_count = |r: &mut Rig, x: f64, t: u64| {
+            r.feed(CanvasInput::Down {
+                button: PointerButton::Primary,
+                at: DevicePoint::new(x, 100.0),
+                time_ms: t,
+            });
+            r.feed(CanvasInput::Move {
+                at: DevicePoint::new(x + DRAG_THRESHOLD_PX + 5.0, 100.0),
+            });
+            r.feed(CanvasInput::Up {
+                button: PointerButton::Primary,
+                at: DevicePoint::new(x + DRAG_THRESHOLD_PX + 5.0, 100.0),
+                time_ms: t + 50,
+            });
+            r.events().iter().find_map(|e| match e {
+                GestureEvent::DragStart { count, .. } => Some(*count),
+                _ => None,
+            })
+        };
+        assert_eq!(drag_count(&mut r, 100.0, 0), Some(1));
+        r.click(300.0, 1_000);
+        assert_eq!(drag_count(&mut r, 301.0, 1_200), Some(2));
+        // A drag ends the sequence; a late second press starts afresh.
+        r.click(300.0, 3_000);
+        assert_eq!(
+            drag_count(&mut r, 300.0, 3_000 + DOUBLE_CLICK_MS + 1),
+            Some(1)
+        );
     }
 
     #[test]

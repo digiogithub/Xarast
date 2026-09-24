@@ -6,6 +6,7 @@
 //!   │                                                │
 //!   │                                          (Esc) cancel → nothing happened
 //!   ├──press on an object (or the selection)──▶ DragNewGradient ──release──▶ Idle
+//!   │     (Adjust: circular; the second press of a double click: conical)
 //!   ├──double click on an arm──▶ insert a stop there (selected)
 //!   └──click a handle──▶ the handle is selected; the infobar rebinds
 //! ```
@@ -597,6 +598,7 @@ impl<K: FillKind> FillLikeTool<K> {
         &mut self,
         from: DocPoint,
         hit: Option<crate::tool::HitResult>,
+        count: u8,
         cx: &mut ToolCtx<'_>,
     ) {
         let sets = Self::sets(cx.doc, cx.edit);
@@ -637,8 +639,13 @@ impl<K: FillKind> FillLikeTool<K> {
         else {
             return;
         };
+        // Adjust makes a circle; a double click held and dragged makes a
+        // conical fill. Adjust wins, as in the original (facts:
+        // `tools/filltool.cpp:944-955`).
         let shape = if cx.modifiers.adjust {
             FillShape::Circular
+        } else if count >= 2 {
+            FillShape::Conical
         } else {
             FillShape::of(&base)
                 .filter(|s| *s != FillShape::Flat)
@@ -1059,7 +1066,9 @@ impl<K: FillKind> Tool for FillLikeTool<K> {
                 );
             }
             GestureEvent::Click { at, hit, count } => self.on_click(*at, *hit, *count, cx),
-            GestureEvent::DragStart { from, hit } => self.on_drag_start(*from, *hit, cx),
+            GestureEvent::DragStart { from, hit, count } => {
+                self.on_drag_start(*from, *hit, *count, cx);
+            }
             GestureEvent::DragUpdate { from, to, .. } => self.on_drag_update(*from, *to, cx),
             GestureEvent::DragEnd { .. } => self.on_drag_end(cx),
             GestureEvent::Cancel => {

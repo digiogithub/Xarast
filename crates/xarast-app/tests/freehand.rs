@@ -131,6 +131,7 @@ fn no_sample_is_dropped_between_the_machine_and_the_fitter() {
             &GestureEvent::DragStart {
                 from: at(&doc_pts[0]),
                 hit: None,
+                count: 1,
             },
             &mut cx,
         );

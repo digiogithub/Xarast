@@ -756,3 +756,54 @@ fn constrain_keeps_a_centre_on_an_axis_and_adjust_locks_the_aspect() {
     };
     assert_eq!(minor, Point::raw(200_000, 220_000));
 }
+
+#[test]
+fn a_double_click_held_and_dragged_makes_a_conical_fill() {
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    let before = s.doc.canonical_digest();
+    let (a, b) = (Point::raw(200_000, 200_000), Point::raw(240_000, 210_000));
+    // A click, then a second press in time that drags.
+    click(&mut s, a, 1_000);
+    assert_eq!(s.doc.canonical_digest(), before, "the click writes nothing");
+    drag_open(&mut s, a, b, 1_200);
+    assert_eq!(s.doc.canonical_digest(), before, "nothing before release");
+    let previewed = pixels(&s);
+    release(&mut s, b, 1_300);
+    assert!(pixels(&s) == previewed);
+    assert_eq!(s.bus.history().len(), 1, "one step");
+    assert_eq!(s.undo_label(), Some("Set Fill"));
+    let g = colour_fill(&s, n);
+    let FillGeometry::Conical {
+        centre, zero_dir, ..
+    } = g
+    else {
+        panic!("not conical: {g:?}")
+    };
+    assert!(centre.distance_to(a) < 2_000.0 && zero_dir.distance_to(b) < 2_000.0);
+    s.undo();
+    assert_eq!(s.doc.canonical_digest(), before, "undo is exact");
+
+    // Too slow for a double click: the infobar's shape (linear).
+    click(&mut s, a, 5_000);
+    drag(&mut s, a, b, 6_000);
+    assert!(matches!(colour_fill(&s, n), FillGeometry::Linear { .. }));
+    s.undo();
+    // Adjust wins over the double click: a circle.
+    hold(
+        &mut s,
+        Modifiers {
+            adjust: true,
+            ..Modifiers::default()
+        },
+    );
+    click(&mut s, a, 9_000);
+    drag(&mut s, a, b, 9_100);
+    assert!(matches!(
+        colour_fill(&s, n),
+        FillGeometry::Radial {
+            aspect_locked: true,
+            ..
+        }
+    ));
+}
