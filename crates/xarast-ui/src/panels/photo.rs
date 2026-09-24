@@ -207,7 +207,7 @@ impl PhotoPanel {
             ("Saturation", saturation(&v.ops), PhotoOp::Saturation),
         ];
         for (name, value, make) in unit {
-            let mut pct = f64::from(value) * 100.0;
+            let mut pct = super::slider_value(f64::from(value) * 100.0, 0);
             let r = ui.add(
                 egui::Slider::new(&mut pct, -100.0..=100.0)
                     .text(name)
@@ -218,7 +218,7 @@ impl PhotoPanel {
             let how = self.classify(ui, &r);
             self.send(ctx, how, v.ops.with(make((pct / 100.0) as f32)));
         }
-        let mut g = f64::from(gamma(&v.ops));
+        let mut g = super::slider_value(f64::from(gamma(&v.ops)), 2);
         let r = ui.add(
             egui::Slider::new(&mut g, f64::from(GAMMA_RANGE.0)..=f64::from(GAMMA_RANGE.1))
                 .logarithmic(true)
@@ -314,7 +314,11 @@ impl PhotoPanel {
                     if r.dragged() {
                         self.crop_drag = Some(c);
                     } else if r.drag_stopped() {
-                        changed_now = Some(c);
+                        // `Esc` ends the drag in egui itself, in this very
+                        // frame: the crop it was dragging to is dropped.
+                        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            changed_now = Some(c);
+                        }
                         self.crop_drag = None;
                     } else if r.changed() {
                         changed_now = Some(c);
