@@ -2,14 +2,15 @@
 id: XARA-US-0084
 type: story
 title: As a user, I save my work from the app (Save, Save As, autosave, recovery)
-status: in_review
+status: done
 priority: critical
 parent: XARA-EP-0007
 author: mcp
 labels: [phase-6, app-core, ui]
 created: 2026-09-23T18:43:30Z
-updated: 2026-09-23T19:55:34Z
+updated: 2026-09-24T10:49:45Z
 started: 2026-09-23T18:44:41Z
+closed: 2026-09-24T10:49:45Z
 ---
 
 ## Description

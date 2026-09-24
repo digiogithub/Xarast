@@ -2,12 +2,13 @@
 id: XARA-T-0216
 type: task
 title: Drive the live Save As / unsaved-changes / lock dialogs end to end (isolated session or by hand)
-status: todo
+status: done
 parent: XARA-US-0084
 author: mcp
 labels: [phase-6, ui, manual]
 created: 2026-09-23T19:55:07Z
-updated: 2026-09-23T19:55:07Z
+updated: 2026-09-24T10:49:45Z
+closed: 2026-09-24T10:49:45Z
 ---
 
 ## Description
