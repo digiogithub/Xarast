@@ -324,6 +324,56 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
 - **F11 does not show the gallery yet**: the same missing dock show/focus
   plumbing as F9 (XARA-T-0254; tracked for the gallery in XARA-T-0292).
 
+### Photo panel (phase 10, T10.6.8, XARA-T-0301)
+
+- **Seam**: `UiModel::photo_panel: Option<PhotoPanelView>` in (`None`
+  with no document; `view.node == None` when the selection is not
+  exactly one bitmap object), `UiCommand::PhotoPanel(PhotoPanelOp)` out;
+  the shell maps it 1:1 to `Intent::PhotoPanel`. The model, the proxy
+  preview and the undo steps are `xarast-app`'s (`tools.md` decisions
+  74–75, `image.md` "Photo adjustments"). The chain's types reach this
+  crate as re-exports of `xarast_app::photo_panel` (`PhotoOp`,
+  `PhotoOps`, `Levels`, …): `xarast-ui` still does not depend on
+  `xarast-doc` outside its tests.
+- **Dock**: "Photo" is a **second tab in the bitmap gallery's cell**
+  (`UiHost::set_default_layout_grouped`, new): a fifth pane in the
+  column squeezed the gallery's rows out of a 1000 pt window (its
+  kittest tests failed). Tabs used to be anonymous to AccessKit —
+  egui_tiles paints the title — so `HostBehavior::on_tab_button` now
+  publishes each tab as `Role::Tab` named after its panel; a test finds
+  and clicks "Photo" in the whole workspace.
+- **Panel** (`panels::photo`, "Photo"): name and master size; the chain as a list (one
+  `ListItem` per op, named by `op_label`: "Brightness +20 %", "Levels
+  (red) 10–240 → 0–255"); sliders Brightness, Contrast, Saturation
+  (−100…100 %), Gamma (0.05…8, logarithmic); a Greyscale checkbox; a
+  "Levels channel" combo and four 0–255 sliders named "Input black
+  (red)" etc.; Rotate left/right, Flip horizontal/vertical; four crop
+  `DragValue`s ("Crop left", "Crop top", "Crop width", "Crop height") in
+  master pixels and "Remove crop"; "Reset all". A chain with an unknown
+  operation shows the list and "Non-editable: unknown operation
+  ‘curves’…" and no control at all. With nothing (or several objects)
+  selected it says what to select.
+- **Interaction**: a slider **dragged** → `Preview(chain)` each frame,
+  release → `Commit` (the release frame's own value is previewed first:
+  `LiveCommit`); `Esc` while held → `Cancel` and the rest of that drag is
+  ignored. **egui ends the drag itself on `Esc` and reports
+  `drag_stopped` in that same frame** (measured in kittest): the
+  classifier therefore turns a `drag_stopped` frame with `Esc` pressed
+  into `Cancel`, not `Commit`. Keyboard steps, typed values, buttons and
+  the checkbox → `Set` (one step each). The crop fields never preview
+  (a crop moves the object): a dragged crop field is kept in the panel
+  and `Set` on release.
+- **Accessibility**: every slider, spin field and button carries a name
+  (`a11y::set_label`), the chain is a list; `tests/photo_panel.rs` (7,
+  kittest) asserts the names, reaches Brightness and Rotate right with
+  Tab alone and operates them with arrows and Enter, drives a pointer
+  drag (previews then exactly one `Commit`, no `Set`), `Esc` mid-drag
+  (`Cancel`, nothing after it), the read-only unknown chain, the
+  empty states, and the tab in the workspace.
+- **Not done**: no F-key or menu entry shows the pane (the dock
+  show/focus plumbing, XARA-T-0254); a saved layout from before this
+  panel does not contain it until the layout is reset.
+
 ## Panels and canvas
 
 ### Current state
@@ -344,6 +394,7 @@ integration) in about a tenth of a second.
 | `colour_bar` | The colour bar under the canvas (paging, menu, click = fill / right = line, colour drag shared with the gallery) |
 | `panels::gallery` | The colour gallery: named colours as a derivation tree, New/Edit/Rename/Delete, draggable swatches |
 | `panels::bitmaps` | The bitmap gallery: thumbnails and details, filter, sort, Place, Delete (unused only), rows dragged onto the canvas (XARA-US-0055) |
+| `panels::photo` | The photo panel: the selected bitmap's chain, tone and levels sliders (previewed live, one step per drag), orientation, crop, reset (XARA-T-0301) |
 | `colour_field` | The editor's field/strip meshes, axes per model, component ranges and units, press tracking |
 | `panels::status` | Coordinates in the document's unit, zoom, quality, cache pressure, renderer tier |
 | `panel` | `Panel` trait, `PanelId`, `UiHost` over `egui_tiles`, versioned `LayoutState` |
@@ -521,6 +572,11 @@ invent them.
   drag on `Esc` by itself, yet still reports `drag_stopped` at the
   release; keep the owner and the cancel flag yourself
   (`colour_bar::drive_drag`).
+  For a slider the `drag_stopped` comes in the **`Esc` frame itself**
+  (egui 0.33, measured in the photo panel's kittest): a classifier that
+  maps `drag_stopped` to "commit" commits a cancelled drag. Check
+  `key_pressed(Escape)` on that frame (`panels::photo`). The colour
+  editor's `classify` does not yet (XARA-T-0305).
 - **Querying a menu item by its visible text in kittest.** The status bar
   also says "100 %"; use `get_by_role_and_label(Role::MenuItem, …)`.
 - **Minor ruler tick values from `index / subdivisions` plus
@@ -530,11 +586,8 @@ invent them.
 
 ### Open TODOs
 
-- **Photo panel** (phase 10 T10.6.8, XARA-T-0301): the model, the
-  cached evaluation and `Session::set_photo_ops` (one undo step, "Adjust
-  Photo"; `tools.md`) exist since XARA-US-0054, but no panel shows or
-  edits a bitmap object's chain yet. It must show a chain with an unknown
-  operation read-only (`PhotoOps::is_editable`).
+- [x] **Photo panel** (phase 10 T10.6.8, XARA-T-0301): done, see
+  "Photo panel" above. Open: a menu/F-key to show it (XARA-T-0254).
 - Re-measure P3, P7, P9 and the presented halves of P2 and P4 on hardware
   with a display; until then they stay "unmeasured" in this note.
 - `egui_kittest` **image** snapshots (phase criterion 17) need the `wgpu`
