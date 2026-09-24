@@ -117,6 +117,7 @@ pub fn scene_damage(
         a: (0, diff.a.len()),
         b: (0, diff.b.len()),
         xf: view.transform,
+        pad: 0,
     };
     let mut work = vec![root];
     while let Some(w) = work.pop() {
@@ -152,10 +153,13 @@ pub fn image_damage(
     let mut rects = Vec::new();
     let mut leaves = 0;
     let mut stack = vec![view.transform];
+    // The reach of the effects the walk is under.
+    let mut pads = vec![0i32];
     let mut i = 0;
     while i < side.len() {
         let op = side.op(i);
         let xf = stack.last().copied().unwrap_or(view.transform);
+        let pad = pads.last().copied().unwrap_or(0);
         match op {
             SceneOp::PushGroup { xf: g, .. } => {
                 stack.push(g.then(xf));
@@ -164,6 +168,18 @@ pub fn image_damage(
             }
             SceneOp::PopGroup => {
                 stack.pop();
+                i += 1;
+                continue;
+            }
+            SceneOp::PushEffect(_) => {
+                pads.push(pad.saturating_add(effect_pad(op, xf)));
+                i += 1;
+                continue;
+            }
+            SceneOp::PopEffect => {
+                if pads.len() > 1 {
+                    pads.pop();
+                }
                 i += 1;
                 continue;
             }
@@ -177,7 +193,7 @@ pub fn image_damage(
         });
         if uses {
             let end = side.close[i as usize].max(i);
-            leaves += leaf_bounds(&side, (i, end), xf, view.viewport, &mut rects);
+            leaves += leaf_bounds(&side, (i, end), xf, pad, view.viewport, &mut rects);
             i = end + 1;
         } else {
             i += 1;
@@ -247,6 +263,7 @@ fn push_kind(op: &SceneOp) -> Option<u8> {
         SceneOp::PushClip { .. } => Some(1),
         SceneOp::PushTransparency(_) => Some(2),
         SceneOp::PushLayer { .. } => Some(3),
+        SceneOp::PushEffect(_) => Some(4),
         _ => None,
     }
 }
@@ -257,7 +274,20 @@ fn pop_kind(op: &SceneOp) -> Option<u8> {
         SceneOp::PopClip => Some(1),
         SceneOp::PopTransparency => Some(2),
         SceneOp::PopLayer => Some(3),
+        SceneOp::PopEffect => Some(4),
         _ => None,
+    }
+}
+
+/// How far a change under `op` spreads, in device pixels, when `op` is an
+/// effect: its reach, or its growth when that is further.
+fn effect_pad(op: &SceneOp, xf: Transform2D) -> i32 {
+    match op {
+        SceneOp::PushEffect(e) => {
+            let s = xf.max_scale();
+            e.reach_px(s).max(e.growth_px(s))
+        }
+        _ => 0,
     }
 }
 
@@ -266,6 +296,9 @@ struct Work {
     a: (u32, u32),
     b: (u32, u32),
     xf: Transform2D,
+    /// How far a change here spreads, in device pixels: the reach of the
+    /// effects it sits under (`crate::effect`).
+    pad: i32,
 }
 
 struct Diff<'a> {
@@ -336,21 +369,23 @@ impl Diff<'_> {
                     SceneOp::PushGroup { xf: g, .. } => g.then(w.xf),
                     _ => w.xf,
                 };
+                let pad = w.pad.saturating_add(effect_pad(self.a.op(sa.0), w.xf));
                 work.push(Work {
                     a: (sa.0 + 1, sa.1),
                     b: (sb.0 + 1, sb.1),
                     xf,
+                    pad,
                 });
             }
         }
         for (c, used) in ca.iter().zip(&used_a) {
             if !used {
-                self.removed += leaf_bounds(&self.a, *c, w.xf, self.view, &mut self.rects);
+                self.removed += leaf_bounds(&self.a, *c, w.xf, w.pad, self.view, &mut self.rects);
             }
         }
         for (c, used) in cb.iter().zip(&used_b) {
             if !used {
-                self.added += leaf_bounds(&self.b, *c, w.xf, self.view, &mut self.rects);
+                self.added += leaf_bounds(&self.b, *c, w.xf, w.pad, self.view, &mut self.rects);
             }
         }
     }
@@ -399,11 +434,14 @@ fn leaf_bounds(
     side: &Side<'_>,
     child: (u32, u32),
     xf: Transform2D,
+    pad: i32,
     view: DeviceRect,
     out: &mut Vec<DeviceRect>,
 ) -> usize {
     let mut stack = vec![xf];
     let mut xf = xf;
+    // The pad in force, and the ones the effects inside opened.
+    let mut pads = vec![pad];
     let mut leaves = 0;
     for i in child.0..=child.1 {
         let b = match side.op(i) {
@@ -417,6 +455,17 @@ fn leaf_bounds(
                 xf = stack.last().copied().unwrap_or(xf);
                 continue;
             }
+            op @ SceneOp::PushEffect(_) => {
+                let p = pads.last().copied().unwrap_or(pad);
+                pads.push(p.saturating_add(effect_pad(op, xf)));
+                continue;
+            }
+            SceneOp::PopEffect => {
+                if pads.len() > 1 {
+                    pads.pop();
+                }
+                continue;
+            }
             SceneOp::Fill { path, .. } => device_bounds_of(path, xf, 0.0),
             SceneOp::Stroke { path, style, .. } => {
                 device_bounds_of(path, xf, stroke_pad(style)).inflated(1)
@@ -425,7 +474,8 @@ fn leaf_bounds(
             _ => continue,
         };
         leaves += 1;
-        let b = b.intersection(view);
+        let p = pads.last().copied().unwrap_or(pad);
+        let b = if p > 0 { b.inflated(p) } else { b }.intersection(view);
         if !b.is_empty() {
             out.push(b);
         }
@@ -459,7 +509,12 @@ fn key(op: &SceneOp) -> u64 {
         SceneOp::Fill { id, path, .. } => rect(mix(5, id.0), path.bounds()),
         SceneOp::Stroke { id, path, .. } => rect(mix(6, id.0), path.bounds()),
         SceneOp::Image { id, image, .. } => mix(mix(7, id.0), u64::from(image.index())),
-        SceneOp::PopGroup | SceneOp::PopClip | SceneOp::PopTransparency | SceneOp::PopLayer => 8,
+        SceneOp::PushEffect(_) => 9,
+        SceneOp::PopGroup
+        | SceneOp::PopClip
+        | SceneOp::PopTransparency
+        | SceneOp::PopLayer
+        | SceneOp::PopEffect => 8,
     }
 }
 

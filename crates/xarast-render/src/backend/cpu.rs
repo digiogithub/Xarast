@@ -26,6 +26,7 @@
 //! twelve families, its conical and diamond gradients and its perspective
 //! mapping exist at all, none of which any rasteriser library offers.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -203,6 +204,11 @@ impl CpuBackend {
         &self.cfg
     }
 
+    /// The blend tables it composites with.
+    pub(crate) const fn luts(&self) -> &BlendLuts {
+        &self.luts
+    }
+
     /// Changes what image samplers do about an evicted level
     /// ([`CpuConfig::missing_levels`]) for the renders that follow; the
     /// blend tables are kept.
@@ -260,6 +266,18 @@ impl CpuBackend {
         let luts = &self.luts;
 
         let t_raster = Instant::now();
+        let cmds = dl.commands();
+        let effects = materialise(dl, cmds, res, luts, &cfg, area, rows_per_band, 0);
+        let pass = Pass {
+            dl,
+            cmds,
+            res,
+            luts,
+            cfg: &cfg,
+            left: 0,
+            silhouette: false,
+            effects: &effects,
+        };
         let band_of = |i: usize, rows: &[u8]| {
             let y0 = i * rows_per_band;
             let h = rows.len() / stride;
@@ -278,16 +296,16 @@ impl CpuBackend {
                 .data_mut()
                 .chunks_mut(chunk)
                 .enumerate()
-                .map(|(i, rows)| render_band(dl, res, luts, &cfg, band_of(i, rows), rows, area))
+                .map(|(i, rows)| render_band(&pass, band_of(i, rows), rows, area))
                 .collect()
         } else if let Some(tiles) = column_tiles(&cfg, area, rows_per_band, target.bounds()) {
-            render_tiles(dl, res, luts, &cfg, &tiles, target, area)
+            render_tiles(&pass, &tiles, target, area)
         } else {
             target
                 .data_mut()
                 .par_chunks_mut(chunk)
                 .enumerate()
-                .map(|(i, rows)| render_band(dl, res, luts, &cfg, band_of(i, rows), rows, area))
+                .map(|(i, rows)| render_band(&pass, band_of(i, rows), rows, area))
                 .collect()
         };
         let raster_us = elapsed_us(t_raster);
@@ -358,6 +376,18 @@ impl CpuBackend {
         let chunk = rows_per_band * stride;
         let cfg = self.cfg;
         let luts = &self.luts;
+        let cmds = dl.commands();
+        let effects = materialise(dl, cmds, res, luts, &cfg, area, rows_per_band, 0);
+        let pass = Pass {
+            dl,
+            cmds,
+            res,
+            luts,
+            cfg: &cfg,
+            left: 0,
+            silhouette: false,
+            effects: &effects,
+        };
         let band_of = |i: usize, rows: &[u8]| {
             let y0 = i64::from(region.y0) + (i * rows_per_band) as i64;
             let h = (rows.len() / stride) as i64;
@@ -372,15 +402,7 @@ impl CpuBackend {
             if cancelled() {
                 return None;
             }
-            Some(render_band(
-                dl,
-                res,
-                luts,
-                &cfg,
-                band_of(i, rows),
-                rows,
-                area,
-            ))
+            Some(render_band(&pass, band_of(i, rows), rows, area))
         };
         let results: Vec<Option<BandStats>> = if cfg.threads == 1 {
             target
@@ -437,6 +459,352 @@ struct Layer {
     /// Straight RGBA8, band-sized.
     pixels: Vec<u8>,
     kind: LayerKind,
+}
+
+/// What one band render draws, and how.
+#[derive(Clone, Copy)]
+struct Pass<'a> {
+    dl: &'a DisplayList,
+    /// The commands drawn: the whole list, or what an effect wraps.
+    cmds: &'a [DrawCmd],
+    res: &'a Resolver,
+    luts: &'a BlendLuts,
+    cfg: &'a CpuConfig,
+    /// The left edge coverage is rasterised from (invariant 15): the
+    /// surface's, 0, for a frame; for an effect's offscreen region, one
+    /// fixed by the view and the effect, never by the draw area.
+    left: i32,
+    /// Draw every primitive as opaque black under a plain blend: an
+    /// effect's silhouette.
+    silhouette: bool,
+    /// The effects among `cmds`, already rendered.
+    effects: &'a Effects,
+}
+
+/// The live effects of one command stream, rendered before its bands.
+#[derive(Debug, Default)]
+pub(crate) struct Effects {
+    /// By the index of an effect's push in the stream: the index of its
+    /// pop, and its result when it touches the area drawn.
+    spans: HashMap<usize, (usize, Option<EffectLayer>)>,
+}
+
+/// An effect's result: premultiplied RGBA8 over `rect`, in device space.
+#[derive(Debug)]
+struct EffectLayer {
+    rect: DeviceRect,
+    pixels: Vec<u8>,
+}
+
+/// The index of the `PopEffect` closing the push at `at`, or the end of
+/// the stream when it is unmatched.
+fn matching_pop(cmds: &[DrawCmd], at: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in cmds.iter().enumerate().skip(at) {
+        match c {
+            DrawCmd::PushEffect { .. } => depth += 1,
+            DrawCmd::PopEffect => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    cmds.len()
+}
+
+/// Renders every outermost effect of `cmds` that reaches `area` (nested
+/// ones are rendered by their parent's own pass). `rows_per_band` is the
+/// frame's band grid, which the offscreen regions reuse.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
+pub(crate) fn materialise(
+    dl: &DisplayList,
+    cmds: &[DrawCmd],
+    res: &Resolver,
+    luts: &BlendLuts,
+    cfg: &CpuConfig,
+    area: DeviceRect,
+    rows_per_band: usize,
+    left: i32,
+) -> Effects {
+    let mut out = Effects::default();
+    let mut i = 0;
+    while i < cmds.len() {
+        if let DrawCmd::PushEffect { .. } = cmds[i] {
+            let end = matching_pop(cmds, i);
+            let inner = &cmds[i + 1..end.min(cmds.len())];
+            let layer = if area.is_empty() {
+                None
+            } else {
+                render_effect(
+                    dl,
+                    &cmds[i],
+                    inner,
+                    res,
+                    luts,
+                    cfg,
+                    area,
+                    rows_per_band,
+                    left,
+                )
+            };
+            out.spans.insert(i, (end, layer));
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Renders one effect: what it wraps, offscreen, at the view's resolution,
+/// over the pixels of `area` it covers plus its reach; then the effect.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
+fn render_effect(
+    dl: &DisplayList,
+    push: &DrawCmd,
+    inner: &[DrawCmd],
+    res: &Resolver,
+    luts: &BlendLuts,
+    cfg: &CpuConfig,
+    area: DeviceRect,
+    rows_per_band: usize,
+    left: i32,
+) -> Option<EffectLayer> {
+    let DrawItem::PushEffect {
+        effect,
+        xf,
+        content,
+    } = dl.item(push)
+    else {
+        return None;
+    };
+    let scale = xf.max_scale();
+    let reach = effect.reach_px(scale);
+    let growth = effect.growth_px(scale);
+    // The pixels kept, and every pixel their kernels read.
+    let keep = content.inflated(growth).intersection(area);
+    if keep.is_empty() {
+        return None;
+    }
+    let need = keep
+        .inflated(reach)
+        .intersection(content.inflated(reach.saturating_add(growth)));
+    // Rows on the frame's band grid, so an offscreen band starts where a
+    // frame's band would.
+    let rpb = i32::try_from(rows_per_band.max(1)).unwrap_or(i32::MAX);
+    let region = DeviceRect::new(need.x0, need.y0.div_euclid(rpb) * rpb, need.x1, need.y1);
+    if region.is_empty() {
+        return None;
+    }
+    // Coverage starts here whatever the draw area: a pixel's inputs never
+    // depend on which rectangle is repainted (`crate::effect`). Left of the
+    // enclosing pass's edge by this effect's reach, so that it is left of
+    // every pixel the region can hold.
+    let left = left.min(dl.view().viewport.x0).saturating_sub(reach);
+    let (w, h) = (region.width() as usize, region.height() as usize);
+    let nested = materialise(dl, inner, res, luts, cfg, region, rows_per_band, left);
+    let never = || false;
+    let target = Offscreen {
+        region,
+        rows_per_band,
+        left,
+    };
+    let mut colour = render_region(dl, inner, res, luts, cfg, &nested, target, false, &never)?;
+    let silhouette = if effect.needs_silhouette() {
+        let sil = render_region(dl, inner, res, luts, cfg, &nested, target, true, &never)?;
+        Some(
+            sil.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect::<Vec<u8>>(),
+        )
+    } else {
+        None
+    };
+    effect.apply(&mut colour, silhouette.as_deref(), w, h, scale);
+    Some(EffectLayer {
+        rect: region,
+        pixels: colour,
+    })
+}
+
+/// Where an offscreen render goes: its device rectangle, the band grid its
+/// rows sit on, and the left edge its coverage starts from.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Offscreen {
+    pub(crate) region: DeviceRect,
+    pub(crate) rows_per_band: usize,
+    pub(crate) left: i32,
+}
+
+/// Renders `cmds` into a fresh transparent premultiplied RGBA8 buffer over
+/// `target.region`, band by band, in parallel. `None` when `cancelled`
+/// said so before a band.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a band's state is genuinely this wide"
+)]
+pub(crate) fn render_region(
+    dl: &DisplayList,
+    cmds: &[DrawCmd],
+    res: &Resolver,
+    luts: &BlendLuts,
+    cfg: &CpuConfig,
+    effects: &Effects,
+    target: Offscreen,
+    silhouette: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Option<Vec<u8>> {
+    let Offscreen {
+        region,
+        rows_per_band,
+        left,
+    } = target;
+    let (w, h) = (region.width() as usize, region.height() as usize);
+    let stride = w * 4;
+    let rpb = rows_per_band.max(1);
+    let pass = Pass {
+        dl,
+        cmds,
+        res,
+        luts,
+        cfg,
+        left,
+        silhouette,
+        effects,
+    };
+    let mut px = vec![0u8; stride * h];
+    if px.is_empty() {
+        return Some(px);
+    }
+    let done: Vec<bool> = px
+        .par_chunks_mut(stride * rpb)
+        .enumerate()
+        .map(|(i, rows)| {
+            if cancelled() {
+                return false;
+            }
+            let y0 = region.y0 + i32::try_from(i * rpb).unwrap_or(i32::MAX);
+            let hh = i32::try_from(rows.len() / stride).unwrap_or(0);
+            let band = DeviceRect::new(region.x0, y0, region.x1, y0 + hh);
+            render_band(&pass, band, rows, region);
+            true
+        })
+        .collect();
+    done.iter().all(|d| *d).then_some(px)
+}
+
+/// Composites an effect's result over `dst` (a band `band`, `width`
+/// wide), inside `draw` and the clip. Premultiplied source-over, which is
+/// what the plain family does at zero transparency.
+fn composite_effect(
+    layer: &EffectLayer,
+    band: DeviceRect,
+    draw: DeviceRect,
+    width: u32,
+    clip: Option<&[u8]>,
+    dst: &mut [u8],
+) -> u64 {
+    let rect = layer.rect.intersection(band).intersection(draw);
+    let lw = layer.rect.width() as usize;
+    let mut touched = 0u64;
+    for y in rect.y0..rect.y1 {
+        let lrow = (y - layer.rect.y0) as usize * lw;
+        for x in rect.x0..rect.x1 {
+            let li = (lrow + (x - layer.rect.x0) as usize) * 4;
+            let Some(src) = layer.pixels.get(li..li + 4) else {
+                continue;
+            };
+            if src[3] == 0 {
+                continue;
+            }
+            let cov = clip.map_or(255, |m| mask_at(m, band, width, x, y));
+            if cov == 0 {
+                continue;
+            }
+            let di = ((y - band.y0) as usize * width as usize + (x - band.x0) as usize) * 4;
+            let Some(d) = dst.get_mut(di..di + 4) else {
+                continue;
+            };
+            let sa = u32::from(crate::blend::mul(src[3], cov));
+            for (c, s) in d.iter_mut().zip(src) {
+                let s = u32::from(crate::blend::mul(*s, cov));
+                let under = (u32::from(*c) * (255 - sa) + 127) / 255;
+                *c = u8::try_from((s + under).min(255)).unwrap_or(u8::MAX);
+            }
+            touched += 1;
+        }
+    }
+    touched
+}
+
+/// A command as its silhouette draws it: opaque black under the plain
+/// family, images with their own alpha, layers composited plainly.
+fn silhouette_of<'a>(item: DrawItem<'a>, black: &'a Paint) -> DrawItem<'a> {
+    match item {
+        DrawItem::Fill {
+            node,
+            path,
+            rule,
+            xf,
+            bounds,
+            ..
+        } => DrawItem::Fill {
+            node,
+            path,
+            rule,
+            paint: black,
+            xf,
+            transparency: &Transparency::OPAQUE,
+            bounds,
+        },
+        DrawItem::Stroke {
+            node,
+            path,
+            style,
+            xf,
+            bounds,
+            ..
+        } => DrawItem::Stroke {
+            node,
+            path,
+            style,
+            paint: black,
+            xf,
+            transparency: &Transparency::OPAQUE,
+            bounds,
+        },
+        DrawItem::Image {
+            node,
+            image,
+            mapping,
+            paint,
+            bounds,
+            ..
+        } => DrawItem::Image {
+            node,
+            image,
+            mapping,
+            paint,
+            transparency: &Transparency::OPAQUE,
+            bounds,
+        },
+        DrawItem::PopLayer { .. } => DrawItem::PopLayer {
+            blend: BlendFamily::Mix,
+            opacity: &Transparency::OPAQUE,
+        },
+        other => other,
+    }
 }
 
 /// The narrowest column a tile is split to, in pixels.
@@ -500,10 +868,7 @@ fn column_tiles(
     reason = "a band's state is genuinely this wide"
 )]
 fn render_tiles(
-    dl: &DisplayList,
-    res: &Resolver,
-    luts: &BlendLuts,
-    cfg: &CpuConfig,
+    pass: &Pass<'_>,
     tiles: &[DeviceRect],
     target: &mut Surface,
     area: DeviceRect,
@@ -523,7 +888,7 @@ fn render_tiles(
         .par_iter()
         .map(|t| {
             let mut buf = copy_out(t);
-            let stats = render_band(dl, res, luts, cfg, *t, &mut buf, area);
+            let stats = render_band(pass, *t, &mut buf, area);
             (stats, buf)
         })
         .collect();
@@ -546,15 +911,17 @@ fn render_tiles(
     clippy::too_many_arguments,
     reason = "a band's state is genuinely this wide"
 )]
-fn render_band(
-    dl: &DisplayList,
-    res: &Resolver,
-    luts: &BlendLuts,
-    cfg: &CpuConfig,
-    band: DeviceRect,
-    rows: &mut [u8],
-    area: DeviceRect,
-) -> BandStats {
+fn render_band(pass: &Pass<'_>, band: DeviceRect, rows: &mut [u8], area: DeviceRect) -> BandStats {
+    let Pass {
+        dl,
+        cmds,
+        res,
+        luts,
+        cfg,
+        left,
+        silhouette,
+        effects,
+    } = *pass;
     let mut stats = BandStats::default();
     let width = band.width();
     if band.is_empty() || rows.len() < band.area() as usize * 4 {
@@ -587,7 +954,12 @@ fn render_band(
     // Clip coverage, band-sized; `None` means no clip.
     let mut clips: Vec<Vec<u8>> = Vec::new();
 
-    for cmd in dl.commands() {
+    let black = Paint::Solid(Rgba8::BLACK);
+    let mut next = 0usize;
+    while next < cmds.len() {
+        let at = next;
+        let cmd = &cmds[at];
+        next += 1;
         // Reject a primitive that misses the band on its precomputed bounds
         // before looking up its payload: resolving touches the scene op, and
         // at 100 000 commands per band that would be most of a band's time.
@@ -599,7 +971,35 @@ fn render_band(
             stats.drew = true;
             continue;
         }
-        match dl.item(cmd) {
+        // An effect was rendered before the bands: composite its result
+        // and skip what it wraps.
+        if let DrawCmd::PushEffect { .. } = cmd
+            && let Some((end, layer)) = effects.spans.get(&at)
+        {
+            next = end + 1;
+            if let Some(layer) = layer {
+                let (dst, _) = split_target(&mut layers, rows);
+                stats.pixels += composite_effect(
+                    layer,
+                    band,
+                    draw,
+                    width,
+                    clips.last().map(Vec::as_slice),
+                    dst,
+                );
+                stats.drew = true;
+            }
+            continue;
+        }
+        let item = dl.item(cmd);
+        // A silhouette is coverage alone: every paint opaque, every
+        // transparency and layer blend plain.
+        let item = if silhouette {
+            silhouette_of(item, &black)
+        } else {
+            item
+        };
+        match item {
             DrawItem::PushClip { path, rule, xf } => {
                 let mask = rasterise_clip(
                     &mut ctx,
@@ -609,6 +1009,7 @@ fn render_band(
                     rule,
                     xf,
                     band,
+                    left,
                     tol_doc,
                 );
                 let merged = match clips.last() {
@@ -658,6 +1059,7 @@ fn render_band(
                     bounds,
                     band,
                     draw,
+                    left,
                     tol_doc,
                     width,
                     clips.last().map(Vec::as_slice),
@@ -688,6 +1090,7 @@ fn render_band(
                     bounds,
                     band,
                     draw,
+                    left,
                     tol_doc,
                     width,
                     clips.last().map(Vec::as_slice),
@@ -723,6 +1126,9 @@ fn render_band(
                 );
                 stats.drew = true;
             }
+            // Only reached for an effect the pre-pass did not render (an
+            // unmatched push): what it wraps is drawn plainly.
+            DrawItem::PushEffect { .. } | DrawItem::PopEffect => {}
             DrawItem::CachedSurface { .. } | DrawItem::Invalid => {
                 // Blitting a cached surface is the cache's job and is
                 // exercised through `RenderCache`; a display list that has
@@ -963,12 +1369,13 @@ fn rasterise_clip(
     rule: FillRule,
     xf: Transform2D,
     band: DeviceRect,
+    left: i32,
     tol_doc: f64,
 ) -> Vec<u8> {
     let mut mask = vec![0u8; band.area() as usize];
     // From the surface's left edge, whatever the band's, for the reason
     // `draw_primitive` gives: a tile's clip is then the whole band's.
-    let guarded = DeviceRect::new(0, band.y0 - BAND_GUARD, band.x1, band.y1 + BAND_GUARD);
+    let guarded = DeviceRect::new(left, band.y0 - BAND_GUARD, band.x1, band.y1 + BAND_GUARD);
     let prim = Primitive::Fill { path, rule, xf };
     if !rasterise_coverage(ctx, scratch, resources, &prim, guarded, tol_doc) {
         return mask;
@@ -1007,6 +1414,7 @@ fn draw_primitive(
     bounds: DeviceRect,
     band: DeviceRect,
     area: DeviceRect,
+    left: i32,
     tol_doc: f64,
     width: u32,
     clip: Option<&[u8]>,
@@ -1032,7 +1440,7 @@ fn draw_primitive(
     // (XARA-T-0221). The right edge does not matter: coverage accumulates
     // from the left.
     let guarded = bounds.intersection(DeviceRect::new(
-        0,
+        left,
         band.y0 - BAND_GUARD,
         rect.x1,
         band.y1 + BAND_GUARD,

@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0ae3f7244033a9227aeb9a56ead2e561b1edc48345fb7954f3f407cda09218d2 # shrinks to steps = [Fill(0.0, 0.0, 4.0, 0), PushGroup(-10.489154204309314, 0.0), Fill(0.0, 0.0, 4.0, 0), PushFeather(4.358221290507693), PushFeather(0.0), Fill(0.0, 0.0, 15.041258737270622, 0)]
+cc a42d9226b5bc7197ed41926fc8a43879937e576e848b6d549ad593b70206de03 # shrinks to steps = [PushFeather(8.415046298674175), PushGroup(-14.53083248730322, 0.0), PushFeather(0.0), Fill(6.185221725271084, 0.0, 9.579727776522986, 0)]
+cc ae98b1eb8298056ae91a98c4c7f4e3f4a152bf397990fe60a8f443249994249b # shrinks to steps = [PushFeather(3.408076475993152), Fill(0.0, 0.0, 4.0, 0), PushGroup(-14.547314355023557, 0.0), PushFeather(0.0), Fill(0.0, 0.0, 17.319757355222922, 0)], edits = [Recolour(0, 0)]
+cc fa2ab585234e4aaf744b7a191d276b3e35377f073316b441e3544a3d16a06597 # shrinks to steps = [PopLayer, PopGroup, PushFeather(11.523859875870908), Fill(0.0, 0.0, 26.609244450309735, 0), Fill(0.0, 35.479496828945, 24.237713826322143, 0), Fill(0.0, 0.0, 4.0, 0)], edits = [Move(9, 0.0, 14.369511463355746)]
