@@ -22,8 +22,11 @@
 //!   axis once the other is fixed (bilinear, or barycentric inside the
 //!   triangle): rows across the other axis, each a linear gradient sampled
 //!   at the row's middle, split until neighbouring rows differ by at most
-//!   [`TOLERANCE`] levels. Two edge rows carry the clamped colour beyond
-//!   the frame, which is what the renderer does outside it.
+//!   [`TOLERANCE`] levels. A clamped mesh has two edge rows carrying the
+//!   clamped colour beyond the frame, which is what the renderer does
+//!   outside it; a tiled mesh is mirrored, as the renderer tiles it: the
+//!   rows repeat mirrored across every period the box reaches, and each
+//!   row's gradient reflects along the other axis.
 //!
 //! Pieces are drawn with `shape-rendering="crispEdges"`: neighbours differ
 //! by a level or two, so aliasing is invisible, while antialiased shared
@@ -46,6 +49,10 @@ const FAN_STEPS: u32 = 1024;
 
 /// Rows of a mesh are cut on this grid of the row axis.
 const ROW_GRID: u32 = 1024;
+
+/// The most rows a tiled mesh may emit across all its periods; past it the
+/// caller falls back to its flat approximation.
+const MAX_TILED_ROWS: usize = 8192;
 
 /// A box in SVG space, millipoints: `x0 y0 x1 y1`.
 pub(crate) type SvgBox = (i64, i64, i64, i64);
@@ -342,14 +349,17 @@ pub(crate) fn conical(
 /// A mesh fill: `f(u, v)` over the frame, linear in `u` for a fixed `v`
 /// (or nearly: `u_breaks(v)` names grid points of the `u` axis, out of
 /// [`GRID`], where it has a kink). Rows across `v`, each a gradient along
-/// `u`; beyond the frame the renderer clamps, and so do the edge rows and
-/// the gradients' padding.
+/// `u`. Beyond the frame a clamped mesh (`tiled` false) clamps, as do the
+/// edge rows and the gradients' padding; a tiled one mirrors, as do the
+/// rows repeated across each period and the gradients' `reflect`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mesh(
     ctx: &mut PaintCtx<'_>,
     fr: Frame2,
     b: SvgBox,
     f: &dyn Fn(f64, f64) -> Rgba8,
     u_breaks: &dyn Fn(f64) -> Vec<u32>,
+    tiled: bool,
     target: Target,
 ) -> Option<String> {
     let k = fr.reach(b)?;
@@ -375,10 +385,17 @@ pub(crate) fn mesh(
     }
     let mut rows = Vec::new();
     split(f, 0, ROW_GRID, &mut rows);
+    // A tiled mesh: the whole periods of `v` the box reaches.
+    #[allow(clippy::cast_possible_truncation)]
+    let periods = (-k.ceil() as i64)..(k.ceil() as i64);
+    if tiled && rows.len().saturating_mul(periods.clone().count()) > MAX_TILED_ROWS {
+        return None;
+    }
+    let spread = tiled.then_some("reflect");
     let mut content = fr.group(target.shift(b));
     let row = |ctx: &mut PaintCtx<'_>, content: &mut String, y0: f64, y1: f64, v: f64| {
         let stops = bake_spans(&|u| f(f64::from(u), v), &u_breaks(v), 1);
-        let g = axis_gradient(ctx, 1, 0, &stops, None, target);
+        let g = axis_gradient(ctx, 1, 0, &stops, spread, target);
         content.push_str("<rect");
         attr(content, "x", &fu(-k));
         attr(content, "y", &fu(y0));
@@ -387,17 +404,37 @@ pub(crate) fn mesh(
         attr(content, "fill", &g);
         content.push_str("/>");
     };
-    // Below the frame: the clamped first row.
-    row(ctx, &mut content, -k, 0.0, 0.0);
-    for (v0, v1) in rows {
-        let (a, b) = (
-            f64::from(v0) / f64::from(ROW_GRID),
-            f64::from(v1) / f64::from(ROW_GRID),
-        );
-        row(ctx, &mut content, a, b, (a + b) / 2.0);
+    if tiled {
+        for p in periods {
+            // Even periods run forwards, odd ones mirrored.
+            #[allow(clippy::cast_precision_loss)]
+            let base = p as f64;
+            for &(v0, v1) in &rows {
+                let (a, b) = (
+                    f64::from(v0) / f64::from(ROW_GRID),
+                    f64::from(v1) / f64::from(ROW_GRID),
+                );
+                let (y0, y1) = if p.rem_euclid(2) == 0 {
+                    (base + a, base + b)
+                } else {
+                    (base + 1.0 - b, base + 1.0 - a)
+                };
+                row(ctx, &mut content, y0, y1, (a + b) / 2.0);
+            }
+        }
+    } else {
+        // Below the frame: the clamped first row.
+        row(ctx, &mut content, -k, 0.0, 0.0);
+        for (v0, v1) in rows {
+            let (a, b) = (
+                f64::from(v0) / f64::from(ROW_GRID),
+                f64::from(v1) / f64::from(ROW_GRID),
+            );
+            row(ctx, &mut content, a, b, (a + b) / 2.0);
+        }
+        // Above it: the clamped last row.
+        row(ctx, &mut content, 1.0, k, 1.0);
     }
-    // Above it: the clamped last row.
-    row(ctx, &mut content, 1.0, k, 1.0);
     content.push_str("</g>");
     ctx.stats.fills_baked += 1;
     Some(wrap(ctx, target, b, &content))

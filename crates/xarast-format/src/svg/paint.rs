@@ -579,6 +579,14 @@ fn conical_frame(ctx: &PaintCtx<'_>, centre: Point, zero_dir: Point) -> Frame2 {
     }
 }
 
+/// Whether a three- or four-colour fill or transparency tiles: it clamps
+/// only when its mapping says "do not repeat", and otherwise tiles
+/// mirrored, the default included, as the renderer draws it
+/// (`xarast-app` `paint.rs::mesh_repeat`).
+fn mesh_tiled(t: Tiling) -> bool {
+    t != Tiling::Simple
+}
+
 /// Bakes a three- or four-colour fill, with its rows across whichever
 /// axis the colour changes least along (fewer rows for the same error).
 #[allow(clippy::too_many_arguments)]
@@ -590,14 +598,17 @@ fn bake_mesh(
     f: &dyn Fn(f64, f64) -> Rgba8,
     breaks: &dyn Fn(f64) -> Vec<u32>,
     b: SvgBox,
+    tiling: Tiling,
+    target: Target,
 ) -> Option<String> {
     let (along_u, along_v) = bake::variation(f);
+    let tiled = mesh_tiled(tiling);
     if along_v <= along_u {
         let fr = frame_of(ctx, origin, axis1, axis2);
-        bake::mesh(ctx, fr, b, f, breaks, Target::Pattern)
+        bake::mesh(ctx, fr, b, f, breaks, tiled, target)
     } else {
         let fr = frame_of(ctx, origin, axis2, axis1);
-        bake::mesh(ctx, fr, b, &|u, v| f(v, u), breaks, Target::Pattern)
+        bake::mesh(ctx, fr, b, &|u, v| f(v, u), breaks, tiled, target)
     }
 }
 
@@ -815,6 +826,8 @@ pub(crate) fn colour_paint(
                     &f,
                     &bake::three_colour_breaks,
                     bx,
+                    tiling,
+                    Target::Pattern,
                 )
             }) {
                 return PaintOut {
@@ -868,10 +881,19 @@ pub(crate) fn colour_paint(
                 && i64::from(origin.y.raw()) + i64::from(axis3.y.raw())
                     == i64::from(axis1.y.raw()) + i64::from(axis2.y.raw());
             let f = move |u: f64, v: f64| bake::four_colour(cs, u, v);
-            if let Some(id) = bounds
-                .filter(|_| parallelogram)
-                .and_then(|bx| bake_mesh(ctx, *origin, *axis1, *axis2, &f, &|_| Vec::new(), bx))
-            {
+            if let Some(id) = bounds.filter(|_| parallelogram).and_then(|bx| {
+                bake_mesh(
+                    ctx,
+                    *origin,
+                    *axis1,
+                    *axis2,
+                    &f,
+                    &|_| Vec::new(),
+                    bx,
+                    tiling,
+                    Target::Pattern,
+                )
+            }) {
                 return PaintOut {
                     value: format!("url(#{id})"),
                     sidecar: Some(side),
@@ -1368,7 +1390,40 @@ pub(crate) fn transparency(
                 sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
-        FillGeometry::ThreeColour { c0, c1, c2, .. } => {
+        FillGeometry::ThreeColour {
+            origin,
+            axis1,
+            axis2,
+            c0,
+            c1,
+            c2,
+        } => {
+            // Per pixel, as the renderer draws it: a mask baked like the
+            // colour mesh, from the levels as greys.
+            let ks = [c0.level, c1.level, c2.level];
+            let f = move |u: f64, v: f64| {
+                bake::three_colour([grey(ks[0]), grey(ks[1]), grey(ks[2])], u, v)
+            };
+            if let Some(mask) = bounds.and_then(|bx| {
+                bake_mesh(
+                    ctx,
+                    *origin,
+                    *axis1,
+                    *axis2,
+                    &f,
+                    &bake::three_colour_breaks,
+                    bx,
+                    tiling,
+                    Target::Mask,
+                )
+            }) {
+                return TranspOut {
+                    mode: c0.mode,
+                    mask: Some(mask),
+                    sidecar: Some(transparency_twin(ctx, t, tiling)),
+                    ..TranspOut::default()
+                };
+            }
             ctx.stats.fills_approximated += 1;
             let level =
                 ((u16::from(c0.level) + u16::from(c1.level) + u16::from(c2.level)) / 3) as u8;
@@ -1379,7 +1434,47 @@ pub(crate) fn transparency(
                 sidecar: Some(transparency_twin(ctx, t, tiling)),
             }
         }
-        FillGeometry::FourColour { c0, c1, c2, c3, .. } => {
+        FillGeometry::FourColour {
+            origin,
+            axis1,
+            axis2,
+            axis3,
+            c0,
+            c1,
+            c2,
+            c3,
+        } => {
+            let parallelogram = i64::from(origin.x.raw()) + i64::from(axis3.x.raw())
+                == i64::from(axis1.x.raw()) + i64::from(axis2.x.raw())
+                && i64::from(origin.y.raw()) + i64::from(axis3.y.raw())
+                    == i64::from(axis1.y.raw()) + i64::from(axis2.y.raw());
+            let ks = [
+                grey(c0.level),
+                grey(c1.level),
+                grey(c2.level),
+                grey(c3.level),
+            ];
+            let f = move |u: f64, v: f64| bake::four_colour(ks, u, v);
+            if let Some(mask) = bounds.filter(|_| parallelogram).and_then(|bx| {
+                bake_mesh(
+                    ctx,
+                    *origin,
+                    *axis1,
+                    *axis2,
+                    &f,
+                    &|_| Vec::new(),
+                    bx,
+                    tiling,
+                    Target::Mask,
+                )
+            }) {
+                return TranspOut {
+                    mode: c0.mode,
+                    mask: Some(mask),
+                    sidecar: Some(transparency_twin(ctx, t, tiling)),
+                    ..TranspOut::default()
+                };
+            }
             ctx.stats.fills_approximated += 1;
             let sum = u16::from(c0.level)
                 + u16::from(c1.level)
