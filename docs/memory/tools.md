@@ -524,6 +524,30 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     New}, text }` ("Paste", no coalescing) and `CutText` ("Cut"); the
     session treats `PasteTarget::New` as a creation (selected, reported to
     `after_commands`).
+70. **A story emptied by deletion is removed (XARA-T-0237, maintainer's
+    decision 2026-09-24).** `DeleteText`, `CutText`, and `TypeText`/
+    `PasteText` replacing a range with nothing, remove the story *inside
+    their own transaction* when it is left holding only its final break
+    (`xarast_doc::remove_empty_story`), so the removal is part of the step
+    that emptied it and merges with the rest of a Backspace burst: one
+    `Ctrl+Z` restores story and text (the original gets the same effect by
+    merging its story deletion into the previous operation). The tool
+    predicts the emptying when it emits (the range covers the whole laid-out
+    text and nothing is inserted: `Emptying::of`) and, in
+    `after_commands`, finding the story gone: the caret becomes **pending
+    at the story's origin** (its matrix translation; a column keeps its
+    width, rotation is not kept) and gets the removed text's attributes that
+    differ from the current ones as its **pending style**, so typing on
+    makes a story that looks like the old one; a story **on a path** leaves
+    its path as an ordinary shape (as the original keeps it,
+    `tools/textops.cpp:4281-4293`) and editing ends — there is no straight place for a caret. Selection:
+    the story is pruned from it (the session prunes after every command),
+    the freed path is not selected (the original deselects it). **Leaving
+    the text (Esc, a tool switch, a click elsewhere) removes nothing**: that
+    keeps invariant 11 (leaving is no edit, no hidden undo step), and the
+    only stories that can be left empty-looking are ones holding nothing but
+    paragraph breaks (typed Enter), which the original would remove on
+    leaving — a deliberate difference.
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
@@ -690,7 +714,9 @@ full render byte for byte).
     preparing a new story and choosing a character attribute at a caret
     leave the canonical digest and the undo history as they were
     (`tests/text_tool.rs`, `tests/text_infobar.rs`); a click on empty
-    canvas never creates an empty story.
+    canvas never creates an empty story, and leaving the text never
+    removes one. A deletion that empties a story removes it in that same
+    undo step (decision 70).
 12. While a text caret is up, Delete/Backspace/Enter never reach the
     object-level commands.
 13. A typing burst is one undo step and one `Ctrl+Z` restores the digest
