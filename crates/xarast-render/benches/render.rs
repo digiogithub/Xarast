@@ -291,6 +291,41 @@ fn images(c: &mut Criterion) {
             criterion::BatchSize::LargeInput,
         );
     });
+    // The pixel budget (W10.5), 2048² (16 MiB) bases, spilled under the
+    // default spill root (on disk, not tmpfs).
+    g.bench_function("budget_evict_spill_2048", |b| {
+        let base = noisy_image(2048, 2048).level(0).data.to_vec();
+        b.iter_batched(
+            || {
+                let budget =
+                    xarast_render::PixelBudget::new(xarast_render::BudgetConfig::unlimited());
+                let img =
+                    xarast_render::ImageRef::with_budget(2048, 2048, base.clone(), &budget, None);
+                (budget, img)
+            },
+            |(budget, img)| {
+                // Evicts the base (and level 1): a 16 MiB spill write.
+                budget.set_limit(0);
+                black_box((budget, img))
+            },
+            criterion::BatchSize::LargeInput,
+        );
+    });
+    g.bench_function("budget_rematerialise_spill_2048", |b| {
+        let budget = xarast_render::PixelBudget::new(xarast_render::BudgetConfig {
+            limit_bytes: 0,
+            ..xarast_render::BudgetConfig::unlimited()
+        });
+        let img = xarast_render::ImageRef::with_budget(
+            2048,
+            2048,
+            noisy_image(2048, 2048).level(0).data.to_vec(),
+            &budget,
+            None,
+        );
+        // Read back from the spill file, then dropped again by the budget.
+        b.iter(|| black_box(img.level(0).data.len()));
+    });
     g.finish();
 }
 
