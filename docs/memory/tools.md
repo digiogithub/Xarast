@@ -414,13 +414,15 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     never delete the story object. Choosing the tool
     with one story selected enters it with the caret at the end; the
     selector's double click on a story does that (decision 27).
-54. **The tool lays stories out itself**, through the walker's bridge
-    (`text::story_input`, `layout_text`) with the attributes resolved at
-    the story (`resolve_inherited`), cached per story and dropped
-    wholesale when `Document::epoch` moves. Hit testing walks every story
-    on a visible, unlocked, non-guide layer (topmost wins), inverse-maps
-    the point with the story matrix and tests the line boxes with a 4 px
-    tolerance. Fonts are the process's shared service
+54. **The tool lays stories out itself**, with the walker's own function
+    (`text::lay_story`: bridge, `layout_text`, and on a path the path's
+    column plus the `PathFit`) with the attributes resolved at the story
+    (`resolve_inherited`), cached per story and dropped wholesale when
+    `Document::epoch` moves. Hit testing walks every story on a visible,
+    unlocked, non-guide layer (topmost wins), inverse-maps the point with
+    the story matrix and asks `CaretMap::hit_point` for the caret and the
+    distance to the text (line boxes, or fitted cluster boxes on a path),
+    with a 4 px tolerance. Fonts are the process's shared service
     (`TextTool::with_fonts` for pinned fonts).
 55. **Text is picked by its line box.** The pick index adds each
     `TextStory` as one `Geometry::Bounds` leaf (the `story_rect` of its
@@ -459,6 +461,18 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     removes the story too). `ToolAction::Delete` (Edit › Delete) deletes
     forwards and `ToolAction::Finish` breaks the paragraph, never joining a
     burst.
+58. **Text on a path in the tool (XARA-T-0250).** The overlay is built
+    from story-space geometry the `CaretMap` computes
+    (`caret_segments`, `selection_quads`), mapped by the story matrix
+    only; the tool no longer builds carets or highlights from
+    `caret_geometry`/`selection_rects` itself. So on a path the caret is
+    the fitted cluster's edge, turned (and sheared) with the glyph, the
+    highlight is one `OverlayShape::Highlight` quad per selected cluster
+    (plus one for a selected paragraph break), and no shell or `xarast-ui`
+    change was needed (`Caret` was already any segment, `Highlight` any
+    quad). Caret motion (arrows, Home/End, Up/Down with a goal x) stays in
+    the straight layout: bending a line changes neither logical nor
+    visual order.
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 

@@ -210,10 +210,11 @@ decisions 53–56 and `ui.md` decision 40 for the tool and shell sides.
 - **Pending caret.** A click on empty canvas or a column drag makes a
   *pending* caret, not a story; the first typed character creates it
   (below).
-- **Text on a path** (`OnPath`): the caret still follows a straight
-  layout (the story laid out as a point story), while the walker draws the
-  text along its path since W9.5. Mapping carets, hit tests and selection
-  spans through `PathFit::cluster_transform` is a follow-up task.
+- **Text on a path** (`OnPath`, XARA-T-0250): the tool lays the story out
+  exactly as the walker does (`text::lay_story`: the path's column, then
+  the fit) and builds `CaretMap::on_path(text, layout, fit)`. Motion is
+  unchanged (straight layout); drawing and hit testing go through the
+  fitted clusters — see "Carets on a path" under "Text on a path".
 
 Measured (`cargo bench -p xarast-app --bench text_caret`, 10 000
 characters, Latin + Hebrew, 300 pt column, pinned fonts; budget 1 ms per
@@ -688,8 +689,64 @@ indents and reflection) and `tests/layout.rs`
 `a_story_on_a_path_keeps_its_parameters_and_its_path`; `xarast-xar`
 `the_eight_on_path_tags_say_reversed_and_reflected`.
 
-Not done (tracker tasks): carets, hit tests and selection along the path
-in the text tool (XARA-T-0250); editing (T9.5.5, XARA-T-0251: fit text to
+### Carets on a path (XARA-T-0250, as built)
+
+Code: `xarast-app/src/text_edit.rs` (`CaretMap::on_path`, `place`,
+`caret_segments`, `selection_quads`, `hit_point`; `Stop::cluster`),
+`text_tool.rs` (`StoryView`).
+
+- **A stop belongs to a cluster** (`Stop::cluster`, the index in the
+  line's clusters). The caret is drawn at *its own* cluster's edge, not
+  "at x on the line": on a curve the right edge of one cluster and the
+  left edge of the next are two different points (the boxes turn apart
+  on the outside of a bend, overlap on the inside). Affinity picks which:
+  downstream = the next cluster's left edge, upstream = the previous
+  one's right edge, as for soft line ends.
+- **Pieces.** Each line is cut into rigid pieces of straight-layout x,
+  each with one transform: a cluster's box under
+  `PathFit::cluster_transform`, except that a gap in the box longer than
+  both the glyphs' advance and half the line's size (a manual kern, e.g.
+  `TextCurve.xar`'s long kern at a line's start) is cut into chunks no
+  longer than that, each fitted as a character of its own
+  (`span_transform`). Without this the caret before a long kern stuck out
+  along the first glyph's tangent, off the path. An empty line is one
+  zero-width piece at its start. Pieces (and their inverses) are built
+  once per layout.
+- **Hit test on a path**: every piece inverse-maps the point; the score
+  is (distance outside the box — the larger of across and along —, then
+  how deep inside along x), lowest wins, so where neighbouring boxes
+  overlap on the inside of a bend the one the point is deeper in wins.
+  The caret goes to the nearer edge of the winning piece's cluster. The
+  distance is also "is the click on this story" (4 px, decision 54 of
+  `tools.md`). Straight text keeps the old rule (nearest line band, then
+  nearest stop) and the old Chebyshev distance to the line boxes.
+- **Selection**: one quad per selected cluster, left corners from its
+  first piece and right corners from its last (so a kerned cluster is
+  still one quad), plus one for a selected paragraph break fitted as a
+  character of its own. Spans are not merged on a path (a merged span
+  cannot bend).
+- **The caret leans with shear**: the segment is the fitted glyph's own
+  vertical, so a sheared story (`CharsShear`) gets a slanted caret, and a
+  reflected one a caret hanging on the other side.
+
+Tests: `xarast-app/tests/text_path_caret.rs` (6; all but the last on
+`Designs/TextCurve.xar`, 3 stories): every stop of every line is the
+fitted cluster edge within 1 mp, on the glyph's baseline and parallel to
+its vertical (> 1000 stops, most of them turned); a click at 20 % / 80 %
+of every glyph gives the nearer edge; every stop round-trips through a
+click a quarter of its cluster inwards; Right walks every boundary in
+logical order and the caret moves at most a cluster along the path per
+step; through `Session` intents a click on a glyph, Right, and a 3-character
+selection drawn as 3 turned quads; and a synthetic half-circle arc
+(no corpus).
+
+**Dead end:** asserting a round trip 0.2 pt inside a cluster's edge fails
+on `TextCurve.xar` line 7: with tight tracking (advance 14.1 pt in a
+12.4 pt box) and a hard bend, the neighbour's fitted box covers that
+point too. Both carets are the same offset; the test clicks a quarter of
+the cluster inwards instead.
+
+Not done (tracker tasks): editing (T9.5.5, XARA-T-0251: fit text to
 a path, remove from path, reverse, drag the indents; word wrap on a
 path); `.xarast` base SVG as `<textPath>` (T9.5.6, XARA-T-0252; browsers
 still see straight lines, `SvgStats::text_on_path`).
