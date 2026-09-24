@@ -2,13 +2,14 @@
 id: XARA-T-0218
 type: task
 title: ".xarast text for browsers: embedded fonts, <textPath>, fills in the story frame"
-status: backlog
+status: in_progress
 priority: medium
 parent: XARA-US-0050
 author: mcp
 labels: [phase-9, text, format]
 created: 2026-09-23T20:03:12Z
-updated: 2026-09-23T20:03:12Z
+updated: 2026-09-24T07:43:40Z
+started: 2026-09-24T07:43:40Z
 ---
 
 ## Description

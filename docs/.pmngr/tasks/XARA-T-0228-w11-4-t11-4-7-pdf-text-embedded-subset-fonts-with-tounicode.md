@@ -2,13 +2,14 @@
 id: XARA-T-0228
 type: task
 title: "W11.4 T11.4.7 PDF text: embedded subset fonts with ToUnicode (or outlines on fsType denial)"
-status: backlog
+status: in_progress
 priority: medium
 parent: XARA-US-0059
 author: mcp
 labels: [phase-11, io, pdf, text]
 created: 2026-09-23T21:35:10Z
-updated: 2026-09-23T21:35:10Z
+updated: 2026-09-24T07:43:40Z
+started: 2026-09-24T07:43:40Z
 ---
 
 ## Description
