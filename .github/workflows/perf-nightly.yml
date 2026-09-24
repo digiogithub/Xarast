@@ -1,0 +1,74 @@
+name: Performance nightly
+
+# Phase 12 A/B/C, heavy tier: every gate of xtask/perf-budgets.txt
+# (`cargo xtask perf --tier nightly`): 100k-object synthetic documents
+# (open, save, render, pan, zoom, peak RSS), the leak check (200
+# open/edit/save/close cycles in one process) and the corpus documents
+# (ProbeX16 open-to-first-paint and save, Spitfire's first open). The
+# per-push tier is the `perf` job of ci.yml. Headless, CPU only.
+#
+# The results JSON of every night is kept as an artefact: that is the
+# per-commit history (A7) until a dashboard reads it.
+#
+# The corpus is never copied into this repository (CLAUDE.md): it is read
+# from the fork of the original, as export-corpus.yml does. When that
+# repository is private, set the CORPUS_TOKEN secret.
+
+on:
+  schedule:
+    # 04:30 UTC, after the fuzz (02:30) and corpus export (03:30) runs, so
+    # that the gates do not share the night's busiest hour.
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: perf-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  perf:
+    name: Performance, memory and start-up gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: digiogithub/xara-xtreme
+          ref: claude/xara-xtreme-rust-port-ktggmu
+          path: corpus
+          token: ${{ secrets.CORPUS_TOKEN || github.token }}
+          sparse-checkout: |
+            testfiles
+            Designs
+            Templates
+            TextDesigns
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+
+      - name: Build
+        run: cargo build --release --locked -p xarast-cli -p xtask
+
+      - name: Gates
+        run: |
+          target/release/xtask perf --tier nightly --cli target/release/xarast-cli \
+            --out perf/perf-nightly.json
+        env:
+          XARAST_XAR_CORPUS: ${{ github.workspace }}/corpus
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-nightly-${{ github.sha }}-${{ github.run_id }}
+          path: perf/perf-nightly.json
+          if-no-files-found: ignore
+          retention-days: 90

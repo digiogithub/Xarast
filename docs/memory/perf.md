@@ -14,8 +14,11 @@ XARA-US-0010, 2026-09-23). Its numbers are the ones that count, and they are
 in the next two sections. The Phase 2, 4 and 5 sections further down were
 measured on the old 4-vCPU development container with no GPU. They are kept
 as history and explain the older decisions, but they are not gate verdicts.
-Wiring the budgets into CI, so that a regression fails the build, is still
-owed.
+
+**Since XARA-US-0061 (2026-09-24) the budgets are CI gates**: `cargo xtask
+perf` over `xtask/perf-budgets.txt`, per push and nightly. See
+[CI gates](#ci-gates-xara-us-0061) for what is gated, the margins and the
+noise control.
 
 ## Reference machine
 
@@ -49,6 +52,134 @@ often P-cores) and compiling throughout, with the load average between 5 and
 spread across runs. Runs taken at load ≥ 25 are discarded unless noted. The
 integrated GPU is the most sensitive to this, because it shares power and
 memory bandwidth with the busy cores.
+
+## CI gates (XARA-US-0061)
+
+**What.** `xarast-cli bench <scenario>` measures (headless, CPU only, one
+JSON object per process); `cargo xtask perf [--tier pr|nightly]` runs the
+scenarios of every gate in `xtask/perf-budgets.txt` and fails on a breach.
+CI: job `perf` of `ci.yml` (pr tier, every push, ubuntu-24.04) and
+`perf-nightly.yml` (nightly tier = every gate, 04:30 UTC, with the
+corpus). Both upload the results JSON; that is the per-commit history
+until a dashboard exists.
+
+```text
+cargo xtask perf                          # pr tier; builds xarast-cli first
+XARAST_XAR_CORPUS=… cargo xtask perf --tier nightly --out perf/n.json
+cargo xtask perf --only open-10k,undo-100k --cli target/release/xarast-cli
+xarast-cli bench pan --nodes 250000 --iterations 200 --zoom 3   # one scenario
+```
+
+**Noise control** (CI runners are shared, slower and have 4 cores):
+
+- Every time is a median (pan/zoom: p95/p99 of 120–200 frames) of 3–20
+  runs. Start-up is 20 separate processes.
+- **Calibration, not baselines per runner.** Before every scenario the
+  xtask runs `bench calibrate` (a fixed sort + float chain, single-
+  threaded `st` and over all cores `mt`, medians of 5) and multiplies
+  the scenario's limit by `max(1, measured / reference)`, the reference
+  being this machine quiet (16.5 ms / 7.5 ms). A slower or busier machine
+  gets proportionally more room; a faster one never gets less. Multi-
+  threaded scenarios scale by `mt`, so a 4-core runner gets ~4× on
+  render/pan/export (generous: our scaling stops at ~3×).
+- **Margins.** A limit is the product budget where the reference
+  measurement is at most half of it; otherwise ~2× the reference for
+  times, ~1.25× for memory, and more for times of a few ms. Memory is
+  never scaled (it does not depend on speed).
+- **Two strikes.** A failing scenario is measured again at once; only a
+  breach both times fails. The report then prints e.g.
+  `REGRESSION: open-10k median_ms = 77.11 > limit 34.38 (+124.3 % over the
+  limit, scaled ×1.15 for this machine); reference machine 70.00 (+10.2 %);
+  first run 59.85`.
+- **Budgets vs. limits.** Each gate carries its phase budget too. Where
+  the budget is known to be breached, the limit sits above it (catching
+  regressions) and the note names the task; the report lists those as
+  "known budget breach" without failing.
+- Saves write to `/dev/shm` (`XARAST_BENCH_DIR` overrides): on this
+  machine's md RAID an fsync added up to 5 s to a ProbeX16 save
+  (6.2 s vs 1.1 s on tmpfs); the gates measure our code, not the disk.
+- Peak RSS is `VmHWM`, reset through `/proc/self/clear_refs` after the
+  set-up, so it is the measured part's (pan's is not reset: its budget
+  is document + first frame + pan pass).
+
+**Not an allocation count.** Phase 12 A1 wants `alloc_bytes` as a
+low-noise signal. A counting `#[global_allocator]` is `unsafe`, and
+`xarast-cli` is not one of the three crates allowed it (phase 0);
+`dhat` as an opt-in feature is the way (XARA-T-0297). Valgrind was also
+considered (instruction counts); not installed here, so unverifiable.
+
+**The gates and the local numbers** (2026-09-24, release, this machine,
+**load 6–14 falling from 100–230** after other agents' builds: indicative;
+"ref" is the median of three nightly runs at load 13–55, which is what
+the budgets file records; both tiers passed, 12/12 and 27/27):
+
+| Gate | Tier | Metric | Limit | Budget | Ref | Last run | Scale |
+|---|---|---|---|---|---|---|---|
+| `startup` (20 processes, spawn → exit) | pr | median ms | 400 | 400 | 4.5 | 4.2 | st |
+| `startup-frame` (entry → first frame) | pr | median ms | 25 | — | 3.5 | 3.2 | st |
+| `startup-rss` | pr | MiB | 32 | — | 19.2 | 19.2 | — |
+| `open-10k` (open + Final first paint) | pr | median ms | 140 | — | 70 | 62–80 | st |
+| `open-10k-rss` | pr | MiB | 104 | — | 81 | 78–84 | — |
+| `save-10k` (app save job) | pr | median ms | 110 | — | 55 | 53–59 | st |
+| `render-10k` (full Final frame) | pr | median ms | 5 | — | 2.1 | 2.0–3.2 | mt |
+| `pan-10k` (Draft, scheduler) | pr | p95 ms | 16 | 16 | 1.0 | 0.86–1.0 | mt |
+| `export-10k` (PNG 4000 × 5543) | pr | median ms | 3000 | 3000 | 240 | 239–273 | mt |
+| `export-10k-rss` | pr | MiB | 552 | — | 440 | 433–446 | — |
+| `undo-100k` (undo or redo via `Session::apply`) | pr | median ms/op | 1 | 1 | 0.17 | 0.17 | st |
+| `edit-100k` (the move itself) | pr | median ms/op | 0.65 | — | 0.31 | 0.30–0.32 | st |
+| `open-100k` | nightly | median ms | 1750 | — | 865 | 828 | st |
+| `open-100k-rss` | nightly | MiB | 672 | — | 535 | 534 | — |
+| `save-100k` | nightly | median ms | 1100 | — | 550 | 558 | st |
+| `render-100k` | nightly | median ms | 50 | — | 24.8 | 23.7 | mt |
+| `pan-100k` (fit) | nightly | p95 / p99 ms | 16 / 24 | 16 / 24 | 4.8 / 6.3 | 4.4 / 4.5 | mt |
+| `pan-100k-rss` | nightly | MiB | 1536 | 1536 | 285 | 285 | — |
+| `pan-100k-zoomed` (3×, CPU tier) | nightly | p95 ms | 33 | 16 (GPU) | 16.5 | 20.5 | mt |
+| `zoom-100k` | nightly | p95 ms | 16 | 16 | 2.0 | 2.4 | mt |
+| `leak` (200 cycles, after warm-up) | nightly | growth % | 20 | 5 | 4.2 | 2.0–9.4 | — |
+| `leak-first` (phase's definition) | nightly | growth % | 35 | 5 | 18.4 | 15–21 | — |
+| `probex16-open` | nightly | median ms | 1500 | 500 | 760 | 752–1031 | st |
+| `probex16-open-rss` | nightly | MiB | 640 | — | 508 | 508 | — |
+| `probex16-save` (app save job, tmpfs) | nightly | median ms | 2200 | 1000 | 1100 | 1083–1281 | st |
+| `spitfire-first` (first text document) | nightly | first ms | 200 | — | 100 | 100–108 | st |
+
+"100k" is `--nodes 250000` (105 852 objects), "10k" `--nodes 25000`
+(10 520). The pr tier takes ~20 s of scenarios here; the nightly ~45 s
+(2.5 min at load 230).
+
+**Reading it.**
+
+- **Known breaches, gated on regression only:** ProbeX16 open-to-first-
+  paint 0.75 s vs 500 ms (XARA-T-0009), ProbeX16 app save 1.08–1.28 s vs
+  1 s (XARA-T-0215: the snapshot restore), the CPU tier's zoomed pan
+  (the 16 ms budget is the integrated GPU's and is met there, T-0050),
+  and the leak check against the phase's own definition (below).
+- **Leak check (B5).** 200 open → walk → render → edit → undo → save →
+  close cycles of a 10k-node document in one process: the resident set
+  after close grows ~5 MiB over cycles 1–3 (thread arenas, pools, tables)
+  and then wanders ±2 MiB with no clear trend (traced to 80 cycles; leaving
+  out the walk, the render, the edit or the save moved the level by a few
+  MiB but did not isolate a stage that climbs on its own). Against
+  the first close that is 15–21 %, so the phase's "within 5 % of after the
+  first close" fails on warm-up, not on a leak; the gate measures after
+  the warm-up (tenth of the cycles) against the median of the last tenth,
+  2–9 %. A per-document leak of even 1 % of the document per cycle would
+  be > 50 % here. Tightening it is XARA-T-0296.
+- **Undo through the session is 0.17 ms at 100k objects**, not the bus's
+  0.3 µs: `Session::apply(Undo)` does the session's bookkeeping too.
+  Inside budget; `edit-100k` (0.31 ms) would show XARA-T-0030's O(n)
+  commit again.
+- **Start-up here is headless**: spawn → first frame of an empty page from
+  the render thread is 4 ms. The real window's ≈ 330 ms (surface, adapter,
+  first present) needs a display and a GPU: XARA-T-0010, on the reference
+  machine or a self-hosted runner (A5).
+- **Font service (XARA-T-0288).** Spitfire's first open + paint is ~100 ms
+  of which ~40 ms is waiting for fontconfig enumeration. The shell already
+  starts it on a background thread before the window exists (`main.rs`,
+  `fonts::prewarm`), and the window opens documents only once it has a
+  surface (~300 ms later), so the app does not pay it. Prewarming in
+  `xarast-cli` too was measured and dropped: Spitfire first open 45.9 →
+  44.8 ms (medians of 5–7, load ~90), because the import it would overlap
+  is only ~5 ms. `spitfire-first` keeps an eye on it.
 
 ## Reference-machine numbers
 
@@ -104,8 +235,11 @@ Measured 2026-09-23 (XARA-US-0010). Budgets that are breached are in bold.
 | Shape + lay out a 10 000-glyph story, cold | ≤ 60 ms | **2.28 ms** | passes |
 | Glyph outline extraction, cached | ≤ 500 ns | **24 ns** | passes |
 | System font enumeration (fontconfig, 2 202 families here) | ≤ 300 ms, off the main thread | **≈ 40 ms** | passes (opt-in `system_fonts` test) |
-| Open a 5 MB `.xar` to first paint | ≤ 500 ms | not yet | XARA-T-0009; the import alone is already 644 ms for 7.4 MB |
-| Cold start to window | ≤ 400 ms | not yet | XARA-T-0010 |
+| Open a 5 MB `.xar` to first paint | ≤ 500 ms | **752–1031 ms** headless (ProbeX16, 7.4 MB, open + Final 1920 × 1080; gate `probex16-open`, 2026-09-24) | **fails**, XARA-T-0009; gated on regression at 1.5 s |
+| Cold start to window | ≤ 400 ms | headless part 4 ms (gate `startup`); the window ≈ 330–420 ms (below) | window: XARA-T-0010 |
+| Undo/redo through `Session::apply`, 100k objects | ≤ 1 ms | **0.17 ms** (gate `undo-100k`) | passes |
+| Export 4000 px wide PNG, 10k objects | ≤ 3 s | **240 ms** (gate `export-10k`) | passes |
+| Peak RSS, 100k objects + first frame + pan pass | ≤ 1.5 GB | **285 MiB** (gate `pan-100k-rss`) | passes |
 | Image probe (header only), 24 Mpx JPEG / PNG | ≤ 200 µs | **59 ns** / **390 ns** | passes (phase 10; JPEG probe no longer goes through `image`) |
 | Decode a 24 Mpx baseline JPEG (7.5 MB, q90) | ≤ 400 ms | **184 ms** (181–190) | passes |
 | Decode a 24 Mpx PNG (27.5 MB) | ≤ 600 ms | **227 ms** (209–239) | passes |
@@ -1053,10 +1187,15 @@ that will recur:
       (XARA-T-0038). The three-band half is fixed for export (≈ 48 bands,
       0.36–0.9 s per file) but not for the headless `render` path.
 - [ ] `Document::snapshot()`: 43–80 ms against 25 ms, still.
-- [ ] Wire the budgets into CI so that a regression fails the build, rather
-      than being noticed later. CI runners are not the reference machine, so
-      the CI gate needs either a self-hosted runner on it or budgets scaled by
-      a calibration bench.
+- [x] Wire the budgets into CI so that a regression fails the build —
+      done 2026-09-24 (XARA-US-0061) with limits scaled by a calibration
+      bench; see [CI gates](#ci-gates-xara-us-0061). Still open from phase
+      12 A/B/C: a self-hosted perf runner (A5) for the window and GPU
+      budgets, a history dashboard (A7), allocation counts (B1), render
+      cache and undo byte ceilings (B3/B4), the 60-minute soak (B6), idle
+      CPU, and the f64 cross-architecture determinism gate: XARA-T-0296
+      (leak limits), T-0297 (B1), T-0298 (A5/A7/A8), T-0299 (B3/B4/B6,
+      idle), T-0300 (cross-arch).
 - [ ] Measure bytes per node excluding payloads, so the 160 B budget can
       actually be judged.
 - [ ] Pixel budget under load: the 40 × 24 Mpx stress test (XARA-T-0282)

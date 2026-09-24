@@ -9,3 +9,5 @@
 /tests/corpus/out
 /squashfs-root
 *.zsync
+# `cargo xtask perf --out perf/...` results (CI uploads them as artefacts)
+/perf

@@ -1,0 +1,76 @@
+# Performance, memory and start-up gates for `cargo xtask perf`
+# (phase 12 A4/A6, B2/B5, C2; story XARA-US-0061). docs/memory/perf.md,
+# "CI gates", explains every choice below; change both together.
+#
+# Each gate is one metric of one `xarast-cli bench` scenario:
+#
+#   <id> <tiers> <metric> <limit> <scale> <budget> <reference> -- <bench args> [# note]
+#
+#   tiers      pr (every push, ci.yml job `perf`) and/or nightly
+#              (perf-nightly.yml, which runs every gate)
+#   metric     a key of the scenario's JSON `metrics` (lower is better);
+#              times in ms, memory in MiB, growth in %
+#   limit      the gate: the build fails above it (twice in a row)
+#   scale      st | mt: the limit (and the budget) is multiplied by
+#              max(1, this machine's calibration / the reference's), single-
+#              threaded or all cores; none: memory, never scaled
+#   budget     the product budget from docs/phases (reported, "-" if none);
+#              a gate may sit above its budget when the budget is known to
+#              be breached (the note names the task): it then catches
+#              regressions until the task closes and the limit comes down
+#   reference  the reference machine's measurement (perf.md), "-" if none
+#
+# `$CORPUS` is XARAST_XAR_CORPUS; those gates are skipped without it.
+#
+# Margins: a limit is the budget where the reference measurement is at
+# most half of it; otherwise about 2x the reference for times and about
+# 1.25x for memory. Times of a few milliseconds carry more.
+
+# The calibration workload (`xarast-cli bench calibrate`) on the reference
+# machine, quiet: median ms single-threaded, and on all 24 threads.
+calibration 16.5 7.5
+
+# ── Start-up (C2): process spawn to the first frame of a new document,
+# collected from the render thread; 20 cold processes, medians. Headless:
+# the real window's ~330 ms of surface and adapter set-up is not in it
+# (XARA-T-0010 measures that on the reference machine).
+startup          pr,nightly process_median_ms 400  st   400  4.5  -- startup --runs 20 --size 1280x800
+startup-frame    pr,nightly frame_median_ms   25   st   -    3.5  -- startup --runs 20 --size 1280x800
+startup-rss      pr,nightly peak_rss_mib      32   none -    19.2 -- startup --runs 20 --size 1280x800
+
+# ── 10k objects (25 000 synthetic nodes = 10 520 objects), every push.
+open-10k         pr,nightly median_ms         140  st   -    70   -- open --nodes 25000 --runs 7
+open-10k-rss     pr,nightly peak_rss_mib      104  none -    81   -- open --nodes 25000 --runs 7
+save-10k         pr,nightly median_ms         110  st   -    55   -- save --nodes 25000 --runs 5
+render-10k       pr,nightly median_ms         5    mt   -    2.1  -- render --nodes 25000 --runs 7
+pan-10k          pr,nightly p95_ms            16   mt   16   1.0  -- pan --nodes 25000 --iterations 120
+export-10k       pr,nightly median_ms         3000 mt   3000 240  -- export --nodes 25000 --runs 3
+export-10k-rss   pr,nightly peak_rss_mib      552  none -    440  -- export --nodes 25000 --runs 3
+
+# ── Undo at 100k objects (250 000 nodes = 105 852 objects): one undo or
+# redo through Session::apply, and the move it undoes (a commit that walks
+# the whole tree, XARA-T-0030's bug, would show here as ~1 ms).
+undo-100k        pr,nightly median_ms         1    st   1    0.17 -- undo --nodes 250000 --runs 5 --iterations 200
+edit-100k        pr,nightly edit_median_ms    0.65 st   -    0.31 -- undo --nodes 250000 --runs 5 --iterations 200
+
+# ── 100k objects, nightly.
+open-100k        nightly    median_ms         1750 st   -    865  -- open --nodes 250000 --runs 7
+open-100k-rss    nightly    peak_rss_mib      672  none -    535  -- open --nodes 250000 --runs 7
+save-100k        nightly    median_ms         1100 st   -    550  -- save --nodes 250000 --runs 5
+render-100k      nightly    median_ms         50   mt   -    24.8 -- render --nodes 250000 --runs 7
+pan-100k         nightly    p95_ms            16   mt   16   4.8  -- pan --nodes 250000 --iterations 200
+pan-100k-p99     nightly    p99_ms            24   mt   24   6.3  -- pan --nodes 250000 --iterations 200
+pan-100k-rss     nightly    peak_rss_mib      1536 none 1536 285  -- pan --nodes 250000 --iterations 200
+pan-100k-zoomed  nightly    p95_ms            33   mt   16   16.5 -- pan --nodes 250000 --iterations 200 --zoom 3 # CPU tier; the 16 ms budget is the integrated GPU's, met there (XARA-T-0050)
+zoom-100k        nightly    p95_ms            16   mt   16   2.0  -- zoom --nodes 250000 --iterations 200
+
+# ── Leaks (B5): 200 open/walk/render/edit/undo/save/close cycles of a
+# 4 200-object document in one process.
+leak             nightly    growth_pct            20 none 5 4.2  -- leak --nodes 10000 --iterations 200 # after warm-up; allocator noise is 2-9 %
+leak-first       nightly    growth_from_first_pct 35 none 5 18.4 -- leak --nodes 10000 --iterations 200 # the phase's definition: includes the ~5 MiB warm-up of cycles 1-3
+
+# ── The corpus, nightly.
+probex16-open     nightly   median_ms     1500 st   500  760  -- open --doc $CORPUS/testfiles/ProbeX16.xar --runs 7 # XARA-T-0009
+probex16-open-rss nightly   peak_rss_mib  640  none -    508  -- open --doc $CORPUS/testfiles/ProbeX16.xar --runs 7
+probex16-save     nightly   median_ms     2200 st   1000 1100 -- save --doc $CORPUS/testfiles/ProbeX16.xar --runs 5 # XARA-T-0215
+spitfire-first    nightly   first_ms      200  st   -    100  -- open --doc $CORPUS/Designs/Spitfire.xar --runs 5 # the first text document of a process waits for font enumeration (XARA-T-0288)
