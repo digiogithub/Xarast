@@ -604,11 +604,13 @@ impl xarast_doc::Command for EditCommand {
             } => {
                 check_layers(tx, &[*story])?;
                 xarast_doc::delete_range(tx, *story, replace.clone())?;
-                xarast_doc::insert_text(tx, *story, replace.start, text).map(|_| ())
+                xarast_doc::insert_text(tx, *story, replace.start, text)?;
+                remove_if_emptied(tx, *story, replace)
             }
             EditCommand::DeleteText { story, range, .. } => {
                 check_layers(tx, &[*story])?;
-                xarast_doc::delete_range(tx, *story, range.clone())
+                xarast_doc::delete_range(tx, *story, range.clone())?;
+                remove_if_emptied(tx, *story, range)
             }
             EditCommand::CreateText {
                 layer,
@@ -634,7 +636,8 @@ impl xarast_doc::Command for EditCommand {
             EditCommand::PasteText { target, text } => paste_text(tx, target, text),
             EditCommand::CutText { story, range } => {
                 check_layers(tx, &[*story])?;
-                xarast_doc::delete_range(tx, *story, range.clone())
+                xarast_doc::delete_range(tx, *story, range.clone())?;
+                remove_if_emptied(tx, *story, range)
             }
         }
     }
@@ -662,6 +665,22 @@ impl xarast_doc::Command for EditCommand {
     }
 }
 
+/// A story a deletion of `range` left without text is removed in the same
+/// step, as the original does (`text.md`, "Removing an emptied story"): one
+/// undo brings back the story and its text. A story on a path leaves its
+/// path behind as an ordinary shape. Nothing happens when nothing was
+/// deleted, so a story that was already empty (an imported one) stays.
+fn remove_if_emptied(
+    tx: &mut Tx<'_>,
+    story: NodeId,
+    range: &Range<usize>,
+) -> Result<(), EditError> {
+    if range.is_empty() {
+        return Ok(());
+    }
+    xarast_doc::remove_empty_story(tx, story).map(|_| ())
+}
+
 /// Runs [`EditCommand::PasteText`]: the plain text is inserted (so it
 /// takes the style where it lands, as typing does), then the styled copy's
 /// attributes are set wherever the pasted characters differ from them.
@@ -674,6 +693,9 @@ fn paste_text(
         PasteTarget::Story { story, replace } => {
             check_layers(tx, &[*story])?;
             xarast_doc::delete_range(tx, *story, replace.clone())?;
+            if text.is_empty() {
+                return remove_if_emptied(tx, *story, replace);
+            }
             (*story, replace.start)
         }
         PasteTarget::New {

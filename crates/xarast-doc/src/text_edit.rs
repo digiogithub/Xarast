@@ -609,6 +609,82 @@ pub fn new_story(
     Ok(story)
 }
 
+/// Whether a story holds no text: nothing but the final paragraph break
+/// every story ends with. `None` when `story` is not a story.
+#[must_use]
+pub fn is_story_empty(doc: &crate::Document, story: NodeId) -> Option<bool> {
+    let st = StoryText::collect_simple(&doc.tree, &doc.defaults, story)?;
+    Some(st.text.strip_suffix('\n').unwrap_or(&st.text).is_empty())
+}
+
+/// What [`remove_empty_story`] did.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EmptyStory {
+    /// The story still holds text (or is not a story): nothing changed.
+    Kept,
+    /// The story was deleted.
+    Removed {
+        /// The plain path a story on a path left in its place, if any.
+        path: Option<NodeId>,
+    },
+}
+
+/// Deletes `story` when it holds no text ([`is_story_empty`]), inside the
+/// caller's transaction, so the deletion that emptied it and the removal
+/// are one undo step (the original merges its story removal into the
+/// operation before it). A story on a path leaves the path it followed in
+/// its place as an ordinary path, carrying as its own attributes the
+/// non-text attributes it painted with (the story's included), so it looks
+/// exactly as it did under the text; text attributes mean nothing to a
+/// path and are not copied.
+///
+/// # Errors
+///
+/// Whatever the transaction refuses (a locked story).
+pub fn remove_empty_story(tx: &mut Tx<'_>, story: NodeId) -> Result<EmptyStory, EditError> {
+    use crate::attr::{ALL_ATTR_SLOTS, resolve_inherited, resolve_uncached};
+    let doc = tx.doc();
+    let (Some(NodeKind::TextStory(node)), Some(true)) =
+        (doc.tree.kind(story), is_story_empty(doc, story))
+    else {
+        return Ok(EmptyStory::Kept);
+    };
+    let followed = if matches!(node.layout, crate::TextLayout::OnPath { .. }) {
+        let inherited = resolve_inherited(&doc.tree, story, &doc.defaults);
+        doc.tree
+            .children(story)
+            .find_map(|c| match doc.tree.kind(c) {
+                Some(NodeKind::Path(p)) => {
+                    let own = resolve_uncached(&doc.tree, c, &doc.defaults);
+                    let attrs: Vec<AttrValue> = ALL_ATTR_SLOTS
+                        .iter()
+                        .filter(|s| !crate::text_convert::is_text_slot(**s))
+                        .filter(|&&s| own.get(s) != inherited.get(s))
+                        .map(|&s| own.get(s).clone())
+                        .collect();
+                    Some(((**p).clone(), attrs))
+                }
+                _ => None,
+            })
+    } else {
+        None
+    };
+    let path = match followed {
+        Some((node, attrs)) => {
+            let path = tx.create(NodeKind::Path(Box::new(node)))?;
+            tx.attach(path, story, Attach::Prev)?;
+            for v in attrs {
+                let a = tx.create(NodeKind::Attr(Box::new(AttrNode::new(v))))?;
+                tx.attach(a, path, Attach::LastChild)?;
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    tx.delete(story)?;
+    Ok(EmptyStory::Removed { path })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,5 +1013,112 @@ mod tests {
         assert_eq!(st.lines.len(), 2);
         assert!(sizes(&st).iter().all(|&(_, s)| s == 9_000));
         assert!(crate::validate::validate_document(&doc).errors.is_empty());
+    }
+
+    /// Deletes a range and removes the story if that emptied it, as the
+    /// app's text commands do: one undo step.
+    #[derive(Debug)]
+    struct DeleteAndTidy(NodeId, Range<usize>);
+
+    impl Command for DeleteAndTidy {
+        fn label(&self) -> &'static str {
+            "Delete Text"
+        }
+
+        fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+            delete_range(tx, self.0, self.1.clone())?;
+            remove_empty_story(tx, self.0).map(|_| ())
+        }
+    }
+
+    #[test]
+    fn a_story_emptied_by_a_deletion_goes_in_the_same_step() {
+        let (mut doc, story) = doc();
+        let before = doc.canonical_digest();
+        let mut bus = CommandBus::new();
+        // Leaving any text, or only paragraph breaks and text, keeps it.
+        bus.dispatch(&mut doc, &DeleteAndTidy(story, 0..4)).unwrap();
+        assert_eq!(text(&doc, story).text, "\nef\n");
+        assert!(doc.tree.is_reachable(story));
+        assert_eq!(is_story_empty(&doc, story), Some(false));
+        bus.dispatch(&mut doc, &DeleteAndTidy(story, 0..3)).unwrap();
+        assert!(!doc.tree.is_reachable(story), "the empty story is gone");
+        assert!(crate::validate::validate_document(&doc).errors.is_empty());
+        bus.undo(&mut doc).unwrap();
+        assert!(doc.tree.is_reachable(story));
+        assert_eq!(text(&doc, story).text, "\nef\n", "one undo: text and story");
+        bus.undo(&mut doc).unwrap();
+        assert_eq!(doc.canonical_digest(), before);
+        // Nothing to remove in a story that still has text.
+        let mut tx = Tx::begin(&mut doc);
+        assert_eq!(remove_empty_story(&mut tx, story), Ok(EmptyStory::Kept));
+        drop(tx);
+        assert_eq!(doc.canonical_digest(), before);
+    }
+
+    #[test]
+    fn an_emptied_story_on_a_path_leaves_its_path_looking_the_same() {
+        let mut pb = xarast_geom::Path::builder();
+        pb.move_to(xarast_geom::Point::raw(0, 0))
+            .line_to(xarast_geom::Point::raw(100_000, 0));
+        let mut b = skeleton(BuildLimits::default()).unwrap();
+        let story = b
+            .node(NodeKind::TextStory(Box::new(TextStoryNode {
+                layout: crate::TextLayout::OnPath {
+                    reversed: false,
+                    tangential: true,
+                    left_indent: Mp::ZERO,
+                    right_indent: Mp::ZERO,
+                    chars: crate::CharsTransform::default(),
+                },
+                ..TextStoryNode::default()
+            })))
+            .unwrap()
+            .node_id();
+        b.push_scope().unwrap();
+        // The story's line width paints its path; its size does not.
+        b.attribute(AttrValue::LineWidth(Mp::new(3_000))).unwrap();
+        b.attribute(AttrValue::FontSize(Mp::new(20_000))).unwrap();
+        let path = b
+            .node(NodeKind::Path(Box::new(crate::PathNode::new(pb.build()))))
+            .unwrap()
+            .node_id();
+        b.push_scope().unwrap();
+        b.attribute(AttrValue::WindingRule(xarast_geom::FillRule::EvenOdd))
+            .unwrap();
+        b.pop_scope();
+        b.node(NodeKind::TextLine(Box::default())).unwrap();
+        b.push_scope().unwrap();
+        b.node(NodeKind::TextItem(TextItem::Char('a'))).unwrap();
+        b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+            .unwrap();
+        b.pop_scope();
+        b.pop_scope();
+        let (mut doc, _) = b.finish().unwrap();
+        let layer = doc.tree.links(story).parent.unwrap();
+        let painted = crate::attr::resolve_uncached(&doc.tree, path, &doc.defaults);
+        let before = doc.canonical_digest();
+        let mut bus = CommandBus::new();
+        bus.dispatch(&mut doc, &DeleteAndTidy(story, 0..1)).unwrap();
+        assert!(!doc.tree.is_reachable(story));
+        let kids: Vec<NodeId> = doc.tree.children(layer).collect();
+        let freed = *kids
+            .iter()
+            .find(|&&n| matches!(doc.tree.kind(n), Some(NodeKind::Path(_))))
+            .expect("the path stays on the layer");
+        let now = crate::attr::resolve_uncached(&doc.tree, freed, &doc.defaults);
+        for s in crate::attr::ALL_ATTR_SLOTS {
+            if !crate::text_convert::is_text_slot(s) {
+                assert_eq!(now.get(s), painted.get(s), "{s:?}");
+            }
+        }
+        // Text attributes are not carried onto the path.
+        assert!(doc.tree.children(freed).all(|c| match doc.tree.kind(c) {
+            Some(NodeKind::Attr(a)) => a.value.slot().is_some_and(|s| !crate::is_text_slot(s)),
+            _ => true,
+        }));
+        assert!(crate::validate::validate_document(&doc).errors.is_empty());
+        bus.undo(&mut doc).unwrap();
+        assert_eq!(doc.canonical_digest(), before);
     }
 }

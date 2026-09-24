@@ -236,6 +236,37 @@ fn cut_removes_the_text_and_is_one_step_named_cut() {
 }
 
 #[test]
+fn cutting_all_the_text_removes_the_story_in_the_same_step() {
+    let (mut app, story) = fixture();
+    let before = s(&app).doc.canonical_digest();
+    caret_at_line_start(&mut app, 0);
+    app.apply(Intent::SelectAll).unwrap();
+    app.apply(Intent::Cut).unwrap();
+    assert_eq!(
+        clipboard_text(&mut app).as_deref(),
+        Some("Hello world\nSecond line")
+    );
+    assert!(
+        !s(&app).doc.tree.is_reachable(story),
+        "the empty story is gone"
+    );
+    assert_eq!(s(&app).undo_label(), Some("Cut"));
+    assert_eq!(s(&app).bus.history().len(), 1);
+    assert!(matches!(
+        s(&app).text_state(),
+        Some(TextEditing::Pending { .. })
+    ));
+    // Pasting it back at the pending caret makes the story again.
+    paste(&mut app, Some("Hello world\nSecond line"));
+    let sel = selection(&app);
+    assert_eq!(text(&app, sel.story).text, "Hello world\nSecond line\n");
+    assert!(bold_at(&text(&app, sel.story), 12), "the styled copy");
+    app.apply(Intent::Undo).unwrap();
+    app.apply(Intent::Undo).unwrap();
+    assert_eq!(s(&app).doc.canonical_digest(), before);
+}
+
+#[test]
 fn with_no_text_selected_copy_and_cut_do_nothing_to_the_story() {
     let (mut app, story) = fixture();
     let before = s(&app).doc.canonical_digest();

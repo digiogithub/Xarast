@@ -132,8 +132,9 @@ pub use text::{
 };
 pub use text_convert::{OutlineRun, convert_story_to_shapes, is_text_slot};
 pub use text_edit::{
-    DeleteRange, InsertText, SetTextAttr, delete_range, insert_text, is_paragraph_slot, new_story,
-    paragraph_line_range, set_text_attr, text_attr_label,
+    DeleteRange, EmptyStory, InsertText, SetTextAttr, delete_range, insert_text, is_paragraph_slot,
+    is_story_empty, new_story, paragraph_line_range, remove_empty_story, set_text_attr,
+    text_attr_label,
 };
 pub use text_model::{
     CharRun, ItemEntry, KernAt, LineEntry, StoryFlow, StoryText, TextCursor, TextPos,
