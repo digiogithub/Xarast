@@ -73,6 +73,11 @@ pub const TAG_CLIPVIEWCONTROLLER: u32 = 4084;
 /// The marker inside a ClipView controller between its clipping objects
 /// and the objects they clip.
 pub const TAG_CLIPVIEW: u32 = 4085;
+/// A shadow controller: its attributes, one [`TAG_SHADOW`] and the object
+/// that casts the shadow.
+pub const TAG_SHADOWCONTROLLER: u32 = 4050;
+/// The generated shadow node inside a shadow controller.
+pub const TAG_SHADOW: u32 = 4051;
 /// Per-point path flags, the first child of the path record.
 pub const TAG_PATH_FLAGS: u32 = 111;
 /// A relative path, stroked.

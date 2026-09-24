@@ -342,6 +342,29 @@ pub struct FontDefinition {
     pub panose: [u8; 10],
 }
 
+/// `TAG_SHADOWCONTROLLER` (4050, 29 bytes), field by field.
+///
+/// Every field after the type is an `INT32`; a truncated record keeps the
+/// original's defaults for what it leaves out.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ShadowControllerRecord {
+    /// 1 wall, 2 floor, 3 glow; 0 (none) and 4 (a "feather" shadow the
+    /// original never finished) are in the enumeration too.
+    pub kind: u8,
+    /// The penumbra: the blur's diameter, in millipoints.
+    pub penumbra: i32,
+    /// The wall offset, in millipoints (a vector: not origin-relative).
+    pub offset: (i32, i32),
+    /// The floor angle, radians × 10⁶ (reduced modulo 2π on reading).
+    pub floor_angle: i32,
+    /// The floor height as a percentage of the object's.
+    pub floor_height: i32,
+    /// The wall scale as a percentage (always 100 in files: unused).
+    pub scale: i32,
+    /// The glow width (the feather width for kind 4), in millipoints.
+    pub width: i32,
+}
+
 /// Where a text story sits.
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum TextPlacement {
@@ -462,6 +485,21 @@ pub enum Decoded {
     /// `TAG_CLIPVIEW` (4085): the marker inside a ClipView controller that
     /// separates the keyholes from the clipped objects. Empty.
     ClipView,
+    /// `TAG_SHADOWCONTROLLER` (4050): a shadow's controller; its children
+    /// are its attributes, one `TAG_SHADOW` and the object that casts the
+    /// shadow (`research/01`, record table; `research/02 §6.9`).
+    ShadowController(ShadowControllerRecord),
+    /// `TAG_SHADOW` (4051): the generated shadow node. Its own attribute
+    /// children carry the shadow's colour.
+    Shadow {
+        /// Profile bias.
+        bias: f64,
+        /// Profile gain.
+        gain: f64,
+        /// Darkness; 1.0 (fully dark) when an older, 16-byte record leaves
+        /// it out.
+        darkness: f64,
+    },
     /// `TAG_SETSENTINEL`.
     SetSentinel,
     /// `TAG_SPREADINFORMATION`.
@@ -729,7 +767,7 @@ pub const fn has_decoder(tag: u32) -> bool {
         | 2100 | 2101 | 2110..=2117 | 2150 | 2151
         | 2200..=2204 | 2206
         | 2900..=2920
-        | 4010 | 4011 | 4070 | 4075..=4078 | 4084 | 4085 | 4086 | 4087 | 4088
+        | 4010 | 4011 | 4050 | 4051 | 4070 | 4075..=4078 | 4084 | 4085 | 4086 | 4087 | 4088
         | 4114 | 4115 | 4116 | 4119 | 4120 | 4121 | 4123 | 4124 | 4129
         | 4030 | 4031 | 4201..=4203)
 }
@@ -943,6 +981,22 @@ pub fn decode(
         // `Kernel/ndclpcnt.cpp:2408`); whatever a payload holds is ignored.
         4084 => Decoded::ClipViewController,
         4085 => Decoded::ClipView,
+        4050 => Decoded::ShadowController(ShadowControllerRecord {
+            kind: c.u8()?,
+            penumbra: c.opt_i32().unwrap_or(4500),
+            offset: (c.opt_i32().unwrap_or(3750), c.opt_i32().unwrap_or(-3750)),
+            floor_angle: c.opt_i32().unwrap_or(785_398),
+            floor_height: c.opt_i32().unwrap_or(50),
+            scale: c.opt_i32().unwrap_or(100),
+            width: c.opt_i32().unwrap_or(3000),
+        }),
+        // Older writers stop after the profile (16 bytes); the original
+        // then keeps its initial darkness, fully dark.
+        4051 => Decoded::Shadow {
+            bias: c.opt_f64().unwrap_or(0.0),
+            gain: c.opt_f64().unwrap_or(0.0),
+            darkness: c.opt_f64().unwrap_or(1.0),
+        },
         4086 => Decoded::Feather {
             size: c.mp()?,
             bias: c.opt_f64().unwrap_or(0.0),

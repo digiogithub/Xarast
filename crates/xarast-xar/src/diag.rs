@@ -127,6 +127,13 @@ pub enum DiagCode {
     /// all, so the clipped objects are drawn unclipped, 4 the keyholes were
     /// too large to combine and only the first clips.
     ClipViewDegraded,
+    /// A shadow could not be mapped as the original draws it. The detail
+    /// says how: 0 a controller with no `TAG_SHADOW` (its object is drawn
+    /// with no shadow), 1 a stray `TAG_SHADOW` outside a controller
+    /// (dropped with its attributes), 2 a shadow whose fill is not a flat
+    /// colour (drawn in its first colour), 3 a shadow type the original
+    /// never draws (0 none, 4 feather, or unknown; drawn as a wall shadow).
+    ShadowDegraded,
 }
 
 impl DiagCode {
@@ -156,6 +163,7 @@ impl DiagCode {
             DiagCode::UnknownEnumValue => "UnknownEnumValue",
             DiagCode::BitmapNotNormalised => "BitmapNotNormalised",
             DiagCode::ClipViewDegraded => "ClipViewDegraded",
+            DiagCode::ShadowDegraded => "ShadowDegraded",
         }
     }
 
@@ -205,7 +213,8 @@ impl DiagCode {
             | DiagCode::UnexpectedCompressionRecord
             | DiagCode::UnknownEnumValue
             | DiagCode::BitmapNotNormalised
-            | DiagCode::ClipViewDegraded => D::UnsupportedFeature,
+            | DiagCode::ClipViewDegraded
+            | DiagCode::ShadowDegraded => D::UnsupportedFeature,
         }
     }
 }
