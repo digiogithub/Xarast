@@ -68,6 +68,8 @@ pub mod damage;
 pub mod display_list;
 pub mod export;
 pub mod golden;
+#[doc(hidden)]
+pub mod gpu_test_lock;
 pub mod paint;
 pub mod path;
 pub mod precision;
