@@ -2,13 +2,14 @@
 id: XARA-T-0276
 type: task
 title: "Embedded fonts: register a document's WOFF2 subsets for display, and the profile C text-outline copy"
-status: backlog
+status: in_progress
 priority: low
 parent: XARA-US-0049
 author: mcp
 labels: [phase-9, text, format]
 created: 2026-09-24T08:50:25Z
-updated: 2026-09-24T08:50:25Z
+updated: 2026-09-24T09:47:49Z
+started: 2026-09-24T09:47:49Z
 ---
 
 ## Description

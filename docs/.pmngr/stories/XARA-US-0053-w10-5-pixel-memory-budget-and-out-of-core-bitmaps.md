@@ -2,12 +2,13 @@
 id: XARA-US-0053
 type: story
 title: W10.5 — Pixel memory budget and out-of-core bitmaps
-status: backlog
+status: in_review
 parent: XARA-EP-0011
 author: mcp
 labels: [phase-10, image, perf]
 created: 2026-09-23T09:42:40Z
-updated: 2026-09-23T09:42:40Z
+updated: 2026-09-24T10:11:54Z
+started: 2026-09-24T09:36:47Z
 ---
 
 ## Tasks (full table: phase-10 §W10.5)
