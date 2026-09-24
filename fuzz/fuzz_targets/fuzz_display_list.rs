@@ -294,6 +294,11 @@ impl Ctx {
                     image: self.image,
                     mapping: mapping(handles, false),
                     repeat: repeat(*r),
+                    filter: match (r / 4) % 3 {
+                        0 => Filter::Nearest,
+                        1 => Filter::Bilinear,
+                        _ => Filter::HighQuality,
+                    },
                 },
             },
         }

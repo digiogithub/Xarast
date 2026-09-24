@@ -20,12 +20,13 @@
 //! enumeration is unchanged, so the gradient matrix still has its 6 × 4 × 2
 //! cells.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use xarast_color::Rgba8;
 
 use crate::precision::Point64;
 use crate::ramp::{Profile, RampCache, RampId};
+use crate::resample::{ImageSampler, Level, MipLevel};
 
 /// The five gradient geometries plus the two meshes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -137,6 +138,36 @@ impl FrameMap {
     #[must_use]
     pub fn apply(&self, p: Point64) -> Option<(f64, f64)> {
         self.m.apply(p)
+    }
+
+    /// Whether the mapping is affine, so that its Jacobian is the same at
+    /// every point.
+    #[must_use]
+    pub const fn is_affine(&self) -> bool {
+        self.affine
+    }
+
+    /// The Jacobian of [`FrameMap::apply`] at a device point,
+    /// `[du/dx, du/dy, dv/dx, dv/dy]`, or `None` behind the horizon.
+    #[must_use]
+    pub fn jacobian(&self, p: Point64) -> Option<[f64; 4]> {
+        let m = &self.m.0;
+        let w = m[6] * p.x + m[7] * p.y + m[8];
+        if !w.is_finite() || w.abs() < 1e-12 {
+            return None;
+        }
+        if self.affine {
+            return Some([m[0] / w, m[1] / w, m[3] / w, m[4] / w]);
+        }
+        let u = m[0] * p.x + m[1] * p.y + m[2];
+        let v = m[3] * p.x + m[4] * p.y + m[5];
+        let w2 = w * w;
+        Some([
+            (m[0] * w - u * m[6]) / w2,
+            (m[1] * w - u * m[7]) / w2,
+            (m[3] * w - v * m[6]) / w2,
+            (m[4] * w - v * m[7]) / w2,
+        ])
     }
 
     /// A scalar gradient's parameter at a device point, as [`grad_param`].
@@ -448,13 +479,24 @@ impl ImageId {
 
 /// A decoded, straight (non-premultiplied) RGBA8 image.
 ///
-/// Decoding is Phase 10's; this crate only samples what it is handed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Decoding is Phase 10's; this crate only samples what it is handed. The
+/// mip pyramid a minified sample needs is built on first use and shared by
+/// every clone (`resample`); equality looks at the pixels only.
+#[derive(Debug, Clone)]
 pub struct ImageRef {
     width: u32,
     height: u32,
     data: Arc<Vec<u8>>,
+    mips: Arc<OnceLock<Vec<MipLevel>>>,
 }
+
+impl PartialEq for ImageRef {
+    fn eq(&self, other: &ImageRef) -> bool {
+        self.width == other.width && self.height == other.height && self.data == other.data
+    }
+}
+
+impl Eq for ImageRef {}
 
 impl ImageRef {
     /// Wraps straight RGBA8 pixel data.
@@ -473,6 +515,7 @@ impl ImageRef {
             width,
             height,
             data: Arc::new(data),
+            mips: Arc::new(OnceLock::new()),
         }
     }
 
@@ -488,31 +531,58 @@ impl ImageRef {
         self.height
     }
 
+    fn mips(&self) -> &[MipLevel] {
+        self.mips
+            .get_or_init(|| crate::resample::build_pyramid(self.width, self.height, &self.data))
+    }
+
+    /// How many levels the image has, the base included: `1 +
+    /// ⌈log2(max(w, h))⌉`. Builds the pyramid on first call.
+    #[must_use]
+    pub fn level_count(&self) -> usize {
+        if self.width == 0 || self.height == 0 {
+            return 1;
+        }
+        1 + self.mips().len()
+    }
+
+    /// Whether the pyramid has been built.
+    #[must_use]
+    pub fn has_pyramid(&self) -> bool {
+        self.mips.get().is_some()
+    }
+
+    /// One level: 0 is the image itself, each next one half the size,
+    /// averaged in linear light; a level past the last is the last. The
+    /// pyramid is built here, on first use of a level above 0.
+    #[must_use]
+    pub fn level(&self, i: usize) -> Level<'_> {
+        let base = Level {
+            width: self.width,
+            height: self.height,
+            data: &self.data,
+        };
+        if i == 0 || self.width == 0 || self.height == 0 {
+            return base;
+        }
+        let mips = self.mips();
+        match mips.get(i - 1).or(mips.last()) {
+            Some(m) => Level {
+                width: m.width,
+                height: m.height,
+                data: &m.data,
+            },
+            None => base,
+        }
+    }
+
     /// Reads one texel with the given repeat mode applied to both axes.
     #[must_use]
     pub fn texel(&self, x: i64, y: i64, repeat: Repeat) -> Rgba8 {
         if self.width == 0 || self.height == 0 {
             return Rgba8::TRANSPARENT;
         }
-        let wrap = |v: i64, n: i64| -> i64 {
-            match repeat {
-                Repeat::Simple => v.clamp(0, n - 1),
-                Repeat::Repeat | Repeat::RepeatHq => v.rem_euclid(n),
-                Repeat::Mirror => {
-                    let m = v.rem_euclid(2 * n);
-                    if m >= n { 2 * n - 1 - m } else { m }
-                }
-            }
-        };
-        let x = wrap(x, i64::from(self.width));
-        let y = wrap(y, i64::from(self.height));
-        let o = (y as usize * self.width as usize + x as usize) * 4;
-        Rgba8 {
-            r: self.data[o],
-            g: self.data[o + 1],
-            b: self.data[o + 2],
-            a: self.data[o + 3],
-        }
+        self.level(0).texel(x, y, repeat)
     }
 }
 
@@ -774,15 +844,15 @@ pub fn eval_paint(paint: &Paint, ramps: &RampCache, images: &ImageRegistry, p: P
 /// ramp table and the image looked up, once per primitive instead of once
 /// per pixel. [`eval_paint`] is this with one point, so the two cannot
 /// drift apart.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PaintSampler<'a> {
     paint: &'a Paint,
     /// The frame map, `None` for a degenerate mapping or a mapless paint.
     frame: Option<FrameMap>,
     /// The ramp table of a table gradient.
     table: Option<&'a [Rgba8]>,
-    /// The image of an image fill.
-    image: Option<&'a ImageRef>,
+    /// The image of an image fill, readied.
+    image: Option<ImageSampler<'a>>,
 }
 
 impl<'a> PaintSampler<'a> {
@@ -803,7 +873,20 @@ impl<'a> PaintSampler<'a> {
                 },
                 None,
             ),
-            Paint::Image { image, mapping, .. } => (mapping.frame_map(), None, images.get(*image)),
+            Paint::Image {
+                image,
+                mapping,
+                repeat,
+                filter,
+                contone,
+                ..
+            } => (
+                None,
+                None,
+                images
+                    .get(*image)
+                    .and_then(|img| ImageSampler::new(img, *mapping, *repeat, *filter, *contone)),
+            ),
         };
         PaintSampler {
             paint,
@@ -869,61 +952,15 @@ impl<'a> PaintSampler<'a> {
                     lerp_rgba(top, bottom, v)
                 }
             },
-            Paint::Image {
-                repeat,
-                filter,
-                contone,
-                adjust,
-                ..
-            } => {
-                let Some(img) = self.image else {
+            Paint::Image { adjust, .. } => {
+                let Some(img) = &self.image else {
                     return Rgba8::TRANSPARENT;
                 };
-                let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
-                    return Rgba8::TRANSPARENT;
-                };
-                let (fw, fh) = (f64::from(img.width()), f64::from(img.height()));
-                let (x, y) = (u * fw - 0.5, v * fh - 0.5);
-                let sample = match filter {
-                    Filter::Nearest => img.texel(x.round() as i64, y.round() as i64, *repeat),
-                    Filter::Bilinear | Filter::HighQuality => {
-                        let (x0, y0) = (x.floor(), y.floor());
-                        let (fx, fy) = (x - x0, y - y0);
-                        let (x0, y0) = (x0 as i64, y0 as i64);
-                        let t00 = img.texel(x0, y0, *repeat);
-                        let t10 = img.texel(x0.saturating_add(1), y0, *repeat);
-                        let t01 = img.texel(x0, y0.saturating_add(1), *repeat);
-                        let t11 = img.texel(x0.saturating_add(1), y0.saturating_add(1), *repeat);
-                        lerp_rgba(lerp_rgba(t00, t10, fx), lerp_rgba(t01, t11, fx), fy)
-                    }
-                };
-                let sample = apply_contone(sample, *contone);
-                apply_adjust(sample, *adjust)
+                apply_adjust(img.sample(p), *adjust)
             }
             Paint::Fractal(_) => Rgba8::TRANSPARENT,
         }
     }
-}
-
-fn apply_contone(c: Rgba8, contone: Option<(Rgba8, Rgba8, crate::ramp::EffectSpace)>) -> Rgba8 {
-    let Some((start, end, space)) = contone else {
-        return c;
-    };
-    // The original remaps the bitmap's luminance onto a two-colour ramp.
-    let y = crate::blend::LumaWeights::BT601.luma(c);
-    let t = f32::from(y) / 255.0;
-    let mixed = xarast_color::interpolate(
-        xarast_color::ColourValue::from_rgba8(start),
-        xarast_color::ColourValue::from_rgba8(end),
-        t,
-        match space {
-            crate::ramp::EffectSpace::Rgb => xarast_color::FillEffect::Fade,
-            crate::ramp::EffectSpace::HsvShort => xarast_color::FillEffect::Rainbow,
-            crate::ramp::EffectSpace::HsvLong => xarast_color::FillEffect::AltRainbow,
-        },
-    );
-    let out = mixed.to_rgba8();
-    Rgba8 { a: c.a, ..out }
 }
 
 fn apply_adjust(c: Rgba8, adj: BitmapAdjust) -> Rgba8 {

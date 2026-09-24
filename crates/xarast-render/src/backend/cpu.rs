@@ -41,9 +41,7 @@ use xarast_geom::{Cap, FillRule, Join, StrokeStyle};
 use crate::backend::{BackendError, FrameTimings, LayerId, Rasterizer, RasterizerCaps};
 use crate::blend::{BlendFamily, BlendLuts, LumaWeights, TranspSource, Transparency, composite};
 use crate::display_list::{DisplayList, DrawCmd, DrawItem, ListParts, SCENE_PAINT};
-use crate::paint::{
-    FrameMap, GradMapping, ImageId, ImageRef, ImageRegistry, Paint, PaintSampler, eval_paint,
-};
+use crate::paint::{FrameMap, GradMapping, ImageId, ImageRegistry, Paint, PaintSampler};
 use crate::path::PathRef;
 use crate::precision::{Point64, Transform2D};
 use crate::ramp::RampCache;
@@ -1078,11 +1076,23 @@ fn draw_image_cmd(
             adjust: crate::paint::BitmapAdjust::default(),
         },
     };
+    // Readied once per command, like a fill's (`composite_coverage`):
+    // the mapping inverted, the image's level of detail chosen.
+    let Some(frame) = mapping.frame_map() else {
+        return 0;
+    };
+    let sampler = PaintSampler::new(&paint, &res.ramps, &res.images);
+    let levels = LevelSampler::new(transparency, res);
+    let flat = match &transparency.source {
+        TranspSource::Flat(t) => Some(*t),
+        _ => None,
+    };
+    let replace = flat == Some(0) && transparency.family == BlendFamily::Mix;
     let mut touched = 0u64;
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
             let p = Point64::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
-            let Some((u, v)) = mapping.to_frame(p) else {
+            let Some((u, v)) = frame.apply(p) else {
                 continue;
             };
             if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
@@ -1095,8 +1105,18 @@ fn draw_image_cmd(
             if cov == 0 {
                 continue;
             }
-            let src = eval_paint(&paint, &res.ramps, &res.images, p);
-            let t = level_at(transparency, res, p);
+            let src = sampler.sample(p);
+            // An opaque texel at zero transparency replaces the pixel, as
+            // in `composite_coverage` (`opaque_replace_matches_the_general_path`).
+            if cov == 255 && replace && src.a == 255 {
+                write_opaque(dst, band, width, x, y, src);
+                touched += 1;
+                continue;
+            }
+            let t = match flat {
+                Some(t) => t,
+                None => levels.sample(p),
+            };
             blend_into(
                 dst,
                 band,
@@ -1218,19 +1238,13 @@ fn mask_at(mask: &[u8], band: DeviceRect, width: u32, x: i32, y: i32) -> u8 {
     mask.get(ix).copied().unwrap_or(0)
 }
 
-/// The transparency level at a point, from a flat value, a graduated ramp
-/// or a bitmap.
-fn level_at(t: &Transparency, res: &Resolver, p: Point64) -> u8 {
-    LevelSampler::new(t, res).sample(p)
-}
-
 /// A transparency readied for many points, as [`PaintSampler`] is for a
 /// paint: the mapping inverted and the table or image looked up once.
 struct LevelSampler<'a> {
     t: &'a Transparency,
     frame: Option<FrameMap>,
     table: Option<&'a [u8]>,
-    image: Option<&'a ImageRef>,
+    image: Option<crate::resample::ImageSampler<'a>>,
 }
 
 impl<'a> LevelSampler<'a> {
@@ -1244,9 +1258,18 @@ impl<'a> LevelSampler<'a> {
                     .map(Vec::as_slice),
                 None,
             ),
-            TranspSource::Image { image, mapping, .. } => {
-                (mapping.frame_map(), None, res.images.get(*image))
-            }
+            TranspSource::Image {
+                image,
+                mapping,
+                repeat,
+                filter,
+            } => (
+                None,
+                None,
+                res.images.get(*image).and_then(|img| {
+                    crate::resample::ImageSampler::new(img, *mapping, *repeat, *filter, None)
+                }),
+            ),
         };
         LevelSampler {
             t,
@@ -1272,18 +1295,13 @@ impl<'a> LevelSampler<'a> {
                 };
                 table[crate::paint::ramp_index(crate::paint::apply_repeat(s, *repeat), table.len())]
             }
-            TranspSource::Image { repeat, .. } => {
-                let Some(img) = self.image else {
+            TranspSource::Image { .. } => {
+                let Some(img) = &self.image else {
                     return 0;
                 };
-                let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
-                    return 0;
-                };
-                let x = (u * f64::from(img.width()) - 0.5).round();
-                let y = (v * f64::from(img.height()) - 0.5).round();
                 // The original reads the transparency out of the luminance
-                // of the tile pattern.
-                LumaWeights::BT601.luma(img.texel(x as i64, y as i64, *repeat))
+                // of the tile pattern, sampled like a colour image.
+                LumaWeights::BT601.luma(img.sample(p))
             }
         }
     }

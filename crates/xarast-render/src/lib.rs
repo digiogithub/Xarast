@@ -74,6 +74,7 @@ pub mod paint;
 pub mod path;
 pub mod precision;
 pub mod ramp;
+pub mod resample;
 pub mod scene;
 pub mod stroke_cull;
 pub mod surface;

@@ -600,6 +600,7 @@ pub(crate) fn transparency(
                         image: *id,
                         mapping,
                         repeat: bitmap_repeat(*own, tiling),
+                        filter: ctx.filter,
                     },
                 }
             }
