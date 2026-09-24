@@ -374,7 +374,11 @@ New in Phase 2:
     within its 64-byte gate. `canonical_digest` adds the chain's hash
     **only when it is non-empty**, so every existing digest is unchanged.
     `bitmap_usage` / `collect_unused` need nothing new: the chain names no
-    resource (the master is the node's `image`).
+    resource (the master is the node's `image`). `SetPhotoOps` only
+    `set_kind`s, so it creates and detaches nothing and the history's
+    retention rule (below) does not apply to it; the history property
+    tests place bitmaps and apply adjust/orient/crop chains to prove it
+    (`Edit::AddBitmap`, `Edit::Photo`; clean at `PROPTEST_CASES=20000`).
 
 ## The `.xar` attribute tag reconciliation
 
