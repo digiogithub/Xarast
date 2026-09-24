@@ -273,7 +273,9 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
   children under their parent, a colour whose parent is not named is a
   root), each row a draggable swatch (also a drop slot) and a selectable
   name ("Paper (tint)"); New / Edit / Rename / Delete act on the chosen
-  row; double click edits it in the colour editor. `F9` does not show it
+  row (accessible names "New named colour", "Edit the chosen colour", …,
+  so none clashes with the Edit menu's "Edit"); double click edits it in
+  the colour editor. `F9` does not show it
   yet: the dock has no show/focus plumbing (XARA-T-0254).
 
 ## Panels and canvas

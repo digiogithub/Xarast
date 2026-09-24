@@ -334,6 +334,10 @@ Plain round-to-nearest would get **545** of them wrong.
 9. A colour drag (bar or gallery) changes nothing before its drop; a drop
    is at most one undo step; a cancelled drag or a drop on nothing leaves
    digest and history untouched.
+   Its frames therefore repaint nothing, and a drop repaints only what
+   the scene diff of XARA-T-0221 finds changed: the target object, or
+   every user of a redefined named colour (`xarast-shell/tests/
+   edit_damage.rs`, `a_colour_drop_repaints_its_target_and_matches_a_full_render`).
 10. Every listed (named) entry's `entry_index` is unique after any
     `move_listed`; the order of `listed` is total (ties broken by slot).
 
