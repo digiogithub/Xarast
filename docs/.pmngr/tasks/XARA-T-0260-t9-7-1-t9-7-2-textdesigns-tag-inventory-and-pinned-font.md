@@ -2,14 +2,15 @@
 id: XARA-T-0260
 type: task
 title: "T9.7.1 + T9.7.2: TextDesigns tag inventory and pinned-font golden renders"
-status: in_review
+status: done
 priority: high
 parent: XARA-US-0050
 author: mcp
 labels: [phase-9, text, acceptance]
 created: 2026-09-24T01:24:31Z
-updated: 2026-09-24T01:38:02Z
+updated: 2026-09-24T02:28:34Z
 started: 2026-09-24T01:24:31Z
+closed: 2026-09-24T02:28:34Z
 ---
 
 ## Description
