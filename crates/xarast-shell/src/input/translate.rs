@@ -360,7 +360,7 @@ fn translate_location(location: winit::keyboard::KeyLocation) -> KeyLocation {
     }
 }
 
-fn translate_ime(ime: &winit::event::Ime) -> ImeEvent {
+pub(crate) fn translate_ime(ime: &winit::event::Ime) -> ImeEvent {
     match ime {
         winit::event::Ime::Enabled => ImeEvent::Enabled,
         winit::event::Ime::Preedit(text, cursor) => ImeEvent::Preedit {

@@ -119,6 +119,9 @@ pub struct Viewer {
     canvas_hovered: bool,
     ime_allowed: bool,
     ime_area: Option<[i32; 4]>,
+    /// The input method's composition for the canvas's text caret (egui
+    /// keeps its own for its text fields).
+    ime: crate::ime::ImeState,
     cursor: CursorShape,
     /// The window title, which also names the accessibility tree's root.
     title: String,
@@ -201,6 +204,7 @@ impl Viewer {
             canvas_hovered: false,
             ime_allowed: false,
             ime_area: None,
+            ime: crate::ime::ImeState::new(),
             cursor: CursorShape::Default,
             title: "Xarast".to_owned(),
             probe: None,
@@ -684,21 +688,21 @@ impl Viewer {
                 self.message = Some(format!("Could not copy: {e}"));
             }
         }
-        let wants_ime = output.ime.is_some();
-        if wants_ime != self.ime_allowed {
-            ctx.set_ime_allowed(wants_ime);
-            self.ime_allowed = wants_ime;
+        let wanted = self.ime_request(output.ime.map(|i| i.cursor_rect));
+        if wanted.is_some() != self.ime_allowed {
+            ctx.set_ime_allowed(wanted.is_some());
+            self.ime_allowed = wanted.is_some();
             self.ime_area = None;
-        }
-        if let Some(ime) = output.ime {
-            let ppp = self.ppp;
-            let r = ime.cursor_rect;
-            let area = [r.min.x, r.min.y, r.width(), r.height()].map(|v| (v * ppp).round() as i32);
-            if self.ime_area != Some(area) {
-                self.ime_area = Some(area);
-                let [x, y, w, h] = area.map(f64::from);
-                ctx.set_ime_cursor_area(x, y, w, h);
+            if wanted.is_none() {
+                self.ime_ended();
             }
+        }
+        if let Some(area) = wanted
+            && self.ime_area != Some(area)
+        {
+            self.ime_area = Some(area);
+            let [x, y, w, h] = area.map(f64::from);
+            ctx.set_ime_cursor_area(x, y, w, h);
         }
         // Over the canvas, where egui asks for nothing in particular, the
         // tool in force chooses the pointer.
@@ -712,6 +716,75 @@ impl Viewer {
             self.cursor = shape;
             ctx.set_cursor(shape);
         }
+    }
+
+    /// Whether the input method should be on, and where its candidate
+    /// window goes, in window device pixels: under egui's focused text
+    /// field (`field`, in points) or, when the canvas has the keyboard,
+    /// under the text tool's caret (T9.4.7). `None`: off. The IME is on
+    /// exactly while one of those carets is up; with it on for no reason
+    /// every key goes through the input method first.
+    fn ime_request(&self, field: Option<egui::Rect>) -> Option<[i32; 4]> {
+        if let Some(r) = field {
+            let ppp = self.ppp;
+            return Some(
+                [r.min.x, r.min.y, r.width(), r.height()].map(|v| (v * ppp).round() as i32),
+            );
+        }
+        if !self.canvas_has_keyboard() {
+            return None;
+        }
+        let [x, y, w, h] = self.app.active()?.ime_cursor_area()?;
+        let c = self.adapter.canvas();
+        Some([
+            (x + f64::from(c.x)).round() as i32,
+            (y + f64::from(c.y)).round() as i32,
+            w.round().max(1.0) as i32,
+            h.round().max(1.0) as i32,
+        ])
+    }
+
+    /// Whether key and input-method events are the canvas's: it has the
+    /// keyboard, or nothing does.
+    fn canvas_has_keyboard(&self) -> bool {
+        !self.text_input && (self.canvas_focused || self.egui.memory(|m| m.focused().is_none()))
+    }
+
+    /// The input method went off (or away from the canvas): a composition
+    /// still showing in the story ends without a commit.
+    fn ime_ended(&mut self) {
+        let was = self.ime.is_composing();
+        self.ime = crate::ime::ImeState::new();
+        if was && self.text_caret_up() {
+            self.apply(vec![Intent::TextPreedit(None)]);
+        }
+    }
+
+    /// An input-method event for the canvas's text caret (T9.4.7): the
+    /// composition is shown in the story, a commit is typed. Returns
+    /// whether a redraw is owed.
+    fn ime_event(&mut self, event: &crate::ime::ImeEvent) -> bool {
+        use crate::ime::ImeChange;
+        let change = self.ime.apply(event.clone());
+        let intent = match change {
+            ImeChange::None | ImeChange::Started => return false,
+            ImeChange::PreeditChanged => {
+                let text = self.ime.preedit();
+                Intent::TextPreedit((!text.is_empty()).then(|| xarast_app::tool::Preedit {
+                    text: text.to_owned(),
+                    cursor: self.ime.cursor(),
+                }))
+            }
+            ImeChange::Cancelled => Intent::TextPreedit(None),
+            ImeChange::Committed => match self.ime.take_commit() {
+                Some(text) if !text.is_empty() => Intent::TextInput(xarast_app::TextInput {
+                    kind: xarast_app::TextInputKind::Insert(text),
+                    time_ms: self.adapter.now_ms(),
+                }),
+                _ => Intent::TextPreedit(None),
+            },
+        };
+        self.apply(vec![intent]).needs_redraw()
     }
 
     /// Sizes and places the canvas from the interface's layout. Returns
@@ -1128,6 +1201,17 @@ impl Viewer {
                     redraw |= self.apply(vec![intent]).needs_redraw();
                 }
             }
+            ShellEvent::Ime(ime) if self.text_caret_up() && self.canvas_has_keyboard() => {
+                redraw |= self.ime_event(ime);
+            }
+            // While the input method composes, keys are its own: a
+            // composition keystroke must never run a shortcut or move the
+            // caret (most platforms do not send them at all then).
+            ShellEvent::Key(k)
+                if k.state == KeyState::Pressed
+                    && !self.text_input
+                    && self.ime.is_composing()
+                    && self.text_caret_up() => {}
             ShellEvent::Key(k)
                 if k.state == KeyState::Pressed && !self.text_input && self.text_caret_up() =>
             {
@@ -2477,15 +2561,23 @@ mod tests {
     /// (every request fails at once, no D-Bus is touched) and returns
     /// whether `f` asked the shell to exit, and what the portal answered.
     fn with_ctx(f: impl FnOnce(&mut ShellCtx<'_>)) -> (bool, Vec<PortalEvent>) {
-        let service = crate::portal::PortalService::offline("no portal in tests");
         let mut clipboard = crate::clipboard::NullClipboard::new("tests");
+        with_clipboard(&mut clipboard, f)
+    }
+
+    /// [`with_ctx`] with the given clipboard.
+    fn with_clipboard(
+        clipboard: &mut dyn crate::clipboard::Clipboard,
+        f: impl FnOnce(&mut ShellCtx<'_>),
+    ) -> (bool, Vec<PortalEvent>) {
+        let service = crate::portal::PortalService::offline("no portal in tests");
         let mut frame = crate::window::PendingFrame::default();
         let waker = crate::ShellWaker::none();
         let mut ctx = ShellCtx {
             window: None,
             scale: one(),
             size: PhysicalSize::new(SIZE.0, SIZE.1),
-            clipboard: &mut clipboard,
+            clipboard,
             portal: service.handle(),
             capabilities: crate::display::PlatformCapabilities::HEADLESS,
             frame: &mut frame,
@@ -3044,6 +3136,208 @@ mod tests {
         assert!(!v.app.active().unwrap().text_editing());
         press(&mut v, Key::Named(NamedKey::ArrowLeft), Modifiers::NONE);
         assert_ne!(at(&v), view);
+    }
+
+    /// A clipboard in memory: what the system clipboard would hold.
+    #[derive(Debug, Default)]
+    struct FakeClipboard {
+        text: Option<String>,
+    }
+
+    impl crate::clipboard::Clipboard for FakeClipboard {
+        fn text(&mut self) -> Result<String, crate::clipboard::ClipboardError> {
+            self.text
+                .clone()
+                .ok_or(crate::clipboard::ClipboardError::Empty("text"))
+        }
+
+        fn set_text(&mut self, text: &str) -> Result<(), crate::clipboard::ClipboardError> {
+            self.text = Some(text.to_owned());
+            Ok(())
+        }
+
+        fn image(
+            &mut self,
+        ) -> Result<crate::clipboard::ClipboardImage, crate::clipboard::ClipboardError> {
+            Err(crate::clipboard::ClipboardError::Empty("image"))
+        }
+
+        fn set_image(
+            &mut self,
+            _: &crate::clipboard::ClipboardImage,
+        ) -> Result<(), crate::clipboard::ClipboardError> {
+            Ok(())
+        }
+
+        fn persists_after_exit(&self) -> bool {
+            false
+        }
+    }
+
+    /// A viewer with the text tool's caret up at a pending point story,
+    /// and the pinned fonts.
+    fn viewer_with_text_caret() -> (Viewer, xarast_doc::NodeId) {
+        let (mut v, square) = viewer_with_square();
+        xarast_app::fonts::set_shared(xarast_app::fonts::FontService::from_dir(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"),
+        ));
+        press(&mut v, Key::Named(NamedKey::Function(8)), Modifiers::NONE);
+        let (x, y) = window_at(&v, 400_000, 500_000);
+        click(&mut v, x, y);
+        assert!(v.app.active().unwrap().text_editing());
+        (v, square)
+    }
+
+    fn type_text(v: &mut Viewer, text: &str) {
+        use crate::input::keyboard::{KeyEvent, KeyLocation};
+        for c in text.chars() {
+            send(
+                v,
+                &[ShellEvent::Key(KeyEvent {
+                    key: Key::char(c),
+                    location: KeyLocation::Standard,
+                    state: KeyState::Pressed,
+                    repeat: false,
+                    text: Some(c.to_string()),
+                    modifiers: Modifiers::NONE,
+                })],
+            );
+        }
+    }
+
+    /// The text of the story the caret is in.
+    fn caret_story_text(v: &Viewer) -> String {
+        let s = v.app.active().unwrap();
+        let Some(xarast_app::text_tool::TextEditing::Story(sel)) = s.text_state() else {
+            panic!("no caret in a story");
+        };
+        xarast_doc::StoryText::collect_simple(&s.doc.tree, &s.doc.defaults, sel.story)
+            .unwrap()
+            .text
+    }
+
+    /// A `winit` input-method event, through the real translation.
+    fn ime(v: &mut Viewer, event: winit::event::Ime) {
+        let e = ShellEvent::Ime(crate::input::translate::translate_ime(&event));
+        send(v, &[e]);
+    }
+
+    #[test]
+    fn the_input_method_follows_the_text_caret_and_composes_in_the_story() {
+        use winit::event::Ime;
+        let (v, _) = viewer_with_square();
+        // No caret, no text field: the input method stays off.
+        assert_eq!(v.ime_request(None), None);
+        // A focused egui text field wants it under its cursor.
+        let field = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(1.0, 14.0));
+        assert_eq!(v.ime_request(Some(field)), Some([10, 20, 1, 14]));
+
+        let (mut v, _) = viewer_with_text_caret();
+        let pending = v.ime_request(None).expect("on while a caret is up");
+        let (x, _) = window_at(&v, 400_000, 500_000);
+        assert!(
+            (f64::from(pending[0]) - x).abs() <= 1.0,
+            "{pending:?} at {x}"
+        );
+        assert!(pending[3] > 5, "as tall as the caret");
+
+        // A commit at the pending caret types (and creates) the story.
+        ime(&mut v, Ime::Enabled);
+        ime(&mut v, Ime::Preedit("h".into(), Some((1, 1))));
+        ime(&mut v, Ime::Preedit(String::new(), None));
+        ime(&mut v, Ime::Commit("Hi".into()));
+        assert_eq!(
+            caret_story_text(&v),
+            "Hi
+"
+        );
+        let at_end = v.ime_request(None).unwrap();
+
+        // A composition shows in the story, not in the document, and the
+        // candidate window moves with the caret inside it.
+        let digest = v.app.active().unwrap().doc.canonical_digest();
+        ime(&mut v, Ime::Preedit("abc".into(), Some((3, 3))));
+        let s = v.app.active().unwrap();
+        assert!(s.preview().text.is_some());
+        assert_eq!(s.doc.canonical_digest(), digest);
+        let composing = v.ime_request(None).unwrap();
+        assert!(composing[0] > at_end[0], "{composing:?} vs {at_end:?}");
+        // Keys during a composition are the input method's: no tool
+        // switch, no zoom, no typing.
+        type_text(&mut v, "d1");
+        press(&mut v, Key::Named(NamedKey::ArrowLeft), Modifiers::NONE);
+        assert_eq!(v.app.active().unwrap().doc.canonical_digest(), digest);
+        assert_eq!(tool(&v), xarast_app::ToolId::Text);
+
+        // Cancelled by the input method: nothing written.
+        ime(&mut v, Ime::Disabled);
+        assert!(v.app.active().unwrap().preview().text.is_none());
+        assert_eq!(v.app.active().unwrap().doc.canonical_digest(), digest);
+        // Committed: typed where the caret is.
+        ime(&mut v, Ime::Enabled);
+        ime(&mut v, Ime::Preedit("にほ".into(), Some((6, 6))));
+        ime(&mut v, Ime::Commit("日本".into()));
+        assert_eq!(
+            caret_story_text(&v),
+            "Hi日本
+"
+        );
+        assert!(v.app.active().unwrap().preview().text.is_none());
+
+        // Esc leaves the text: the input method goes off.
+        press(&mut v, Key::Named(NamedKey::Escape), Modifiers::NONE);
+        assert_eq!(v.ime_request(None), None);
+    }
+
+    #[test]
+    fn ctrl_c_x_v_at_a_text_caret_move_text_not_objects() {
+        let (mut v, square) = viewer_with_text_caret();
+        let mut clipboard = FakeClipboard::default();
+        type_text(&mut v, "Hello");
+        // Shift+Home selects it; Ctrl+C copies the text.
+        press(
+            &mut v,
+            Key::Named(NamedKey::Home),
+            Modifiers::NONE.with_shift(),
+        );
+        press(&mut v, Key::char('c'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert_eq!(clipboard.text.as_deref(), Some("Hello"));
+        // End, Ctrl+V: pasted from the system clipboard.
+        press(&mut v, Key::Named(NamedKey::End), Modifiers::NONE);
+        press(&mut v, Key::char('v'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert_eq!(
+            caret_story_text(&v),
+            "HelloHello
+"
+        );
+        // Text another application copied is pasted as text.
+        clipboard.text = Some(" and more".to_owned());
+        press(&mut v, Key::char('v'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert_eq!(
+            caret_story_text(&v),
+            "HelloHello and more
+"
+        );
+        // Ctrl+X cuts the selected text, never the objects.
+        press(
+            &mut v,
+            Key::Named(NamedKey::Home),
+            Modifiers::NONE.with_shift(),
+        );
+        press(&mut v, Key::char('x'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert_eq!(clipboard.text.as_deref(), Some("HelloHello and more"));
+        assert_eq!(
+            caret_story_text(&v),
+            "
+"
+        );
+        let s = v.app.active().unwrap();
+        assert!(s.doc.tree.contains(square) && s.doc.tree.is_reachable(square));
+        assert_eq!(s.undo_label(), Some("Cut"));
     }
 
     #[test]

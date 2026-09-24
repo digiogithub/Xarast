@@ -241,6 +241,46 @@ pub enum EditCommand {
         /// The typing burst whose text it styles, if any.
         burst: Option<u64>,
     },
+    /// Pastes text while a text caret is up (phase 9, T9.4.8): into a
+    /// story, replacing the selection, or as a new story at a pending
+    /// caret. Styled text keeps its character attributes
+    /// ([`crate::text_clip`]).
+    PasteText {
+        /// Where it goes.
+        target: PasteTarget,
+        /// What is pasted.
+        text: std::sync::Arc<crate::text_clip::StyledText>,
+    },
+    /// Cuts a byte range of a story's text (its copy was already taken):
+    /// a deletion with its own name in the Edit menu.
+    CutText {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The byte range.
+        range: Range<usize>,
+    },
+}
+
+/// Where [`EditCommand::PasteText`] puts its text.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PasteTarget {
+    /// Into a story, replacing a byte range (empty at a caret).
+    Story {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The byte range the paste replaces.
+        replace: Range<usize>,
+    },
+    /// A new story, as the last object of a layer: a paste at a pending
+    /// caret.
+    New {
+        /// The layer it goes onto.
+        layer: NodeId,
+        /// The story: its placement and layout.
+        story: Box<TextStoryNode>,
+        /// The attributes the new story is given.
+        attrs: Vec<AttrValue>,
+    },
 }
 
 /// The coalescing kind of typing: [`EditCommand::TypeText`] and
@@ -313,6 +353,8 @@ impl EditCommand {
             EditCommand::TypeText { .. } => "Typing",
             EditCommand::DeleteText { .. } => "Delete Text",
             EditCommand::CreateText { .. } => "New Text",
+            EditCommand::PasteText { .. } => "Paste",
+            EditCommand::CutText { .. } => "Cut",
             EditCommand::SetTextAttr { edits, .. } => edits
                 .first()
                 .and_then(|(_, v)| v.slot())
@@ -373,6 +415,11 @@ impl EditCommand {
             EditCommand::TypeText { replace, text, .. } => replace.is_empty() && text.is_empty(),
             EditCommand::DeleteText { range, .. } => range.is_empty(),
             EditCommand::CreateText { text, .. } => text.is_empty(),
+            EditCommand::PasteText { target, text } => {
+                text.is_empty()
+                    && matches!(target, PasteTarget::Story { replace, .. } if replace.is_empty())
+            }
+            EditCommand::CutText { range, .. } => range.is_empty(),
             EditCommand::SetTextAttr { edits, .. } => edits.is_empty(),
             EditCommand::CreateShape { .. }
             | EditCommand::SetShapeParams { .. }
@@ -584,6 +631,11 @@ impl xarast_doc::Command for EditCommand {
                 }
                 Ok(())
             }
+            EditCommand::PasteText { target, text } => paste_text(tx, target, text),
+            EditCommand::CutText { story, range } => {
+                check_layers(tx, &[*story])?;
+                xarast_doc::delete_range(tx, *story, range.clone())
+            }
         }
     }
 
@@ -608,6 +660,65 @@ impl xarast_doc::Command for EditCommand {
             _ => None,
         }
     }
+}
+
+/// Runs [`EditCommand::PasteText`]: the plain text is inserted (so it
+/// takes the style where it lands, as typing does), then the styled copy's
+/// attributes are set wherever the pasted characters differ from them.
+fn paste_text(
+    tx: &mut Tx<'_>,
+    target: &PasteTarget,
+    text: &crate::text_clip::StyledText,
+) -> Result<(), EditError> {
+    let (story, at) = match target {
+        PasteTarget::Story { story, replace } => {
+            check_layers(tx, &[*story])?;
+            xarast_doc::delete_range(tx, *story, replace.clone())?;
+            (*story, replace.start)
+        }
+        PasteTarget::New {
+            layer,
+            story,
+            attrs,
+        } => {
+            match tx.doc().tree.kind(*layer) {
+                Some(NodeKind::Layer(l)) if !l.locked && !l.guide => {}
+                _ => return Err(EditError::NotPermitted(*layer)),
+            }
+            (
+                xarast_doc::new_story(tx, *layer, (**story).clone(), attrs)?,
+                0,
+            )
+        }
+    };
+    if text.is_empty() {
+        return Ok(());
+    }
+    xarast_doc::insert_text(tx, story, at, &text.text)?;
+    if text.runs.is_empty() {
+        return Ok(());
+    }
+    let st = crate::text_clip::story_text(tx.doc(), story).ok_or(EditError::WrongKind(story))?;
+    for (range, value) in crate::text_clip::paste_edits(&st, at, text) {
+        if value
+            .slot()
+            .is_some_and(xarast_doc::text_convert::is_text_slot)
+        {
+            xarast_doc::set_text_attr(tx, story, range, &value)?;
+        } else {
+            // A colour: the characters' own attribute, as a text attribute
+            // is written.
+            let items = st
+                .items
+                .iter()
+                .filter(|e| e.len > 0 && range.contains(&(e.byte as usize)))
+                .map(|e| e.node);
+            for item in items {
+                set_own_attr(tx, item, value.clone())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_path_commands(cmd: &EditCommand, tx: &mut Tx<'_>) -> Result<(), EditError> {

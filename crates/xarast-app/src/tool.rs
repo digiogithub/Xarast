@@ -198,6 +198,32 @@ pub struct Preview {
     /// attribute of that slot, exactly as the command the drag commits
     /// will write it.
     pub attrs: Vec<(NodeId, xarast_doc::AttrValue)>,
+    /// Text drawn inside a story that is not in the document: an input
+    /// method's composition (phase 9, T9.4.7).
+    pub text: Option<TextPreview>,
+}
+
+/// Text shown in a story as if it had been typed at `at`, without being
+/// in the document: the input method's preedit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPreview {
+    /// The `TextStory`.
+    pub story: NodeId,
+    /// Byte offset in the story's text where it shows.
+    pub at: usize,
+    /// The text.
+    pub text: String,
+}
+
+/// An input method's composition, as the shell reports it: the text being
+/// composed and the selection within it (a byte range, already on
+/// character boundaries), or no cursor to draw.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Preedit {
+    /// The text being composed.
+    pub text: String,
+    /// The selection within `text`; `None` hides the caret.
+    pub cursor: Option<(usize, usize)>,
 }
 
 impl Preview {
@@ -206,12 +232,16 @@ impl Preview {
         self.transform = None;
         self.hidden.clear();
         self.attrs.clear();
+        self.text = None;
     }
 
     /// Whether there is nothing to apply.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.transform.is_none() && self.hidden.is_empty() && self.attrs.is_empty()
+        self.transform.is_none()
+            && self.hidden.is_empty()
+            && self.attrs.is_empty()
+            && self.text.is_none()
     }
 
     /// The previewed nodes as a set, for the walker's lookups.
@@ -1192,6 +1222,35 @@ pub trait Tool: Send + std::fmt::Debug {
         false
     }
 
+    /// The input method's composition changed, while
+    /// [`Tool::text_editing`] says text has the keyboard; `None` ends it
+    /// without a commit. Returns whether the tool took it.
+    fn text_preedit(&mut self, preedit: Option<Preedit>, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (preedit, cx);
+        false
+    }
+
+    /// Cut or paste into the text being edited. Returns whether the tool
+    /// took it.
+    fn text_clipboard(&mut self, op: crate::text_clip::TextClipOp, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (op, cx);
+        false
+    }
+
+    /// A styled copy of the selected text, when text is selected.
+    fn text_copy(&self, doc: &Document) -> Option<crate::text_clip::StyledText> {
+        let _ = doc;
+        None
+    }
+
+    /// The text caret, bottom then top, in document space: where an input
+    /// method's candidate window goes. Present whenever a caret is up,
+    /// even while the caret itself is hidden.
+    fn text_caret(&self, view: ToolView<'_>) -> Option<(DocPoint, DocPoint)> {
+        let _ = view;
+        None
+    }
+
     /// The commands this tool just emitted have been applied: `doc` is the
     /// document after them, `created` the object a creation command made.
     /// Not called when a command failed.
@@ -1618,6 +1677,43 @@ impl ToolMachine {
         }
         let id = self.current;
         self.tool_mut(id).is_some_and(|t| t.text_input(input, cx))
+    }
+
+    /// Sends the input method's composition to the tool in force, unless
+    /// a gesture is in flight. Returns whether the tool took it.
+    pub fn text_preedit(&mut self, preedit: Option<Preedit>, cx: &mut ToolCtx<'_>) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id)
+            .is_some_and(|t| t.text_preedit(preedit, cx))
+    }
+
+    /// Sends a text cut or paste to the tool in force, unless a gesture is
+    /// in flight. Returns whether the tool took it.
+    pub fn text_clipboard(
+        &mut self,
+        op: crate::text_clip::TextClipOp,
+        cx: &mut ToolCtx<'_>,
+    ) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id).is_some_and(|t| t.text_clipboard(op, cx))
+    }
+
+    /// The tool in force's styled copy of the selected text, if any.
+    #[must_use]
+    pub fn text_copy(&self, doc: &Document) -> Option<crate::text_clip::StyledText> {
+        self.tool(self.current).and_then(|t| t.text_copy(doc))
+    }
+
+    /// The tool in force's text caret, if one is up.
+    #[must_use]
+    pub fn text_caret(&self, view: ToolView<'_>) -> Option<(DocPoint, DocPoint)> {
+        self.tool(self.current).and_then(|t| t.text_caret(view))
     }
 
     /// Tells the tool in force its commands were applied.

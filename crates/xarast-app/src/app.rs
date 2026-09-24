@@ -260,6 +260,21 @@ pub struct AppState {
     /// The application's own clipboard: the last copy, in full fidelity,
     /// and the SVG text it put on the system clipboard.
     clipboard: Option<InternalClipboard>,
+    /// The last copy of text made at a text caret, with its attributes
+    /// (T9.4.8). At most one of this and `clipboard` is set: the last copy
+    /// made, whichever kind.
+    text_clipboard: Option<TextClipboard>,
+}
+
+/// The last copy of text made in this process (T9.4.8).
+#[derive(Debug, Clone)]
+pub struct TextClipboard {
+    /// The text and its character attributes. Its plain text is what went
+    /// on the system clipboard.
+    pub text: std::sync::Arc<crate::text_clip::StyledText>,
+    /// The document it was copied from: only that document gets its
+    /// colours, which may name its palette.
+    pub source: crate::DocumentId,
 }
 
 /// The last copy made in this process.
@@ -281,12 +296,38 @@ impl AppState {
         self.clipboard.as_ref()
     }
 
+    /// The last text copy, if the last copy was of text.
+    #[must_use]
+    pub fn text_clipboard(&self) -> Option<&TextClipboard> {
+        self.text_clipboard.as_ref()
+    }
+
     /// Copies the active selection to the internal clipboard and asks the
-    /// platform to put its SVG flavour on the system clipboard.
+    /// platform to put its SVG flavour on the system clipboard. While a
+    /// text caret is up it copies the selected text instead, and with no
+    /// text selected copies nothing: the story under the caret is not the
+    /// selection then.
     fn copy(&mut self) -> Changed {
+        if let Some(s) = self.active()
+            && s.text_editing()
+        {
+            let source = s.id;
+            let Some(text) = s.copy_text() else {
+                return Changed::empty();
+            };
+            self.requests
+                .push(PlatformRequest::SetClipboardText(text.text.clone()));
+            self.text_clipboard = Some(TextClipboard {
+                text: std::sync::Arc::new(text),
+                source,
+            });
+            self.clipboard = None;
+            return Changed::UI;
+        }
         let Some(fragment) = self.active().and_then(Session::copy_selection) else {
             return Changed::empty();
         };
+        self.text_clipboard = None;
         let svg = crate::structure::fragment_svg(&fragment);
         self.requests
             .push(PlatformRequest::SetClipboardText(svg.clone()));
@@ -305,6 +346,9 @@ impl AppState {
         text: Option<String>,
         in_place: bool,
     ) -> Result<Changed, SessionError> {
+        if self.active().is_some_and(Session::text_editing) {
+            return self.paste_at_caret(text);
+        }
         let fragment = match (&text, &self.clipboard) {
             (None, Some(c)) => Some(std::sync::Arc::clone(&c.fragment)),
             (Some(t), Some(c)) if *t == c.svg => Some(std::sync::Arc::clone(&c.fragment)),
@@ -323,6 +367,56 @@ impl AppState {
             Some(s) => s.paste_fragment(fragment, in_place),
             None => Ok(Changed::empty()),
         }
+    }
+
+    /// Pastes what the shell read from the clipboard at the text caret
+    /// (T9.4.8): our own last text copy, with its attributes, when the text
+    /// is its plain text (or there is no clipboard to read); otherwise the
+    /// text as plain text. Our own copied objects are not text.
+    fn paste_at_caret(&mut self, text: Option<String>) -> Result<Changed, SessionError> {
+        let ours = self.text_clipboard.clone();
+        let styled = match (&text, &ours) {
+            (None, Some(c)) => Some(c.clone()),
+            (Some(t), Some(c)) if *t == c.text.text => Some(c.clone()),
+            _ => None,
+        };
+        let clip = match (styled, text) {
+            (Some(c), _) => {
+                if self.active().is_some_and(|s| s.id == c.source) {
+                    c.text
+                } else {
+                    std::sync::Arc::new(c.text.without_paint())
+                }
+            }
+            (None, Some(t)) if self.clipboard.as_ref().is_some_and(|c| c.svg == t) => {
+                return Ok(self.paste_notice(
+                    "The clipboard holds objects, not text: leave the text (Esc) to paste them.",
+                ));
+            }
+            (None, Some(t)) if !crate::text_clip::typed(&t).is_empty() => {
+                std::sync::Arc::new(crate::text_clip::StyledText::plain(&t))
+            }
+            (None, _) => {
+                return Ok(self.paste_notice("The clipboard holds no text to paste."));
+            }
+        };
+        match self.active_mut() {
+            Some(s) => Ok(s
+                .text_clipboard(crate::text_clip::TextClipOp::Paste(clip))?
+                .0),
+            None => Ok(Changed::empty()),
+        }
+    }
+
+    /// Reports a paste that did nothing.
+    fn paste_notice(&mut self, message: &str) -> Changed {
+        self.diagnostics.push(DiagnosticEntry {
+            severity: Severity::Info,
+            message: message.to_owned(),
+            document: self.active,
+        });
+        self.notice = Some(message.to_owned());
+        Changed::UI
     }
 
     /// An application with nothing open.
@@ -573,6 +667,13 @@ impl AppState {
                 let changed = self.copy();
                 if changed.is_empty() {
                     return Ok(changed);
+                }
+                if self.text_clipboard.is_some()
+                    && let Some(s) = self.active_mut()
+                    && s.text_editing()
+                {
+                    let (c, _) = s.text_clipboard(crate::text_clip::TextClipOp::Cut)?;
+                    return Ok(changed | c);
                 }
                 match self.active_mut() {
                     Some(s) => {

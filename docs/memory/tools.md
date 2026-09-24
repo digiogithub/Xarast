@@ -35,7 +35,7 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Snapping: `SnapSource`, resolver, grid, guides, objects (corners, then outlines), NumPad toggles, marker | `snap.rs`, `ToolCtx::snap_point`/`snap_move` | done (XARA-US-0036, T-0153) |
 | Guides/grid as undoable document edits; ruler guides and grid settings wired | `snap.rs` `GuideCommand`, shell `ui_intent` | done |
 | `--probe snap|arrange|paste` | `xarast-shell` | done |
-| Text tool (F8): caret, selection, visual/logical bidi navigation, pending point/column story; `Intent::TextNav`; text stories pickable by their line box; selector double click on text → text tool | `text_edit.rs`, `text_tool.rs`, `picking.rs` | done (XARA-US-0047, T9.4.1–T9.4.4 + the T9.4.5 gestures); typing T9.4.6 done; IME/clipboard are T9.4.7–T9.4.8 |
+| Text tool (F8): caret, selection, visual/logical bidi navigation, pending point/column story; `Intent::TextNav`; text stories pickable by their line box; selector double click on text → text tool | `text_edit.rs`, `text_tool.rs`, `picking.rs` | done (XARA-US-0047, T9.4.1–T9.4.4 + the T9.4.5 gestures); typing T9.4.6 done; IME composition and the text clipboard (T9.4.7–T9.4.8) done (XARA-T-0224, decision 63) |
 | Text infobar (font, size, B/I/U, align, spacing, tracking), OpenType panel, text ruler; `EditCommand::SetTextAttr`; `ToolRequests::current` | `text_infobar.rs`, `text_tool.rs`, `ops.rs`, `tool.rs` | done (XARA-T-0225, T9.4.9–T9.4.10; decision 59) |
 
 Tests: `crates/xarast-app/tests/transforms.rs` (18: dual state, scale
@@ -502,6 +502,28 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
 60. **Invariant 11 widened**: the text tool mutates the document only by
     typing and by attribute edits the user asked for; choosing an attribute
     at a caret changes nothing until text is typed.
+63. **IME and the text clipboard (XARA-T-0224, T9.4.7–T9.4.8).** New tool
+    hooks, all defaulting to "not taken": `Tool::text_preedit(Option<
+    Preedit>)` (from `Intent::TextPreedit`), `Tool::text_clipboard(
+    TextClipOp::{Cut, Paste(Arc<StyledText>)})`, `Tool::text_copy(doc)`
+    and `Tool::text_caret(view)` (the caret's segment even while it is
+    hidden, for `Session::ime_cursor_area`). `Preview` gained `text:
+    Option<TextPreview>`: a composition is drawn through the preview, so it
+    never touches the document or the undo history (`text.md`, "IME
+    composition and the text clipboard"). **While a caret is up, Copy,
+    Cut and Paste are the text's** (`AppState::copy`, `Intent::Cut`,
+    `paste_text` check `Session::text_editing()` first): Copy/Cut with a
+    collapsed caret do nothing — never the story object under it; the
+    copy is kept as `AppState::text_clipboard` (at most one of it and the
+    object clipboard is set) and its plain text goes out through
+    `SetClipboardText`; Paste still asks the shell (`ReadClipboard`) and
+    the answer pastes our styled copy when the text matches it (or there
+    is no clipboard), the text as plain text otherwise, and refuses our
+    own object SVG with a status line ("leave the text (Esc) to paste
+    them"). Edits: `EditCommand::PasteText { target: PasteTarget::{Story,
+    New}, text }` ("Paste", no coalescing) and `CutText` ("Cut"); the
+    session treats `PasteTarget::New` as a creation (selected, reported to
+    `after_commands`).
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
