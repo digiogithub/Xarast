@@ -1586,7 +1586,11 @@ impl<'o> Mapper<'o> {
                         persp: None,
                         tiling: Tiling::default(),
                         dpi: 96,
-                        contone: None,
+                        // The two levels and the mode: black maps to the
+                        // start level, white to the end (XARA-T-0307).
+                        // Dropping them drew every bitmap transparency
+                        // in Mix over the full 0..255 range.
+                        contone: Some((from, to)),
                         profile: BiasGain::new(g.profile.0, g.profile.1),
                     },
                     None => TranspPaint::Flat { value: from },

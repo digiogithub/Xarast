@@ -232,9 +232,15 @@ fn row<S: Stop>(slot: FillSlot, g: &FillGeometry<S>, mode: Option<TranspMode>) -
         FillGeometry::Bitmap { persp, .. } => (0, RampMapping::Linear, persp.is_some()),
         _ => (0, RampMapping::Linear, false),
     };
+    // A bitmap transparency's pair is its two levels, not a contone: it is
+    // still a bitmap transparency, as the file's own record says.
+    let shape = match shape_name(g) {
+        "contone" if mode.is_some() => "bitmap",
+        s => s,
+    };
     FillRow {
         slot,
-        shape: shape_name(g),
+        shape,
         stops,
         profile: g.profile(),
         mapping,
@@ -521,8 +527,10 @@ pub fn report(c: &FillCensus, summary: bool) -> String {
             if r.perspective {
                 s.push_str(" perspective");
             }
+            // A bitmap transparency always says its mode: it used to be
+            // lost on import (XARA-T-0307).
             if let Some(m) = r.mode
-                && m != TranspMode::Mix
+                && (m != TranspMode::Mix || r.shape == "bitmap")
             {
                 let _ = write!(s, " mode={}", mode_name(m));
             }
