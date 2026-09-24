@@ -29,6 +29,12 @@ pub enum PromptAnswer {
     DiscardRecovery,
     /// Keep the autosaved snapshots and ask again next time.
     Later,
+    /// After a crash: switch this session to safe mode.
+    SafeMode,
+    /// After a crash: put the crash report's path on the clipboard.
+    CopyReport,
+    /// After a crash: carry on as normal.
+    Continue,
 }
 
 /// How a choice is presented.
@@ -196,6 +202,64 @@ impl Prompt {
                     role: ChoiceRole::Cancel,
                 },
             ],
+        }
+    }
+
+    /// "Xarast closed unexpectedly" (XARA-US-0064 F7): where the crash
+    /// report is, what safe mode is, and whether this session is in it.
+    #[must_use]
+    pub fn crashed(notice: &crate::crash::CrashNotice) -> Prompt {
+        use crate::crash::SafeMode;
+        let mut message = "Xarast closed unexpectedly last time.".to_owned();
+        match &notice.report {
+            Some(path) => message.push_str(&format!(
+                " A crash report was saved to \u{201c}{}\u{201d}. It holds no \
+                 document content and is never sent anywhere; attach it to a \
+                 bug report if you want to.",
+                path.display()
+            )),
+            None => message.push_str(" No crash report was written."),
+        }
+        let mut choices = Vec::new();
+        match notice.safe_mode {
+            SafeMode::Forced => message.push_str(&format!(
+                " It has closed unexpectedly {} times in the last few minutes, so \
+                 this session runs in safe mode: the canvas is drawn without GPU \
+                 tiles, on a software graphics adapter where there is one, with \
+                 default settings.",
+                notice.recent_crashes
+            )),
+            SafeMode::Requested => {
+                message.push_str(" This session runs in safe mode.");
+            }
+            SafeMode::Offered | SafeMode::Off => {
+                message.push_str(
+                    " Safe mode draws the canvas without GPU tiles, on a software \
+                     graphics adapter where there is one, with default settings.",
+                );
+                choices.push(PromptChoice {
+                    answer: PromptAnswer::SafeMode,
+                    label: "Use safe mode",
+                    role: ChoiceRole::Normal,
+                });
+            }
+        }
+        if notice.report.is_some() {
+            choices.push(PromptChoice {
+                answer: PromptAnswer::CopyReport,
+                label: "Copy report path",
+                role: ChoiceRole::Normal,
+            });
+        }
+        choices.push(PromptChoice {
+            answer: PromptAnswer::Continue,
+            label: "Continue",
+            role: ChoiceRole::Default,
+        });
+        Prompt {
+            title: "Xarast closed unexpectedly".to_owned(),
+            message,
+            choices,
         }
     }
 }
