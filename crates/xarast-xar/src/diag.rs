@@ -119,6 +119,14 @@ pub enum DiagCode {
     /// rewrite that channel (which holds transparency) as standard alpha, so
     /// its bytes were kept verbatim. The detail is the image's byte length.
     BitmapNotNormalised,
+    /// A ClipView could not be mapped as the original draws it: a
+    /// controller with no `TAG_CLIPVIEW` marker, a marker outside a
+    /// controller, or a keyhole whose outline the importer cannot compute
+    /// (text, a live object). The detail says which: 0 no marker, 1 a stray
+    /// marker, 2 a keyhole left out of the clip, 3 no keyhole geometry at
+    /// all, so the clipped objects are drawn unclipped, 4 the keyholes were
+    /// too large to combine and only the first clips.
+    ClipViewDegraded,
 }
 
 impl DiagCode {
@@ -147,6 +155,7 @@ impl DiagCode {
             DiagCode::BadRelativePathSize => "BadRelativePathSize",
             DiagCode::UnknownEnumValue => "UnknownEnumValue",
             DiagCode::BitmapNotNormalised => "BitmapNotNormalised",
+            DiagCode::ClipViewDegraded => "ClipViewDegraded",
         }
     }
 
@@ -195,7 +204,8 @@ impl DiagCode {
             DiagCode::UnknownCompressionType
             | DiagCode::UnexpectedCompressionRecord
             | DiagCode::UnknownEnumValue
-            | DiagCode::BitmapNotNormalised => D::UnsupportedFeature,
+            | DiagCode::BitmapNotNormalised
+            | DiagCode::ClipViewDegraded => D::UnsupportedFeature,
         }
     }
 }

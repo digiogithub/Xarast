@@ -67,6 +67,12 @@ pub const TAG_DEFINERGBCOLOUR: u32 = 50;
 pub const TAG_DEFINECOMPLEXCOLOUR: u32 = 51;
 /// A group node.
 pub const TAG_GROUP: u32 = 104;
+/// A ClipView controller: a group whose children before its
+/// [`TAG_CLIPVIEW`] marker clip the children after it.
+pub const TAG_CLIPVIEWCONTROLLER: u32 = 4084;
+/// The marker inside a ClipView controller between its clipping objects
+/// and the objects they clip.
+pub const TAG_CLIPVIEW: u32 = 4085;
 /// Per-point path flags, the first child of the path record.
 pub const TAG_PATH_FLAGS: u32 = 111;
 /// A relative path, stroked.

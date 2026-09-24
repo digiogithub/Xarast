@@ -767,6 +767,21 @@ impl<'o> Mapper<'o> {
                 self.builder.node(NodeKind::Group(Box::default()))?;
                 After::Child
             }
+            Decoded::ClipViewController => {
+                self.emit_clip_view(node)?;
+                After::Drop
+            }
+            // A marker outside a controller separates nothing; its
+            // children, if any, stay at this level.
+            Decoded::ClipView => {
+                self.mapped = self.mapped.saturating_add(1);
+                self.diags.push(
+                    Diagnostic::new(DiagCode::ClipViewDegraded)
+                        .at(at.0, at.1)
+                        .with_detail(1),
+                );
+                After::Same
+            }
 
             // Records consumed by the node that encloses them.
             Decoded::SpreadInformation(_)
@@ -1040,6 +1055,176 @@ impl<'o> Mapper<'o> {
             _ => return false,
         }
         true
+    }
+
+    /// A `TAG_CLIPVIEWCONTROLLER` and everything under it.
+    ///
+    /// In the format the controller's ink children *before* its
+    /// `TAG_CLIPVIEW` marker are the keyholes and the ones *after* it are
+    /// clipped (`research/01 §4.8`). The original draws the keyholes as
+    /// ordinary objects (fill and whole outline, unclipped, beneath the
+    /// rest) and clips the rest to the union of the keyholes' filled
+    /// areas, outlines left out. The model's ClipView takes its first child
+    /// as the clipping path and never paints it, so the mapping is
+    ///
+    /// ```text
+    /// Group                      the controller
+    ///   attributes…
+    ///   keyholes…                painted, as the original paints them
+    ///   ClipView (Inside)
+    ///     Path                   the keyholes' union, never painted
+    ///     clipped objects…
+    /// ```
+    ///
+    /// which draws what the original draws. The original has no "keep the
+    /// outside" mode, so the ClipView is always `Inside`.
+    fn emit_clip_view(&mut self, node: &RecordNode) -> Result<(), XarError> {
+        self.mapped = self.mapped.saturating_add(1);
+        let group = self.builder.node(NodeKind::Group(Box::default()))?;
+        if node.children.is_empty() {
+            return Ok(());
+        }
+        self.push_scope()?;
+        let r = self.clip_view_children(node, group.node_id());
+        self.pop_scope();
+        r
+    }
+
+    fn clip_view_children(
+        &mut self,
+        node: &RecordNode,
+        group: xarast_doc::NodeId,
+    ) -> Result<(), XarError> {
+        let rec = &node.record;
+        let children = node.children.as_slice();
+        let Some(marker) = children
+            .iter()
+            .position(|c| c.record.tag == crate::tags::TAG_CLIPVIEW)
+        else {
+            // No marker: the original finds no ClipView node and draws
+            // the controller as the group it derives from.
+            self.diags.push(
+                Diagnostic::new(DiagCode::ClipViewDegraded)
+                    .at(rec.number, rec.tag)
+                    .with_detail(0),
+            );
+            return self.visit_children(children);
+        };
+        let (keyholes, rest) = children.split_at(marker);
+        let Some((cv, clipped)) = rest.split_first() else {
+            return self.visit_children(keyholes);
+        };
+        self.visit_children(keyholes)?;
+        // The marker itself. Only the first one separates; a later one is
+        // an ordinary (stray) marker among the clipped objects.
+        self.mapped = self.mapped.saturating_add(1);
+        let rule = match self.attrs.get(AttrSlot::WindingRule) {
+            AttrValue::WindingRule(r) => *r,
+            _ => FillRule::NonZero,
+        };
+        let at = (cv.record.number, cv.record.tag);
+        let Some(clip) = self.keyhole_clip(group, rule, at) else {
+            self.diags.push(
+                Diagnostic::new(DiagCode::ClipViewDegraded)
+                    .at(at.0, at.1)
+                    .with_detail(3),
+            );
+            self.visit_children(&cv.children)?;
+            return self.visit_children(clipped);
+        };
+        self.builder
+            .node(NodeKind::ClipView(xarast_doc::ClipViewNode {
+                mode: xarast_doc::ClipViewMode::Inside,
+            }))?;
+        self.push_scope()?;
+        let r = self.clipped(clip, &cv.children, clipped);
+        self.pop_scope();
+        r
+    }
+
+    /// The inside of a mapped ClipView: the clipping path first, then what
+    /// it clips.
+    fn clipped(
+        &mut self,
+        clip: xarast_geom::Path,
+        under_marker: &[RecordNode],
+        clipped: &[RecordNode],
+    ) -> Result<(), XarError> {
+        self.builder.node(NodeKind::Path(Box::new(PathNode {
+            data: Arc::new(clip),
+            filled: true,
+            stroked: false,
+        })))?;
+        self.visit_children(under_marker)?;
+        self.visit_children(clipped)
+    }
+
+    /// The clipping path of a ClipView: the union of the filled areas of
+    /// the keyholes already emitted under `group`, each under its own
+    /// winding rule (`rule` is the one in force in the group). A single
+    /// keyhole under the group's rule is taken verbatim; anything else is
+    /// resolved by the boolean engine into non-overlapping, consistently
+    /// oriented contours, which clip the same under the non-zero and
+    /// even-odd rules.
+    ///
+    /// `None` when no keyhole has an outline the importer can compute.
+    fn keyhole_clip(
+        &mut self,
+        group: xarast_doc::NodeId,
+        rule: FillRule,
+        at: (u32, u32),
+    ) -> Option<xarast_geom::Path> {
+        let doc = self.builder.document();
+        let mut parts: Vec<(xarast_geom::Path, FillRule)> = Vec::new();
+        let mut missed = false;
+        for id in doc.tree.children(group) {
+            match doc.tree.kind(id) {
+                Some(NodeKind::Attr(_)) | None => {}
+                Some(_) => {
+                    let own = own_winding(doc, id).unwrap_or(rule);
+                    if !silhouettes(doc, id, own, &mut parts, 0) {
+                        missed = true;
+                    }
+                }
+            }
+        }
+        if missed {
+            self.diags.push(
+                Diagnostic::new(DiagCode::ClipViewDegraded)
+                    .at(at.0, at.1)
+                    .with_detail(2),
+            );
+        }
+        if let [(p, r)] = parts.as_slice()
+            && *r == rule
+        {
+            return Some(p.clone());
+        }
+        let points: usize = parts.iter().map(|(p, _)| p.points().len()).sum();
+        if points > MAX_KEYHOLE_POINTS {
+            self.diags.push(
+                Diagnostic::new(DiagCode::ClipViewDegraded)
+                    .at(at.0, at.1)
+                    .with_detail(4),
+            );
+            return parts.into_iter().next().map(|(p, _)| p);
+        }
+        let tol = xarast_geom::Tolerance::BOOLEAN;
+        let mut acc: Option<xarast_geom::Path> = None;
+        for (p, r) in &parts {
+            let resolved = xarast_geom::self_union(p, *r, tol);
+            acc = Some(match acc {
+                None => resolved,
+                Some(a) => xarast_geom::boolean(
+                    &a,
+                    &resolved,
+                    xarast_geom::BoolOp::Union,
+                    FillRule::NonZero,
+                    tol,
+                ),
+            });
+        }
+        acc
     }
 
     fn opaque_node(&mut self, rec: &crate::Record) -> Result<(), XarError> {
@@ -1623,6 +1808,84 @@ impl<'o> Mapper<'o> {
 // ── Free helpers ────────────────────────────────────────────────────────────
 
 /// How many records a subtree holds, counting its root.
+/// Above this many points across its keyholes, a ClipView is clipped by
+/// its first keyhole alone rather than by the boolean union of all of
+/// them, so that a hostile file cannot make an import crawl.
+const MAX_KEYHOLE_POINTS: usize = 200_000;
+
+/// How deep [`silhouettes`] descends into nested groups.
+const MAX_KEYHOLE_DEPTH: u32 = 64;
+
+/// A node's own winding rule: a `WindingRule` attribute among its children.
+fn own_winding(doc: &xarast_doc::Document, id: xarast_doc::NodeId) -> Option<FillRule> {
+    let mut found = None;
+    for c in doc.tree.children(id) {
+        if let Some(NodeKind::Attr(a)) = doc.tree.kind(c)
+            && let AttrValue::WindingRule(r) = &a.value
+        {
+            found = Some(*r);
+        }
+    }
+    found
+}
+
+/// Collects the filled outlines a keyhole contributes to its ClipView's
+/// clip, with the winding rule each is filled under. A group contributes
+/// its members'. Returns `false` when some part has no outline the
+/// importer can compute (text, a live object, an opaque record); the
+/// parts that do are still collected.
+fn silhouettes(
+    doc: &xarast_doc::Document,
+    id: xarast_doc::NodeId,
+    rule: FillRule,
+    out: &mut Vec<(xarast_geom::Path, FillRule)>,
+    depth: u32,
+) -> bool {
+    match doc.tree.kind(id) {
+        Some(NodeKind::Path(p)) => {
+            out.push(((*p.data).clone(), rule));
+            true
+        }
+        Some(NodeKind::QuickShape(q)) => match &q.path {
+            Some(p) => {
+                out.push(((**p).clone(), rule));
+                true
+            }
+            None => false,
+        },
+        Some(NodeKind::Bitmap(b)) => {
+            let a = b.origin;
+            let at = |p: Point, v: Vector| {
+                Point::new(p.x.saturating_add(v.dx), p.y.saturating_add(v.dy))
+            };
+            let p1 = at(a, b.major);
+            let p2 = at(p1, b.minor);
+            let p3 = at(a, b.minor);
+            let mut pb = xarast_geom::Path::builder();
+            pb.move_to(a).line_to(p1).line_to(p2).line_to(p3).close();
+            out.push((pb.build(), rule));
+            true
+        }
+        Some(NodeKind::Group(_)) if depth < MAX_KEYHOLE_DEPTH => {
+            let mut ok = true;
+            for c in doc.tree.children(id) {
+                match doc.tree.kind(c) {
+                    Some(NodeKind::Attr(_)) | None => {}
+                    // A nested ClipView holds clipped content; its keyholes
+                    // are its group's other children, visited here.
+                    Some(NodeKind::ClipView(_)) => {}
+                    Some(_) => {
+                        let own = own_winding(doc, c).unwrap_or(rule);
+                        ok &= silhouettes(doc, c, own, out, depth.saturating_add(1));
+                    }
+                }
+            }
+            ok
+        }
+        _ => false,
+    }
+}
+
 fn count_subtree(nodes: &[RecordNode]) -> u32 {
     let mut n = 0u32;
     for node in nodes {
@@ -2477,5 +2740,232 @@ mod tests {
             let angles = if complex { (32_768, -16_384) } else { (0, 0) };
             assert_eq!((chars.rotation, chars.shear), angles, "{tag}");
         }
+    }
+
+    /// A closed `side` square with its bottom-left corner at `(x, y)`.
+    fn square_path(x: i32, y: i32, side: i32) -> Vec<u8> {
+        let mut p = vec![0x06u8];
+        p.extend_from_slice(&interleave(x + side, y + side));
+        for (verb, dx, dy) in [
+            (0x02, side, 0),
+            (0x02, 0, side),
+            (0x02, -side, 0),
+            (0x03, 0, -side),
+        ] {
+            p.push(verb);
+            p.extend_from_slice(&interleave(dx, dy));
+        }
+        p
+    }
+
+    /// A zero-margin spread and a layer holding whatever `f` adds.
+    fn layer_with(f: impl FnOnce(XarBuilder) -> XarBuilder) -> Vec<u8> {
+        let mut spread = Vec::new();
+        for v in [600_000i32, 450_000, 0, 0] {
+            spread.extend_from_slice(&v.to_le_bytes());
+        }
+        spread.push(2);
+        let b = XarBuilder::new()
+            .record(40, &[])
+            .record(41, &[])
+            .down()
+            .record(42, &[])
+            .down()
+            .record(45, &spread)
+            .record(43, &[])
+            .down();
+        f(b).up().up().up().end_of_file().finish()
+    }
+
+    fn clip_diags(report: &ImportReport) -> Vec<u64> {
+        report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == DiagCode::ClipViewDegraded)
+            .map(|d| d.detail)
+            .collect()
+    }
+
+    fn balanced(report: &ImportReport) {
+        assert_eq!(
+            report.records_mapped + report.records_skipped + report.records_stripped,
+            report.records_read,
+            "every record counted once"
+        );
+    }
+
+    fn kinds_under(doc: &xarast_doc::Document, id: xarast_doc::NodeId) -> Vec<&'static str> {
+        doc.tree
+            .children(id)
+            .filter_map(|c| doc.tree.kind(c))
+            .map(NodeKind::type_name)
+            .collect()
+    }
+
+    fn first_of(doc: &xarast_doc::Document, name: &str) -> Option<xarast_doc::NodeId> {
+        doc.tree
+            .preorder(doc.tree.root())
+            .find(|&id| doc.tree.kind(id).map(NodeKind::type_name) == Some(name))
+    }
+
+    #[test]
+    fn a_clip_view_puts_its_keyhole_first_and_keeps_it_painted() {
+        // Keyhole, marker, clipped: the keyhole is *before* the marker in
+        // the file (`Kernel/ndclpcnt.h:123-133`).
+        let bytes = layer_with(|b| {
+            b.record(4084, &[])
+                .down()
+                .record(192, &[])
+                .record(116, &square_path(100_000, 100_000, 50_000))
+                .record(4085, &[])
+                .record(116, &square_path(0, 0, 300_000))
+                .up()
+        });
+        let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
+        balanced(&report);
+        assert_eq!(clip_diags(&report), Vec::<u64>::new());
+        let group = first_of(&doc, "Group").expect("the controller is a group");
+        assert_eq!(kinds_under(&doc, group), ["Attr", "Path", "ClipView"]);
+        let cv = first_of(&doc, "ClipView").unwrap();
+        assert_eq!(kinds_under(&doc, cv), ["Path", "Path"]);
+        let clip = doc.tree.children(cv).next().unwrap();
+        let keyhole = doc
+            .tree
+            .children(group)
+            .find(|&c| matches!(doc.tree.kind(c), Some(NodeKind::Path(_))))
+            .unwrap();
+        let (Some(NodeKind::Path(a)), Some(NodeKind::Path(b))) =
+            (doc.tree.kind(clip), doc.tree.kind(keyhole))
+        else {
+            unreachable!()
+        };
+        // One keyhole under the group's own rule: taken verbatim.
+        assert_eq!(a.data.points(), b.data.points());
+        assert!(a.filled && !a.stroked);
+    }
+
+    #[test]
+    fn keyholes_under_their_own_winding_rules_clip_to_their_union() {
+        // Two overlapping squares, the second even-odd: the union is one
+        // outline, not two, and not the overlap.
+        let bytes = layer_with(|b| {
+            b.record(4084, &[])
+                .down()
+                .record(116, &square_path(0, 0, 200_000))
+                .record(116, &square_path(100_000, 100_000, 200_000))
+                .down()
+                .record(178, &[3])
+                .up()
+                .record(4085, &[])
+                .record(116, &square_path(0, 0, 400_000))
+                .up()
+        });
+        let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
+        balanced(&report);
+        let cv = first_of(&doc, "ClipView").unwrap();
+        let clip = doc.tree.children(cv).next().unwrap();
+        let Some(NodeKind::Path(p)) = doc.tree.kind(clip) else {
+            panic!("the clip is a path");
+        };
+        assert_eq!(p.data.subpaths().count(), 1);
+        let area = p.data.signed_area().abs();
+        let want = 2.0 * 200_000f64.powi(2) - 100_000f64.powi(2);
+        assert!((area - want).abs() < want * 1e-6, "{area} vs {want}");
+    }
+
+    #[test]
+    fn degenerate_clip_views_still_import_every_record() {
+        let bytes = layer_with(|b| {
+            b
+                // No marker: a group.
+                .record(4084, &[])
+                .down()
+                .record(116, &square_path(0, 0, 10_000))
+                .record(116, &square_path(0, 0, 20_000))
+                .up()
+                // A marker and no keyhole: nothing to clip to.
+                .record(4084, &[])
+                .down()
+                .record(4085, &[])
+                .down()
+                .record(116, &square_path(0, 0, 30_000))
+                .up()
+                .record(116, &square_path(0, 0, 40_000))
+                .up()
+                // A stray marker, with a child.
+                .record(4085, &[1, 2, 3])
+                .down()
+                .record(116, &square_path(0, 0, 50_000))
+                .up()
+                // An empty controller.
+                .record(4084, &[])
+                // A text keyhole has no outline here: left out of the clip.
+                .record(4084, &[])
+                .down()
+                .record(2100, &[0u8; 64])
+                .record(116, &square_path(0, 0, 60_000))
+                .record(4085, &[])
+                .record(116, &square_path(0, 0, 70_000))
+                .up()
+        });
+        let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
+        balanced(&report);
+        assert_eq!(report.validation_errors, 0);
+        assert_eq!(clip_diags(&report), [0, 3, 1, 2]);
+        // Only the last controller clips; every path survives.
+        let paths = doc
+            .tree
+            .preorder(doc.tree.root())
+            .filter(|&id| matches!(doc.tree.kind(id), Some(NodeKind::Path(_))))
+            .count();
+        assert_eq!(paths, 7 + 1, "seven paths and one clip");
+        let cv = first_of(&doc, "ClipView").unwrap();
+        assert_eq!(kinds_under(&doc, cv), ["Path", "Path"]);
+    }
+
+    #[test]
+    fn a_bitmap_transparency_keeps_its_levels_and_mode() {
+        let mut bmp = Vec::new();
+        for u in "b".encode_utf16() {
+            bmp.extend_from_slice(&u.to_le_bytes());
+        }
+        bmp.extend_from_slice(&0u16.to_le_bytes());
+        bmp.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        let mut t = Vec::new();
+        for v in [0i32, 0, 1000, 0, 0, 1000] {
+            t.extend_from_slice(&v.to_le_bytes());
+        }
+        // Start 115, end 200, Bleach; the bitmap is record 2.
+        t.extend_from_slice(&[115, 200, 3]);
+        t.extend_from_slice(&2i32.to_le_bytes());
+        let bytes = XarBuilder::new()
+            .record(68, &bmp)
+            .record(40, &[])
+            .record(116, &square_path(0, 0, 1000))
+            .down()
+            .record(171, &t)
+            .up()
+            .end_of_file()
+            .finish();
+        let (doc, _) = import(&bytes, &ImportOptions::default()).unwrap();
+        let t = doc
+            .tree
+            .preorder(doc.tree.root())
+            .find_map(|id| match doc.tree.kind(id) {
+                Some(NodeKind::Attr(a)) => match &a.value {
+                    AttrValue::TranspFill(t) => Some(t.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("the transparency was imported");
+        let TranspPaint::Bitmap { contone, .. } = t else {
+            panic!("a bitmap transparency: {t:?}");
+        };
+        let level = |level| Transparency {
+            level,
+            mode: xarast_color::TranspMode::Bleach,
+        };
+        assert_eq!(contone, Some((level(115), level(200))));
     }
 }

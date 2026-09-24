@@ -145,6 +145,56 @@ fn file_seeds() -> Vec<(String, Vec<u8>)> {
         v
     }));
 
+    // A ClipView: a keyhole with a winding rule of its own and a second
+    // keyhole before the marker, one clipped object after it, and a
+    // controller with no marker. Declared atomic, as real files do.
+    out.push((
+        "clip-view".into(),
+        XarBuilder::new()
+            .record(10, &[0xF4, 0x0F, 0, 0, 0xF5, 0x0F, 0, 0])
+            .record(40, &[])
+            .down()
+            .record(4084, &[])
+            .down()
+            .record(116, &minimal_payload(116))
+            .down()
+            .record(178, &[3])
+            .up()
+            .record(116, &minimal_payload(116))
+            .record(4085, &[])
+            .record(116, &minimal_payload(116))
+            .up()
+            .record(4084, &[])
+            .down()
+            .record(116, &minimal_payload(116))
+            .up()
+            .up()
+            .end_of_file()
+            .finish(),
+    ));
+    // A bitmap transparency with levels 115..200 in Bleach, over a PNG
+    // definition (record 2).
+    out.push(("bitmap-transparency".into(), {
+        let mut t = Vec::new();
+        for v in [0i32, 0, 1000, 0, 0, 1000] {
+            t.extend_from_slice(&v.to_le_bytes());
+        }
+        t.extend_from_slice(&[115, 200, 3]);
+        t.extend_from_slice(&2i32.to_le_bytes());
+        t.extend_from_slice(&[0u8; 16]);
+        XarBuilder::new()
+            .record(68, b"b\0\0\0\x89PNG\r\n\x1a\n")
+            .record(40, &[])
+            .down()
+            .record(116, &minimal_payload(116))
+            .down()
+            .record(171, &t)
+            .up()
+            .up()
+            .end_of_file()
+            .finish()
+    }));
+
     // One file per decodable tag, carrying a plausible minimal payload.
     out.push(("every-tag".into(), {
         let mut b = XarBuilder::new();
