@@ -16,8 +16,11 @@ WATCH pdf 5.6
 
 # resvg draws seams between the tiles of a bitmap-fill <pattern>; PDF
 # rasterises bitmap fills (XARA-T-0229) and the renderers resample them.
-leafgirl svg 13
-leafgirl pdf 9
+# Since the image resampler (XARA-US-0052) our PNG minifies the fill
+# through a linear-light mip pyramid, which the viewers do not: pdf
+# 7.69 -> 9.38 (Poppler; Ghostscript 9.82), svg 11.40 -> 9.51 (2026-09-24).
+leafgirl svg 11
+leafgirl pdf 10.8
 TestBitmapFill pdf 6.5
 
 # Feathering is approximated by an SVG blur.
@@ -25,6 +28,17 @@ SoftShadow svg 4.8
 
 # (Text on a path: SVG places and turns each character on the path since
 # T9.5.6, XARA-T-0252: TextCurve 16.27 -> 3.06, under the default now.)
+
+# The TextDesigns files carry the original's own rendering of the text as
+# a placed bitmap under the live text (SimpleText 183x128 px drawn at
+# 88x62, 2.1x; TextJust 652x1243 px, 4.2x). Since XARA-US-0052 our PNG
+# minifies it with a footprint-widened tent (1-2x) or a linear-light mip
+# pyramid (beyond 2x); resvg filters the SVG <image> without mip levels,
+# as our old sampler did. The SVG bytes are unchanged; only the PNG
+# reference moved: SimpleText 2.03 -> 6.20, TextJust 2.19 -> 9.17
+# (measured 2026-09-24). A filter policy, not geometry.
+SimpleText svg 7.2
+TextJust svg 10.6
 
 # Small text (5-9 px glyphs at 72 dpi). Since T11.4.7 (XARA-T-0228) PDF
 # text is live text in embedded subset fonts, so the viewers rasterise the

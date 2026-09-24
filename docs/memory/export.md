@@ -251,6 +251,17 @@ PDFs open in Poppler and Ghostscript with no message; 20 carry fonts, 29
 fonts in all, every one embedded, subset and with `ToUnicode` (`pdffonts`).
 Two runs are byte-identical (32 text-file PDFs and SVGs compared).
 
+After merging the image resampler (XARA-US-0052) with font embedding
+(2026-09-24, release, 72 dpi, paper): 59/59 each format, SVG median 0.74,
+PDF best-of-two median 2.37, 0 failures. The merge's PNGs are
+byte-identical to the resampler branch's and its SVGs to the font
+branch's; the resampler alone already failed three limits (SimpleText
+svg 6.20, TextJust svg 9.17, leafgirl pdf 9.38), all from the PNG side:
+the TextDesigns files place the original's own text rendering as a
+bitmap minified 2-4x, which our PNG now filters with a widened tent or
+linear-light mips and resvg/the viewers do not. New limits and reasons in
+`export-limits-corpus.txt` (leafgirl svg lowered to 11).
+
 Small text: Poppler and Ghostscript both paint thin glyph features darker
 than our coverage AA; rendered at 8× and compared at 8×, TextJust's PDF is
 within 2.4/255 of our 8× export, so the outlines are right. Poppler also
