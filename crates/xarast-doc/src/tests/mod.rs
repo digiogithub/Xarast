@@ -11,6 +11,7 @@ mod builder;
 mod foreign;
 mod invariants;
 mod props;
+mod regen;
 mod tree;
 mod undo;
 

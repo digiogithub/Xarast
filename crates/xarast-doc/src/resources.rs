@@ -129,6 +129,27 @@ pub struct ProceduralSource {
     pub fractal: bool,
 }
 
+impl ProceduralSource {
+    /// The key a generated bitmap is cached under: SHA-256 of every
+    /// parameter (floats by their bits), the fractal flag, and the name
+    /// and version of the generator, so that a change to the generator
+    /// can never serve an old bitmap under a new algorithm (phase 13 H5,
+    /// H6; the `IsSameAsCachedFractal` equivalent).
+    #[must_use]
+    pub fn cache_key(&self) -> [u8; 32] {
+        use crate::digest::{Canon, CanonicalHasher};
+        let mut h = CanonicalHasher::new();
+        h.str(PROCEDURAL_GENERATOR);
+        h.bool(self.fractal);
+        self.params.canon(&mut h);
+        h.finish()
+    }
+}
+
+/// The generator [`ProceduralSource::cache_key`] names. Bump the version
+/// whenever the generated pixels change for the same parameters.
+pub const PROCEDURAL_GENERATOR: &str = "xarast-procedural/0";
+
 /// One bitmap in the document.
 #[derive(Clone, PartialEq, Debug)]
 pub struct BitmapResource {

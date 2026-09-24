@@ -66,6 +66,7 @@ pub mod kind;
 pub mod live;
 pub mod palette;
 pub mod photo;
+pub mod regen;
 pub mod resources;
 pub mod snapshot;
 pub mod structure;
@@ -112,7 +113,8 @@ pub use kind::{
 };
 pub use live::{
     BevelParams, BevelType, BlendParams, BrushParams, ContourParams, EffectParams, LiveKind,
-    LiveNode, LiveRole, MouldKind, MouldParams, RegenState, ShadowKind, ShadowParams,
+    LiveNode, LiveParts, LiveRole, MouldKind, MouldParams, RegenState, ShadowKind, ShadowParams,
+    controller_of, in_generated,
 };
 pub use palette::{
     ColourUses, CreateColour, DeleteColour, MoveColour, PaletteResolver, RedefineColour,
@@ -121,6 +123,10 @@ pub use palette::{
 pub use photo::{
     Levels, LevelsChannel, PhotoOp, PhotoOps, PhotoOrient, PixelRect, SetPhotoOps,
     replaced_placement,
+};
+pub use regen::{
+    FlushReport, GeneratedShape, LiveCache, LiveOutput, RegenError, RegenKey, RegenQueue,
+    regen_key, regenerate,
 };
 pub use resources::{
     ArrowId, BitmapData, BitmapId, BitmapInfo, BitmapResource, BitmapUsage, DashId,

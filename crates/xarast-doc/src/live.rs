@@ -1,9 +1,9 @@
 //! Live objects: blends, contours, shadows, bevels, moulds, brushes and
 //! effects.
 //!
-//! **Structure and round-trip only until Phase 13.** The node exists, it
-//! validates, it digests and it survives a round trip; `regenerate()` does
-//! not exist yet.
+//! The node exists, it validates, it digests and it survives a round trip.
+//! What it *derives* is computed outside the tree, by [`crate::regen`]:
+//! regeneration is never an edit, so it never appears in the undo log.
 //!
 //! The pattern the original spreads across a dozen class pairs is one shape:
 //! a *controller* the user selects, a *source* subtree holding the untouched
@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use xarast_geom::{BiasGain, Mp, Point};
 
+use crate::kind::NodeKind;
 use crate::text::Justification;
+use crate::tree::{NodeId, Tree};
 
 /// What part a node plays in a live object.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -24,6 +26,17 @@ pub enum LiveRole {
     Generated,
     /// The source data, untouched.
     Source,
+}
+
+impl LiveRole {
+    /// Whether a node in this role cannot exist on its own: it is derived
+    /// data, excluded from selection, from the clipboard and from
+    /// independent deletion (the original's `NeedsParent`,
+    /// `research/02 §6.1`).
+    #[must_use]
+    pub const fn needs_parent(self) -> bool {
+        matches!(self, LiveRole::Generated)
+    }
 }
 
 /// How stale a generated subtree is.
@@ -238,3 +251,58 @@ pub struct EffectParams {
 /// Text justification is shared with the text model; re-exported here so the
 /// live-object parameters that need it do not reach across modules.
 pub type LiveJustification = Justification;
+
+/// The parts of a live controller.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct LiveParts {
+    /// The controller itself.
+    pub controller: NodeId,
+    /// Its source subtree: the originals, untouched.
+    pub source: NodeId,
+    /// Its first generated child, when a file stored one (the baked result
+    /// a reader without a generator draws).
+    pub generated: Option<NodeId>,
+}
+
+/// The source and generated children of a controller, or `None` when `id`
+/// is not a controller or has no source (which `validate` reports).
+#[must_use]
+pub fn parts(tree: &Tree, id: NodeId) -> Option<LiveParts> {
+    match tree.kind(id) {
+        Some(NodeKind::Live(l)) if l.role == LiveRole::Controller => {}
+        _ => return None,
+    }
+    let mut source = None;
+    let mut generated = None;
+    for c in tree.children(id) {
+        if let Some(NodeKind::Live(l)) = tree.kind(c) {
+            match l.role {
+                LiveRole::Source if source.is_none() => source = Some(c),
+                LiveRole::Generated if generated.is_none() => generated = Some(c),
+                _ => {}
+            }
+        }
+    }
+    Some(LiveParts {
+        controller: id,
+        source: source?,
+        generated,
+    })
+}
+
+/// The nearest live controller at or above `id`.
+#[must_use]
+pub fn controller_of(tree: &Tree, id: NodeId) -> Option<NodeId> {
+    std::iter::once(id).chain(tree.ancestors(id)).find(
+        |a| matches!(tree.kind(*a), Some(NodeKind::Live(l)) if l.role == LiveRole::Controller),
+    )
+}
+
+/// Whether `id` is a generated node or lies inside one: derived data that
+/// no command may edit on its own ([`LiveRole::needs_parent`]).
+#[must_use]
+pub fn in_generated(tree: &Tree, id: NodeId) -> bool {
+    std::iter::once(id)
+        .chain(tree.ancestors(id))
+        .any(|a| matches!(tree.kind(a), Some(NodeKind::Live(l)) if l.role.needs_parent()))
+}

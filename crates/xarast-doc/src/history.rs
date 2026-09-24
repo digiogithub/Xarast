@@ -862,9 +862,10 @@ impl<'d> Tx<'d> {
         if n.flags.contains(NodeFlags::LOCKED) {
             return Err(EditError::NotPermitted(node));
         }
-        if let NodeKind::Live(l) = &n.kind
-            && l.role == crate::live::LiveRole::Generated
-        {
+        // Generated data is the controller's to recompute: neither a
+        // generated node nor anything inside one is edited on its own
+        // (`research/02 §6.1`, `NeedsParent`).
+        if crate::live::in_generated(&self.doc.tree, node) {
             return Err(EditError::NotPermitted(node));
         }
         Ok(())
