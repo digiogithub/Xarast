@@ -35,6 +35,10 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   minification, a lazily built mip pyramid with trilinear beyond, and an
   aligned fast path; bitmap transparencies use the same sampler and filter.
   See "Resampling quality".
+- **Pixel budget:** every `ImageRef`'s base and pyramid levels are held
+  under a `PixelBudget`; levels above the per-image proxy are evicted
+  LRU and come back byte for byte from a reduction, a spill file or the
+  walker's re-decode. See "Pixel memory budget".
 - **Ramps:** multi-stop, RGB / HSV-short / HSV-long, 256- and 2048-entry
   tables, the Schlick bias/gain profile, the fixed-point transparency path
   with 22 fractional bits, and an interning cache.
@@ -973,6 +977,96 @@ is indexed by ramp id and rebuilt when its length is wrong). The render
 thread's resolver is a snapshot clone, untouched by eviction. A cache that
 never calls `begin_frame` (export, corpus tools) never evicts.
 
+### Pixel memory budget (XARA-US-0053, W10.5, 2026-09-24)
+
+`crates/xarast-render/src/pixel_budget.rs` and `spill.rs`. **Built in
+`xarast-render`, not `xarast-image`** as the phase table says: the levels
+being budgeted are `ImageRef`'s base and mip pyramid, which live here, and
+`xarast-image` is a leaf crate the renderer does not depend on. The
+walker (`xarast-app`) supplies the one thing only it knows: how to
+re-produce a base (`PixelSource`).
+
+- **`ImageRef` is a handle to a shared `ImageStore`**: per level an
+  `Option<Arc<Vec<u8>>>`, the proxy index, a spill file, the source. Its
+  public surface is unchanged except that `level(i)` returns an owned
+  `LevelBuf` (width, height, `Arc` data) instead of a borrow, and
+  `level_count` no longer builds anything (it is computed from the
+  dimensions). New: `with_budget`, `prepare`, `proxy_level`,
+  `resident_levels`; `ImageRegistry::iter`.
+- **Samplers pin.** `ImageSampler::new` pins, once per primitive, exactly
+  the levels its plan can reach — the base for aligned / nearest /
+  magnify / 1–2× widen, `level` and `level + 1` for a fixed
+  minification, every level for a perspective plane — and samples from
+  its own `Arc`s with no lock. Eviction drops the store's references
+  only, so it can never pull pixels from under a band being drawn;
+  memory is freed when the last pin goes.
+- **Evictable vs proxy.** Levels `≥ proxy` are never evicted once built;
+  levels `< proxy` (the base and the larger reductions) are, least
+  recently *drawn* store first, whenever the evictable total exceeds the
+  limit (`PixelBudget::enforce`, run after every pin, registration,
+  `prepare` and `set_limit`). The proxy rule is in `perf.md`.
+- **Byte-for-byte re-materialisation.** A reduced level is rebuilt from
+  the nearest larger resident level with `resample::reduce_level`, the
+  one 2 × 2 step the pyramid is built with (deterministic). A base comes
+  back from its spill file, else its `PixelSource`. A source marked
+  `is_cheap` (the walker's copy of native document pixels) is simply
+  dropped; any other base is **spilled once**, the first time it is
+  evicted, and read back from then on (1.2 ms per 16 MiB from the page
+  cache vs. a decode). A base whose spill fails and that has no source
+  is never dropped (only its larger reductions are), so there is always
+  a way back; `BudgetStats::lost` counts the only other failure (a
+  damaged spill file with no source: drawn transparent).
+- **Draws vs reads.** Only a sampler's pin counts as a draw that may grow
+  the proxy; `ImageRef::level` (equality, tests) reads without moving it.
+  `ImageRef` equality is `Arc::ptr_eq` or else the base bytes (it
+  re-materialises both if needed — rare: damage compares clones).
+- **The global budget** (`PixelBudget::global`, what `ImageRef::new`
+  registers with) takes `XARAST_PIXEL_BUDGET_MB`, else a quarter of
+  `MemTotal` clamped to 512 MiB – 4 GiB (1 GiB if `/proc/meminfo` is
+  unreadable). Tests and tools make their own (`PixelBudget::new`,
+  `SceneWalker::with_pixel_budget`).
+- **The spill directory** (`spill.rs`): `$XARAST_SPILL_DIR`, else
+  `$XDG_CACHE_HOME/xarast/spill`, else `~/.cache/xarast/spill` —
+  deliberately not `/tmp`, which is usually `tmpfs` (RAM). One
+  `session-<pid>-<nanos>/` per budget that spilled, holding an exclusive
+  `File::lock` on its `lock` file for life; a `SpillFile` deletes itself
+  on drop, a `SpillDir` its directory. The global budget lives in a
+  static and is never dropped, so its directory is left at exit; the
+  next session's `SpillDir::create` sweeps every `session-*` sibling
+  whose lock it can take (owner gone; flock is released by the kernel on
+  death). Tested with a fake dead session, a lockless one and a live one.
+- **Locks.** Store mutex → ledger mutex is allowed, never the reverse;
+  `enforce` picks victims under the ledger lock and evicts with it
+  released.
+
+**Proof that pixels never change** — both run in the default gate:
+
+- `xarast-render/tests/pixel_budget.rs`: every image case of the
+  130-scene feature corpus, re-wrapped under a budget with
+  limit 0 and proxy cap/default 1 (everything above 1 × 1 evictable),
+  × {no source → spill, expensive source → spill, cheap source →
+  re-copy} × {lazy pyramid, prepared pyramid} × {deterministic,
+  interactive (parallel bands)}: byte-identical to the unbudgeted
+  render; stats assert evictions, spill reads / source reads, level
+  rebuilds and `lost == 0`. Plus proxy, cap, accounting, spill-file
+  lifetime and equality tests.
+- `xarast-app/tests/pixel_budget.rs`: the **24 corpus files with
+  bitmaps** (Groucho2 and leafgirl asserted present), Final and Draft,
+  640 × 480 fit, under a tiny spilling budget and a tiny budget with
+  spilling off (re-decode from the original): byte-identical to an
+  unlimited budget. One run: 297 evictions, 209 re-materialisations (all
+  from spill, or all by re-decode), 69 level rebuilds, 88 spill writes
+  (53 MiB), 0 lost. 28 s in the test profile.
+
+**Not done** (XARA-T-0281, T10.5.5): re-materialisation is synchronous on
+the render thread, and Draft's `Nearest` always samples the base even
+when minified, so a zoomed-out Draft view of evicted photos reads every
+base back. The fix is to draw the proxy and re-materialise on a worker;
+it is not byte-identical by design, so it belongs to interactive frames
+only. The phase's 40 × 24 Mpx stress test is XARA-T-0282. The document's
+own copies (`BitmapResource::pixels`, the encoded `original`) are outside
+the budget: it covers the renderer's decoded levels.
+
 ### GPU tests: on by default, serialised machine-wide (2026-09-24)
 
 Tests that open a real `wgpu` device run by default again;
@@ -1086,6 +1180,12 @@ run the shell's dependency turns it on).
 19. **An aligned mapping samples as a point under every filter.** Do not
     "improve" a 1:1 bitmap with the magnification kernel; the fast path
     and the golden `resample_aligned_hq` depend on it.
+20. **The pixel budget never changes a rendered pixel.** Sampling code
+    reads image levels only through a sampler's pins (`ImageSampler`) or
+    `ImageRef::level`, never by keeping a borrow across a pin; a level is
+    rebuilt only with `reduce_level`; a `PixelSource` must return the
+    exact bytes first registered; a base with no way back is never
+    dropped. `tests/pixel_budget.rs` here and in `xarast-app` hold it.
 ---
 
 ## Dead ends (do not retry)
@@ -1187,7 +1287,8 @@ run the shell's dependency turns it on).
 | 19 | Document/per-bitmap smoothing flag → `Filter` (T10.4.4's remaining half) | XARA-T-0273 |
 | 20 | Bitmap-fill tile seams in resvg on exported SVG (the renderer has none) | XARA-T-0274 |
 | 21 | Mesh fills ignore `Repeat` (did not fall out of the image work: meshes do not go through the image sampler) | XARA-T-0256 |
-| 22 | The pyramid is built on the render thread on first minified frame (26 ms for 2048², single-threaded); precompute it off-thread with the decode | T10.5.2 (XARA-US-0053) |
+| 22 | ~~The pyramid is built on the render thread on first minified frame~~. **Done 2026-09-24**: the walker's decode threads call `ImageRef::prepare`; see "Pixel memory budget" | done (XARA-T-0278) |
+| 23 | Re-materialisation of an evicted base is synchronous on the render thread; Draft `Nearest` reads the base even when minified. Draw the proxy, re-materialise on a worker | XARA-T-0281 |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 
 ### Vector export (PDF, XARA-US-0059, 2026-09-23)

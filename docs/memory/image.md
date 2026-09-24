@@ -31,8 +31,9 @@ the corpus test.
   inverts it and `xar::normalise_xar_png` rewrites such a file as a
   standard PNG, which the importer does. See "The `.xar` wrappings".
 - Not yet: `xarast-doc` still has its own `BitmapResource` (SHA-256 over
-  pixels + original; XARA-T-0156). Encoders (T10.2.5), the pyramid, the
-  budget, photo ops and the gallery are later workstreams.
+  pixels + original; XARA-T-0156). Encoders (T10.2.5), photo ops and the
+  gallery are later workstreams. The pyramid (XARA-US-0052) and the pixel
+  budget (XARA-US-0053) were built in `xarast-render`; see below.
 
 ### Corpus census (all 59 files, `tests/corpus.rs`)
 
@@ -273,18 +274,43 @@ side:
 - `ImageRef` keeps **straight** RGBA8, as registered by the walker; the
   sampler premultiplies (and linearises, for minification) itself, so there is no reason to
   hand it premultiplied data.
-- It lazily builds a **mip pyramid** (+⅓ of the image's bytes) the first
-  time the image is drawn at two or more texels per pixel, shared by every
-  clone of the `ImageRef`. The walker registers each resource once per
-  walker, so a document pays it once per image and session — but on the
-  render thread, 26 ms for 2048² (`perf.md`). Moving it next to the decode
-  is T10.5.2's proxy work (XARA-US-0053), which should reuse
-  `resample::build_pyramid`'s levels rather than invent a second reduction.
+- The **mip pyramid** (+⅓ of the image's bytes) is shared by every clone
+  of the `ImageRef`. Since XARA-US-0053 the walker builds it on its decode
+  threads (`ImageRef::prepare`, right after the decode), so the render
+  thread no longer pays 26 ms per 2048² on the first minified frame; an
+  image nobody prepared still builds it lazily on first minification.
 - Contone (duotone) is applied per texel through a 256-entry table, before
   filtering, as the original does in its sampler; bitmap transparencies
   are filtered like colour fills (`TranspSource::Image` has a `Filter`).
 - Not wired: the document's smoothing flag (XARA-T-0273); bitmap fill
   editing (XARA-T-0271); placing a new bitmap (XARA-T-0272).
+
+### Pixel memory budget (XARA-US-0053, 2026-09-24)
+
+The budget itself lives in `xarast-render` (`pixel_budget.rs`,
+`spill.rs`; design, proofs and numbers in `render.md`, "Pixel memory
+budget", and the proxy rule in `perf.md`) because the levels it budgets
+are `ImageRef`'s. This crate is unchanged. The walker's side
+(`make_image`, `Encoded` in `xarast-app/src/walker.rs`):
+
+- Every registered image gets a `PixelSource`. **Native pixels**
+  (`w·h·4` bytes in the document): a *cheap* source copying the
+  document's `Arc<[u8]>`, so an evicted base is dropped and copied back,
+  never spilled. **Encoded originals**: an *expensive* source that runs
+  the same decode again (`Encoded::decode`: tag 71 with the palette, 65,
+  69, or the façade) and checks the dimensions; the budget spills such a
+  base on its first eviction and reads the spill file back after that.
+  Both re-produce the registered bytes exactly: every decoder here is
+  deterministic (tested over the 24 corpus files with bitmaps, byte for
+  byte, spilling and re-decoding).
+- Native and encoded resources now go through the same worker pool
+  (`decode_all`), which also calls `prepare`; results are still applied
+  in input order, so registration is deterministic.
+- `SceneWalker::with_pixel_budget` registers under a budget other than
+  the process-wide one; `headless::render_with_walker` renders with such
+  a walker.
+- The document's own bytes (`BitmapResource::pixels`, `original`) are
+  **not** in the budget; only the renderer's decoded levels are.
 
 ## Dead ends (do not retry)
 
@@ -309,6 +335,9 @@ side:
   we leave palette PNGs alone. No corpus file has one, and the original's
   writer never produces one.
 - Encoders for resource storage (T10.2.5).
+- `build_scene` makes a fresh walker, so it re-decodes (and now
+  re-prepares) every bitmap per call; a per-document decoded-image cache
+  is part of XARA-T-0281 (T10.5.5).
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - A faster tag-71 snap (k-d tree or a 32³ pre-quantised grid) if a real
   document is dominated by it.
