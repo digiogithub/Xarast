@@ -590,11 +590,9 @@ impl Thumbnails {
                 .spawn(move || {
                     while let Ok((key, res, images)) = rx.recv() {
                         // A panicking decoder is a failed thumbnail.
-                        let thumb = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            thumbnail(&res, &images)
-                        }))
-                        .ok()
-                        .flatten();
+                        let thumb = crate::crash::expect_panics(|| thumbnail(&res, &images))
+                            .ok()
+                            .flatten();
                         if done.send((key, thumb)).is_err() {
                             break;
                         }

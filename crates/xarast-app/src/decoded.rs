@@ -228,11 +228,10 @@ impl DecodedImages {
         if let Some(found) = self.get(res, budget) {
             return found;
         }
-        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::walker::ready_image(res, budget)
-        }))
-        .ok()
-        .flatten();
+        // A panicking decoder is a missing image, not a crash.
+        let made = crate::crash::expect_panics(|| crate::walker::ready_image(res, budget))
+            .ok()
+            .flatten();
         self.insert(res, budget, made)
     }
 
