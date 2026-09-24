@@ -2,14 +2,15 @@
 id: XARA-T-0295
 type: task
 title: "Text tool: remove a story holding only paragraph breaks when editing ends"
-status: in_review
+status: done
 priority: medium
 parent: XARA-US-0047
 author: mcp
 labels: [phase-9, tools, text]
 created: 2026-09-24T12:07:00Z
-updated: 2026-09-24T12:41:20Z
+updated: 2026-09-24T13:17:53Z
 started: 2026-09-24T12:30:07Z
+closed: 2026-09-24T13:17:53Z
 ---
 
 ## Description
