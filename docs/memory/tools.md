@@ -751,16 +751,45 @@ repaints nothing).
 
 ## Phase 10: photo adjustments (XARA-US-0054)
 
-No tool or panel yet (XARA-T-0301). The entry point the panel will call
-is `Session::set_photo_ops(node, &ops)`: it reads the master's size
+The photo panel (XARA-T-0301, `xarast_app::photo_panel`; the widgets in
+`ui.md`, "Photo panel") edits the chain of the one selected bitmap
+object. Its entry point is `Session::set_photo_ops(node, &ops)`: it reads the master's size
 (`place::bitmap_pixels`), dispatches `xarast_doc::SetPhotoOps` as **one
 undo step labelled "Adjust Photo"**, and records nothing when the chain
 normalises to the one the object has (so re-applying a chain in another
 order is not a step). It refuses a non-bitmap node (`WrongKind`) and a
 chain holding an unknown operation (`NotPermitted`). A crop moves the
 object so the kept pixels stay put; a turn swaps its width and height
-about its centre (`image.md`, "Photo adjustments"). A slider drag must
-coalesce through a gesture or commit on release — the panel's job.
+about its centre (`image.md`, "Photo adjustments").
+
+74. **A photo slider drag previews, it does not emit** — decision 45's
+    pattern, not the colour editor's live gesture (`colour.md` 19).
+    Applying `SetPhotoOps` each frame would put a full-resolution
+    evaluation (≈ 60 ms plus a 200 ms pyramid on 24 Mpx) on the walk
+    thread every frame and prune a derived image per frame.
+    `PhotoPanelOp::Preview(chain)` stores `(node, chain)` in
+    `Preview::photo`; the walker draws that object from a **proxy**
+    (`image.md`); `Commit` takes it and calls `set_photo_ops` once —
+    one "Adjust Photo" step; `Cancel`, `Intent::Cancel` (`Esc`, consumed
+    by the drag so the selection stays), undo and redo drop it with
+    nothing to undo (`photo_panel::settle`). The preview lives in the
+    session's `Preview` because only a canvas gesture's commit/cancel
+    clears that, and one pointer cannot drive both at once.
+75. **Only tone previews; geometry is set.** A `Preview` whose crop or
+    orientation differs from the object's would be drawn into the old
+    placement (`SetPhotoOps` moves the object), so it is applied at once
+    as `Set`. The panel edits crop and orientation with typed fields and
+    buttons only. `Set`, `Reset` and keyboard steps are one step each; a
+    chain with an unknown op is never previewed or set (`NotPermitted`).
+
+Tests: `crates/xarast-app/tests/photo_panel.rs` (5): a 60-event drag
+leaves digest and history untouched frame by frame, damages only its
+object, evaluates nothing full-size, commits one step and undoes
+exactly; `Esc` mid-drag restores digest, history, label, chain and
+pixels; turns are set at once, levels preview on top, reset is one
+step, an unknown chain is read-only; the committed render equals a
+fresh walker's and a hand-baked full-resolution master's; the 24 Mpx
+timing (numbers in `image.md`).
 
 ## Provisional values (observe in the VM before trusting)
 
@@ -819,6 +848,10 @@ coalesce through a gesture or commit on release — the panel's job.
     placed bitmap is one step and adds at most one resource
     (`tests/place_bitmap.rs`). Undo of a placement restores everything but
     the resource table, which is outside the history (decision 68).
+16. A photo slider drag emits nothing before release: the document
+    digest and the history are unchanged on every frame, the release is
+    one "Adjust Photo" step, and `Esc` leaves nothing
+    (`tests/photo_panel.rs`).
 
 ## Dead ends (do not retry)
 

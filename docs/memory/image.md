@@ -475,7 +475,11 @@ job each:
   construction (the budget re-creates evicted derived images from it).
   24 Mpx brightness + contrast + gamma: **66 ms** single-threaded in the
   test profile (budget 200 ms; no rayon needed yet), checked pixel by
-  pixel against the fused table (`tests/photo.rs`, criterion 13).
+  pixel against the fused table (`tests/photo.rs`, criterion 13). Since
+  XARA-T-0301 the pixel pass (table + mixes) runs on scoped threads in
+  bands of ≥ 128 Ki pixels (`available_parallelism`); every pixel is
+  independent, so the bytes are the same (the criterion-13 test covers
+  the banded path). The geometry copies stay single-threaded.
 - **The translation — `xarast_io::photo`.** `recipe(&PhotoOps)` and
   `bake(w, h, rgba, ops)`: the only place a document chain becomes a
   recipe, used by the walker and the SVG exporter alike, so the screen,
@@ -496,9 +500,41 @@ job each:
   dropped from both caches (history-only chains are re-evaluated on
   undo); the walker's registry slot is parked with a 1 × 1 placeholder
   and reused (`ImageRegistry::replace`), so twenty slider values leave
-  the registry at most one slot bigger (tested). Evaluation happens on
-  the walk thread, at full resolution — the live proxy preview is
-  XARA-T-0301.
+  the registry at most one slot bigger (tested). The committed chain is
+  evaluated on the walk thread, at full resolution.
+- **Live proxy preview (XARA-T-0301, T10.6.5).** While a photo panel
+  slider is dragged, `Preview::photo` carries `(node, chain)` and the
+  walker draws that object from a **proxy** (`SceneWalker::proxy_image`):
+  the chain evaluated on a reduced level of the registered master
+  (`ImageRef::level(k)`, straight sRGB like the base; the pyramid was
+  built at decode). `proxy_level` takes the smallest level whose output
+  still has as many pixels as the object shows on screen, then smaller
+  until the level holds ≤ `PROXY_MAX_PIXELS` (2.1 M, about full HD);
+  the crop is scaled onto the level and rounded outwards
+  (`scale_recipe`). The parallelogram is unchanged, so a smaller image
+  lands in the same place. A proxy is registered unbudgeted-source
+  (`None`) in one slot per previewed object, reused frame to frame
+  (another slider value replaces the slot's image), and parked with the
+  placeholder into `derived_free` the first walk nobody previews it —
+  so the commit's full-resolution derived image usually takes that very
+  slot. Nothing goes into `DecodedImages` (tests assert its `derived`
+  stat stays 0 through a drag). The node's fingerprint mixes the chain
+  hash, and `scene_damage` compares the new image by content, so damage
+  stays on the object (tested each frame beside a second picture).
+  `SceneWalker::photo_proxies` / `Session::photo_proxies` report the
+  level and size per frame.
+- **Measured** (test profile, this 24-core machine shared with other
+  agents; `photo_panel.rs::a_slider_frame_on_a_24_mpx_photo_stays_within_33_ms`,
+  6000 × 4000 native master shown at ≈ 1200 × 800 in a 1280 × 800
+  view): proxy level 2 (1500 × 1000). At load average ≈ 10: intent +
+  walk with the proxy evaluation **3.3 ms median, 10.5 ms max**; whole
+  slider frame with the CPU render of the view **19.1 ms median, 27.9 ms
+  p90, 31.0 ms max** over 30 frames. Before the banded pixel pass the
+  walk was ≈ 10 ms; with the machine loaded (load ≈ 80–115) the frame
+  median reached ≈ 33 ms. The test asserts the median ≤ 33 ms. **The release is not in budget**: committing evaluates the full
+  24 Mpx on the walk thread, ≈ 60 ms evaluation + ≈ 200 ms pyramid
+  (`prepare`) ≈ 264 ms once (XARA-T-0304: evaluate the committed chain
+  off the walk thread and keep drawing the proxy until it lands).
 - **Damage:** an adjustment changes one leaf's image id; `scene_damage`
   compares images by content, so only that object repaints and undo gives
   no damage against the frame before (tested with a second picture
@@ -551,9 +587,11 @@ job each:
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - `DecodeLimits::max_frames` is informational: every decoder already takes
   the first frame only.
-- Photo adjustments: the panel and live proxy preview (XARA-T-0301);
-  derived renditions in `.xarast` and a browser-correct base picture
-  (XARA-T-0302); chains on bitmap fills (XARA-T-0303).
+- Photo adjustments: derived renditions in `.xarast` and a
+  browser-correct base picture (XARA-T-0302); chains on bitmap fills
+  (XARA-T-0303); the full-resolution evaluation of a committed chain off
+  the walk thread (XARA-T-0304, the 264 ms release hitch on 24 Mpx).
+  (The panel and the live proxy preview: done, XARA-T-0301.)
 - Bitmap gallery (XARA-US-0055): thumbnails on disk and the thumbnail
   budget (XARA-T-0289); Replace and Save a copy (XARA-T-0290); ICC
   profiles as resources and through the placement PNG conversion

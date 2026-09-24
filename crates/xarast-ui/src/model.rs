@@ -350,6 +350,9 @@ pub struct UiModel {
     /// What the bitmap gallery shows (phase 10, W10.7), the bitmap drag in
     /// flight included. `None` with no document open.
     pub bitmap_gallery: Option<xarast_app::bitmap_gallery::BitmapGalleryView>,
+    /// What the photo panel shows (phase 10, T10.6.8): the one selected
+    /// bitmap object's photo chain. `None` with no document open.
+    pub photo_panel: Option<xarast_app::photo_panel::PhotoPanelView>,
     /// The background imports still running (T10.7.5), for the status
     /// bar's progress and its Cancel button.
     pub imports: Vec<xarast_app::import::ImportProgress>,
@@ -496,6 +499,9 @@ pub enum UiCommand {
     /// An operation of the bitmap gallery (phase 10, W10.7): place,
     /// delete, a drag and its drop.
     BitmapGallery(xarast_app::bitmap_gallery::BitmapGalleryOp),
+    /// An operation of the photo panel: a live slider value, its commit
+    /// or cancel, a typed change (phase 10, T10.6.8).
+    PhotoPanel(xarast_app::photo_panel::PhotoPanelOp),
     /// A bitmap drag is over a point of the window, in logical points from
     /// the window's top-left. The shell turns it into
     /// [`xarast_app::bitmap_gallery::BitmapDragPoint::Canvas`] over the

@@ -222,6 +222,10 @@ pub enum Intent {
     /// an unused bitmap, or drag one onto the canvas. See
     /// [`crate::bitmap_gallery`].
     BitmapGallery(crate::bitmap_gallery::BitmapGalleryOp),
+    /// An operation of the photo panel (phase 10, T10.6.8): a live
+    /// slider value, a commit, a cancel, a typed change. See
+    /// [`crate::photo_panel`].
+    PhotoPanel(crate::photo_panel::PhotoPanelOp),
     /// `Esc`: cancel the gesture in flight, or, when there is none,
     /// select nothing (`research/04 §4.1`).
     Cancel,
