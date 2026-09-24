@@ -69,6 +69,7 @@ pub mod colour_editor;
 pub mod command;
 pub mod commands;
 pub mod convert;
+pub mod decoded;
 pub mod edit;
 pub mod fill_handles;
 pub mod fill_tool;
@@ -115,6 +116,7 @@ pub use app::{
     Severity, TextClipboard, xarast_path,
 };
 pub use command::{AppCommand, ChordKey, KeyChord};
+pub use decoded::{DecodedImages, DecodedImagesStats};
 pub use edit::{
     ControlPoints, CurrentAttributes, EditState, Modifiers, SelectMode, ToolId, ToolState,
 };

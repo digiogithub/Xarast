@@ -221,6 +221,10 @@ pub struct Session {
     /// last rebuild: the render thread skips strips outside it.
     scene_ink: crate::geometry::DocRect,
     walker: SceneWalker,
+    /// The document's decoded bitmaps, shared by every walker made for
+    /// it: the session's own, export, thumbnails, [`build_scene`]
+    /// (XARA-T-0281).
+    decoded_images: crate::decoded::DecodedImages,
     /// The tools and the shared interaction machine.
     tools: ToolMachine,
     /// What the tool in force wants drawn while its gesture is in flight.
@@ -281,6 +285,7 @@ impl Session {
             xarast_geom::Rect::EMPTY,
         );
         let size = viewport.size();
+        let decoded_images = crate::decoded::DecodedImages::new();
         Session {
             id,
             doc,
@@ -293,7 +298,8 @@ impl Session {
             spare_scene: None,
             scene_epoch: 0,
             scene_ink: crate::geometry::DocRect::EMPTY,
-            walker: SceneWalker::new(),
+            walker: SceneWalker::new().with_decoded_images(decoded_images.clone()),
+            decoded_images,
             tools: ToolMachine::new(),
             preview: Preview::default(),
             picker: crate::tool::Picker::new(),
@@ -440,7 +446,8 @@ impl Session {
             self.state_serial(),
             self.doc.snapshot(),
             self.source.clone(),
-        ))
+        )
+        .with_decoded_images(self.decoded_images.clone()))
     }
 
     /// Records a finished save: the document is clean if the history is
@@ -656,6 +663,21 @@ impl Session {
             self.resolver_snapshot
                 .get_or_insert_with(|| Arc::new(self.walker.resolver().clone())),
         )
+    }
+
+    /// The document's decoded bitmaps: hand them to any walker made for
+    /// this document so that it does not decode them again
+    /// ([`SceneWalker::with_decoded_images`], [`crate::decoded`]).
+    #[must_use]
+    pub const fn decoded_images(&self) -> &crate::decoded::DecodedImages {
+        &self.decoded_images
+    }
+
+    /// A fresh walker for this document that shares its decoded bitmaps:
+    /// what export, thumbnails and [`build_scene`] walk with.
+    #[must_use]
+    pub fn scene_walker(&self) -> SceneWalker {
+        SceneWalker::new().with_decoded_images(self.decoded_images.clone())
     }
 
     /// Packages the current scene and view as a frame for the render
@@ -1638,7 +1660,8 @@ impl Session {
 ///
 /// The `&Session` form allocates a fresh scene and resolver every call;
 /// [`Session::rebuild_scene`] is the one to use per frame, because it
-/// reuses both. Use this one when a caller has only a shared reference —
+/// reuses both. Bitmaps are not decoded again: the walker shares the
+/// session's [`Session::decoded_images`]. Use this one when a caller has only a shared reference —
 /// a thumbnailer, a test, an export.
 ///
 /// # Panics
@@ -1648,7 +1671,7 @@ impl Session {
 /// [`Session::rebuild_scene`] when the error matters.
 #[must_use]
 pub fn build_scene(session: &Session, dirty: Option<DeviceRect>) -> BuiltScene {
-    let mut walker = SceneWalker::new();
+    let mut walker = session.scene_walker();
     let mut scene = Scene::new();
     let stats = walker
         .rebuild_previewed(

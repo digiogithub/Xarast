@@ -62,6 +62,9 @@ pub struct SaveJob {
     thumbnail: bool,
     deterministic: bool,
     text: Option<Placer>,
+    /// The session's decoded bitmaps, so that the thumbnail does not
+    /// decode them again.
+    images: Option<crate::decoded::DecodedImages>,
 }
 
 impl std::fmt::Debug for SaveJob {
@@ -127,7 +130,17 @@ impl SaveJob {
             thumbnail: kind == SaveKind::Document,
             deterministic: false,
             text: Some(crate::svg_text::placer()),
+            images: None,
         }
+    }
+
+    /// Renders the thumbnail with the document's decoded bitmaps
+    /// ([`crate::decoded`]) instead of decoding them again.
+    /// [`crate::Session::save_job`] passes the session's.
+    #[must_use]
+    pub fn with_decoded_images(mut self, images: crate::decoded::DecodedImages) -> SaveJob {
+        self.images = Some(images);
+        self
     }
 
     /// Writes byte-reproducible output (fixed timestamps): for tests.
@@ -210,9 +223,10 @@ impl SaveJob {
         // (518 000 nodes) that is ~0.4 s off a ~1 s save.
         let (prepared, thumbnail) = std::thread::scope(|scope| {
             let doc = &doc;
+            let images = self.images.as_ref();
             let render = self
                 .thumbnail
-                .then(|| scope.spawn(move || crate::thumbnail::thumbnail_png(doc)));
+                .then(|| scope.spawn(move || crate::thumbnail::thumbnail_png_with(doc, images)));
             let prepared = match &source {
                 Some(src) => xarast_format::prepare_resave(doc, src, &opts),
                 None => xarast_format::prepare_save(doc, &opts),

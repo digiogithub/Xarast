@@ -14,6 +14,7 @@ use xarast_format::thumbnail::{PREVIEW_PX, THUMBNAIL_PX, ThumbnailError};
 use xarast_geom::Mp;
 use xarast_render::{CpuBackend, CpuConfig, DirtyRect, DisplayList, RenderQuality, Scene, Surface};
 
+use crate::decoded::DecodedImages;
 use crate::edit::EditState;
 use crate::geometry::{DeviceSize, DocPointF, DocRect};
 use crate::viewport::Viewport;
@@ -52,6 +53,22 @@ impl CpuThumbnails {
         area: DocRect,
         max_px: u32,
     ) -> Result<Surface, ThumbnailError> {
+        self.render_with(doc, area, max_px, None)
+    }
+
+    /// [`CpuThumbnails::render`] with the document's decoded bitmaps
+    /// ([`crate::decoded`]), so that none is decoded again.
+    ///
+    /// # Errors
+    ///
+    /// As [`CpuThumbnails::render`].
+    pub fn render_with(
+        &self,
+        doc: &Document,
+        area: DocRect,
+        max_px: u32,
+        images: Option<&DecodedImages>,
+    ) -> Result<Surface, ThumbnailError> {
         if area.is_empty() || max_px == 0 {
             return Err(ThumbnailError("the document has no page to show".into()));
         }
@@ -70,7 +87,10 @@ impl CpuThumbnails {
         view.set_centre(DocPointF::new((lo.0 + hi.0) * 0.5, (lo.1 + hi.1) * 0.5));
 
         let edit = EditState::for_document(doc);
-        let mut walker = SceneWalker::new();
+        let mut walker = match images {
+            Some(i) => SceneWalker::new().with_decoded_images(i.clone()),
+            None => SceneWalker::new(),
+        };
         let mut scene = Scene::new();
         walker
             .rebuild(doc, &edit, &view, RenderQuality::Final, None, &mut scene)
@@ -121,7 +141,18 @@ impl ThumbnailProvider for CpuThumbnails {
 /// made (a document with no page). A save never fails for want of one.
 #[must_use]
 pub fn thumbnail_png(doc: &Document) -> Option<Vec<u8>> {
-    CpuThumbnails::default().thumbnail(doc, THUMBNAIL_PX).ok()
+    thumbnail_png_with(doc, None)
+}
+
+/// [`thumbnail_png`] with the document's decoded bitmaps
+/// ([`crate::Session::decoded_images`]): no bitmap is decoded again.
+#[must_use]
+pub fn thumbnail_png_with(doc: &Document, images: Option<&DecodedImages>) -> Option<Vec<u8>> {
+    let t = CpuThumbnails::default();
+    let surface = t
+        .render_with(doc, crate::viewport::page_rect(doc), THUMBNAIL_PX, images)
+        .ok()?;
+    xarast_render::golden::encode_png(&surface).ok()
 }
 
 /// The recommended preview size, re-exported for callers that ask for one.

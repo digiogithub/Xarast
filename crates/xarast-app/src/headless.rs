@@ -143,7 +143,8 @@ pub fn render_with_fonts(
     let walker = match fonts {
         Some(f) => crate::walker::SceneWalker::with_fonts(f),
         None => crate::walker::SceneWalker::new(),
-    };
+    }
+    .with_decoded_images(session.decoded_images().clone());
     render_framed(session, opts, &view, walker)
 }
 
