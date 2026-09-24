@@ -708,6 +708,9 @@ impl Viewer {
                             .and_then(|v| v.drag.as_ref())
                             .map(|d| d.status.clone())
                     })
+                    // Then what the tool says about the pointer or its
+                    // gesture (T8.4.6); notices when it has nothing.
+                    .or_else(|| self.app.active().and_then(Session::tool_status))
                     .or_else(|| self.message.clone()),
                 problem_count: self.app.diagnostics.entries().len(),
                 ..StatusInfo::default()
@@ -960,6 +963,7 @@ impl Viewer {
             UiCommand::ClearRecent => Intent::ClearRecent,
             UiCommand::AnswerPrompt(a) => Intent::AnswerPrompt(a),
             UiCommand::InfobarEdit { field, value } => Intent::InfobarEdit { field, value },
+            UiCommand::InfobarDrag(op) => Intent::InfobarDrag(op),
             UiCommand::ColourEditor(op) => Intent::ColourEditor(op),
             UiCommand::ColourBar(op) => Intent::ColourBar(op),
             UiCommand::ColourDragAt { x, y, shift } => {
@@ -1410,7 +1414,9 @@ impl Viewer {
                 }
             }
             ShellEvent::Key(k) if k.state == KeyState::Pressed && !self.text_input => {
-                if !k.modifiers.constrain()
+                if let Some(nudge) = self.arrow_nudge(k) {
+                    redraw |= self.apply(vec![nudge]).needs_redraw();
+                } else if !k.modifiers.constrain()
                     && let Some(pan) = self.arrow_pan(&k.key)
                 {
                     redraw |= self.apply(vec![pan]).needs_redraw();
@@ -1505,6 +1511,32 @@ impl Viewer {
         text.chars()
             .any(|c| c == '\t' || !c.is_control())
             .then(|| T::Insert(text.to_owned()))
+    }
+
+    /// Arrow keys nudge what the tool in force has selected (a fill
+    /// handle, XARA-T-0220) when the canvas has the keyboard, or when
+    /// nothing does; the step follows the modifiers (`research/04 §4.5`).
+    fn arrow_nudge(&self, k: &KeyEvent) -> Option<Intent> {
+        use xarast_app::{Nudge, NudgeDir, NudgeStep};
+        let nothing_focused = self.egui.memory(|m| m.focused().is_none());
+        if !(self.canvas_focused || nothing_focused) {
+            return None;
+        }
+        let dir = match k.key {
+            Key::Named(NamedKey::ArrowLeft) => NudgeDir::Left,
+            Key::Named(NamedKey::ArrowRight) => NudgeDir::Right,
+            Key::Named(NamedKey::ArrowUp) => NudgeDir::Up,
+            Key::Named(NamedKey::ArrowDown) => NudgeDir::Down,
+            _ => return None,
+        };
+        if !self.app.active().is_some_and(Session::takes_nudge) {
+            return None;
+        }
+        let m = k.modifiers;
+        Some(Intent::Nudge(Nudge {
+            dir,
+            step: NudgeStep::from_keys(m.constrain(), m.adjust(), m.alternative()),
+        }))
     }
 
     /// Arrow keys pan the view when the canvas has the keyboard, or when
@@ -3275,6 +3307,72 @@ mod tests {
 
     fn tool(v: &Viewer) -> xarast_app::ToolId {
         v.app.active().unwrap().tools().current()
+    }
+
+    /// XARA-T-0220: with a fill handle selected the arrows nudge it (one
+    /// undo step per run) instead of panning, and the status line speaks
+    /// for the fill tool.
+    #[test]
+    fn arrows_nudge_a_selected_fill_handle_and_pan_otherwise() {
+        use xarast_app::{PointerButton, PointerSample};
+        let (mut v, n) = viewer_with_square();
+        let s = v.app.active_mut().unwrap();
+        s.apply(Intent::Select {
+            nodes: vec![n],
+            mode: xarast_app::SelectMode::Replace,
+        })
+        .unwrap();
+        s.apply(Intent::ChooseTool(xarast_app::ToolId::Fill))
+            .unwrap();
+        let at = |s: &Session, x: i32| {
+            s.viewport
+                .doc_to_device(xarast_geom::Point::raw(x, 150_000))
+        };
+        let sample = |at, time_ms| PointerSample {
+            at,
+            pressure: None,
+            time_ms,
+        };
+        let (a, b) = (at(s, 120_000), at(s, 180_000));
+        s.apply(Intent::PointerMove(sample(a, 0))).unwrap();
+        s.apply(Intent::PointerDown {
+            button: PointerButton::Primary,
+            sample: sample(a, 0),
+        })
+        .unwrap();
+        s.apply(Intent::PointerMove(sample(b, 10))).unwrap();
+        s.apply(Intent::PointerUp {
+            button: PointerButton::Primary,
+            sample: sample(b, 20),
+        })
+        .unwrap();
+        assert_eq!(s.undo_label(), Some("Set Fill"));
+        assert!(s.takes_nudge(), "the end handle is selected");
+        // Hovering the end handle: the status line says what a drag does.
+        s.apply(Intent::PointerMove(sample(b, 30))).unwrap();
+        let status = v.ui_model(1.0).status.message.unwrap_or_default();
+        assert!(status.contains("Drag to move"), "{status}");
+        let len = v.app.active().unwrap().bus.history().len();
+        let centre = v.app.active().unwrap().viewport.centre();
+        for _ in 0..3 {
+            press(&mut v, Key::Named(NamedKey::ArrowRight), Modifiers::NONE);
+        }
+        press(
+            &mut v,
+            Key::Named(NamedKey::ArrowUp),
+            Modifiers::NONE.with_ctrl(),
+        );
+        let s = v.app.active().unwrap();
+        assert_eq!(s.bus.history().len(), len + 1, "one step for the run");
+        assert_eq!(s.undo_label(), Some("Move Fill Handle"));
+        assert_eq!(s.viewport.centre(), centre, "the view did not pan");
+        // With no handle selected the arrows pan again.
+        v.apply(vec![Intent::Cancel]);
+        assert!(!v.app.active().unwrap().takes_nudge());
+        press(&mut v, Key::Named(NamedKey::ArrowRight), Modifiers::NONE);
+        let s = v.app.active().unwrap();
+        assert_eq!(s.bus.history().len(), len + 1);
+        assert_ne!(s.viewport.centre(), centre, "the arrow panned");
     }
 
     #[test]
