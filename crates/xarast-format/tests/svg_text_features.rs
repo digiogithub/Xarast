@@ -7,15 +7,13 @@ use std::sync::Arc;
 
 use xarast_doc::{
     AttrSlot, AttrValue, BuildLimits, Document, FeatureSetting, NodeKind, StoryText, TextItem,
-    TextStoryNode,
 };
 use xarast_format::svg::{SvgOptions, normal_form};
 use xarast_format::{OpenOptions, SaveOptions, WriteOptions, open_reader, save_opened_to, save_to};
 
 fn doc() -> Document {
     let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
-    b.node(NodeKind::TextStory(Box::new(TextStoryNode::default())))
-        .unwrap();
+    b.node(NodeKind::TextStory(Box::default())).unwrap();
     b.push_scope().unwrap();
     b.node(NodeKind::TextLine(Box::default())).unwrap();
     b.push_scope().unwrap();
