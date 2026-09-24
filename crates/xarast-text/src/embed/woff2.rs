@@ -1,20 +1,23 @@
 //! WOFF2 (W3C Recommendation "WOFF File Format 2.0"), written from the
 //! specification.
 //!
-//! The encoder stores every table with the **null transform** (for `glyf`
-//! and `loca` that is transform version 3) and compresses the table data
-//! as one Brotli stream in font mode. That is a conforming WOFF2 file; the
-//! optional `glyf` transform would save a little more on large subsets and
-//! can be added later without changing any caller. Output depends on the
-//! input only (single-threaded Brotli, tables in a fixed order).
+//! The encoder applies the **`glyf` transform** (§5.1, transform version 0
+//! for `glyf` and `loca`) to TrueType fonts, stores every other table with
+//! the null transform, and compresses the table data as one Brotli stream
+//! in font mode. A `glyf` that does not parse is stored untransformed
+//! (version 3). Output depends on the input only (single-threaded Brotli,
+//! tables in a fixed order).
 //!
-//! [`decode`] reads back files that use only null transforms — ours — and
-//! is what the tests and the tools that render an exported SVG with its
-//! embedded fonts use. It refuses anything else.
+//! [`decode`] reads single-font WOFF2 files from any conforming writer: the
+//! null transforms, the `glyf`/`loca` transform and the `hmtx` transform
+//! (§5.4). It is what the `.xarast` reader's document fonts, the tests and
+//! the tools that render an exported SVG with its embedded fonts use.
+//! Collections (`ttcf`) are refused.
 
 use std::io::{Read, Write};
 
 use super::sfnt::{Sfnt, Tag};
+use super::woff2_glyf;
 
 /// The "known table" tags of WOFF2 §5.1, in flag-index order.
 const KNOWN: [&[u8; 4]; 63] = [
@@ -93,22 +96,38 @@ fn stored_order(s: &Sfnt) -> Vec<(Tag, &[u8])> {
     out
 }
 
+/// `head.indexToLocFormat`.
+fn index_format(s: &Sfnt) -> Option<u16> {
+    let h = s.table(b"head")?.get(50..52)?;
+    Some(u16::from_be_bytes([h[0], h[1]]))
+}
+
 /// Encodes a font as WOFF2.
 pub(crate) fn encode(s: &Sfnt) -> Option<Vec<u8>> {
+    encode_with(s, true)
+}
+
+/// Encodes a font as WOFF2, with the `glyf` transform when `transform`.
+pub(crate) fn encode_with(s: &Sfnt, transform: bool) -> Option<Vec<u8>> {
     let tables = stored_order(s);
     let num = u16::try_from(tables.len()).ok()?;
+    let glyf = if transform {
+        s.table(b"glyf")
+            .zip(s.table(b"loca"))
+            .zip(index_format(s))
+            .and_then(|((g, l), f)| woff2_glyf::transform(g, l, f))
+    } else {
+        None
+    };
     let mut dir = Vec::new();
     let mut stream = Vec::new();
     let mut sfnt_size: u64 = 12 + 16 * u64::from(num);
     for (tag, data) in &tables {
         let len = u32::try_from(data.len()).ok()?;
-        // glyf and loca: version 3 is the null transform; every other
-        // table: version 0 is.
-        let version: u8 = if tag == b"glyf" || tag == b"loca" {
-            3
-        } else {
-            0
-        };
+        let outline = tag == b"glyf" || tag == b"loca";
+        // glyf and loca: version 0 is the transform and 3 the null one;
+        // every other table: version 0 is the null transform.
+        let version: u8 = if outline && glyf.is_none() { 3 } else { 0 };
         match KNOWN.iter().position(|k| *k == tag) {
             Some(i) => dir.push((i as u8) | (version << 6)),
             None => {
@@ -117,7 +136,15 @@ pub(crate) fn encode(s: &Sfnt) -> Option<Vec<u8>> {
             }
         }
         push_base128(&mut dir, len);
-        stream.extend_from_slice(data);
+        match (&glyf, outline) {
+            (Some(t), true) => {
+                // The transformed glyf holds loca too: its own length is 0.
+                let t: &[u8] = if tag == b"glyf" { t } else { &[] };
+                push_base128(&mut dir, u32::try_from(t.len()).ok()?);
+                stream.extend_from_slice(t);
+            }
+            _ => stream.extend_from_slice(data),
+        }
         sfnt_size += u64::from(len).div_ceil(4) * 4;
     }
     let params = brotli::enc::BrotliEncoderParams {
@@ -153,9 +180,10 @@ pub(crate) fn encode(s: &Sfnt) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Decodes a WOFF2 file whose tables all use the null transform (what
-/// [`encode`] writes) into a plain OpenType font file. `None` for anything
-/// else, malformed or not.
+/// Decodes a single-font WOFF2 file into a plain OpenType font file,
+/// undoing the `glyf`/`loca` and `hmtx` transforms. `None` for anything
+/// malformed, a collection, or a transform the specification does not
+/// define.
 #[must_use]
 pub fn decode(b: &[u8]) -> Option<Vec<u8>> {
     let u32_at = |at: usize| -> Option<u32> {
@@ -166,10 +194,14 @@ pub fn decode(b: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let flavor = u32_at(4)?;
+    if flavor == u32::from_be_bytes(*b"ttcf") {
+        return None;
+    }
     let num = usize::from(u16::from_be_bytes([*b.get(12)?, *b.get(13)?]));
     let compressed_len = u32_at(20)? as usize;
     let mut at = HEADER_LEN;
-    let mut entries: Vec<(Tag, usize)> = Vec::with_capacity(num);
+    // (tag, stored length, transformed)
+    let mut entries: Vec<(Tag, usize, bool)> = Vec::with_capacity(num);
     for _ in 0..num {
         let flags = *b.get(at)?;
         at += 1;
@@ -182,16 +214,20 @@ pub fn decode(b: &[u8]) -> Option<Vec<u8>> {
             i => **KNOWN.get(usize::from(i))?,
         };
         let version = flags >> 6;
-        let null = if &tag == b"glyf" || &tag == b"loca" {
-            version == 3
-        } else {
-            version == 0
+        let outline = &tag == b"glyf" || &tag == b"loca";
+        let transformed = match (outline, version) {
+            (true, 3) | (false, 0) => false,
+            (true, 0) => true,
+            (false, 1) if &tag == b"hmtx" => true,
+            _ => return None,
         };
-        if !null {
-            return None;
-        }
-        let len = read_base128(b, &mut at)? as usize;
-        entries.push((tag, len));
+        let orig = read_base128(b, &mut at)? as usize;
+        let len = if transformed {
+            read_base128(b, &mut at)? as usize
+        } else {
+            orig
+        };
+        entries.push((tag, len, transformed));
     }
     let compressed = b.get(at..at.checked_add(compressed_len)?)?;
     let mut data = Vec::new();
@@ -205,13 +241,39 @@ pub fn decode(b: &[u8]) -> Option<Vec<u8>> {
         tables: std::collections::BTreeMap::new(),
     };
     let mut off = 0usize;
-    for (tag, len) in entries {
+    let mut transformed: Vec<Tag> = Vec::new();
+    for (tag, len, t) in entries {
         let end = off.checked_add(len)?;
         s.tables.insert(tag, data.get(off..end)?.to_vec());
+        if t {
+            transformed.push(tag);
+        }
         off = end;
     }
-    if off != data.len() {
+    // The reference encoder pads the stream; nothing may follow the tables
+    // but that padding.
+    if data.len().checked_sub(off)? > 3 {
         return None;
+    }
+    let glyf_t = transformed.contains(b"glyf");
+    if glyf_t != transformed.contains(b"loca") {
+        return None;
+    }
+    let mut x_mins = None;
+    if glyf_t {
+        if s.table(b"loca").is_some_and(|l| !l.is_empty()) {
+            return None;
+        }
+        let r = woff2_glyf::reconstruct(s.table(b"glyf")?)?;
+        s.tables.insert(*b"glyf", r.glyf);
+        s.tables.insert(*b"loca", r.loca);
+        x_mins = Some(r.x_mins);
+    }
+    if transformed.contains(b"hmtx") {
+        let hhea = s.table(b"hhea")?;
+        let hmetrics = usize::from(u16::from_be_bytes([*hhea.get(34)?, *hhea.get(35)?]));
+        let hmtx = woff2_glyf::reconstruct_hmtx(s.table(b"hmtx")?, hmetrics, x_mins.as_deref()?)?;
+        s.tables.insert(*b"hmtx", hmtx);
     }
     let mut out = Vec::new();
     out.write_all(&s.to_bytes()).ok()?;
@@ -233,6 +295,47 @@ mod tests {
         }
         let mut at = 0;
         assert_eq!(read_base128(&[0x80, 0x01], &mut at), None);
+    }
+
+    #[test]
+    fn a_truetype_font_survives_the_glyf_transform() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fonts");
+        for f in [
+            "NotoSans-Regular.subset.ttf",
+            "NotoSansArabic-Regular.subset.ttf",
+            "XarastTestVariable.ttf",
+        ] {
+            let bytes = std::fs::read(dir.join(f)).unwrap();
+            let s = Sfnt::parse(&bytes, 0).unwrap();
+            let plain = encode_with(&s, false).unwrap();
+            let packed = encode(&s).unwrap();
+            // Real faces shrink; the synthetic one (a few glyphs) may not.
+            if f.starts_with("Noto") {
+                assert!(
+                    packed.len() < plain.len(),
+                    "{f}: {} >= {}",
+                    packed.len(),
+                    plain.len()
+                );
+            }
+            let back = Sfnt::parse(&decode(&packed).unwrap(), 0).unwrap();
+            for (tag, data) in &s.tables {
+                let mut data = data.clone();
+                let mut got = back.table(tag).unwrap().to_vec();
+                if tag == b"head" {
+                    // checkSumAdjustment covers the rebuilt glyf.
+                    data[8..12].fill(0);
+                    got[8..12].fill(0);
+                }
+                if tag != b"glyf" && tag != b"loca" {
+                    assert_eq!(got, data, "{f}");
+                }
+            }
+            assert_eq!(back.tables.len(), s.tables.len());
+            // A second pass is stable: the rebuilt glyf is canonical.
+            let again = Sfnt::parse(&decode(&encode(&back).unwrap()).unwrap(), 0).unwrap();
+            assert_eq!(again, back, "{f}");
+        }
     }
 
     #[test]

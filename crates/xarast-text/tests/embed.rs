@@ -197,3 +197,87 @@ fn nothing_to_embed_is_an_error_not_an_empty_font() {
     assert_eq!(db.web_font(id, &['日']).unwrap_err(), EmbedError::Empty);
     assert_eq!(db.web_font(id, &[]).unwrap_err(), EmbedError::Empty);
 }
+
+/// Another writer's WOFF2 (`ttf2woff2`, `glyf` transformed; see the
+/// fonts' `PROVENANCE.md`) decodes to the same font: every table but
+/// `glyf`/`loca`/`head` byte for byte, and every glyph's outline,
+/// advance and box.
+#[test]
+fn another_writers_transformed_woff2_decodes_to_the_same_font() {
+    use skrifa::raw::{TableProvider, TopLevelTable};
+    let woff = font_bytes("NotoSans-Bold.subset.ttf2woff2.woff2");
+    let ttf = woff2::decode(&woff).expect("the glyf transform decodes");
+    let got = skrifa::FontRef::new(&ttf).expect("parses");
+    let orig_bytes = font_bytes(LATIN_BOLD);
+    let orig = skrifa::FontRef::new(&orig_bytes).unwrap();
+    let skip = [
+        skrifa::raw::tables::glyf::Glyf::TAG,
+        skrifa::raw::tables::loca::Loca::TAG,
+        skrifa::raw::tables::head::Head::TAG,
+    ];
+    for rec in orig.table_directory.table_records() {
+        let tag = rec.tag();
+        if skip.contains(&tag) {
+            continue;
+        }
+        assert_eq!(
+            got.table_data(tag).map(|d| d.as_bytes().to_vec()),
+            orig.table_data(tag).map(|d| d.as_bytes().to_vec()),
+            "{tag}"
+        );
+    }
+    let n = orig.maxp().unwrap().num_glyphs();
+    assert_eq!(got.maxp().unwrap().num_glyphs(), n);
+    let gm = got.glyph_metrics(Size::unscaled(), LocationRef::default());
+    let om = orig.glyph_metrics(Size::unscaled(), LocationRef::default());
+    for gid in 0..u32::from(n) {
+        let g = skrifa::GlyphId::new(gid);
+        assert_eq!(outline(&got, gid), outline(&orig, gid), "glyph {gid}");
+        assert_eq!(gm.advance_width(g), om.advance_width(g), "glyph {gid}");
+        assert_eq!(gm.bounds(g), om.bounds(g), "glyph {gid}");
+    }
+    // Truncated, it is refused rather than misread; corrupted, it never
+    // panics.
+    assert!(woff2::decode(&woff[..woff.len() / 2]).is_none());
+    for i in (48..woff.len()).step_by(97) {
+        let mut bad = woff.clone();
+        bad[i] ^= 0x5A;
+        let _ = woff2::decode(&bad);
+    }
+}
+
+/// Xarast's own web fonts carry the `glyf` transform.
+#[test]
+fn our_web_fonts_use_the_glyf_transform() {
+    let db = pinned_db();
+    let id = face(&db, "Noto Sans");
+    let chars: Vec<char> = ('!'..='~').collect();
+    let w = db.web_font(id, &chars).expect("embeds");
+    // Walk the table directory for glyf (known-table index 10).
+    let num = usize::from(u16::from_be_bytes([w.woff2[12], w.woff2[13]]));
+    let dir = &w.woff2[48..];
+    let mut at = 0;
+    let mut glyf_version = None;
+    for _ in 0..num {
+        let flags = dir[at];
+        at += 1;
+        if flags & 63 == 63 {
+            at += 4;
+        }
+        let transformed = match flags & 63 {
+            10 | 11 => flags >> 6 == 0,
+            _ => flags >> 6 != 0,
+        };
+        if flags & 63 == 10 {
+            glyf_version = Some(flags >> 6);
+        }
+        for _ in 0..(1 + usize::from(transformed)) {
+            while dir[at] & 0x80 != 0 {
+                at += 1;
+            }
+            at += 1;
+        }
+    }
+    assert_eq!(glyf_version, Some(0), "glyf is transformed");
+    assert!(woff2::decode(&w.woff2).is_some());
+}

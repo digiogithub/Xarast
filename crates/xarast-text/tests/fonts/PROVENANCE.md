@@ -12,6 +12,7 @@ result cannot depend on the machine's installed fonts.
 | `NotoSansHebrew-Regular.subset.ttf` | Noto Sans Hebrew Regular 3.000 | Debian `fonts-noto-core` 20201225-2 | OFL-1.1 | U+0020, U+0591-05F4, U+FB1D-FB4F |
 | `NotoSansArabic-Regular.subset.ttf` | Noto Sans Arabic Regular 2.005 | Debian `fonts-noto-core` 20201225-2 | OFL-1.1 | U+0020, U+060C, U+061B, U+061F, U+0621-0652, U+0660-0669 |
 | `NotoSansCJKjp-Regular.subset.otf` | Noto Sans CJK JP Regular 2.004 (face 0 of `NotoSansCJK-Regular.ttc`, CFF outlines) | Debian `fonts-noto-cjk` 1:20230817+repack1-3 | OFL-1.1 | 28 ideographs/kana used by the tests plus U+3000-3003, U+300C-300D, U+FF01, U+FF08-FF09, U+FF0C |
+| `NotoSans-Bold.subset.ttf2woff2.woff2` | `NotoSans-Bold.subset.ttf` above, WOFF2-compressed by another writer | `ttf2woff2` 0.13.3 (crates.io, MIT OR Apache-2.0), `encode` at the default Brotli quality: `glyf`/`loca` transformed | OFL-1.1 | as its source |
 | `XarastTestVariable.ttf` | none: synthetic, drawn by `make_variable.py` | this repository | MIT OR Apache-2.0 | n/a |
 
 The licence was checked explicitly on 2026-09-23 in the fonts themselves (name
@@ -46,4 +47,12 @@ d77049b1cc9ab09e065768bee31b71a832a87dceca5ca48e36c2e9be9d8fec1b  NotoSansHebrew
 c76dc9670c3c61fe496eee92342155e4c8b7ef54d25a8081833210f79ab62a8f  NotoSansArabic-Regular.subset.ttf
 06952e44347601d5bc4d10eabfa37d5d0056b79836438d9627c8026350e02989  NotoSansCJKjp-Regular.subset.otf
 d00bcda46bd672ffc1528c0297d7ff10f9ae92422d862b00cecfb8825bc7bed4  XarastTestVariable.ttf
+eeef8a465a0d73e81b5933145ffd8f93fc1d42cc7650d28baf46df709a097ffa  NotoSans-Bold.subset.ttf2woff2.woff2
 ```
+
+The WOFF2 file is the decoder's independent fixture: it was written by a
+program other than Xarast, with the `glyf` transform Xarast's own encoder
+also applies, so the decoder is not only checked against its own encoder.
+Regenerate it with a throwaway crate depending on `ttf2woff2 = "=0.13.3"`
+that calls `ttf2woff2::encode(&ttf, BrotliQuality::default())`; it is not a
+dependency of the workspace.
