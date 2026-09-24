@@ -97,6 +97,7 @@ pub mod structure;
 pub mod svg_text;
 mod text;
 pub mod text_edit;
+pub mod text_infobar;
 #[cfg(test)]
 mod text_path_fidelity;
 pub mod text_tool;
@@ -127,9 +128,9 @@ pub use render_thread::{
 };
 pub use session::{BuiltScene, Dirty, DocumentId, FileKind, Session, SessionError, build_scene};
 pub use tool::{
-    Anchor, CursorKind, GestureEvent, HandleShape, HitResult, Infobar, InfobarField, InfobarItem,
-    InfobarValue, InteractionState, OverlayShape, Preview, TextInput, TextInputKind, TextKey,
-    TextNav, Tool, ToolAction, ToolCtx, ToolMachine, ToolView,
+    Anchor, CursorKind, FeatureOption, GestureEvent, HandleShape, HitResult, Infobar, InfobarField,
+    InfobarItem, InfobarValue, InteractionState, OverlayShape, Preview, TextInput, TextInputKind,
+    TextKey, TextNav, TextRuler, Tool, ToolAction, ToolCtx, ToolMachine, ToolView,
 };
 pub use viewport::{MAX_ZOOM, MIN_ZOOM, Viewport, ZoomTarget};
 pub use walker::{SceneWalker, WalkStats};

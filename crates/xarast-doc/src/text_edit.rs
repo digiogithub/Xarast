@@ -175,10 +175,13 @@ fn line_at(st: &StoryText, b: usize) -> usize {
         .saturating_sub(1)
 }
 
-/// Every line of every paragraph `range` touches.
-fn paragraph_lines(st: &StoryText, range: &Range<usize>) -> Vec<NodeId> {
+/// The lines (indices into [`StoryText::lines`]) of every paragraph the
+/// byte range `range` touches: the caret's paragraph for an empty range.
+/// Empty for a story with no lines.
+#[must_use]
+pub fn paragraph_line_range(st: &StoryText, range: &Range<usize>) -> Range<usize> {
     if st.lines.is_empty() {
-        return Vec::new();
+        return 0..0;
     }
     let first = line_at(st, range.start);
     let last = if range.end > range.start {
@@ -196,7 +199,15 @@ fn paragraph_lines(st: &StoryText, range: &Range<usize>) -> Vec<NodeId> {
     while b + 1 < st.lines.len() && !st.lines[b].ends_paragraph {
         b += 1;
     }
-    st.lines[a..=b].iter().map(|l| l.node).collect()
+    a..b + 1
+}
+
+/// Every line of every paragraph `range` touches.
+fn paragraph_lines(st: &StoryText, range: &Range<usize>) -> Vec<NodeId> {
+    st.lines[paragraph_line_range(st, range)]
+        .iter()
+        .map(|l| l.node)
+        .collect()
 }
 
 fn attr_of(tx: &Tx<'_>, node: NodeId, slot: AttrSlot) -> bool {

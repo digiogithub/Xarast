@@ -286,6 +286,8 @@ fn paint_icon(p: &egui::Painter, r: Rect, tool: ToolId, ink: Color32) {
 pub struct InfobarRow {
     /// Text being typed, per field, while that field has the keyboard.
     editing: HashMap<InfobarField, String>,
+    /// What the font chooser's filter holds.
+    font_filter: String,
 }
 
 impl InfobarRow {
@@ -368,6 +370,21 @@ impl InfobarRow {
                         min,
                         max,
                     } => real_slider(ui, *field, *value, *min, *max, out),
+                    InfobarItem::Scalar {
+                        field,
+                        value,
+                        suffix,
+                        min,
+                        max,
+                    } => self.scalar(ui, *field, *value, suffix, (*min, *max), out),
+                    InfobarItem::FontFamily {
+                        field,
+                        families,
+                        selected,
+                    } => self.font_family(ui, *field, families, selected.as_deref(), out),
+                    InfobarItem::Features { options } => features_menu(ui, options, out),
+                    // Drawn on the horizontal ruler (`rulers::TextRulerStrip`).
+                    InfobarItem::TextRuler(_) => {}
                     InfobarItem::Note(text) => {
                         ui.label(egui::RichText::new(text).color(tokens.text_muted));
                     }
@@ -421,6 +438,107 @@ impl InfobarRow {
         }
     }
 
+    /// A number with a unit suffix, typed; committed on Enter or focus
+    /// loss, clamped to its range.
+    fn scalar(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: InfobarField,
+        value: Option<f64>,
+        suffix: &str,
+        (min, max): (f64, f64),
+        out: &mut CommandSink,
+    ) {
+        ui.label(field.label());
+        let shown = value.map(|v| format_scalar(v, suffix)).unwrap_or_default();
+        let id = ui.make_persistent_id(("xarast_infobar", field));
+        let has_focus = ui.memory(|m| m.has_focus(id));
+        let text = self.editing.entry(field).or_insert_with(|| shown.clone());
+        if !has_focus {
+            text.clone_from(&shown);
+        }
+        let response = ui.add(
+            egui::TextEdit::singleline(text)
+                .id(id)
+                .desired_width(56.0)
+                .horizontal_align(egui::Align::RIGHT),
+        );
+        let response = response.on_hover_text(field.description());
+        let label = match value {
+            Some(v) => format!("{}: {}", field.description(), format_scalar(v, suffix)),
+            None => field.description().to_owned(),
+        };
+        crate::a11y::set_label(ui.ctx(), response.id, label);
+        let commit = response.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape));
+        if commit {
+            if let Some(v) = parse_scalar(text, suffix)
+                && value.is_none_or(|old| (old - v.clamp(min, max)).abs() > 1e-9)
+            {
+                out.push(UiCommand::InfobarEdit {
+                    field,
+                    value: InfobarValue::Real(v.clamp(min, max)),
+                });
+            }
+            text.clone_from(&shown);
+        }
+    }
+
+    /// The font chooser: a drop-down of the installed families with a
+    /// filter at its top. The family in force shows even when it is not
+    /// installed (a substituted font).
+    fn font_family(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: InfobarField,
+        families: &[std::sync::Arc<str>],
+        selected: Option<&str>,
+        out: &mut CommandSink,
+    ) {
+        ui.label(field.label());
+        let shown = selected.unwrap_or("—");
+        let mut picked = None;
+        let filter = &mut self.font_filter;
+        let r = egui::ComboBox::from_id_salt(("xarast_infobar", field))
+            .selected_text(shown)
+            .width(160.0)
+            .height(320.0)
+            .show_ui(ui, |ui| {
+                let f = ui.add(
+                    egui::TextEdit::singleline(filter)
+                        .hint_text("Filter")
+                        .desired_width(150.0),
+                );
+                crate::a11y::set_label(ui.ctx(), f.id, "Filter fonts".to_owned());
+                let needle = filter.to_lowercase();
+                for (i, name) in families
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| needle.is_empty() || n.to_lowercase().contains(&needle))
+                    .take(MAX_FONTS_LISTED)
+                {
+                    if ui
+                        .selectable_label(selected == Some(&**name), &**name)
+                        .clicked()
+                    {
+                        picked = Some(i);
+                    }
+                }
+            });
+        crate::a11y::set_label(
+            ui.ctx(),
+            r.response.id,
+            format!("{}: {shown}", field.description()),
+        );
+        if let Some(i) = picked
+            && families.get(i).map(|n| &**n) != selected
+        {
+            out.push(UiCommand::InfobarEdit {
+                field,
+                value: InfobarValue::Choice(i),
+            });
+        }
+    }
+
     fn angle(
         &mut self,
         ui: &mut egui::Ui,
@@ -462,6 +580,74 @@ impl InfobarRow {
             text.clone_from(&shown);
         }
     }
+}
+
+/// How many families the font chooser lists at once; the filter narrows
+/// a longer list.
+pub const MAX_FONTS_LISTED: usize = 400;
+
+/// A number as a scalar field shows it: up to two decimals, then the
+/// suffix.
+#[must_use]
+pub fn format_scalar(v: f64, suffix: &str) -> String {
+    let mut s = format!("{v:.2}");
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" {
+        s = "0".to_owned();
+    }
+    s.push_str(suffix);
+    s
+}
+
+/// Parses a scalar field: a number, optionally followed by its suffix.
+/// `None` for anything else, or for a non-finite number.
+#[must_use]
+pub fn parse_scalar(text: &str, suffix: &str) -> Option<f64> {
+    let t = text.trim();
+    let t = if suffix.is_empty() {
+        t
+    } else {
+        t.strip_suffix(suffix).unwrap_or(t).trim()
+    };
+    t.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// The OpenType feature panel: a menu of check boxes, one per feature;
+/// a feature a selection has both ways shows as indeterminate.
+fn features_menu(ui: &mut egui::Ui, options: &[xarast_app::FeatureOption], out: &mut CommandSink) {
+    let r = ui.menu_button("OpenType", |ui| {
+        for o in options {
+            let mut on = o.on.unwrap_or(false);
+            let c = ui.add(egui::Checkbox::new(&mut on, o.label).indeterminate(o.on.is_none()));
+            let tag = String::from_utf8_lossy(&o.tag).into_owned();
+            crate::a11y::set_label(
+                ui.ctx(),
+                c.id,
+                format!(
+                    "{} ({tag}): {}",
+                    o.label,
+                    match o.on {
+                        Some(true) => "on",
+                        Some(false) => "off",
+                        None => "mixed",
+                    }
+                ),
+            );
+            if c.changed() {
+                out.push(UiCommand::InfobarEdit {
+                    field: InfobarField::TextFeature(o.tag),
+                    value: InfobarValue::Toggle(on),
+                });
+            }
+        }
+    });
+    let r = r.response.on_hover_text("OpenType features of the text");
+    crate::a11y::set_label(ui.ctx(), r.id, "OpenType features".to_owned());
 }
 
 /// An angle as the bar shows it: degrees, up to two decimals, with the

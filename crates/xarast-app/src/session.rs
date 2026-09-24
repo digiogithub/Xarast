@@ -959,6 +959,11 @@ impl Session {
         {
             changed |= Changed::SELECTION | Changed::UI;
         }
+        for v in requests.current {
+            if self.edit.current.set(v) {
+                changed |= Changed::UI;
+            }
+        }
         if let Some(tool) = requests.tool {
             changed |= self.choose_tool(tool);
         }
