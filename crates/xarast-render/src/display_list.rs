@@ -838,6 +838,15 @@ fn push_mapped_transparency(
             repeat: *repeat,
             ramp: *ramp,
         },
+        TranspSource::Mesh {
+            mapping,
+            repeat,
+            levels,
+        } => TranspSource::Mesh {
+            mapping: mapping.transformed(xf),
+            repeat: *repeat,
+            levels: *levels,
+        },
         TranspSource::Image {
             image,
             mapping,

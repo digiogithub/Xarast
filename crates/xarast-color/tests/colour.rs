@@ -324,6 +324,9 @@ fn transparency_modes_match_the_file_and_default_to_mix() {
     assert_eq!(TranspMode::from_byte(1), TranspMode::Mix);
     assert_eq!(TranspMode::from_byte(2), TranspMode::StainedGlass);
     assert_eq!(TranspMode::from_byte(28), TranspMode::Luminosity);
+    // The original's transparency tool writes Hue as 31 (`TT_HUE`).
+    assert_eq!(TranspMode::from_byte(31), TranspMode::Hue);
+    assert_eq!(TranspMode::Hue as u8, 31);
     // The gaps are undocumented render-engine variants; treat them as mix.
     for v in [4u8, 7, 12, 14, 15, 99, 255] {
         assert_eq!(TranspMode::from_byte(v), TranspMode::Mix, "{v}");

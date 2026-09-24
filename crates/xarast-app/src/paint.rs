@@ -28,9 +28,9 @@ use xarast_doc::fill::{FillGeometry, Perspective, Ramp, RampMapping, Tiling};
 use xarast_doc::resources::BitmapId;
 use xarast_geom::Point;
 use xarast_render::{
-    BitmapAdjust, BlendFamily, EffectSpace, GradMapping, GradRamp, GradShape, ImageId, Paint,
-    Point64, Profile, RampEase, RampLength, Repeat, Resolver, Stop, TranspSource, TranspStop,
-    Transparency, build_transparency_ramp_eased,
+    BitmapAdjust, BlendFamily, EffectSpace, GradMapping, GradRamp, GradShape, ImageId, MeshLevels,
+    Paint, Point64, Profile, RampEase, RampLength, Repeat, Resolver, Stop, TranspSource,
+    TranspStop, Transparency, build_transparency_ramp_eased,
 };
 
 /// Everything the mapping needs that is not the fill itself.
@@ -166,14 +166,22 @@ fn gradient_repeat(t: Tiling) -> Repeat {
     }
 }
 
-/// The mapping of a three- or four-colour fill: it clamps only when the
-/// mapping says "do not repeat", and tiles otherwise — including the
-/// default.
+/// The mapping of a three- or four-colour fill or transparency: it clamps
+/// only when the mapping says "do not repeat", and tiles otherwise —
+/// including the default (`research/01 §8.3`).
+///
+/// The tiles are **mirrored**. The original has a single "tiled" mesh
+/// style whatever the mapping value, and the previews it embedded in
+/// `Fill Types simple.xar` show which tiling that is: rendered at the
+/// preview's size, mirrored tiles score a mean |Δ| of 23–35 per cell
+/// against it, plain tiles 30–51 and clamping 43–65, and the diagonal
+/// stripes and checkers of the tiled cells appear only when mirrored
+/// (`docs/memory/render.md`, "Mesh tiling, measured").
 fn mesh_repeat(t: Tiling) -> Repeat {
     match t {
         Tiling::Simple => Repeat::Simple,
         Tiling::None | Tiling::Repeat | Tiling::RepeatInverted | Tiling::RepeatExtra => {
-            Repeat::Repeat
+            Repeat::Mirror
         }
     }
 }
@@ -224,6 +232,7 @@ fn family_of(m: TranspMode) -> BlendFamily {
         TranspMode::Lighten => BlendFamily::Lighten,
         TranspMode::Brightness => BlendFamily::Brightness,
         TranspMode::Luminosity => BlendFamily::Luminosity,
+        TranspMode::Hue => BlendFamily::Hue,
     }
 }
 
@@ -624,18 +633,70 @@ pub(crate) fn transparency(
             }
             None => Transparency::OPAQUE,
         },
-        // Meshes and procedurals have no transparency counterpart in the
-        // renderer; the flat average keeps the object composited roughly
-        // right instead of dropping the transparency altogether.
-        FillGeometry::ThreeColour { c0, c1, c2, .. } => {
-            Transparency::mix(mean_level(&[c0.level, c1.level, c2.level]))
-        }
-        FillGeometry::FourColour { c0, c1, c2, c3, .. } => {
-            Transparency::mix(mean_level(&[c0.level, c1.level, c2.level, c3.level]))
-        }
+        // A mesh transparency is interpolated per pixel on the colour
+        // mesh's own frame and corner order, and tiles as it does.
+        FillGeometry::ThreeColour {
+            origin,
+            axis1,
+            axis2,
+            c0,
+            c1,
+            c2,
+        } => mesh_transparency(
+            c0.mode,
+            affine(*origin, *axis1, *axis2),
+            mesh_repeat(tiling),
+            MeshLevels::Three([c0.level, c1.level, c2.level]),
+        ),
+        FillGeometry::FourColour {
+            origin,
+            axis1,
+            axis2,
+            axis3,
+            c0,
+            c1,
+            c2,
+            c3,
+        } => mesh_transparency(
+            c0.mode,
+            GradMapping::Perspective {
+                a: p64(*origin),
+                b: p64(*axis2),
+                c: p64(*axis1),
+                d: p64(*axis3),
+            },
+            mesh_repeat(tiling),
+            MeshLevels::Four([c0.level, c1.level, c2.level, c3.level]),
+        ),
+        // Procedurals have no transparency counterpart in the renderer
+        // yet; the flat average keeps the object composited roughly right,
+        // in its own family, instead of dropping the transparency.
         FillGeometry::Fractal { from, to, .. } | FillGeometry::Noise { from, to, .. } => {
-            Transparency::mix(mean_level(&[from.level, to.level]))
+            if from.mode == TranspMode::None {
+                Transparency::OPAQUE
+            } else {
+                Transparency::flat(family_of(from.mode), mean_level(&[from.level, to.level]))
+            }
         }
+    }
+}
+
+fn mesh_transparency(
+    mode: TranspMode,
+    mapping: GradMapping,
+    repeat: Repeat,
+    levels: MeshLevels,
+) -> Transparency {
+    if mode == TranspMode::None {
+        return Transparency::OPAQUE;
+    }
+    Transparency {
+        family: family_of(mode),
+        source: TranspSource::Mesh {
+            mapping,
+            repeat,
+            levels,
+        },
     }
 }
 

@@ -150,6 +150,10 @@ pub enum TranspMode {
     Brightness = 25,
     /// Luminosity.
     Luminosity = 28,
+    /// Hue: the source's hue on the destination's saturation and value.
+    /// The original's transparency tool offers it last, after Luminosity,
+    /// and writes 31 (`TT_HUE`, `Kernel/fillval.h:171`).
+    Hue = 31,
 }
 
 impl TranspMode {
@@ -168,6 +172,7 @@ impl TranspMode {
             22 => TranspMode::Lighten,
             25 => TranspMode::Brightness,
             28 => TranspMode::Luminosity,
+            31 => TranspMode::Hue,
             _ => TranspMode::Mix,
         }
     }

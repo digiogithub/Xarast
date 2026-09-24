@@ -10,8 +10,8 @@
 //! | Radial (elliptical) | radial shading (type 3), circles `r = 0 → 1` | yes |
 //! | Diamond | two axial shadings of `|u|` and `|v|`, the second clipped to the quadrants where `|v| > |u|` | yes |
 //! | Conical | a Gouraud triangle fan (type 4), [`CONICAL_WEDGES`] wedges | approximated |
-//! | Four-colour mesh | function-based shading (type 1) of a 2 × 2 sampled function | yes: PDF's multilinear interpolation is Xara's bilinear blend, and the function clamps its input as the renderer clamps `(u, v)` |
-//! | Three-colour mesh | function-based shading of a [`MESH3_GRID`]² sampled function | approximated |
+//! | Four-colour mesh | function-based shading (type 1) of a sampled function with one sample per tile corner | yes: PDF's multilinear interpolation is Xara's bilinear blend; a clamped mesh's function clamps its input as the renderer clamps `(u, v)`, and a tiled mesh's tiles are mirrored, so the lattice of corner samples is continuous and exact |
+//! | Three-colour mesh | function-based shading of a [`MESH3_GRID`]² sampled function per tile | approximated |
 //!
 //! The ramp — stops, profile and effect space already baked into the
 //! renderer's 256- or 2048-entry table — becomes a sampled function
@@ -25,7 +25,7 @@
 
 use kurbo::{Affine, BezPath, Point};
 use xarast_color::Rgba8;
-use xarast_render::paint::{apply_repeat, ramp_index};
+use xarast_render::paint::{apply_repeat, mesh_uv, mesh3_channel, mesh4_channel, ramp_index};
 use xarast_render::{GradMapping, GradRamp, GradShape, RampCache, Repeat};
 
 use super::writer::{Canvas, PdfWriter, Rule, Vertex};
@@ -167,7 +167,7 @@ pub fn paint_gradient(
     };
     match (shape, ramp) {
         (GradShape::Mesh3 | GradShape::Mesh4, GradRamp::Mesh3(_) | GradRamp::Mesh4(_)) => {
-            mesh(w, c, &frame, ramp, fold(|p| p.x), fold(|p| p.y))
+            mesh(w, c, &frame, ramp, repeat, fold(|p| p.x), fold(|p| p.y))
         }
         (_, GradRamp::Table(id)) => {
             let Some(table) = ramps.try_get(*id) else {
@@ -353,75 +353,104 @@ fn table_gradient(
 }
 
 /// A mesh gradient as a function-based shading over the shape's frame
-/// bounds, the function clamping its input to the unit square.
+/// bounds.
+///
+/// A clamped mesh is a function over the unit square, which clamps its
+/// input exactly as the renderer clamps `(u, v)`. A tiled mesh is mirrored
+/// ([`Repeat::Mirror`], the only tiling the walker gives a mesh), which
+/// makes it continuous: the function spans the whole periods the shape
+/// covers and samples every tile, and PDF's multilinear interpolation
+/// between a four-colour mesh's corner samples is its bilinear blend on
+/// every tile. Plain repetition has seams on every tile edge that no
+/// sampled function draws, so it is rasterised.
 fn mesh(
     w: &mut PdfWriter,
     c: &mut Canvas,
     frame: &Frame,
     ramp: &GradRamp,
+    repeat: Repeat,
     (u0, u1): (f64, f64),
     (v0, v1): (f64, f64),
 ) -> Shaded {
-    let domain = [u0.min(0.0), u1.max(1.0), v0.min(0.0), v1.max(1.0)];
-    match ramp {
-        GradRamp::Mesh4(k) => {
-            if k.iter().any(|c| c.a < 255) {
-                return Shaded::Rasterise("mesh colours with transparency".into());
-            }
-            // (0,0), (1,0), (0,1), (1,1): the first input varies fastest.
-            let samples: Vec<u8> = k.iter().flat_map(|c| [c.r, c.g, c.b]).collect();
-            let f = w.sampled_rgb_function(&[0.0, 1.0, 0.0, 1.0], &[2, 2], &samples);
-            let sh = w.function_based(f, domain);
-            c.transform(frame.to_page.as_coeffs());
-            c.shading(sh);
-            Shaded::Exact
+    let (du, dv) = if repeat == Repeat::Simple {
+        ((0.0, 1.0), (0.0, 1.0))
+    } else {
+        match (periods(u0, u1), periods(v0, v1)) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(r), _) | (_, Err(r)) => return Shaded::Rasterise(r),
         }
-        GradRamp::Mesh3(k) => {
-            if k.iter().any(|c| c.a < 255) {
-                return Shaded::Rasterise("mesh colours with transparency".into());
-            }
-            let g = MESH3_GRID;
-            let mut samples = Vec::with_capacity((g * g * 3) as usize);
-            for j in 0..g {
-                for i in 0..g {
-                    let (u, v) = (
-                        f64::from(i) / f64::from(g - 1),
-                        f64::from(j) / f64::from(g - 1),
-                    );
-                    let px = mesh3_at(k, u, v);
-                    samples.extend_from_slice(&[px.r, px.g, px.b]);
-                }
-            }
-            let f = w.sampled_rgb_function(&[0.0, 1.0, 0.0, 1.0], &[g, g], &samples);
-            let sh = w.function_based(f, domain);
-            c.transform(frame.to_page.as_coeffs());
-            c.shading(sh);
-            Shaded::Approximated("three-colour mesh drawn from a 33 x 33 sampled grid")
+    };
+    let single = du == (0.0, 1.0) && dv == (0.0, 1.0);
+    if !single && repeat != Repeat::Mirror {
+        return Shaded::Rasterise("a mesh tiled without mirroring".into());
+    }
+    let (grid, approximated) = match ramp {
+        GradRamp::Mesh4(k) if k.iter().all(|c| c.a == 255) => (2, false),
+        GradRamp::Mesh3(k) if k.iter().all(|c| c.a == 255) => (MESH3_GRID, true),
+        GradRamp::Mesh3(_) | GradRamp::Mesh4(_) => {
+            return Shaded::Rasterise("mesh colours with transparency".into());
         }
-        GradRamp::Table(_) => Shaded::Exact,
+        GradRamp::Table(_) => return Shaded::Exact,
+    };
+    // Whole periods: `periods` bounded them by `MAX_PERIODS`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let count = |(lo, hi): (f64, f64)| ((hi - lo) as u32).saturating_mul(grid - 1) + 1;
+    let (nu, nv) = (count(du), count(dv));
+    if u64::from(nu) * u64::from(nv) > MAX_SAMPLES as u64 {
+        return Shaded::Rasterise("a tiled mesh with too many tiles".into());
+    }
+    let step = 1.0 / f64::from(grid - 1);
+    let mut samples = Vec::with_capacity((nu * nv * 3) as usize);
+    for j in 0..nv {
+        for i in 0..nu {
+            let (u, v) = (du.0 + f64::from(i) * step, dv.0 + f64::from(j) * step);
+            // The lattice of a single tile is the unit square itself; only
+            // a mirrored mesh folds (plain repetition would send u = 1 to 0).
+            let (u, v) = if repeat == Repeat::Mirror {
+                mesh_uv((u, v), repeat)
+            } else {
+                (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+            };
+            let px = mesh_at(ramp, u, v);
+            samples.extend_from_slice(&[px.r, px.g, px.b]);
+        }
+    }
+    let domain = [u0.min(du.0), u1.max(du.1), v0.min(dv.0), v1.max(dv.1)];
+    let f = w.sampled_rgb_function(&[du.0, du.1, dv.0, dv.1], &[nu, nv], &samples);
+    let sh = w.function_based(f, domain);
+    c.transform(frame.to_page.as_coeffs());
+    c.shading(sh);
+    if approximated {
+        Shaded::Approximated("three-colour mesh drawn from a 33 x 33 sampled grid per tile")
+    } else {
+        Shaded::Exact
     }
 }
 
-/// The three-colour mesh at a point of the unit square, as the renderer
-/// defines it: barycentric weights with the first clamped at zero and the
-/// three renormalised.
-fn mesh3_at(k: &[Rgba8; 3], u: f64, v: f64) -> Rgba8 {
-    let w0 = (1.0 - u - v).max(0.0);
-    let sum = w0 + u + v;
-    if sum <= 0.0 {
-        return k[0];
-    }
-    let ch = |a: u8, b: u8, c: u8| -> u8 {
-        let x = (w0 * f64::from(a) + u * f64::from(b) + v * f64::from(c)) / sum;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let y = x.round().clamp(0.0, 255.0) as u8;
-        y
-    };
-    Rgba8 {
-        r: ch(k[0].r, k[1].r, k[2].r),
-        g: ch(k[0].g, k[1].g, k[2].g),
-        b: ch(k[0].b, k[1].b, k[2].b),
-        a: ch(k[0].a, k[1].a, k[2].a),
+/// A mesh's colour at a point of the unit square, by the renderer's own
+/// formulas.
+fn mesh_at(ramp: &GradRamp, u: f64, v: f64) -> Rgba8 {
+    match ramp {
+        GradRamp::Mesh3(k) => {
+            let ch = |f: fn(&Rgba8) -> u8| mesh3_channel([f(&k[0]), f(&k[1]), f(&k[2])], u, v);
+            Rgba8 {
+                r: ch(|c| c.r),
+                g: ch(|c| c.g),
+                b: ch(|c| c.b),
+                a: ch(|c| c.a),
+            }
+        }
+        GradRamp::Mesh4(k) => {
+            let ch =
+                |f: fn(&Rgba8) -> u8| mesh4_channel([f(&k[0]), f(&k[1]), f(&k[2]), f(&k[3])], u, v);
+            Rgba8 {
+                r: ch(|c| c.r),
+                g: ch(|c| c.g),
+                b: ch(|c| c.b),
+                a: ch(|c| c.a),
+            }
+        }
+        GradRamp::Table(_) => Rgba8::TRANSPARENT,
     }
 }
 
@@ -464,15 +493,15 @@ mod tests {
 
     #[test]
     fn the_mesh3_grid_is_the_renderer_formula() {
-        let k = [
+        let k = GradRamp::Mesh3([
             Rgba8::rgb(255, 0, 0),
             Rgba8::rgb(0, 255, 0),
             Rgba8::rgb(0, 0, 255),
-        ];
-        assert_eq!(mesh3_at(&k, 0.0, 0.0), k[0]);
-        assert_eq!(mesh3_at(&k, 1.0, 0.0), k[1]);
-        assert_eq!(mesh3_at(&k, 0.0, 1.0), k[2]);
+        ]);
+        assert_eq!(mesh_at(&k, 0.0, 0.0), Rgba8::rgb(255, 0, 0));
+        assert_eq!(mesh_at(&k, 1.0, 0.0), Rgba8::rgb(0, 255, 0));
+        assert_eq!(mesh_at(&k, 0.0, 1.0), Rgba8::rgb(0, 0, 255));
         // Past the hypotenuse the first weight is clamped away.
-        assert_eq!(mesh3_at(&k, 1.0, 1.0), Rgba8::rgb(0, 128, 128));
+        assert_eq!(mesh_at(&k, 1.0, 1.0), Rgba8::rgb(0, 128, 128));
     }
 }

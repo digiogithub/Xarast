@@ -1267,6 +1267,7 @@ impl<'a> LevelSampler<'a> {
     fn new(t: &'a Transparency, res: &'a Resolver, missing: MissingLevels) -> LevelSampler<'a> {
         let (frame, table, image) = match &t.source {
             TranspSource::Flat(_) => (None, None, None),
+            TranspSource::Mesh { mapping, .. } => (mapping.frame_map(), None, None),
             TranspSource::Gradient { mapping, ramp, .. } => (
                 mapping.frame_map(),
                 res.transparency_ramps
@@ -1312,6 +1313,13 @@ impl<'a> LevelSampler<'a> {
                     return 0;
                 };
                 table[crate::paint::ramp_index(crate::paint::apply_repeat(s, *repeat), table.len())]
+            }
+            TranspSource::Mesh { repeat, levels, .. } => {
+                let Some(uv) = self.frame.and_then(|f| f.apply(p)) else {
+                    return 0;
+                };
+                let (u, v) = crate::paint::mesh_uv(uv, *repeat);
+                levels.at(u, v)
             }
             TranspSource::Image { .. } => {
                 let Some(img) = &self.image else {

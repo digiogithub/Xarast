@@ -225,6 +225,7 @@ impl BlendFamily {
             TranspMode::Lighten => BlendFamily::Lighten,
             TranspMode::Brightness => BlendFamily::Brightness,
             TranspMode::Luminosity => BlendFamily::Luminosity,
+            TranspMode::Hue => BlendFamily::Hue,
         }
     }
 
@@ -270,6 +271,20 @@ pub enum TranspSource {
         repeat: Repeat,
         /// The 256- or 2048-entry transparency ramp, held by the caller.
         ramp: RampId,
+    },
+    /// A three- or four-colour transparency: `t` is interpolated between
+    /// corner levels per pixel, as [`GradRamp::Mesh3`] and
+    /// [`GradRamp::Mesh4`] interpolate colours.
+    ///
+    /// [`GradRamp::Mesh3`]: crate::paint::GradRamp::Mesh3
+    /// [`GradRamp::Mesh4`]: crate::paint::GradRamp::Mesh4
+    Mesh {
+        /// Where the mesh's unit square sits.
+        mapping: GradMapping,
+        /// Clamped ([`Repeat::Simple`]) or tiled.
+        repeat: Repeat,
+        /// The corner levels.
+        levels: crate::paint::MeshLevels,
     },
     /// A bitmap supplies `t` per pixel.
     Image {

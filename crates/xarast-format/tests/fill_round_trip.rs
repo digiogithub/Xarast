@@ -487,9 +487,9 @@ fn fills_svg_has_no_paint_for_are_baked_into_geometry() {
     save_to(&doc, &mut out, &deterministic()).unwrap();
     let svg = svg_of(&out.into_inner());
     // Per profile × effect: conical, diamond, three- and four-colour fills
-    // as patterns; per profile: conical and diamond transparencies as
-    // masks (mesh transparencies have no renderer counterpart yet and
-    // stay flat, as the renderer draws them).
+    // as patterns; per profile: conical, diamond, three- and four-colour
+    // transparencies as masks (the renderer evaluates mesh transparencies
+    // per pixel, XARA-T-0256).
     let patterns = svg.matches("<pattern").count();
     let baked_masks = svg
         .split("<mask")
@@ -497,7 +497,7 @@ fn fills_svg_has_no_paint_for_are_baked_into_geometry() {
         .filter(|m| m.split('>').next().unwrap().contains("fill-bake"))
         .count();
     assert_eq!(patterns, 3 * 3 * 4, "baked fill patterns");
-    assert_eq!(baked_masks, 3 * 2, "baked transparency masks");
+    assert_eq!(baked_masks, 3 * 4, "baked transparency masks");
     assert_eq!(
         svg.matches("xarast:generated=\"fill-bake\"").count(),
         patterns + baked_masks

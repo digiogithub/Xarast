@@ -1153,9 +1153,10 @@ pub const FILL_SHAPES: [&str; 8] = [
 ];
 
 /// The fill of one matrix shape, and the frame a graduated transparency
-/// uses with it: the fill's own for the scalar shapes, a diagonal linear
-/// one for the flat fill and the meshes, which have no scalar parameter to
-/// share (a mesh transparency is not evaluated per pixel; XARA-T-0256).
+/// uses with it: the fill's own for the scalar shapes and a diagonal
+/// linear one for the flat fill. A mesh's transparency is a mesh of its own
+/// on the fill's frame ([`matrix_mesh_transparency`]), so the shape
+/// returned for it is not used.
 fn matrix_fill(name: &str, ramp: crate::ramp::RampId) -> (Paint, GradShape, GradMapping) {
     let diagonal = GradMapping::Affine {
         a: dpt(12.0, 12.0),
@@ -1216,6 +1217,29 @@ fn matrix_fill(name: &str, ramp: crate::ramp::RampId) -> (Paint, GradShape, Grad
     }
 }
 
+/// The graduated transparency of a mesh cell: a mesh of the same kind on
+/// the fill's own square frame, from opaque at the origin to 224 (as the
+/// scalar cells' ramp), evaluated per pixel (XARA-T-0256).
+fn matrix_mesh_transparency(name: &str, family: BlendFamily) -> Option<Transparency> {
+    let levels = match name {
+        "mesh3" => crate::paint::MeshLevels::Three([0, 224, 112]),
+        "mesh4" => crate::paint::MeshLevels::Four([0, 224, 112, 176]),
+        _ => return None,
+    };
+    Some(Transparency {
+        family,
+        source: TranspSource::Mesh {
+            mapping: GradMapping::Affine {
+                a: dpt(8.0, 8.0),
+                b: dpt(8.0, 88.0),
+                c: dpt(88.0, 8.0),
+            },
+            repeat: Repeat::Simple,
+            levels,
+        },
+    })
+}
+
 /// The phase-8 golden matrix (T8.5.5): every fill shape × every exposed
 /// blend family × {flat, graduated} transparency, 8 × 10 × 2 = 160 scenes
 /// at [`FILL_BLEND_SIZE`].
@@ -1247,43 +1271,46 @@ pub fn fill_blend_cases() -> Vec<Case> {
                     RampLength::Long,
                 );
                 let (paint, t_shape, t_mapping) = matrix_fill(shape, colour);
-                let transparency = if graduated {
-                    // The transparency table lives at a ramp id of its own,
-                    // as the walker stores it.
-                    let slot = res.ramps.intern(
-                        &[Stop::new(0.0, Rgba8::BLACK), Stop::new(1.0, Rgba8::WHITE)],
-                        Profile::IDENTITY,
-                        EffectSpace::Rgb,
-                        RampLength::Long,
-                    );
-                    let i = slot.index() as usize;
-                    res.transparency_ramps.resize(i + 1, Vec::new());
-                    res.transparency_ramps[i] = build_transparency_ramp(
-                        &[
-                            TranspStop {
-                                offset: 0.0,
-                                level: 0,
+                let transparency =
+                    if let (true, Some(t)) = (graduated, matrix_mesh_transparency(shape, family)) {
+                        t
+                    } else if graduated {
+                        // The transparency table lives at a ramp id of its own,
+                        // as the walker stores it.
+                        let slot = res.ramps.intern(
+                            &[Stop::new(0.0, Rgba8::BLACK), Stop::new(1.0, Rgba8::WHITE)],
+                            Profile::IDENTITY,
+                            EffectSpace::Rgb,
+                            RampLength::Long,
+                        );
+                        let i = slot.index() as usize;
+                        res.transparency_ramps.resize(i + 1, Vec::new());
+                        res.transparency_ramps[i] = build_transparency_ramp(
+                            &[
+                                TranspStop {
+                                    offset: 0.0,
+                                    level: 0,
+                                },
+                                TranspStop {
+                                    offset: 1.0,
+                                    level: 224,
+                                },
+                            ],
+                            Profile::IDENTITY,
+                            RampLength::Long,
+                        );
+                        Transparency {
+                            family,
+                            source: TranspSource::Gradient {
+                                shape: t_shape,
+                                mapping: t_mapping,
+                                repeat: Repeat::Simple,
+                                ramp: slot,
                             },
-                            TranspStop {
-                                offset: 1.0,
-                                level: 224,
-                            },
-                        ],
-                        Profile::IDENTITY,
-                        RampLength::Long,
-                    );
-                    Transparency {
-                        family,
-                        source: TranspSource::Gradient {
-                            shape: t_shape,
-                            mapping: t_mapping,
-                            repeat: Repeat::Simple,
-                            ramp: slot,
-                        },
-                    }
-                } else {
-                    Transparency::flat(family, 128)
-                };
+                        }
+                    } else {
+                        Transparency::flat(family, 128)
+                    };
                 {
                     let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
                     backdrop(&mut b);

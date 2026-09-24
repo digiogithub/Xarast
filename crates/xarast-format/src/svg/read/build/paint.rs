@@ -73,6 +73,7 @@ fn mode_of(v: &str) -> Option<TranspMode> {
         "luminosity" => TranspMode::Luminosity,
         "contrast" => TranspMode::Contrast,
         "brightness" => TranspMode::Brightness,
+        "hue" => TranspMode::Hue,
         _ => return None,
     })
 }
@@ -1401,4 +1402,27 @@ fn push(out: &mut Vec<AttrValue>, v: AttrValue) {
     }
     out.retain(|x| x.slot().is_none() || x.slot() != v.slot());
     out.push(v);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_blend_mode_the_writer_names_reads_back() {
+        for m in [
+            TranspMode::StainedGlass,
+            TranspMode::Bleach,
+            TranspMode::Contrast,
+            TranspMode::Saturation,
+            TranspMode::Darken,
+            TranspMode::Lighten,
+            TranspMode::Brightness,
+            TranspMode::Luminosity,
+            TranspMode::Hue,
+        ] {
+            let (_, name) = crate::svg::paint::blend_of(m).expect("a blend mode");
+            assert_eq!(mode_of(name), Some(m), "{name}");
+        }
+    }
 }
