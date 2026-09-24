@@ -85,6 +85,7 @@ pub mod node_edit;
 pub mod ops;
 mod paint;
 pub mod pen;
+pub mod photo_panel;
 pub mod picking;
 pub mod place;
 pub mod prefs;

@@ -227,8 +227,9 @@ pub struct Session {
     decoded_images: crate::decoded::DecodedImages,
     /// The tools and the shared interaction machine.
     tools: ToolMachine,
-    /// What the tool in force wants drawn while its gesture is in flight.
-    preview: Preview,
+    /// What the tool in force wants drawn while its gesture is in flight
+    /// (and the photo panel's slider drag, [`Preview::photo`]).
+    pub(crate) preview: Preview,
     /// The pick index, rebuilt lazily after a change.
     picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
@@ -558,6 +559,19 @@ impl Session {
     #[must_use]
     pub const fn walk_stats(&self) -> WalkStats {
         self.walker.stats()
+    }
+
+    /// How the last walk drew the photo chain a slider drag previews
+    /// (the proxy level and size; [`crate::walker::PhotoProxyInfo`]).
+    #[must_use]
+    pub fn photo_proxies(&self) -> &[crate::walker::PhotoProxyInfo] {
+        self.walker.photo_proxies()
+    }
+
+    /// The photo panel's view of this session ([`crate::photo_panel`]).
+    #[must_use]
+    pub fn photo_panel_view(&self) -> crate::photo_panel::PhotoPanelView {
+        crate::photo_panel::view(self)
     }
 
     /// The view parameters the renderer needs for the current viewport.
@@ -1229,6 +1243,9 @@ impl Session {
                     changed |= self.canvas_input(CanvasInput::Modifiers(m))?.0;
                 }
             }
+            Intent::Cancel if !self.preview.photo.is_empty() => {
+                changed |= crate::photo_panel::settle(self);
+            }
             Intent::Cancel => {
                 let (c, mut consumed) = self.canvas_input(CanvasInput::Cancel)?;
                 changed |= c;
@@ -1387,6 +1404,7 @@ impl Session {
             }
             Intent::Undo => {
                 changed |= crate::colour_editor::settle(self);
+                changed |= crate::photo_panel::settle(self);
                 changed |= self.cancel_gesture();
                 if self.undo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
@@ -1394,6 +1412,7 @@ impl Session {
             }
             Intent::Redo => {
                 changed |= crate::colour_editor::settle(self);
+                changed |= crate::photo_panel::settle(self);
                 changed |= self.cancel_gesture();
                 if self.redo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
@@ -1410,6 +1429,9 @@ impl Session {
             }
             Intent::ColourEditor(op) => {
                 changed |= crate::colour_editor::run(self, op)?;
+            }
+            Intent::PhotoPanel(op) => {
+                changed |= crate::photo_panel::run(self, op)?;
             }
             Intent::BitmapGallery(op) => {
                 changed |= crate::bitmap_gallery::run(self, op)?;
