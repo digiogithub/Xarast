@@ -19,7 +19,6 @@ use fontique::{
     QueryStatus, SourceCache, SourceKind,
 };
 use skrifa::MetadataProvider;
-use skrifa::raw::TableProvider;
 use skrifa::string::StringId;
 
 use crate::style::{FontQuery, FontStyle};
@@ -421,15 +420,7 @@ impl FontDb {
     /// table cannot be read is treated as installable, the OpenType default.
     #[must_use]
     pub fn embedding_denied(&self, id: FaceId) -> bool {
-        let Some(data) = self.face_data(id) else {
-            return false;
-        };
-        let Some(font) = data.font_ref() else {
-            return false;
-        };
-        let Ok(os2) = font.os2() else { return false };
-        let fs = os2.fs_type();
-        fs & 0x000F == 0x0002 || fs & 0x0200 != 0
+        !self.embed_rights(id).level.allowed()
     }
 
     /// Every substitution made so far, in the order first made.

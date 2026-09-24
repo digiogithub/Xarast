@@ -194,6 +194,16 @@ unicode-bidi = "0.3.18"
 # same versions `parley` already links. `Unicode-3.0`.
 icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_properties = { version = "2.3", default-features = false, features = ["compiled_data"] }
+# Font embedding (`xarast-text::embed`: WOFF2 in `.xarast`/SVG, subset fonts
+# in PDF). `subsetter` (Typst) subsets TrueType and CFF faces; pure Rust,
+# `MIT OR Apache-2.0`, one dependency (`rustc-hash`, already in the graph).
+# Default features off: `variable-fonts` would pull a second `skrifa`
+# (0.42) and `write-fonts`; a variable face is embedded at its default
+# instance or not at all (`docs/memory/text.md`, "Font embedding").
+subsetter = { version = "0.2.6", default-features = false }
+# The Brotli stream inside WOFF2 (our own encoder, `embed/woff2.rs`). Pure
+# Rust, `BSD-3-Clause AND MIT` (both allowed), deterministic single-threaded.
+brotli = { version = "9", default-features = false, features = ["std"] }
 
 # ── User interface ───────────────────────────────────────────────────────────
 # `egui` used as a *library*, never through `eframe` (`research/05 §2.4`): the
