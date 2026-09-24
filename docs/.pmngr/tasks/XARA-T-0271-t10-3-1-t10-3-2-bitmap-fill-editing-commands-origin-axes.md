@@ -2,14 +2,15 @@
 id: XARA-T-0271
 type: task
 title: T10.3.1/T10.3.2 — Bitmap fill editing commands (origin, axes, tiling, DPI) and fill handles
-status: in_review
+status: done
 priority: medium
 parent: XARA-US-0052
 author: mcp
 labels: [phase-10, bitmap, app-core, tools]
 created: 2026-09-24T07:56:41Z
-updated: 2026-09-24T10:19:29Z
+updated: 2026-09-24T10:39:00Z
 started: 2026-09-24T09:33:22Z
+closed: 2026-09-24T10:39:00Z
 ---
 
 ## Description

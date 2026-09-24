@@ -2,14 +2,15 @@
 id: XARA-T-0272
 type: task
 title: T10.3.6/T10.3.8 — NodeBitmap default attributes and drag/paste-to-place at natural size
-status: in_review
+status: done
 priority: low
 parent: XARA-US-0052
 author: mcp
 labels: [phase-10, bitmap, app-core]
 created: 2026-09-24T07:56:41Z
-updated: 2026-09-24T10:19:29Z
+updated: 2026-09-24T10:39:00Z
 started: 2026-09-24T09:33:22Z
+closed: 2026-09-24T10:39:00Z
 ---
 
 ## Description

@@ -2,13 +2,14 @@
 id: XARA-T-0278
 type: task
 title: T10.5.2 Resident screen-resolution proxy per resource (pyramid off the render thread)
-status: in_review
+status: done
 parent: XARA-US-0053
 author: mcp
 labels: [phase-10, image, perf]
 created: 2026-09-24T09:36:59Z
-updated: 2026-09-24T10:11:54Z
+updated: 2026-09-24T10:39:00Z
 started: 2026-09-24T09:36:59Z
+closed: 2026-09-24T10:39:00Z
 ---
 
 ## Description
