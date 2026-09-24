@@ -228,6 +228,7 @@ each with a limit and a reason in `export-limits-corpus.txt`:
 | Bake ladder: conical/diamond/multi-colour fills | Fill Types simple (~~svg 19.7~~ 1.9 since XARA-US-0043, pdf 7.2), WATCH2 ~~svg 16.5~~ 0.7, WATCH (~~svg 5.1~~ 2.4, pdf 4.8) — SVG now bakes them into geometry (`xarast-format` `svg/bake.rs`, `xarast-format.md`) |
 | Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
 | Feathering as a blur | SoftShadow svg 4.1 |
+| Text on a path written straight in SVG (T9.5.6, XARA-T-0252 open) | TextCurve svg 16.3 (pdf 1.55 follows the path) — appeared when XARA-US-0048 made the PNG follow the path; drop the limit once the base SVG writes `<textPath>` |
 | Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) |
 
 Small text: Poppler and Ghostscript both paint thin glyph features darker
