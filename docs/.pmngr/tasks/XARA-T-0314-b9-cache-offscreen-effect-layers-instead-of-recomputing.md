@@ -2,13 +2,14 @@
 id: XARA-T-0314
 type: task
 title: B9 — Cache offscreen effect layers instead of recomputing them every frame
-status: backlog
+status: in_review
 priority: medium
 parent: XARA-US-0068
 author: mcp
 labels: [phase-13, live-effects, render, perf]
 created: 2026-09-24T18:06:47Z
-updated: 2026-09-24T18:06:47Z
+updated: 2026-09-24T20:11:17Z
+started: 2026-09-24T19:27:15Z
 ---
 
 ## Description

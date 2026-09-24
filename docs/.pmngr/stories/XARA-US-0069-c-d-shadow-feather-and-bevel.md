@@ -2,12 +2,13 @@
 id: XARA-US-0069
 type: story
 title: C/D — Shadow, feather and bevel
-status: backlog
+status: in_progress
 parent: XARA-EP-0014
 author: mcp
 labels: [phase-13, live-effects]
 created: 2026-09-23T09:43:25Z
-updated: 2026-09-23T09:43:25Z
+updated: 2026-09-24T19:33:21Z
+started: 2026-09-24T19:33:21Z
 ---
 
 ## Tasks (full tables: phase-13 §C, §D)
