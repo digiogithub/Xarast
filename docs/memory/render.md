@@ -51,7 +51,8 @@ Memory note for the **render engine** (`crates/xarast-render`), Phase 4.
   into the device rectangles an edit changed (XARA-T-0221, "Edit damage"),
   and any rectangle drawn over a frame is exactly that frame's pixels.
 - **Validation:** a 130-scene generated feature corpus with committed goldens,
-  exact CPU goldens, determinism over 20 runs, the gradient matrix, the blend
+  the 160-scene fill shape × blend family × {flat, graduated} matrix
+  (XARA-T-0222), exact CPU goldens, determinism over 20 runs, the gradient matrix, the blend
   domain, the precision rule (measured *and* grepped), AA level counts and a
   supersampled comparison, and `criterion` benches per budget row.
 
@@ -1156,6 +1157,50 @@ Note for `cargo test -p xarast-render`: the two parity files are
 `#![cfg(feature = "gpu")]`; alone, pass `--features gpu` (in a workspace
 run the shell's dependency turns it on).
 
+### The fill × blend golden matrix (XARA-T-0222, T8.5.5, 2026-09-24)
+
+`corpus::fill_blend_cases()` is the phase-8 gate "one PNG per shape ×
+{flat, graduated} × 10 blend modes": **160 scenes**, compared exactly
+(gate A) by `tests/golden_fill_blend.rs` against
+`tests/golden/fill_blend/<shape>_<family>_<flat|graduated>.png`.
+Regenerate with `XARAST_UPDATE_GOLDEN=1 cargo test -p xarast-render
+--test golden_fill_blend`.
+
+- **Axes.** `FILL_SHAPES` are the eight editable `FILLSHAPE_*` shapes:
+  flat, linear, circular, elliptical (a `Radial` with unequal axes),
+  conical, diamond, mesh3, mesh4. `EXPOSED_FAMILIES` are the ten the
+  transparency tool offers; `Bevel` and `None` are renderer-internal and
+  are not in the matrix. "Flat" is `Transparency::flat(family, 128)`;
+  "graduated" is a transparency ramp from 0 to 224 (identity profile,
+  2048 entries), `Repeat::Simple`.
+- **The graduated transparency uses the fill's own shape and frame** for
+  the five scalar shapes, so the transparency sampler is tested per shape.
+  For flat and the two meshes it uses a diagonal linear frame: flat has no
+  frame, and a mesh-shaped `TranspSource::Gradient` evaluates to level 0
+  everywhere (`grad_param` returns `None` for meshes), which a golden
+  would silently lock in. The walker instead draws a mesh transparency as
+  the flat mean of its levels; per-pixel mesh transparency is
+  XARA-T-0256, whose goldens belong to that task.
+- **Mesh repeat is not exercised** (every cell is `Repeat::Simple`), so
+  XARA-T-0256's "mesh ignores repeat" does not show here; the matrix
+  neither exposes nor hides it.
+- **Separate from `all_cases`** on purpose: export, PDF, determinism and
+  parity iterate the corpus, and 160 more scenes would multiply their cost
+  for no new coverage of their own concerns. 48 × 48, drawn at half a
+  pixel per point from the corpus's own geometry (backdrop bands + star):
+  ≈ 1.1 KiB a PNG, 183 KB for the lot; the test runs in 0.3 s.
+- **Acceptance 14 per cell.** `every_exposed_family_draws_differently_…`
+  asserts that, for every shape and variant, the ten families give ten
+  different images (all 45 pairs). A family that fell back to another
+  would pass once blessed; it cannot pass this.
+- **These are regression locks, not correctness claims.** The exotic
+  families are re-blessed when TODO 3 corrects them against the extracted
+  tables (phase-08 risk table). Visually: Hue at 128 renders strongly
+  saturated source hues; Contrast and Saturation are faint over the flat
+  fill. None of that is judged here.
+- No GPU parity: the GPU backend's compositing pass is deferred (TODO 2),
+  so there is nothing on the GPU to compare the families with.
+
 ---
 
 ## Invariants that must not be broken
@@ -1347,7 +1392,7 @@ run the shell's dependency turns it on).
 | 13 | Gradient-heavy export: ≈ 30 ns per composited pixel, and only three 1 MiB bands on a 766 px image. The three `*GradFilledShapes*` files take 2.2–4.5 s | XARA-T-0038 |
 | 14 | `SimpleSphere.xar` is still black. The renderer is right; the walker fills an unfilled 12 pt frame opaque black over the whole drawing. The gradient repeat default is also suspect | XARA-T-0037 (app/doc) |
 | 17 | ~~Dirty region for a fill edit (T8.5.4)~~. **Done 2026-09-24**, for every edit: the render thread diffs scenes (`scene_damage`) and repaints only the damage; see "Edit damage" | done (XARA-T-0221) |
-| 18 | Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5) | XARA-T-0222 |
+| 18 | ~~Golden images: every fill shape × every exposed blend mode × {flat, graduated} (T8.5.5)~~. **Done 2026-09-24**: 160 exact goldens; see "The fill × blend golden matrix" | done (XARA-T-0222) |
 | 19 | Document/per-bitmap smoothing flag → `Filter` (T10.4.4's remaining half) | XARA-T-0273 |
 | 20 | Bitmap-fill tile seams in resvg on exported SVG (the renderer has none) | XARA-T-0274 |
 | 21 | Mesh fills ignore `Repeat` (did not fall out of the image work: meshes do not go through the image sampler) | XARA-T-0256 |

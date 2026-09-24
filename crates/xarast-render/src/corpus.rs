@@ -1117,6 +1117,202 @@ fn structure_cases() -> Vec<Case> {
     out
 }
 
+/// The edge length of every fill × blend matrix scene, in pixels.
+///
+/// Half of [`CASE_SIZE`]: the matrix is 160 images, and at 48 × 48 it costs
+/// about what 40 corpus goldens do. The geometry is the corpus's own, drawn
+/// at half a pixel per point.
+pub const FILL_BLEND_SIZE: u32 = 48;
+
+/// The ten blend families the transparency tool offers
+/// (`phases/phase-08` "Blend modes exposed in the UI"). `Bevel` and `None`
+/// exist only for the renderer's own use.
+pub const EXPOSED_FAMILIES: [BlendFamily; 10] = [
+    BlendFamily::Mix,
+    BlendFamily::StainedGlass,
+    BlendFamily::Bleach,
+    BlendFamily::Contrast,
+    BlendFamily::Saturation,
+    BlendFamily::Darken,
+    BlendFamily::Lighten,
+    BlendFamily::Brightness,
+    BlendFamily::Luminosity,
+    BlendFamily::Hue,
+];
+
+/// The eight editable fill shapes of phase 8, in `FILLSHAPE_*` order.
+pub const FILL_SHAPES: [&str; 8] = [
+    "flat",
+    "linear",
+    "circular",
+    "elliptical",
+    "conical",
+    "diamond",
+    "mesh3",
+    "mesh4",
+];
+
+/// The fill of one matrix shape, and the frame a graduated transparency
+/// uses with it: the fill's own for the scalar shapes, a diagonal linear
+/// one for the flat fill and the meshes, which have no scalar parameter to
+/// share (a mesh transparency is not evaluated per pixel; XARA-T-0256).
+fn matrix_fill(name: &str, ramp: crate::ramp::RampId) -> (Paint, GradShape, GradMapping) {
+    let diagonal = GradMapping::Affine {
+        a: dpt(12.0, 12.0),
+        b: dpt(-24.0, 48.0),
+        c: dpt(84.0, 84.0),
+    };
+    let square = GradMapping::Affine {
+        a: dpt(8.0, 8.0),
+        b: dpt(8.0, 88.0),
+        c: dpt(88.0, 8.0),
+    };
+    let gradient = |shape, mapping| Paint::Gradient {
+        shape,
+        mapping,
+        repeat: Repeat::Simple,
+        ramp: GradRamp::Table(ramp),
+    };
+    let scalar = |shape, mapping| (gradient(shape, mapping), shape, mapping);
+    match name {
+        "linear" => scalar(GradShape::Linear, diagonal),
+        "circular" => scalar(GradShape::Radial, affine_mapping()),
+        "elliptical" => scalar(
+            GradShape::Radial,
+            GradMapping::Affine {
+                a: dpt(48.0, 48.0),
+                b: dpt(48.0, 68.0),
+                c: dpt(88.0, 48.0),
+            },
+        ),
+        "conical" => scalar(GradShape::Conical, affine_mapping()),
+        "diamond" => scalar(GradShape::Diamond, affine_mapping()),
+        "mesh3" => (
+            Paint::Gradient {
+                shape: GradShape::Mesh3,
+                mapping: square,
+                repeat: Repeat::Simple,
+                ramp: GradRamp::Mesh3([rgb(250, 240, 20), rgb(230, 30, 120), rgb(20, 60, 200)]),
+            },
+            GradShape::Linear,
+            diagonal,
+        ),
+        "mesh4" => (
+            Paint::Gradient {
+                shape: GradShape::Mesh4,
+                mapping: square,
+                repeat: Repeat::Simple,
+                ramp: GradRamp::Mesh4([
+                    rgb(250, 240, 20),
+                    rgb(230, 30, 120),
+                    rgb(20, 60, 200),
+                    rgb(20, 200, 120),
+                ]),
+            },
+            GradShape::Linear,
+            diagonal,
+        ),
+        _ => (Paint::Solid(rgb(200, 190, 60)), GradShape::Linear, diagonal),
+    }
+}
+
+/// The phase-8 golden matrix (T8.5.5): every fill shape × every exposed
+/// blend family × {flat, graduated} transparency, 8 × 10 × 2 = 160 scenes
+/// at [`FILL_BLEND_SIZE`].
+///
+/// Each scene is the corpus backdrop (three saturated bands, so every
+/// destination-reading family has chroma to read) under the star, filled
+/// with the shape and carrying either a flat transparency of 128 or a
+/// graduated one from opaque to 224 along the shape's own frame.
+///
+/// These are regression locks, not a statement that the exotic families
+/// are right: the phase document says they are re-blessed when a family is
+/// corrected against the extracted tables (render TODO 3).
+#[must_use]
+pub fn fill_blend_cases() -> Vec<Case> {
+    let mut out = Vec::new();
+    for shape in FILL_SHAPES {
+        for graduated in [false, true] {
+            for family in EXPOSED_FAMILIES {
+                let mut scene = Scene::new();
+                let mut res = Resolver::new();
+                let colour = res.ramps.intern(
+                    &[
+                        Stop::new(0.0, rgb(250, 240, 20)),
+                        Stop::new(0.45, rgb(230, 30, 120)),
+                        Stop::new(1.0, rgb(20, 60, 200)),
+                    ],
+                    Profile::new(0.2, -0.3),
+                    EffectSpace::Rgb,
+                    RampLength::Long,
+                );
+                let (paint, t_shape, t_mapping) = matrix_fill(shape, colour);
+                let transparency = if graduated {
+                    // The transparency table lives at a ramp id of its own,
+                    // as the walker stores it.
+                    let slot = res.ramps.intern(
+                        &[Stop::new(0.0, Rgba8::BLACK), Stop::new(1.0, Rgba8::WHITE)],
+                        Profile::IDENTITY,
+                        EffectSpace::Rgb,
+                        RampLength::Long,
+                    );
+                    let i = slot.index() as usize;
+                    res.transparency_ramps.resize(i + 1, Vec::new());
+                    res.transparency_ramps[i] = build_transparency_ramp(
+                        &[
+                            TranspStop {
+                                offset: 0.0,
+                                level: 0,
+                            },
+                            TranspStop {
+                                offset: 1.0,
+                                level: 224,
+                            },
+                        ],
+                        Profile::IDENTITY,
+                        RampLength::Long,
+                    );
+                    Transparency {
+                        family,
+                        source: TranspSource::Gradient {
+                            shape: t_shape,
+                            mapping: t_mapping,
+                            repeat: Repeat::Simple,
+                            ramp: slot,
+                        },
+                    }
+                } else {
+                    Transparency::flat(family, 128)
+                };
+                {
+                    let mut b = SceneBuilder::begin(&mut scene, RenderQuality::Final);
+                    backdrop(&mut b);
+                    b.push_transparency(transparency);
+                    b.fill(SceneNodeId(10), &star_path(), FillRule::NonZero, paint);
+                    b.pop_transparency();
+                    b.finish().expect("balanced");
+                }
+                out.push(Case {
+                    name: format!(
+                        "{shape}_{}_{}",
+                        family_name(family),
+                        if graduated { "graduated" } else { "flat" }
+                    ),
+                    scene,
+                    resolver: res,
+                    view: ViewParams::new(
+                        FILL_BLEND_SIZE,
+                        FILL_BLEND_SIZE,
+                        Transform2D::scale(0.5 / f64::from(Mp::PER_PT)),
+                        RenderQuality::Final,
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// Every case in the feature corpus.
 ///
 /// At least 120, which is the phase's gate; the exact count is asserted by
@@ -1189,6 +1385,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_fill_blend_matrix_is_complete_and_named_safely() {
+        let cases = fill_blend_cases();
+        assert_eq!(cases.len(), 8 * 10 * 2, "the phase-8 gate is 160 images");
+        let mut seen = HashSet::new();
+        for shape in FILL_SHAPES {
+            for family in EXPOSED_FAMILIES {
+                for variant in ["flat", "graduated"] {
+                    let name = format!("{shape}_{}_{variant}", family_name(family));
+                    assert!(
+                        cases.iter().any(|c| c.name == name),
+                        "missing matrix cell {name}"
+                    );
+                }
+            }
+        }
+        for c in &cases {
+            assert!(seen.insert(c.name.clone()), "duplicate case {}", c.name);
+            assert!(
+                c.name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_'),
+                "case name {} is not filename safe",
+                c.name
+            );
+        }
+        assert!(!EXPOSED_FAMILIES.contains(&BlendFamily::Bevel));
+        assert!(!EXPOSED_FAMILIES.contains(&BlendFamily::None));
     }
 
     #[test]
