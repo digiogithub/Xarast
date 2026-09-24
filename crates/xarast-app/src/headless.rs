@@ -7,6 +7,7 @@
 //! enough to run in CI on a machine with no `/dev/dri` at all.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use xarast_color::Rgba8;
 use xarast_render::{
@@ -136,6 +137,35 @@ pub fn render_with_fonts(
     opts: &HeadlessOptions,
     fonts: Option<std::sync::Arc<crate::fonts::FontService>>,
 ) -> Result<HeadlessResult, HeadlessError> {
+    let view = framed_view(session, opts, fonts.as_deref());
+    let walker = match &fonts {
+        Some(f) => crate::walker::SceneWalker::with_fonts(Arc::clone(f)),
+        None => crate::walker::SceneWalker::new(),
+    };
+    render_framed(session, opts, &view, walker)
+}
+
+/// [`render`] with a walker the caller set up: tests pass one that
+/// registers bitmaps under a pixel budget of their own
+/// ([`SceneWalker::with_pixel_budget`](crate::walker::SceneWalker::with_pixel_budget)).
+///
+/// # Errors
+///
+/// As [`render`].
+pub fn render_with_walker(
+    session: &Session,
+    opts: &HeadlessOptions,
+    walker: crate::walker::SceneWalker,
+) -> Result<HeadlessResult, HeadlessError> {
+    let view = framed_view(session, opts, None);
+    render_framed(session, opts, &view, walker)
+}
+
+fn framed_view(
+    session: &Session,
+    opts: &HeadlessOptions,
+    fonts: Option<&crate::fonts::FontService>,
+) -> crate::viewport::Viewport {
     let mut view = session.viewport.clone();
     if let Some(dpi) = opts.dpi {
         view.set_dpi(dpi);
@@ -146,7 +176,7 @@ pub fn render_with_fonts(
         HeadlessFrame::FitDrawing => {
             view.fit_rect(crate::viewport::drawing_or_page_rect_with(
                 &session.doc,
-                fonts.as_deref(),
+                fonts,
             ));
         }
         HeadlessFrame::Fit(r) => view.fit_rect(r),
@@ -157,18 +187,22 @@ pub fn render_with_fonts(
             }
         }
     }
+    view
+}
 
-    let mut walker = match fonts {
-        Some(f) => crate::walker::SceneWalker::with_fonts(f),
-        None => crate::walker::SceneWalker::new(),
-    };
+fn render_framed(
+    session: &Session,
+    opts: &HeadlessOptions,
+    view: &crate::viewport::Viewport,
+    mut walker: crate::walker::SceneWalker,
+) -> Result<HeadlessResult, HeadlessError> {
     let mut scene = xarast_render::Scene::new();
     // The live preview too: a render mid-gesture shows what the window
     // shows. With no gesture in flight it is empty and changes nothing.
     let scene_stats = walker.rebuild_previewed(
         &session.doc,
         &session.edit,
-        &view,
+        view,
         opts.quality,
         None,
         session.preview(),
