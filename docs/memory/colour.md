@@ -341,6 +341,12 @@ Plain round-to-nearest would get **545** of them wrong.
    unchanged.
 8. A cancelled colour-editor drag leaves the document, the undo list, the
    redo list and the state serial exactly as they were before it.
+   The panel must *send* that `Cancel`: egui 0.33 ends a drag by itself
+   on `Esc` and reports it as a release in the same frame, so every value
+   widget of the editor (numbers, tint/shade sliders, 2D field, strip)
+   checks `Esc` on its release frame (XARA-T-0305; before the fix they
+   all sent `Commit`, and decision 24's held redo branch was released).
+   Pinned by `crates/xarast-ui/tests/colour_editor.rs`.
 9. A colour drag (bar or gallery) changes nothing before its drop; a drop
    is at most one undo step; a cancelled drag or a drop on nothing leaves
    digest and history untouched.
