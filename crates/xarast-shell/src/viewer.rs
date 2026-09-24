@@ -428,20 +428,51 @@ impl Viewer {
                 PlatformRequest::ReadClipboard { in_place } => {
                     let read = ctx.clipboard().text();
                     let ours = self.app.clipboard().map(|c| c.svg.as_str());
+                    let is_ours = read.as_ref().ok().map(String::as_str) == ours;
                     tracing::info!(
                         read = ?read.as_ref().map(String::len),
-                        ours = read.as_ref().ok().map(String::as_str) == ours,
+                        ours = is_ours,
                         "clipboard read for a paste"
                     );
-                    let text = match read {
-                        Ok(t) => Some(t),
-                        // No clipboard at all: paste our own last copy.
-                        Err(crate::clipboard::ClipboardError::Unavailable(_)) => None,
-                        // Something that is not text (an image): nothing
-                        // Xarast can paste yet.
-                        Err(_) => Some(String::new()),
+                    // A picture is pasted as a bitmap (phase 10, T10.3.8)
+                    // when the text is not something Xarast pastes itself:
+                    // not our copy, not SVG, and no text caret is up.
+                    let text_editing = self.app.active().is_some_and(Session::text_editing);
+                    let wants_image = !text_editing
+                        && match &read {
+                            Ok(t) => !is_ours && !looks_like_svg(t),
+                            Err(crate::clipboard::ClipboardError::Unavailable(_)) => false,
+                            Err(_) => true,
+                        };
+                    let image = if wants_image {
+                        ctx.clipboard().image().ok()
+                    } else {
+                        None
                     };
-                    self.apply(vec![Intent::PasteText { text, in_place }]);
+                    let intent = match (image, read) {
+                        (Some(img), _) => Intent::PasteImage {
+                            width: u32::try_from(img.width).unwrap_or(0),
+                            height: u32::try_from(img.height).unwrap_or(0),
+                            rgba: std::sync::Arc::from(img.rgba),
+                        },
+                        (None, Ok(t)) => Intent::PasteText {
+                            text: Some(t),
+                            in_place,
+                        },
+                        // No clipboard at all: paste our own last copy.
+                        (None, Err(crate::clipboard::ClipboardError::Unavailable(_))) => {
+                            Intent::PasteText {
+                                text: None,
+                                in_place,
+                            }
+                        }
+                        // Neither text nor a picture.
+                        (None, Err(_)) => Intent::PasteText {
+                            text: Some(String::new()),
+                            in_place,
+                        },
+                    };
+                    self.apply(vec![intent]);
                 }
                 PlatformRequest::ShowDialog(xarast_app::Dialog::Align) => {
                     self.workspace.menu().set_align_open(true);
@@ -1140,6 +1171,13 @@ fn zoom_target(t: xarast_ui::model::ZoomTarget) -> xarast_app::ZoomTarget {
     }
 }
 
+/// Whether clipboard text is an SVG document, which Xarast pastes as
+/// objects rather than looking for a picture beside it.
+fn looks_like_svg(t: &str) -> bool {
+    let t = t.trim_start();
+    t.starts_with("<svg") || (t.starts_with("<?xml") && t.contains("<svg"))
+}
+
 impl Viewer {
     /// Routes one platform event: files and the colour scheme to the
     /// viewer, view keys and everything the adapter understands to the
@@ -1151,8 +1189,27 @@ impl Viewer {
     pub fn handle(&mut self, event: &ShellEvent) -> bool {
         let mut redraw = false;
         match event {
-            ShellEvent::Drag(DragEvent::Dropped { paths, .. }) => {
-                self.to_open.extend(paths.iter().cloned());
+            ShellEvent::Drag(DragEvent::Dropped { paths, at }) => {
+                // Images dropped on an open document are placed in it, at
+                // the drop point (phase 10, T10.3.8); everything else is
+                // opened as a document.
+                let (images, docs): (Vec<PathBuf>, Vec<PathBuf>) =
+                    paths.iter().cloned().partition(|p| {
+                        self.app.active().is_some() && xarast_app::place::is_image_path(p)
+                    });
+                self.to_open.extend(docs);
+                if !images.is_empty() {
+                    let canvas = self.adapter.canvas();
+                    let at = at
+                        .map(|p| PhysicalPos::new(f64::from(p.x), f64::from(p.y)))
+                        .filter(|p| canvas.contains(*p))
+                        .map(|p| canvas.to_canvas(p));
+                    let intents = images
+                        .into_iter()
+                        .map(|path| Intent::ImportImage { path, at })
+                        .collect();
+                    self.apply(intents);
+                }
                 redraw = true;
             }
             ShellEvent::AccessibilityActivated => {
@@ -3142,6 +3199,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct FakeClipboard {
         text: Option<String>,
+        image: Option<crate::clipboard::ClipboardImage>,
     }
 
     impl crate::clipboard::Clipboard for FakeClipboard {
@@ -3159,7 +3217,9 @@ mod tests {
         fn image(
             &mut self,
         ) -> Result<crate::clipboard::ClipboardImage, crate::clipboard::ClipboardError> {
-            Err(crate::clipboard::ClipboardError::Empty("image"))
+            self.image
+                .clone()
+                .ok_or(crate::clipboard::ClipboardError::Empty("image"))
         }
 
         fn set_image(
@@ -3585,5 +3645,156 @@ mod tests {
         assert_eq!(entries.len(), 1, "one autosave kept for recovery");
         assert!(entries[0].path().join("snapshot.xarast").is_file());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // ---- Placing bitmaps by drop and paste (XARA-T-0272) ---------------
+
+    /// The bitmap objects of the active document, in tree order.
+    fn bitmaps(v: &Viewer) -> Vec<xarast_doc::BitmapNode> {
+        let s = v.app.active().unwrap();
+        s.doc
+            .tree
+            .preorder(s.doc.tree.root())
+            .filter_map(|n| match s.doc.tree.kind(n) {
+                Some(xarast_doc::NodeKind::Bitmap(b)) => Some((**b).clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn bitmap_centre(b: &xarast_doc::BitmapNode) -> (f64, f64) {
+        let far = b.origin + b.major + b.minor;
+        let (a, c) = (b.origin.to_f64(), far.to_f64());
+        ((a.0 + c.0) / 2.0, (a.1 + c.1) / 2.0)
+    }
+
+    /// A PNG of `w × h` pixels on disk, in a directory of its own.
+    fn png_file(tag: &str, w: u32, h: u32) -> (PathBuf, PathBuf) {
+        let rgba = [0u8, 128, 255, 255].repeat((w * h) as usize);
+        let img = xarast_app::place::image_from_rgba(w, h, &rgba).unwrap();
+        let dir = std::env::temp_dir().join(format!("xarast-t0272-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dropped.png");
+        std::fs::write(&path, &*img.resource.original.as_ref().unwrap().bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn an_image_dropped_on_the_canvas_is_placed_at_the_drop_point() {
+        let (mut v, _) = viewer_with_square();
+        let (dir, png) = png_file("drop", 96, 48);
+        let history = v.app.active().unwrap().bus.history().len();
+        let (x, y) = window_at(&v, 300_000, 450_000);
+        #[allow(clippy::cast_possible_truncation)]
+        let at = crate::input::event::PhysicalPos2::new(x.round() as i32, y.round() as i32);
+        let dropped = ShellEvent::Drag(DragEvent::Dropped {
+            paths: vec![png.clone(), PathBuf::from("/nonexistent/other.xar")],
+            at: Some(at),
+        });
+        assert!(v.handle(&dropped));
+        // The image is placed, the document is queued to open as before.
+        assert_eq!(v.to_open, vec![PathBuf::from("/nonexistent/other.xar")]);
+        let s = v.app.active().unwrap();
+        assert_eq!(s.bus.history().len(), history + 1);
+        assert_eq!(s.undo_label(), Some("Import Bitmap"));
+        let b = bitmaps(&v);
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].major.dx, xarast_geom::Mp::new(72_000));
+        let c = bitmap_centre(&b[0]);
+        // One device pixel at the zoom in force.
+        let px = 1.0 / v.app.active().unwrap().viewport.zoom() * 750.0 + 1.0;
+        assert!(
+            (c.0 - 300_000.0).abs() <= px && (c.1 - 450_000.0).abs() <= px,
+            "{c:?} within {px}"
+        );
+        // Dropped outside the canvas: centred in the view instead.
+        let outside = ShellEvent::Drag(DragEvent::Dropped {
+            paths: vec![png],
+            at: Some(crate::input::event::PhysicalPos2::new(1, 1)),
+        });
+        v.handle(&outside);
+        let b = bitmaps(&v);
+        assert_eq!(b.len(), 2);
+        let view = v
+            .app
+            .active()
+            .unwrap()
+            .viewport
+            .visible_doc_rect()
+            .centre()
+            .to_f64();
+        let c = bitmap_centre(&b[1]);
+        assert!((c.0 - view.0).abs() <= 1.0 && (c.1 - view.1).abs() <= 1.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_dropped_file_that_is_not_an_image_leaves_the_document_alone() {
+        let (mut v, _) = viewer_with_square();
+        let dir = std::env::temp_dir().join(format!("xarast-t0272-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake.png");
+        std::fs::write(&fake, b"GIF? no").unwrap();
+        let digest = v.app.active().unwrap().doc.canonical_digest();
+        v.handle(&ShellEvent::Drag(DragEvent::Dropped {
+            paths: vec![fake],
+            at: None,
+        }));
+        assert_eq!(v.app.active().unwrap().doc.canonical_digest(), digest);
+        assert!(
+            v.message
+                .as_deref()
+                .is_some_and(|m| m.contains("Could not place")),
+            "{:?}",
+            v.message
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ctrl_v_pastes_a_picture_from_the_clipboard_as_one_step() {
+        let (mut v, _) = viewer_with_square();
+        let mut clipboard = FakeClipboard {
+            text: None,
+            image: crate::clipboard::ClipboardImage::new(4, 2, [255u8, 0, 0, 255].repeat(8)),
+        };
+        let history = v.app.active().unwrap().bus.history().len();
+        press(&mut v, Key::char('v'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        let s = v.app.active().unwrap();
+        assert_eq!(s.bus.history().len(), history + 1);
+        assert_eq!(s.undo_label(), Some("Paste"));
+        let b = bitmaps(&v);
+        assert_eq!(b.len(), 1);
+        // 4 × 2 px at 96 dpi: 3 × 1.5 pt.
+        assert_eq!(b[0].major.dx, xarast_geom::Mp::new(3_000));
+        assert_eq!(b[0].minor.dy, xarast_geom::Mp::new(-1_500));
+        let digest_after = v.app.active().unwrap().doc.canonical_digest();
+        press(&mut v, Key::char('z'), Modifiers::NONE.with_ctrl());
+        assert!(bitmaps(&v).is_empty(), "one undo removes it");
+        press(
+            &mut v,
+            Key::char('z'),
+            Modifiers::NONE.with_ctrl().with_shift(),
+        );
+        assert_eq!(v.app.active().unwrap().doc.canonical_digest(), digest_after);
+    }
+
+    #[test]
+    fn our_own_copy_wins_over_a_picture_on_the_clipboard() {
+        let (mut v, _) = viewer_with_square();
+        let mut clipboard = FakeClipboard::default();
+        press(&mut v, Key::char('a'), Modifiers::NONE.with_ctrl());
+        press(&mut v, Key::char('c'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert!(clipboard.text.is_some());
+        clipboard.image = crate::clipboard::ClipboardImage::new(1, 1, vec![0, 0, 0, 255]);
+        press(&mut v, Key::char('v'), Modifiers::NONE.with_ctrl());
+        with_clipboard(&mut clipboard, |ctx| v.perform_requests(ctx));
+        assert!(
+            bitmaps(&v).is_empty(),
+            "the objects were pasted, not the picture"
+        );
+        assert_eq!(v.app.active().unwrap().undo_label(), Some("Paste"));
     }
 }
