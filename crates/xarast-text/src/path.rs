@@ -34,6 +34,10 @@ use crate::style::StoryMode;
 /// Accuracy of arc-length inversion, in millipoints.
 const ARCLEN_ACCURACY: f64 = 0.01;
 
+/// The largest character shear (its tangent) a [plain](PathFit::is_plain)
+/// fit may have: half a point over a 100 pt glyph.
+pub const PLAIN_SHEAR: f64 = 0.005;
+
 /// A path parameterised by arc length.
 #[derive(Clone, Debug)]
 pub struct TextPath {
@@ -250,6 +254,16 @@ impl PathFit {
         let place = Affine::translate((at.x - half + offset.x, at.y + offset.y));
         place * turn * pre * local
     }
+
+    /// Whether every [`PathFit::cluster_transform`] is a rotation and a
+    /// translation, which is what SVG can say per character (`x`, `y`,
+    /// `rotate`): the characters are not reflected and sheared by at most
+    /// [`PLAIN_SHEAR`] (`TextCurve.xar` carries 0.11°, which moves the top
+    /// of a 20 pt glyph by 0.04 pt).
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        !self.style.reflected && self.style.shear.tan().abs() <= PLAIN_SHEAR
+    }
 }
 
 #[cfg(test)]
@@ -417,5 +431,33 @@ mod tests {
             (top - Point::new(10_500.0, -3_000.0)).hypot() < 1e-6,
             "{top:?}"
         );
+    }
+
+    #[test]
+    fn a_fit_is_plain_unless_characters_are_mirrored_or_visibly_sheared() {
+        let path = TextPath::new(&line((0.0, 0.0), (100_000.0, 0.0)), false).unwrap();
+        let fit = |style: PathFitStyle| PathFit::new(path.clone(), style);
+        assert!(fit(PathFitStyle::default()).is_plain());
+        let upright = PathFitStyle {
+            tangential: false,
+            ..PathFitStyle::default()
+        };
+        assert!(fit(upright).is_plain());
+        // `TextCurve.xar`'s shear: -131 in 16.16 radians.
+        let slight = PathFitStyle {
+            shear: -131.0 / 65536.0,
+            ..PathFitStyle::default()
+        };
+        assert!(fit(slight).is_plain());
+        let sheared = PathFitStyle {
+            shear: 0.1,
+            ..PathFitStyle::default()
+        };
+        assert!(!fit(sheared).is_plain());
+        let reflected = PathFitStyle {
+            reflected: true,
+            ..PathFitStyle::default()
+        };
+        assert!(!fit(reflected).is_plain());
     }
 }
