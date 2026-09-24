@@ -2,13 +2,13 @@
 id: XARA-T-0307
 type: task
 title: Bitmap transparencies lose their start/end levels and their mode on .xar import
-status: in_progress
+status: in_review
 priority: medium
 parent: XARA-US-0018
 author: mcp
 labels: [render, xar]
 created: 2026-09-24T15:40:18Z
-updated: 2026-09-24T16:08:20Z
+updated: 2026-09-24T17:00:49Z
 started: 2026-09-24T16:08:20Z
 ---
 
