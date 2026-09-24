@@ -1682,6 +1682,31 @@ penumbra** → profile → colour × opacity → content over it.
   machine: 71–85 → 108–136 ms (81 more effects, each two region passes, a
   resample and a blur, every frame) until the layer cache (XARA-T-0314).
 
+### Shadows under the effect layer cache (merge of T-0318 onto T-0314)
+
+- **The key already holds everything a shadow reads** (invariant 25
+  verdict): the `ShadowEffect` (map, displacement, spread, blur, profile,
+  resolved colour) is inside the push op, compared by equality; the
+  warp `xf⁻¹ · map⁻¹ · xf` reads the effect's device transform, which is
+  in the key bit for bit (`Setting::xf`, plus the view's transform and
+  viewport). The **region origin is not a dependency**: the warp samples
+  from absolute device positions only and the region always spans
+  `keep ⊕ reach`, so a layer is valid over its `valid` rectangle wherever
+  its region started. `tests/effect_cache.rs`
+  (`shadow_layers_are_exact_over_columns_and_strips`,
+  `a_shadow_under_another_view_misses_and_stays_exact`) and the damage
+  properties (whose generator now pushes wall, glow and floor shadows)
+  hold it.
+- **An effect's content includes its nested effects' growth.** Found by
+  the damage property with shadows: the display list unioned a child
+  effect's *content* into its parent's, not how far it draws, so a
+  strip that culled a shadowed object (its shadow still in the strip)
+  shrank the parent's region and cut the shadow: strip ≠ frame. The
+  pop now unions `content ⊕ growth`. An effect whose content is empty
+  (all culled) is skipped: `DeviceRect::EMPTY.inflated(g)` is a real
+  rectangle round the origin, and it rendered and cached a layer of
+  nothing (and grew the list's bounds to the origin).
+
 ---
 
 ## Invariants that must not be broken
@@ -1789,7 +1814,8 @@ penumbra** → profile → colour × opacity → content over it.
     the frame's band grid, `reach` beyond what it keeps (beyond the
     viewport too); the display list keeps wrapped primitives within
     `clip ⊕ reach`; `scene_damage` pads changes under an effect by its
-    reach. Clamping the region to the viewport feathers every object at
+    reach; a nested effect counts towards its parent's content with its
+    growth. Clamping the region to the viewport feathers every object at
     the view's edge; starting coverage at the region's corner moves
     pixels by 1/255 between a repaint and a frame.
 24. **Effects are cut from the silhouette, not from alpha.** A feather or

@@ -1249,6 +1249,16 @@ after run interleaved, two rounds each:
   catch a cache that stops hitting. They need the corpus; the pr job
   on GitHub has none and skips them.
 
+**With shadows (XARA-T-0318 merged onto the cache, 2026-09-24).**
+Groucho2 now carries 63 feathers **and 81 shadows**, all cached.
+`xarast-cli bench render --whole --doc Groucho2.xar --runs 11`, release,
+load ~15, two rounds: warm median **8.2 / 9.1 ms** (min 7.0), first frame
+92.6 / 70.4 ms, peak RSS 61.1–61.9 MiB, walk 19.7 ms. Before the cache,
+shadows alone put a one-shot Groucho2 frame at 108–136 ms (render.md,
+"Shadows", cost); warm frames stay inside the `render-groucho2` nightly
+limit (16 ms × calibration, ref 6.5). `perf --tier pr`: 17/17 passed
+(`render-feathers` 3.92 ms against 13.59).
+
 ## Things that were slow, and why
 
 Worth remembering, because each was a factor of several and each has a shape
