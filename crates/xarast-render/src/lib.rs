@@ -95,7 +95,7 @@ pub use compose::{
     TexelRect, TileGrid, TileKey, TilePlacement, compose_cpu, source_texel, texel_intersection,
     texel_rect_is_empty, whole_tile,
 };
-pub use damage::{Damage, scene_damage};
+pub use damage::{Damage, image_damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
@@ -103,8 +103,8 @@ pub use paint::{
 };
 pub use path::PathRef;
 pub use pixel_budget::{
-    BudgetConfig, BudgetStats, FnSource, LevelBuf, PROXY_CAP, PROXY_DEFAULT, PixelBudget,
-    PixelSource,
+    BudgetConfig, BudgetStats, FnSource, LevelBuf, MissingLevels, PROXY_CAP, PROXY_DEFAULT,
+    PixelBudget, PixelSource, substitution_tick,
 };
 pub use precision::{Point64, Tile, TileLocal, Transform2D, round_device};
 pub use ramp::{

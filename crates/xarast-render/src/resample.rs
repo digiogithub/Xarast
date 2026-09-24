@@ -52,7 +52,7 @@ use std::sync::LazyLock;
 use xarast_color::Rgba8;
 
 use crate::paint::{Filter, FrameMap, GradMapping, ImageRef, Repeat};
-use crate::pixel_budget::LevelBuf;
+use crate::pixel_budget::{LevelBuf, MissingLevels, Pinned};
 use crate::precision::Point64;
 use crate::ramp::EffectSpace;
 
@@ -624,6 +624,12 @@ enum Plan {
     Fixed(Lod),
     /// A perspective mapping: the level of detail per pixel.
     PerPixel,
+    /// The levels the plan needed were evicted and the render would not
+    /// wait for them ([`MissingLevels::Substitute`]): the only pinned
+    /// level, a smaller resident one, point-sampled for `Nearest` and
+    /// bilinear otherwise. Never byte-identical by design; the caller
+    /// redraws once the base is back.
+    Fallback,
 }
 
 /// How close to exact the aligned case must be, relative per axis: over
@@ -703,6 +709,28 @@ impl<'a> ImageSampler<'a> {
         filter: Filter,
         contone: Option<(Rgba8, Rgba8, EffectSpace)>,
     ) -> Option<ImageSampler<'a>> {
+        ImageSampler::with_missing(
+            img,
+            mapping,
+            repeat,
+            filter,
+            contone,
+            MissingLevels::Materialise,
+        )
+    }
+
+    /// [`ImageSampler::new`], with what to do when a level it needs was
+    /// evicted and needs the base back (`pixel_budget`, "Drawing without
+    /// waiting").
+    #[must_use]
+    pub fn with_missing(
+        img: &'a ImageRef,
+        mapping: GradMapping,
+        repeat: Repeat,
+        filter: Filter,
+        contone: Option<(Rgba8, Rgba8, EffectSpace)>,
+        missing: MissingLevels,
+    ) -> Option<ImageSampler<'a>> {
         if img.width() == 0 || img.height() == 0 {
             return None;
         }
@@ -739,9 +767,12 @@ impl<'a> ImageSampler<'a> {
             Plan::Fixed(Lod::Minify { level, .. }) => (level, level + 1),
             Plan::Nearest { level } => (level, level),
             Plan::PerPixel | Plan::NearestPerPixel => (0, img.level_count() - 1),
-            Plan::Aligned { .. } | Plan::Fixed(_) => (0, 0),
+            Plan::Aligned { .. } | Plan::Fixed(_) | Plan::Fallback => (0, 0),
         };
-        let pins = img.pin_levels(first, last);
+        let (plan, first, pins) = match img.pin_levels(first, last, missing) {
+            Pinned::Levels(pins) => (plan, first, pins),
+            Pinned::Substitute(level, pin) => (Plan::Fallback, level, vec![pin]),
+        };
         Some(ImageSampler {
             img,
             pins,
@@ -811,6 +842,23 @@ impl<'a> ImageSampler<'a> {
                 let rho = self.frame.jacobian(p).map_or(1.0, |j| footprint(j, w, h));
                 let lod = lod_of(rho, || self.img.level_count());
                 self.filtered(u, v, lod)
+            }
+            Plan::Fallback => {
+                let Some((u, v)) = self.frame.apply(p) else {
+                    return Rgba8::TRANSPARENT;
+                };
+                if self.filter == Filter::Nearest {
+                    return self.point(u, v, self.first);
+                }
+                if !(u.abs() < 1e9 && v.abs() < 1e9) {
+                    return Rgba8::TRANSPARENT;
+                }
+                let l = self.lvl(self.first);
+                let (x, y) = (u * f64::from(l.width) - 0.5, v * f64::from(l.height) - 0.5);
+                encode_premul_in(
+                    bilinear(MAGNIFY_SPACE.table(), l, remap, x, y, self.repeat),
+                    MAGNIFY_SPACE,
+                )
             }
         }
     }

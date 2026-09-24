@@ -333,3 +333,207 @@ fn equality_survives_eviction() {
     drop(budget);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Four photographs placed on a 320 × 240 view at `scale` device pixels
+/// per texel, drawn at `quality`'s filter.
+fn photos(
+    images: &[ImageRef],
+    scale: f64,
+    quality: RenderQuality,
+) -> (Scene, xarast_render::Resolver, ViewParams) {
+    let filter = match quality {
+        RenderQuality::Draft => Filter::Nearest,
+        RenderQuality::Final => Filter::HighQuality,
+    };
+    let mut res = xarast_render::Resolver::new();
+    let mut scene = Scene::new();
+    {
+        let mut b = SceneBuilder::begin(&mut scene, quality);
+        for (k, image) in images.iter().enumerate() {
+            let id = res.images.insert(image.clone());
+            let (w, h) = (
+                f64::from(image.width()) * scale,
+                f64::from(image.height()) * scale,
+            );
+            let (x, y) = (
+                5.0 + 160.0 * f64::from(k as u32 % 2),
+                5.0 + 120.0 * f64::from(k as u32 / 2),
+            );
+            let mapping = GradMapping::Affine {
+                a: Point64::new(x, y),
+                b: Point64::new(x, y + h),
+                c: Point64::new(x + w, y),
+            };
+            let paint = Paint::Image {
+                image: id,
+                mapping,
+                repeat: Repeat::Simple,
+                filter,
+                contone: None,
+                adjust: xarast_render::BitmapAdjust::default(),
+            };
+            b.image(SceneNodeId(k as u64), id, mapping, paint);
+        }
+        b.finish().expect("balanced");
+    }
+    let view = ViewParams::new(320, 240, Transform2D::IDENTITY, quality);
+    (scene, res, view)
+}
+
+fn render_into(
+    scene: &Scene,
+    res: &xarast_render::Resolver,
+    view: &ViewParams,
+    cfg: CpuConfig,
+    rect: Option<xarast_render::DeviceRect>,
+    target: &mut Surface,
+) {
+    let dirty = rect.map_or(DirtyRect::NONE, DirtyRect::of);
+    let dl = DisplayList::build(scene, view, &dirty);
+    CpuBackend::new(cfg)
+        .render(&dl, res, target)
+        .expect("renders");
+}
+
+fn substituting() -> CpuConfig {
+    CpuConfig {
+        missing_levels: xarast_render::MissingLevels::Substitute,
+        ..CpuConfig::deterministic()
+    }
+}
+
+/// XARA-T-0281: a zoomed-out Draft frame of evicted photographs reads no
+/// base back on the render thread, and the Final that follows — drawn
+/// from substitutes, then repainted over the images once their bases are
+/// back — is the unlimited render byte for byte.
+#[test]
+fn a_zoomed_out_draft_reads_no_base_back_and_the_final_converges() {
+    let root = scratch("async");
+    // The product's proxy sizes, nothing evictable kept resident.
+    let budget = PixelBudget::new(BudgetConfig {
+        limit_bytes: 0,
+        spill_root: Some(root.clone()),
+        ..BudgetConfig::unlimited()
+    });
+    let free = PixelBudget::new(BudgetConfig::unlimited());
+    let data: Vec<Vec<u8>> = (0..4).map(|k| noisy(1200, 900, 10 + k)).collect();
+    let squeezed: Vec<ImageRef> = data
+        .iter()
+        .map(|d| ImageRef::with_budget(1200, 900, d.clone(), &budget, None))
+        .collect();
+    let reference_images: Vec<ImageRef> = data
+        .iter()
+        .map(|d| ImageRef::with_budget(1200, 900, d.clone(), &free, None))
+        .collect();
+    // Evicted without a pyramid: the proxy (150 × 113) was built on the
+    // way out, the base spilled.
+    for image in &squeezed {
+        assert!(!image.resident_levels()[0]);
+        assert!(image.resident_levels()[image.proxy_level()]);
+    }
+    let reads = |b: &PixelBudget| {
+        let s = b.stats();
+        s.from_spill + s.from_source
+    };
+
+    // Draft at 1/8 scale (8 texels per pixel): level 3, the proxy. Even
+    // the waiting policy reads nothing back.
+    let before = reads(&budget);
+    for cfg in [CpuConfig::deterministic(), substituting()] {
+        let (scene, res, view) = photos(&squeezed, 0.125, RenderQuality::Draft);
+        render_into(&scene, &res, &view, cfg, None, &mut Surface::new(320, 240));
+    }
+    assert_eq!(
+        reads(&budget),
+        before,
+        "a zoomed-out Draft read a base back"
+    );
+    assert_eq!(budget.stats().substituted, 0);
+
+    // Draft at 1/4 scale: level 2 is above the proxy and evicted. The
+    // substituting render draws the proxy and reads nothing back.
+    let tick = xarast_render::substitution_tick();
+    let (scene, res, view) = photos(&squeezed, 0.25, RenderQuality::Draft);
+    render_into(
+        &scene,
+        &res,
+        &view,
+        substituting(),
+        None,
+        &mut Surface::new(320, 240),
+    );
+    assert_eq!(reads(&budget), before, "the Draft waited for a base");
+    assert!(budget.stats().substituted >= 4, "one per image and band");
+    assert!(squeezed.iter().all(|i| i.substituted_since(tick)));
+
+    // The Final at 1/4 scale, the way the render thread does it: drawn
+    // from substitutes, the bases brought back off the render thread,
+    // then the images' damage repainted over the frame.
+    let (scene, res, view) = photos(&squeezed, 0.25, RenderQuality::Final);
+    let mut frame = Surface::new(320, 240);
+    let tick = xarast_render::substitution_tick();
+    render_into(&scene, &res, &view, substituting(), None, &mut frame);
+    assert_eq!(reads(&budget), before, "the Final waited for a base");
+    let hit: Vec<bool> = res
+        .images
+        .iter()
+        .map(|i| i.substituted_since(tick))
+        .collect();
+    assert!(hit.iter().all(|&h| h));
+    let (ref_scene, ref_res, _) = photos(&reference_images, 0.25, RenderQuality::Final);
+    let mut reference = Surface::new(320, 240);
+    render_into(
+        &ref_scene,
+        &ref_res,
+        &view,
+        CpuConfig::deterministic(),
+        None,
+        &mut reference,
+    );
+    assert!(
+        frame.data() != reference.data(),
+        "a substitute is not the picture"
+    );
+
+    // A budget that keeps what it brings back: the tiny one would evict
+    // the bases again before the repaint pins them.
+    budget.set_limit(u64::MAX);
+    for image in res.images.iter() {
+        assert!(image.rematerialise());
+    }
+    assert_eq!(budget.stats().rematerialised, 4);
+    let damage = xarast_render::image_damage(&scene, &view, |id| hit[id.index() as usize], 4)
+        .expect("balanced");
+    assert!(!damage.rects.is_empty());
+    let tick = xarast_render::substitution_tick();
+    for r in &damage.rects {
+        for y in r.y0..r.y1 {
+            for x in r.x0..r.x1 {
+                frame.set_pixel(x, y, [0, 0, 0, 0]);
+            }
+        }
+        render_into(&scene, &res, &view, substituting(), Some(*r), &mut frame);
+    }
+    assert!(!squeezed.iter().any(|i| i.substituted_since(tick)));
+    assert!(
+        frame.data() == reference.data(),
+        "the repaint did not converge"
+    );
+
+    // And the waiting policy, as export uses it, is exact at once.
+    budget.set_limit(0);
+    let mut direct = Surface::new(320, 240);
+    render_into(
+        &scene,
+        &res,
+        &view,
+        CpuConfig::deterministic(),
+        None,
+        &mut direct,
+    );
+    assert!(direct.data() == reference.data());
+    assert_eq!(budget.stats().lost, 0);
+    drop((squeezed, res, scene));
+    drop(budget);
+    let _ = std::fs::remove_dir_all(&root);
+}
