@@ -114,6 +114,40 @@ jobs:
       - name: Compare the hash manifests
         run: diff export-ubuntu-24.04.sha256 export-ubuntu-22.04.sha256
 
+  # Phase 12 A/B/C, per-push tier: start-up to first frame, open, save,
+  # undo, render, pan and export of 10k-object synthetic documents, and
+  # undo at 100k, each against xtask/perf-budgets.txt. Headless, CPU only,
+  # no corpus. Time limits are scaled by a calibration workload run on the
+  # same runner before every scenario, and a breach is measured twice
+  # before it fails; docs/memory/perf.md, "CI gates", has the margins.
+  # The heavy tier (100k objects, the corpus, the leak check) is
+  # perf-nightly.yml.
+  perf:
+    name: Performance gates (per push)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: perf
+
+      - name: Build
+        run: cargo build --release --locked -p xarast-cli -p xtask
+
+      - name: Gates
+        run: |
+          target/release/xtask perf --tier pr --cli target/release/xarast-cli \
+            --out perf/perf-pr.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: perf-pr-${{ github.sha }}
+          path: perf/perf-pr.json
+          if-no-files-found: ignore
+
   licences:
     name: Licence and advisory policy
     runs-on: ubuntu-latest
