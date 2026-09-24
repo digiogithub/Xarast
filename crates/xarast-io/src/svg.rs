@@ -436,6 +436,10 @@ fn compromises(s: &fsvg::Stats, svg: &str, failed_images: usize) -> Vec<Compromi
             "photo adjustments baked into a PNG of the adjusted pixels",
             s.photo_ops.saturating_sub(s.photo_ops_unbaked),
         ),
+        (
+            "feathers drawn by an SVG filter (a Gaussian blur for the disc blur)",
+            s.effects_baked,
+        ),
     ];
     let mut out: Vec<Compromise> = not_rendered
         .into_iter()

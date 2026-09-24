@@ -14,6 +14,7 @@
 //! | [`num`] | §4.5.1 pass 1: numbers in points, 3 decimals, no redundant zeros |
 //! | [`pathdata`] | pass 2: relative/absolute per segment, collapsed commands, `h`/`v`/`s` |
 //! | `paint` | §6.3–§6.6: fills, gradients, ramp baking, transparency, masks |
+//! | `effect` | §6.8: live effects drawn as SVG filters (feathers) |
 //! | `emit` | §5.8, §6.1, §6.2, §6.7–§6.10: the tree, geometry, text, live effects |
 //! | `defs` | passes 6–7: content-hashed ids, deduplicated `<defs>` |
 //! | [`frame`] | §5.5: Y-up document space → Y-down SVG space, in integers |
@@ -39,6 +40,7 @@
 
 mod bake;
 pub mod defs;
+mod effect;
 mod emit;
 pub mod frame;
 pub mod interchange;
@@ -282,8 +284,10 @@ pub struct Stats {
     pub arrows_unbaked: usize,
     /// Variable-width and brush strokes, drawn as plain strokes.
     pub strokes_approximated: usize,
-    /// Feathering recorded but not drawn.
+    /// Feathering recorded but not drawn (a text run's).
     pub effects_approximated: usize,
+    /// Feathers drawn by an SVG filter (`effect.rs`), plus their twin.
+    pub effects_baked: usize,
     /// `ClipRegion` attributes, which nothing draws yet.
     pub clip_regions_ignored: usize,
     /// Non-attribute children of ink nodes, drawn before them as siblings.

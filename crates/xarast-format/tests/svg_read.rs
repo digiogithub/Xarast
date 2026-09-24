@@ -1438,3 +1438,65 @@ fn a_feather_comes_back_on_the_node_that_owns_it() {
     );
     assert_eq!(first, resave(&mut o), "a fixed point");
 }
+
+/// A feather is drawn by an SVG filter in both dialects (XARA-T-0317), so
+/// a browser shows it in a `.xarast` and in an export alike; Xarast reads
+/// the feather from `xarast:feather` and drops the filter, which it
+/// derives again at the next save.
+#[test]
+fn a_feather_is_drawn_by_a_filter_that_the_reader_ignores() {
+    let feather = |size: i32| AttrValue::Feather {
+        size: Mp::new(size),
+        profile: BiasGain::new(0.25, -0.5),
+    };
+    let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
+    b.node(NodeKind::Group(Box::default())).unwrap();
+    b.push_scope().unwrap();
+    b.attribute(feather(8_000)).unwrap();
+    b.node(triangle(0, 0)).unwrap();
+    b.node(triangle(40_000, 0)).unwrap();
+    b.push_scope().unwrap();
+    b.attribute(AttrValue::Feather {
+        size: Mp::new(3_000),
+        profile: BiasGain::IDENTITY,
+    })
+    .unwrap();
+    b.pop_scope();
+    b.pop_scope();
+    let (doc, _) = b.finish().unwrap();
+
+    let native =
+        xarast_format::svg::write_svg(&doc, &mut ResourceIndex::new(), &SvgOptions::default());
+    let s = &native.svg;
+    assert_eq!(s.matches("xarast:filter=\"feather\"").count(), 2, "{s}");
+    assert_eq!(s.matches(" filter=\"url(#f").count(), 2, "{s}");
+    assert_eq!(native.stats.effects_baked, 2);
+    assert_eq!(native.stats.effects_approximated, 0);
+    // Half the size pulls in, σ is half of that; only the profiled feather
+    // has a table.
+    assert!(s.contains("stdDeviation=\"2\""), "{s}");
+    assert!(s.contains("stdDeviation=\".75\""), "{s}");
+    assert_eq!(s.matches("<feFuncA").count(), 1, "{s}");
+    assert!(s.contains("color-interpolation-filters=\"sRGB\""));
+
+    let r = read(s);
+    assert_eq!(r.stats.foreign_attributes, 0, "the filter is not baggage");
+    let again = xarast_format::svg::write_svg(
+        &r.document,
+        &mut ResourceIndex::new(),
+        &SvgOptions::default(),
+    );
+    assert_eq!(*s, again.svg, "the filter is derived, not carried");
+
+    let export = xarast_format::svg::write_svg(
+        &doc,
+        &mut ResourceIndex::new(),
+        &SvgOptions {
+            dialect: xarast_format::svg::SvgDialect::Interchange,
+            ..SvgOptions::default()
+        },
+    );
+    assert!(!export.svg.contains("xarast"), "{}", export.svg);
+    assert_eq!(export.svg.matches(" filter=\"url(#f").count(), 2);
+    assert_eq!(export.svg.matches("<feMorphology").count(), 8);
+}
