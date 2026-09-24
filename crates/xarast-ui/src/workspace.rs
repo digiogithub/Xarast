@@ -21,6 +21,8 @@
 //! with the shell's own passes, and a pane can be dragged into a tab
 //! group, which the canvas cannot survive.
 
+use xarast_app::DockPane;
+
 use crate::canvas::{CanvasResponse, CanvasWidget};
 use crate::menus::AppMenu;
 use crate::model::{CommandSink, DocumentView, UiCommand, UiModel};
@@ -108,6 +110,19 @@ impl Workspace {
     /// and the default has been kept.
     pub fn load_layout(&mut self, state: &LayoutState) -> bool {
         self.host.load_layout(state)
+    }
+
+    /// Shows a pane and brings it to the front (F9, F10, F11 and the
+    /// Window menu, through `PlatformRequest::ShowDialog`): docked again
+    /// when the layout lacks it, its tab made active, its tab given the
+    /// keyboard on the next frame.
+    pub fn show_pane(&mut self, pane: DockPane) -> bool {
+        self.host.show(pane_panel(pane))
+    }
+
+    /// Whether a pane is docked, visible and the active tab of its group.
+    pub fn is_pane_showing(&self, pane: DockPane) -> bool {
+        self.host.is_showing(pane_panel(pane))
     }
 
     /// Chooses who navigates the canvas; see
@@ -242,6 +257,17 @@ impl Workspace {
     /// know whether a guide drag is in progress before it starts a tool.
     pub fn is_dragging_guide(&self) -> bool {
         self.canvas.is_dragging_guide()
+    }
+}
+
+/// The dock panel behind a pane of the command table.
+pub fn pane_panel(pane: DockPane) -> PanelId {
+    match pane {
+        DockPane::Layers => crate::panels::layers::ID,
+        DockPane::ColourEditor => crate::panels::colour::ID,
+        DockPane::ColourGallery => crate::panels::gallery::ID,
+        DockPane::BitmapGallery => crate::panels::bitmaps::ID,
+        DockPane::Photo => crate::panels::photo::ID,
     }
 }
 
