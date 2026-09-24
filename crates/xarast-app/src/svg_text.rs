@@ -15,14 +15,22 @@
 //! ([`PathFit::is_plain`]) is placed along the path instead (T9.5.6):
 //! each character's glyph origin carried onto the path by
 //! [`PathFit::cluster_transform`], and the angle it turns there.
+//!
+//! It also says which faces each story is drawn with and which characters
+//! each draws, and makes their WOFF2 subsets for the writer's `@font-face`
+//! rules (`research/06 §6.7` rules 2–3), through the process's shared
+//! embedding layer (`xarast_text::embed`, the same one PDF export uses):
+//! a face whose `OS/2.fsType` forbids embedding gets no file, and the
+//! families that asked for it are listed so that their runs say
+//! `xarast:font-embed="denied"`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use xarast_doc::{AttrStack, Document, NodeId, NodeKind, StoryText};
-use xarast_format::svg::{Placer, StoryPlacement, TextPlacer};
+use xarast_format::svg::{FontFile, PlacedFace, Placer, StoryPlacement, TextPlacer};
 use xarast_geom::Mp;
-use xarast_text::{PathFit, StoryInput};
+use xarast_text::{EmbedError, FaceId, FontStyle, PathFit, StoryInput};
 
 use crate::fonts::{self, FontService};
 use crate::text::{layout_text, path_fit, story_input};
@@ -30,6 +38,8 @@ use crate::text::{layout_text, path_fit, story_input};
 /// Lays stories out with a [`FontService`] for the SVG writer.
 pub struct SvgTextPlacer {
     fonts: Arc<FontService>,
+    /// The faces handed out as [`PlacedFace::key`]s.
+    faces: Mutex<HashMap<u64, FaceId>>,
 }
 
 impl std::fmt::Debug for SvgTextPlacer {
@@ -42,7 +52,26 @@ impl SvgTextPlacer {
     /// A placer over `fonts`.
     #[must_use]
     pub fn new(fonts: Arc<FontService>) -> SvgTextPlacer {
-        SvgTextPlacer { fonts }
+        SvgTextPlacer {
+            fonts,
+            faces: Mutex::default(),
+        }
+    }
+
+    /// The face as the writer knows it, remembered for [`TextPlacer::font_file`].
+    fn placed_face(&self, face: FaceId) -> Option<PlacedFace> {
+        let info = self.fonts.db().face_info(face)?;
+        let key = u64::from(face.index());
+        self.faces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, face);
+        Some(PlacedFace {
+            family: info.family,
+            weight: info.weight,
+            italic: info.style != FontStyle::Normal,
+            key,
+        })
     }
 }
 
@@ -152,6 +181,68 @@ impl TextPlacer for SvgTextPlacer {
             .iter()
             .map(|s| (Arc::clone(&s.requested), Arc::clone(&s.used)))
             .collect();
+        // The faces drawn with, the characters each draws, and the face of
+        // each character item.
+        let mut used: BTreeMap<FaceId, BTreeSet<char>> = BTreeMap::new();
+        let mut item_face: HashMap<NodeId, FaceId> = HashMap::new();
+        for line in &layout.lines {
+            for run in &line.runs {
+                let set = used.entry(run.face).or_default();
+                for g in &run.glyphs {
+                    let Some(c) = line.cluster_at(g.cluster) else {
+                        continue;
+                    };
+                    let Some(t) = st.text.get(c.range.clone()) else {
+                        continue;
+                    };
+                    set.extend(t.chars().filter(|c| !c.is_control()));
+                    for (off, _) in t.char_indices() {
+                        if let Some(node) = item_at.get(&(c.range.start + off)) {
+                            item_face.entry(*node).or_insert(run.face);
+                        }
+                    }
+                }
+            }
+        }
+        let mut index: HashMap<FaceId, usize> = HashMap::new();
+        for (face, chars) in used {
+            if chars.is_empty() {
+                continue;
+            }
+            if let Some(f) = self.placed_face(face) {
+                index.insert(face, placement.faces.len());
+                placement.faces.push((f, chars.into_iter().collect()));
+            }
+        }
+        placement.char_faces = item_face
+            .into_iter()
+            .filter_map(|(node, face)| Some((node, *index.get(&face)?)))
+            .collect();
+        // The requested families whose own face refuses embedding.
+        let db = self.fonts.db();
+        for r in &input.runs {
+            if placement.denied.contains(&r.font.family) {
+                continue;
+            }
+            if let Some(m) = db.query_with_panose(&r.font, r.panose)
+                && db.embedding_denied(m.face)
+            {
+                placement.denied.push(Arc::clone(&r.font.family));
+            }
+        }
         Some(placement)
+    }
+
+    fn font_file(&self, face: &PlacedFace, chars: &[char]) -> Option<FontFile> {
+        let id = *self
+            .faces
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&face.key)?;
+        Some(match self.fonts.web_font(id, chars) {
+            Ok(w) => FontFile::Woff2(w.woff2),
+            Err(e @ EmbedError::Denied(_)) => FontFile::Denied(Arc::from(e.to_string())),
+            Err(e) => FontFile::Unavailable(Arc::from(e.to_string())),
+        })
     }
 }

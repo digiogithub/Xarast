@@ -15,7 +15,7 @@
 //! on, which is what lets pass 3 elide the SVG defaults safely: no ancestor
 //! `<g>` ever sets a paint property.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use xarast_color::{ColourId, ColourKind, ColourModel, FillEffect, TranspMode};
@@ -36,7 +36,7 @@ use super::paint::{
 };
 use super::pathdata::path_data;
 use super::style::{self, GroupKind, Styler, Vals, p};
-use super::text::{Placer, StoryPlacement};
+use super::text::{PlacedFace, Placer, StoryPlacement};
 use super::xml::{
     attr, base64, fragment_is_well_formed, is_ncname, is_xml_char, push_text_escaped,
 };
@@ -247,9 +247,12 @@ pub(crate) struct Emitter<'d, 'b> {
     spread_y: i64,
     bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
     /// Where the application lays text out, for the base SVG of text.
-    placer: Option<Placer>,
+    pub placer: Option<Placer>,
     /// `SvgDialect::Interchange`: foreign baggage is not written.
     interchange: bool,
+    /// Every face the placed text is drawn with and the characters drawn
+    /// with it: the fonts to embed (`research/06 §6.7` rule 2).
+    pub fonts: BTreeMap<PlacedFace, BTreeSet<char>>,
 }
 
 impl<'d, 'b> Emitter<'d, 'b> {
@@ -304,6 +307,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             bitmap_href,
             placer: opts.text.clone(),
             interchange: opts.dialect == super::SvgDialect::Interchange,
+            fonts: BTreeMap::new(),
         }
     }
 
@@ -1779,6 +1783,14 @@ impl<'d, 'b> Emitter<'d, 'b> {
             Some(p) => p.0.place(self.doc, n, &mut self.attrs),
             None => None,
         };
+        if let Some(p) = &placement {
+            for (face, chars) in &p.faces {
+                self.fonts
+                    .entry(face.clone())
+                    .or_default()
+                    .extend(chars.chars());
+            }
+        }
         // Text on a path is drawn along it when the placer placed each
         // character on the path (T9.5.6); otherwise on straight lines.
         if matches!(story.layout, TextLayout::OnPath { .. })
@@ -1982,8 +1994,9 @@ impl<'d, 'b> Emitter<'d, 'b> {
     /// attributes, then paint (as for any ink element, through a slot).
     fn text_run(&mut self, place: Option<&StoryPlacement>) -> TextRun {
         let subs: &[(Arc<str>, Arc<str>)] = place.map_or(&[], |p| &p.substitutions);
+        let denied: &[Arc<str>] = place.map_or(&[], |p| &p.denied);
         let mut el = El::new("tspan");
-        for (k, v) in super::text::run_text_attrs(&self.attrs, subs) {
+        for (k, v) in super::text::run_text_attrs(&self.attrs, subs, denied) {
             el.a(k, v);
         }
         el.ink = true;
@@ -2020,6 +2033,22 @@ impl<'d, 'b> Emitter<'d, 'b> {
             ..
         } = r;
         if let Some(p) = place {
+            // The faces this run's characters are drawn with join the
+            // family chain right after the family asked for, so that a
+            // browser (or resvg) finds the embedded file for each.
+            let mut families: Vec<&str> = Vec::new();
+            for (n, _) in &items {
+                if let Some((face, _)) = p.char_faces.get(n).and_then(|i| p.faces.get(*i))
+                    && !families.contains(&&*face.family)
+                {
+                    families.push(&face.family);
+                }
+            }
+            if !families.is_empty()
+                && let Some((_, chain)) = el.attrs.iter_mut().find(|(k, _)| k == "font-family")
+            {
+                *chain = super::text::chain_with(chain, &families);
+            }
             // One position per character the browser draws.
             let mut xs: Vec<i64> = Vec::new();
             let mut ys: Vec<i64> = Vec::new();

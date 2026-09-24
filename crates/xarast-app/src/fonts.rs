@@ -18,9 +18,16 @@
 //! [`FontService::isolated`] service from pinned fonts and hand it to the
 //! walker (`docs/memory/text.md`, invariant 3).
 
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use xarast_text::{FontDb, Shaper};
+use xarast_text::{EmbedError, FaceId, FontDb, Shaper, WebFont};
+
+/// How many web fonts [`FontService::web_font`] remembers.
+const WEB_FONT_CACHE: usize = 64;
+
+/// The web fonts made so far, by face and character set.
+type WebFontCache = HashMap<(FaceId, Vec<char>), Result<WebFont, EmbedError>>;
 
 /// A font database, its shaper, and whether the system's fonts are in it.
 pub struct FontService {
@@ -29,6 +36,9 @@ pub struct FontService {
     /// Set once the database is complete: the number of families known.
     loaded: OnceLock<usize>,
     system: bool,
+    /// Web fonts already made: every save of a document embeds the same
+    /// subsets, and autosave saves often.
+    web_fonts: Mutex<WebFontCache>,
 }
 
 impl std::fmt::Debug for FontService {
@@ -50,6 +60,7 @@ impl FontService {
             db,
             loaded: OnceLock::new(),
             system: true,
+            web_fonts: Mutex::default(),
         })
     }
 
@@ -65,6 +76,7 @@ impl FontService {
             db,
             loaded,
             system: false,
+            web_fonts: Mutex::default(),
         })
     }
 
@@ -175,6 +187,34 @@ impl FontService {
     #[must_use]
     pub fn db(&self) -> &Arc<FontDb> {
         &self.db
+    }
+
+    /// [`FontDb::web_font`], remembered: the same face and characters give
+    /// the same file without subsetting again. `chars` must be sorted.
+    ///
+    /// # Errors
+    ///
+    /// As [`FontDb::web_font`].
+    pub fn web_font(&self, face: FaceId, chars: &[char]) -> Result<WebFont, EmbedError> {
+        let key = (face, chars.to_vec());
+        if let Some(hit) = self
+            .web_fonts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            return hit.clone();
+        }
+        let made = self.db.web_font(face, chars);
+        let mut cache = self
+            .web_fonts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if cache.len() >= WEB_FONT_CACHE {
+            cache.clear();
+        }
+        cache.insert(key, made.clone());
+        made
     }
 }
 

@@ -335,9 +335,11 @@ fn render_svg(
     {
         return Err("carries `xarast:` vocabulary".into());
     }
+    // The fonts the SVG embeds shadow installed ones, as in a browser.
+    let fontdb = crate::fonts::with_embedded(fontdb, &String::from_utf8_lossy(&svg), path.parent());
     let opts = resvg::usvg::Options {
         resources_dir: path.parent().map(Path::to_path_buf),
-        fontdb: std::sync::Arc::clone(fontdb),
+        fontdb,
         ..Default::default()
     };
     let tree = resvg::usvg::Tree::from_data(&svg, &opts)?;

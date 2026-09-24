@@ -17,3 +17,6 @@ workspace = true
 # development tool, which never ships. Justified in deny.toml.
 resvg = "0.45"
 png = "0.18"
+# Decodes the WOFF2 fonts an exported SVG embeds, so resvg renders with
+# them as a browser would (`src/fonts.rs`).
+xarast-text = { path = "../crates/xarast-text" }

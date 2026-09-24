@@ -12,8 +12,12 @@
 //! differ only in the root element.
 //!
 //! Everything the SVG cannot carry is in the report: the writer's
-//! approximation counters become [`Compromise`]s, and every font family the
-//! file names is reported as not embedded until T11.3.4.
+//! approximation counters become [`Compromise`]s. Fonts are embedded
+//! (T11.3.4): with the application's text placer, every face the text is
+//! drawn with goes into the file as a WOFF2 subset in a `data:` URI behind
+//! an `@font-face` rule — the same subsets `.xarast` stores — except a face
+//! whose licence forbids it, which is reported as `FontNotEmbedded`.
+//! Without a placer nothing is embedded and every family is reported.
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -63,8 +67,9 @@ impl Exporter for SvgExporter {
             vector: true,
             alpha: true,
             multipage: false,
-            // Text is live text in the named fonts until T11.3.4.
-            embeds_fonts: false,
+            // WOFF2 subsets in `@font-face` rules (T11.3.4), where the
+            // face's licence allows.
+            embeds_fonts: true,
             has_dpi: false,
             lossy: false,
             deterministic: true,
@@ -156,6 +161,22 @@ impl Exporter for SvgExporter {
         report.dpi = 72.0;
         report.commands = out.stats.elements;
         report.compromises = compromises(&out.stats, &out.svg, links.failed);
+        if opts.text.is_some() {
+            // The families the file names are embedded (or substituted by
+            // an embedded face) except the ones the writer could not embed.
+            report
+                .compromises
+                .retain(|c| !matches!(c, Compromise::FontNotEmbedded { .. }));
+            for f in out.fonts.iter().filter(|f| f.not_embedded.is_some()) {
+                let c = Compromise::FontNotEmbedded {
+                    family: Arc::clone(&f.face.family),
+                    reason: f.not_embedded.clone().unwrap_or_else(|| Arc::from("")),
+                };
+                if !report.compromises.contains(&c) {
+                    report.compromises.push(c);
+                }
+            }
+        }
         report
             .compromises
             .extend(crate::fidelity::document_compromises(
@@ -365,7 +386,7 @@ fn compromises(s: &fsvg::Stats, svg: &str, failed_images: usize) -> Vec<Compromi
             .into_iter()
             .map(|family| Compromise::FontNotEmbedded {
                 family: family.into(),
-                reason: "SVG export writes live text; the viewer must have the font (T11.3.4)"
+                reason: "the SVG was written without the application's text layout, so no font is embedded; the viewer must have it"
                     .into(),
             }),
     );
