@@ -217,28 +217,35 @@ fn warp(
     origin: (i32, i32),
 ) -> Vec<u8> {
     let c = back.to_affine().as_coeffs();
-    let (ox, oy) = (f64::from(origin.0), f64::from(origin.1));
+    let (ox, oy) = (i64::from(origin.0), i64::from(origin.1));
+    // `x`, `y` are absolute device pixel indices.
     let at = |x: i64, y: i64| -> f64 {
+        let (x, y) = (x - ox, y - oy);
         if x < 0 || y < 0 || x >= width as i64 || y >= height as i64 {
             0.0
         } else {
             f64::from(plane[y as usize * width + x as usize])
         }
     };
+    let (lo_x, lo_y) = (ox as f64 - 1.0, oy as f64 - 1.0);
+    let (hi_x, hi_y) = (ox as f64 + width as f64, oy as f64 + height as f64);
     let mut out = vec![0u8; plane.len()];
     out.par_chunks_mut(width.max(1))
         .enumerate()
         .for_each(|(j, row)| {
-            let dy = oy + j as f64 + 0.5;
+            // Everything below is computed from absolute device positions
+            // only: where the region starts must not move a sample by an
+            // ulp (a strip's region starts elsewhere than a frame's).
+            let dy = (oy + j as i64) as f64 + 0.5;
             for (i, o) in row.iter_mut().enumerate() {
-                let dx = ox + i as f64 + 0.5;
-                let sx = c[0] * dx + c[2] * dy + c[4] - ox - 0.5;
-                let sy = c[1] * dx + c[3] * dy + c[5] - oy - 0.5;
+                let dx = (ox + i as i64) as f64 + 0.5;
+                let sx = c[0] * dx + c[2] * dy + c[4] - 0.5;
+                let sy = c[1] * dx + c[3] * dy + c[5] - 0.5;
                 if !(sx.is_finite() && sy.is_finite())
-                    || sx < -1.0
-                    || sy < -1.0
-                    || sx > width as f64
-                    || sy > height as f64
+                    || sx < lo_x
+                    || sy < lo_y
+                    || sx > hi_x
+                    || sy > hi_y
                 {
                     continue;
                 }

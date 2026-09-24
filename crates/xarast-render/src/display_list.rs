@@ -673,6 +673,14 @@ impl DisplayList {
             if let Some(b) = c.bounds() {
                 bounds = bounds.union(b);
             }
+            // An effect may draw beyond what it wraps (a shadow), as
+            // `build` accounts for at its pop.
+            if let DrawCmd::PushEffect { op, xf, content } = c
+                && let Some(SceneOp::PushEffect(e)) = self.ops.get(*op as usize)
+            {
+                let s = self.xforms.get(*xf as usize).map_or(1.0, |t| t.max_scale());
+                bounds = bounds.union(content.inflated(e.growth_px(s)));
+            }
             needs_dst_read |= c.needs_dst_read();
         }
         Arc::new(DisplayList {
