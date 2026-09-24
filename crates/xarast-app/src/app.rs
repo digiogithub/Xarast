@@ -264,6 +264,27 @@ pub struct AppState {
     /// (T9.4.8). At most one of this and `clipboard` is set: the last copy
     /// made, whichever kind.
     text_clipboard: Option<TextClipboard>,
+    /// Large image files being read and decoded in the background
+    /// (T10.7.5).
+    imports: crate::import::ImportWorker,
+    /// Where each background import goes when it arrives.
+    pending_imports: Vec<PendingImport>,
+    /// Files up to this many bytes are imported inline; `None` means
+    /// [`crate::import::INLINE_IMPORT_BYTES`].
+    inline_import_bytes: Option<u64>,
+    /// Bitmap-gallery thumbnails, shared by every document (T10.7.3).
+    thumbnails: crate::bitmap_gallery::Thumbnails,
+    /// Each document's bitmap-gallery entries, rebuilt when it changes.
+    gallery: HashMap<DocumentId, crate::bitmap_gallery::EntryCache>,
+}
+
+/// A background import and where its image goes.
+#[derive(Debug, Clone, Copy)]
+struct PendingImport {
+    id: u64,
+    doc: DocumentId,
+    /// The drop point in document space, or `None` for the view's centre.
+    centre: Option<crate::geometry::DocPoint>,
 }
 
 /// The last copy of text made in this process (T9.4.8).
@@ -349,6 +370,14 @@ impl AppState {
         if self.active().is_some_and(Session::text_editing) {
             return self.paste_at_caret(text);
         }
+        // A file manager's copy: the image files it names are imported
+        // (T10.7.4), unless the text is our own copy.
+        if let Some(t) = &text
+            && self.clipboard.as_ref().is_none_or(|c| c.svg != *t)
+            && let Some(r) = self.paste_files(t)
+        {
+            return r;
+        }
         let fragment = match (&text, &self.clipboard) {
             (None, Some(c)) => Some(std::sync::Arc::clone(&c.fragment)),
             (Some(t), Some(c)) if *t == c.svg => Some(std::sync::Arc::clone(&c.fragment)),
@@ -413,17 +442,125 @@ impl AppState {
     /// says why it cannot.
     fn place_image(
         &mut self,
+        doc: Option<DocumentId>,
         img: Result<crate::place::ImageToPlace, crate::place::PlaceError>,
-        at: Option<crate::geometry::DevicePoint>,
+        centre: Option<crate::geometry::DocPoint>,
         label: &'static str,
     ) -> Result<Changed, SessionError> {
         match img {
+            Err(crate::place::PlaceError::Cancelled) => Ok(Changed::empty()),
             Err(e) => Ok(self.paste_notice(&format!("Could not place the image: {e}"))),
-            Ok(img) => match self.active_mut() {
-                Some(s) => s.place_image(img, at, label),
+            Ok(img) => match doc.and_then(|d| self.docs.get_mut(d)) {
+                Some(s) => s.place_image_at(img, centre, label),
                 None => Ok(Changed::empty()),
             },
         }
+    }
+
+    /// Imports an image file into the active document (T10.7.4, T10.7.5):
+    /// inline when it is small, otherwise in the background with progress,
+    /// placed when it arrives. The drop point is kept in document space.
+    fn import_image(
+        &mut self,
+        path: PathBuf,
+        at: Option<crate::geometry::DevicePoint>,
+    ) -> Result<Changed, SessionError> {
+        let Some(s) = self.active() else {
+            return Ok(Changed::empty());
+        };
+        let doc = s.id;
+        let centre = at.map(|p| s.device_to_doc_point(p));
+        let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let inline = self
+            .inline_import_bytes
+            .unwrap_or(crate::import::INLINE_IMPORT_BYTES);
+        if size <= inline {
+            let img = crate::place::image_from_file(&path);
+            return self.place_image(Some(doc), img, centre, "Import Bitmap");
+        }
+        let id = self.imports.start(path, size);
+        self.pending_imports.push(PendingImport { id, doc, centre });
+        if let Some(p) = self.imports.progress().into_iter().find(|p| p.id == id) {
+            self.notice = Some(p.label());
+        }
+        Ok(Changed::UI)
+    }
+
+    /// Imports the image files a pasted text names (a file manager's
+    /// copy). `None` when it names none.
+    fn paste_files(&mut self, text: &str) -> Option<Result<Changed, SessionError>> {
+        let paths = crate::place::image_paths_in_text(text);
+        if paths.is_empty() {
+            return None;
+        }
+        let mut changed = Changed::empty();
+        for path in paths {
+            match self.import_image(path, None) {
+                Ok(c) => changed |= c,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+        Some(Ok(changed))
+    }
+
+    /// Files up to `bytes` long are imported inline, larger ones in the
+    /// background. Tests set 0 to send everything to the background.
+    #[must_use]
+    pub fn with_inline_import_limit(mut self, bytes: u64) -> AppState {
+        self.inline_import_bytes = Some(bytes);
+        self
+    }
+
+    /// The background imports still running, oldest first, for the
+    /// status bar.
+    #[must_use]
+    pub fn import_progress(&self) -> Vec<crate::import::ImportProgress> {
+        self.imports.progress()
+    }
+
+    /// Places the background imports that have finished (T10.7.5), each
+    /// one undo step in the document it was started in. Never blocks.
+    pub fn poll_imports(&mut self) -> Changed {
+        let mut changed = Changed::empty();
+        for f in self.imports.poll() {
+            let Some(i) = self.pending_imports.iter().position(|p| p.id == f.id) else {
+                continue;
+            };
+            let p = self.pending_imports.remove(i);
+            match self.place_image(Some(p.doc), f.result, p.centre, "Import Bitmap") {
+                Ok(c) => changed |= c,
+                Err(e) => changed |= self.paste_notice(&format!("Could not place the image: {e}")),
+            }
+        }
+        changed
+    }
+
+    /// Blocks until every background import has ended, then places them.
+    /// For tests.
+    pub fn wait_imports(&mut self) -> Changed {
+        self.imports.wait();
+        self.poll_imports()
+    }
+
+    /// What the bitmap gallery shows for the active document (phase 10,
+    /// W10.7): its bitmaps with the thumbnails made so far — the rest are
+    /// asked for — and the bitmap drag in flight. `None` with nothing open.
+    pub fn bitmap_gallery_view(&mut self) -> Option<crate::bitmap_gallery::BitmapGalleryView> {
+        let id = self.active?;
+        let docs = &self.docs;
+        self.gallery.retain(|d, _| docs.get(*d).is_some());
+        let session = self.docs.get(id)?;
+        let cache = self.gallery.entry(id).or_default();
+        Some(crate::bitmap_gallery::view(
+            session,
+            cache,
+            &mut self.thumbnails,
+        ))
+    }
+
+    /// Waits for the thumbnails asked for so far. For tests.
+    pub fn settle_thumbnails(&mut self, timeout: std::time::Duration) {
+        self.thumbnails.settle(timeout);
     }
 
     fn paste_notice(&mut self, message: &str) -> Changed {
@@ -481,8 +618,16 @@ impl AppState {
 
     /// Calls `wake` from the save thread whenever a save finishes, so an
     /// idle event loop gets to [`AppState::poll_saves`].
+    ///
+    /// The same waker is called when a background import finishes or a
+    /// bitmap-gallery thumbnail is ready, since those are polled at the
+    /// same time ([`AppState::poll_imports`]).
     pub fn set_save_waker(&mut self, wake: crate::save::Waker) {
-        self.saver.set_waker(wake);
+        let wake: std::sync::Arc<dyn Fn() + Send + Sync> = std::sync::Arc::from(wake);
+        let (a, b) = (std::sync::Arc::clone(&wake), std::sync::Arc::clone(&wake));
+        self.imports.set_waker(Box::new(move || a()));
+        self.thumbnails.set_waker(Box::new(move || b()));
+        self.saver.set_waker(Box::new(move || wake()));
     }
 
     /// Takes the requests the platform layer owes, oldest first.
@@ -714,14 +859,23 @@ impl AppState {
                 rgba,
             } => {
                 let img = crate::place::image_from_rgba(width, height, &rgba);
-                self.place_image(img, None, "Paste")
+                self.place_image(self.active, img, None, "Paste")
             }
-            Intent::ImportImage { path, at } => {
-                if self.active.is_none() {
-                    return Ok(Changed::empty());
+            Intent::ImportImage { path, at } => self.import_image(path, at),
+            Intent::ShowImportDialog => {
+                if self.active.is_some() {
+                    self.requests.push(PlatformRequest::ShowImportDialog);
                 }
-                let img = crate::place::image_from_file(&path);
-                self.place_image(img, at, "Import Bitmap")
+                Ok(Changed::empty())
+            }
+            Intent::CancelImports => {
+                self.pending_imports.clear();
+                Ok(if self.imports.cancel_all() > 0 {
+                    self.notice = Some("Import cancelled".to_owned());
+                    Changed::UI
+                } else {
+                    Changed::empty()
+                })
             }
             Intent::Save => Ok(match self.active {
                 Some(id) => self.save_document(id, None),

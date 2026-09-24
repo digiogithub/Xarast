@@ -64,6 +64,7 @@
 
 pub mod app;
 pub mod autosave;
+pub mod bitmap_gallery;
 pub mod colour_bar;
 pub mod colour_editor;
 pub mod command;
@@ -76,6 +77,7 @@ pub mod fonts;
 pub mod freehand;
 pub mod geometry;
 pub mod headless;
+pub mod import;
 pub mod intent;
 pub mod locks;
 pub mod node_edit;

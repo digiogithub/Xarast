@@ -234,6 +234,9 @@ pub struct Session {
     /// A colour dragged from the colour bar or the gallery (phase 8,
     /// W8.7): never undone, never saved.
     pub(crate) colour_drag: Option<crate::colour_bar::ColourDrag>,
+    /// A bitmap dragged from the bitmap gallery (phase 10, T10.7.2): never
+    /// undone, never saved.
+    pub(crate) bitmap_drag: Option<crate::bitmap_gallery::BitmapDrag>,
     /// Where the drag in flight last snapped, for the feedback marker.
     last_snap: Option<crate::snap::SnapHit>,
     /// The document changed since the viewport's scroll bounds were
@@ -300,6 +303,7 @@ impl Session {
             last_edit: None,
             colour_editor: crate::colour_editor::ColourEditorModel::default(),
             colour_drag: None,
+            bitmap_drag: None,
             last_snap: None,
             scroll_bounds_stale: false,
             resolver_snapshot: None,
@@ -1353,6 +1357,9 @@ impl Session {
             Intent::ColourEditor(op) => {
                 changed |= crate::colour_editor::run(self, op)?;
             }
+            Intent::BitmapGallery(op) => {
+                changed |= crate::bitmap_gallery::run(self, op)?;
+            }
             Intent::MomentaryTool(tool) => {
                 if self.edit.tool.momentary != tool && tool.is_none_or(ToolId::is_available) {
                     self.edit.tool.momentary = tool;
@@ -1383,6 +1390,8 @@ impl Session {
             | Intent::PasteText { .. }
             | Intent::PasteImage { .. }
             | Intent::ImportImage { .. }
+            | Intent::ShowImportDialog
+            | Intent::CancelImports
             | Intent::ShowDialog(_)
             | Intent::Quit
             | Intent::Save
@@ -1559,21 +1568,83 @@ impl Session {
         at: Option<crate::geometry::DevicePoint>,
         label: &'static str,
     ) -> Result<Changed, SessionError> {
+        let centre = at.map(|p| self.device_to_doc_point(p));
+        self.place_image_at(img, centre, label)
+    }
+
+    /// A canvas device point in document space.
+    pub(crate) fn device_to_doc_point(
+        &self,
+        p: crate::geometry::DevicePoint,
+    ) -> crate::geometry::DocPoint {
         use crate::geometry::DocPointF64Ext;
-        let mut changed = self.cancel_gesture();
-        let Some(layer) = self
-            .edit
+        self.viewport.device_to_doc_f64(p).to_doc_point()
+    }
+
+    /// [`Session::place_image`] centred on a document point (a background
+    /// import remembers where it was dropped in document space, since the
+    /// view may move before it arrives), or in the middle of the view.
+    ///
+    /// # Errors
+    ///
+    /// When the command is refused: a locked or guide layer.
+    pub fn place_image_at(
+        &mut self,
+        img: crate::place::ImageToPlace,
+        centre: Option<crate::geometry::DocPoint>,
+        label: &'static str,
+    ) -> Result<Changed, SessionError> {
+        if self.placement_layer().is_none() {
+            return Ok(self.cancel_gesture());
+        }
+        let size = img.natural_size();
+        let image = self.doc.resources.insert_bitmap(img.resource);
+        self.place_bitmap(image, size, centre, label)
+    }
+
+    fn placement_layer(&self) -> Option<xarast_doc::NodeId> {
+        self.edit
             .active_layer()
             .or_else(|| self.doc.active_layer(self.doc.active_spread()))
-        else {
+    }
+
+    /// Places a bitmap the document already holds as a new object at its
+    /// natural size — a bitmap dragged from the bitmap gallery (phase 10,
+    /// T10.7.2) — centred on `centre` or in the middle of the view, and
+    /// selects it. One undo step named `label`; nothing happens for an
+    /// unknown bitmap.
+    ///
+    /// # Errors
+    ///
+    /// When the command is refused: a locked or guide layer.
+    pub fn place_resource(
+        &mut self,
+        image: xarast_doc::BitmapId,
+        centre: Option<crate::geometry::DocPoint>,
+        label: &'static str,
+    ) -> Result<Changed, SessionError> {
+        let Some((pixels, dpi)) = crate::place::bitmap_pixels(&self.doc, image) else {
+            return Ok(Changed::empty());
+        };
+        let size = (
+            xarast_doc::bitmap_fill::natural_length(pixels.0, dpi.0),
+            xarast_doc::bitmap_fill::natural_length(pixels.1, dpi.1),
+        );
+        self.place_bitmap(image, size, centre, label)
+    }
+
+    fn place_bitmap(
+        &mut self,
+        image: xarast_doc::BitmapId,
+        (w, h): (xarast_geom::Mp, xarast_geom::Mp),
+        centre: Option<crate::geometry::DocPoint>,
+        label: &'static str,
+    ) -> Result<Changed, SessionError> {
+        let mut changed = self.cancel_gesture();
+        let Some(layer) = self.placement_layer() else {
             return Ok(changed);
         };
-        let centre = match at {
-            Some(p) => self.viewport.device_to_doc_f64(p).to_doc_point(),
-            None => self.viewport.visible_doc_rect().centre(),
-        };
-        let (w, h) = img.natural_size();
-        let image = self.doc.resources.insert_bitmap(img.resource);
+        let centre = centre.unwrap_or_else(|| self.viewport.visible_doc_rect().centre());
         let cmd = xarast_doc::PlaceBitmap {
             layer,
             bitmap: xarast_doc::bitmap_place::bitmap_node_centred(image, centre, w, h),
