@@ -539,6 +539,23 @@ reason the walker *reports*, which is its own test.
     (XARA-T-0306) need nothing new here: the importer emits the model's
     shape, a group with the painted keyholes and a ClipView whose first
     child is their union (`xar-import.md` finding 17).
+47. **A feather wraps the node that owns it** (XARA-US-0068, 2026-09-24).
+    At `EnterScope` (and at a story's visit) the walker looks for the
+    node's *own* `Feather` attribute child with a size above zero, or a
+    preview's override of the slot, and pushes
+    `LayerEffect::Feather { size, profile }` before the node's group or
+    clip, popping it last at `LeaveScope`; the node's own ink (a path's
+    fill, painted at `LeaveScope`) is inside it. The inherited value is
+    ignored: the attribute stack hands a group's feather to every member,
+    but the original feathers the owner once, as one offscreen unit.
+    Structural nodes (document, chapter, spread, page, layer) never
+    feather. With a dirty rectangle, culling inside a feathered node
+    widens by the feather's size, so everything within its reach of the
+    area is in the scene (production passes no rectangle; the renderer
+    widens again for itself). `WalkStats::effects` counts them. Live
+    controllers still draw their children as before and count
+    `live_pending`; `regen::LiveOutput` is not consumed yet
+    (`document-model.md` decision 41 and its TODO).
 
 ---
 

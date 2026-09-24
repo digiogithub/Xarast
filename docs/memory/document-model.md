@@ -32,7 +32,8 @@ Modules, all of them in `crates/xarast-doc/src/`:
 | `foreign` | `ForeignBaggage`, `ForeignAttr`, `ForeignChild`, `ForeignChildKind`, `ForeignMarks` — per-node data a `.xarast` reader did not understand (XARA-T-0089) |
 | `structure` | `DocumentNode`, `SpreadNode`, `PageNode`, `LayerNode`, `GridNode`, `FrameProps`, `AnimProps` |
 | `text` | `TextStoryNode`, `TextLineNode`, `TextItem`, `TextLayout`, `Justification`, `LineSpacing`, `Script`, `TabStop` |
-| `live` | `LiveNode`, `LiveRole`, `LiveKind`, `RegenState` and the seven parameter structs |
+| `live` | `LiveNode`, `LiveRole`, `LiveKind`, `RegenState`, the seven parameter structs, `LiveParts`/`parts`, `controller_of`, `in_generated` |
+| `regen` | phase 13 A3/A4: `regenerate`, `RegenKey`/`regen_key`, `LiveOutput`, `GeneratedShape`, `LiveCache`, `RegenQueue`, `FlushReport`, `RegenError` |
 | `resources` | `DocumentResources`, `BitmapId`/`DashId`/`ArrowId`, `BitmapResource`, `collect_unused` |
 | `history` | `Action`, `Tx`, `Transaction`, `History`, `CoalesceKey`, `Command`, `CommandBus`, `EditError` |
 | `snapshot` | `Snapshot`, a dense `Arc<SecondaryMap<NodeId, NodeData>>`, plus `Document::snapshot`/`restore` |
@@ -45,8 +46,9 @@ Modules, all of them in `crates/xarast-doc/src/`:
 `NodeKind` variants implemented: `Document`, `Chapter`, `Spread`, `Page`,
 `Layer`, `Grid`, `Path`, `Shape`, `QuickShape`, `Bitmap`, `Guideline`, `Group`,
 `Live`, `ClipView`, `TextStory`, `TextLine`, `TextItem`, `Attr`, `Opaque`.
-`Live` and the text variants are **structure and round-trip only**:
-`regenerate()` is Phase 13 and shaping is Phase 9. `QuickShape` stores all
+`Live` has its phase-13 infrastructure (decision 41: regeneration
+outside the tree) but no generator yet; the text variants are laid out
+by Phase 9. `QuickShape` stores all
 its parameters. Its `path` is the **generated outline** in document
 coordinates, from `xarast_geom::regular_shape_outline` (XARA-T-0013,
 2026-09-23). `QuickShape::outline()` regenerates it from the stored
@@ -379,6 +381,84 @@ New in Phase 2:
     retention rule (below) does not apply to it; the history property
     tests place bitmaps and apply adjust/orient/crop chains to prove it
     (`Edit::AddBitmap`, `Edit::Photo`; clean at `PROPTEST_CASES=20000`).
+41. **Live objects regenerate outside the tree** (phase 13 A1–A4,
+    XARA-US-0068, 2026-09-24; `src/regen.rs`). `regenerate(doc,
+    controller, dpi)` is a pure function of the document returning a
+    `LiveOutput`; `LiveCache` keeps each controller's last output with
+    the `RegenKey` it was computed for; `RegenQueue` collects controllers
+    (`mark`, `mark_changes` from the tree's change journal: every
+    controller at or above a changed node, or every controller when the
+    journal overflowed), deduplicates, and `flush`es deepest first (ties
+    by tag), skipping any whose key still matches the cache.
+    `RegenState::Dirty` entries flush alone with `flush_urgent`
+    (export, conversion); `Deferred` ones wait for paint. Why outside:
+    the phase's three traps become structural. *Regeneration is not an
+    edit*: nothing in `regen` writes the tree or the history, so one
+    parameter change is one undo step and undo recomputes (or finds) the
+    old output — `one_parameter_change_is_one_undo_step_and_a_flush_
+    records_nothing`. *The double invalidation* (old extent and new) is
+    the render thread's scene diff, which compares the scene drawn with
+    each output (`render.md`, "Edit damage"); there is no per-controller
+    bounds bookkeeping to forget. *Deferred beats immediate*: a drag
+    marks one entry, flushed once per frame. The alternative — rewrite
+    the generated subtree in place without recording it — breaks the
+    history property "every undo lands on the recorded digest" the moment
+    the flush has not run yet.
+42. **`RegenKey`** = SHA-256 of a version string, the controller's
+    parameters (the `LiveNode` canon with role/regen/name neutralised),
+    its tag and content revision, the tags, content revisions and child
+    counts of every non-generated node under it in preorder, the tags and
+    revisions of the attribute children that precede the first object at
+    every ancestor level (what it inherits), `resources_rev`, and the dpi
+    quantised to 1/64. Content revisions move forward on undo too
+    (decision 34), so an undo never finds a stale entry — it regenerates.
+    Keys are per tree: a `LiveCache` belongs to one document (`clear` on
+    replacement, `retain_alive` after the history lets nodes go). An
+    attribute placed *after* an object at an ancestor level (the
+    `AttrAfterInk` warning) is not in the key; such files exist (267
+    warnings in the corpus) but none with a live object today.
+43. **`LiveOutput` has two variants.** `Stored` — draw the source and the
+    generated subtree a file stored, as they are — is what every kind
+    returns until its generator lands (blend/contour XARA-US-0070, mould
+    XARA-US-0071), and what pixel effects return for good: shadow,
+    feather and bevel lighting are computed by the renderer at the
+    resolution they are shown (`render.md`, "Live effects: the offscreen
+    pipeline"). `Shapes(Arc<[GeneratedShape]>)` (path + the attributes
+    that differ from what the controller inherits, paint order, document
+    coordinates) is the contract the geometry generators fill. The
+    `match` in `regenerate` lists every `LiveKind` so that a generator
+    lands as a one-arm change and a new kind cannot be added silently.
+44. **Generated data needs its parent** (A2). `LiveRole::needs_parent()`
+    is true for `Generated`; `live::in_generated(tree, id)` is true for a
+    generated node or anything inside one, and `Tx::check_permitted`
+    now refuses every command on such a node (it refused only the
+    generated node itself before). The controller, with its whole
+    subtree, is deleted normally. Marquee selection and the clipboard
+    need nothing: `xarast-app`'s `selectable_objects` takes a layer's
+    direct children, and a generated node is never one. **"Exactly one
+    generated subtree" is deliberately not an invariant**: a blend has
+    one generated node per pair of objects, a controller built by a
+    reader or a command has none until something bakes one, and the
+    derived result lives outside the tree anyway. Invariants 4 and 12
+    stand as they were.
+45. **Blend steps are generated, not materialised** (the phase-13
+    decision the story named; F7). They are `LiveOutput::Shapes` in the
+    `LiveCache`, never nodes; only an explicit "convert to editable
+    shapes" (`BecomeA`, A9) creates nodes, as one undoable command.
+46. **`MouldGeometry` is a trait over a closed enum** (the other named
+    decision). The trait (`describe`, `validate`, `mould_point`,
+    `mould_path`, `invert_point`) is the contract G2 lists; the storage
+    is an enum (`Envelope4x4`, `Envelope2x2`, `Perspective`) because the
+    set is closed, the params must be `Clone + PartialEq`, digested and
+    serialised, and an exhaustive `match` is what makes a new kind
+    impossible to forget. To be built by XARA-US-0071; recorded here so
+    it is not re-litigated.
+47. **`ProceduralSource::cache_key()`** (the third named decision): SHA-256
+    of `PROCEDURAL_GENERATOR` (`"xarast-procedural/0"`, bumped whenever
+    the pixels change for the same parameters), the fractal flag and the
+    `ProceduralParams` canon (floats by their bits: one ulp is another
+    bitmap). The generator version in the key is phase 13 H6's "freeze
+    it": an old bitmap can never be served under a new algorithm.
 
 ## The `.xar` attribute tag reconciliation
 
@@ -661,12 +741,16 @@ the digest recorded for that state serial.
       against the corpus. **Done: 26 257 pairs, zero disagreements.**
 - [ ] The 3500–3505 overprint on/off pairing: **unanswerable from this
       corpus**, which contains none of those records.
-- [ ] Decide whether blend intermediate steps are materialised as nodes or
-      generated at render time. The original does the latter; it affects
-      hit-testing (Phase 13).
-- [ ] `ProceduralSource` and its cache hash — the struct exists, the hash does
-      not (Phase 13 / Phase 10).
-- [ ] `MouldGeometry` as trait or enum, when live effects land (Phase 13).
+- [x] Decide whether blend intermediate steps are materialised as nodes or
+      generated at render time. **Generated** (decision 45).
+- [x] `ProceduralSource` and its cache hash. **Done**: `cache_key()`
+      (decision 47).
+- [x] `MouldGeometry` as trait or enum. **Decided**: a trait over a closed
+      enum (decision 46); built by XARA-US-0071.
+- [ ] Wire `RegenQueue` + `LiveCache` into the session (flush before
+      `rebuild_scene`, `mark_changes` beside the picker's `note_changes`)
+      and teach the walker to draw `LiveOutput::Shapes`, with the first
+      geometry generator (XARA-T-0316).
 - [ ] Incremental checkpoints: share structure with the previous snapshot
       instead of rebuilding, and drive them from the autosave timer (Phase 6).
       Until then `History::set_checkpoint_cadence` is opt-in.

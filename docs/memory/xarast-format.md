@@ -697,6 +697,32 @@ optional background `<rect>`, optional minify.
   output is byte-identical to before (the round-trip and corpus tests
   guard it).
 
+## Feathers are written on their owner (XARA-US-0068, 2026-09-24)
+
+Since the renderer draws feathers (`render.md`, "Live effects: the
+offscreen pipeline"), *where* a feather sits matters: the node that owns
+the `Feather` attribute is feathered once, as a unit, and its descendants
+are not feathered again. The writer used to put `xarast:feather` on every
+ink element from the resolved attribute state, so a group's feather came
+back as one feather per member — caught by the corpus render round trip
+(Groucho2's 12 feathered groups: 288 pixels, up to 35 levels). Now:
+
+- `own_feather(n, el)` writes `xarast:feather="size bias gain"` on an
+  ink element, a group `<g>`, a ClipView `<g>` or a live controller `<g>`
+  **only when that node has a `Feather` attribute child** above zero.
+  Text runs (`<tspan>`) still write the state in force: runs have no
+  owner, and no corpus text is feathered.
+- The reader turns `xarast:feather` on those three containers into an
+  attribute child (a ClipView's after its clipping shape, which must stay
+  the first child); `feather` is a known attribute there, not foreign
+  baggage. On ink elements it was already read as an own attribute.
+- Files written before this read their per-member feathers back as
+  per-member owners (each member feathered alone), as they were written.
+- Pinned by `tests/svg_read.rs`,
+  `a_feather_comes_back_on_the_node_that_owns_it`, and by
+  `xarast-app/tests/xarast_roundtrip.rs` over the corpus. Baking a
+  filter for external viewers is still C10 (XARA-T-0317).
+
 ## Photo operations: `<xarast:photo-ops>` (XARA-US-0054, 2026-09-24)
 
 `svg/photo.rs` writes and parses a bitmap object's chain
