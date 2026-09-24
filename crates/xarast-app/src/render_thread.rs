@@ -431,7 +431,13 @@ impl RenderThread {
         let worker = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
             .name("xarast-render".to_owned())
-            .spawn(move || worker_loop(&worker, renderer, &waker))?;
+            // A panic that escapes the worker is fatal: the interface
+            // thread autosaves and exits (`crash::run_guarded`).
+            .spawn(move || {
+                crate::crash::run_guarded("xarast-render", || {
+                    worker_loop(&worker, renderer, &waker);
+                });
+            })?;
         Ok(RenderThread {
             shared,
             handle: Some(handle),
@@ -905,6 +911,7 @@ fn worker_loop<R: FrameRenderer>(shared: &Arc<Shared>, renderer: R, waker: &Wake
             Next::Repair(job) => (job, true),
         };
 
+        crate::crash::force_panic_point("render");
         let tick = xarast_render::substitution_tick();
         let mut produced = if repairing {
             // Exact whatever the budget did since: see the module docs.

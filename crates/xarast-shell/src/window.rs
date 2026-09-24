@@ -14,13 +14,15 @@ use winit::window::{Window, WindowId};
 use crate::clipboard::{Clipboard, system_clipboard};
 use crate::decorations::DecorationPlan;
 use crate::display::{DisplayEnvironment, PlatformCapabilities};
-use crate::gpu_errors::{GpuErrorSink, GpuRecovery, Recovery};
+use crate::gpu_errors::{
+    DeviceLoss, DeviceRebuilt, GpuErrorSink, GpuRecovery, RebuildCause, Recovery,
+};
 use crate::input::event::ShellEvent;
 use crate::input::translate::EventTranslator;
-use crate::paint::{CanvasFrame, Painter, UiFrame};
+use crate::paint::{CanvasFrame, Painter, TextureLedger, UiFrame};
 use crate::portal::{PortalHandle, PortalService};
 use crate::scale::{PhysicalSize, ScaleFactor};
-use crate::tiles::{CanvasTier, CanvasView, Compositor, TiledFrame};
+use crate::tiles::{CanvasCarry, CanvasTier, CanvasView, Compositor, TiledFrame};
 use crate::{
     APP_ID, AdapterReport, BackendPreference, FrameRequest, PresentTiming, RendererPreference,
     ShellApp, ShellConfig, ShellError, record_first_frame,
@@ -151,6 +153,8 @@ pub(crate) struct PendingFrame {
     capture: Option<(std::path::PathBuf, bool)>,
     /// The accessibility tree to publish after this frame.
     a11y: Option<egui::accesskit::TreeUpdate>,
+    /// The application asked for safe mode.
+    pub(crate) safe_mode: bool,
 }
 
 #[derive(Debug)]
@@ -361,6 +365,14 @@ impl ShellCtx<'_> {
         self.frame.a11y = Some(update);
     }
 
+    /// Switches to safe mode for the rest of the session: the device is
+    /// rebuilt on a software adapter where there is one, with CPU canvas
+    /// composition, and the picture carried over (XARA-US-0064 F5). The
+    /// application hears of it as [`ShellEvent::GpuRebuilt`].
+    pub const fn request_safe_mode(&mut self) {
+        self.frame.safe_mode = true;
+    }
+
     /// Asks the shell to quit after this callback.
     pub const fn exit(&mut self) {
         self.exit = true;
@@ -524,6 +536,8 @@ pub(crate) struct Gpu {
     tiles_pending: bool,
     /// Where `wgpu` reports the errors it would otherwise panic on.
     errors: GpuErrorSink,
+    /// A CPU copy of the interface textures, for a device rebuild.
+    ledger: TextureLedger,
     pub(crate) report: AdapterReport,
     last_present: Option<PresentTiming>,
     /// Wait for the GPU after each present (`ShellConfig::probe`).
@@ -536,6 +550,7 @@ impl Gpu {
         preference: BackendPreference,
         renderer: RendererPreference,
         probe: bool,
+        prefer_software: bool,
     ) -> Result<Self, ShellError> {
         // The window's display handle goes to the instance: the GL backend
         // needs it to find an EGL display on Wayland, and without it
@@ -555,7 +570,7 @@ impl Gpu {
         // none does is it an error, and a diagnosis rather than a panic.
         let mut chosen = None;
         let mut failures = Vec::new();
-        for adapter in candidate_adapters(&instance, &surface) {
+        for adapter in candidate_adapters(&instance, &surface, prefer_software) {
             let name = adapter.get_info().name;
             match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("xarast device"),
@@ -664,6 +679,7 @@ impl Gpu {
             compositor,
             tiles_pending: false,
             errors,
+            ledger: TextureLedger::default(),
             report,
             last_present: None,
             probe,
@@ -728,8 +744,37 @@ impl Gpu {
             self.tiles_pending |= self.compositor.prepare(&mut self.painter);
         }
         if let Some(ui) = pending.ui.take() {
+            self.ledger.apply(&ui.textures);
             self.painter.set_ui(&self.device, &self.queue, ui);
         }
+    }
+
+    /// Gives up this device, keeping what a new one needs to show the same
+    /// window: the canvas's last frame and view, the interface textures
+    /// and meshes. All of it is in memory; nothing is read from the GPU.
+    fn into_carry(mut self) -> GpuCarry {
+        let (ui, ppp) = self.painter.take_ui();
+        GpuCarry {
+            canvas: self.compositor.into_carry(),
+            ledger: self.ledger,
+            ui,
+            ppp,
+        }
+    }
+
+    /// Fills a new device with what the old one showed.
+    fn restore(&mut self, carry: GpuCarry) {
+        self.compositor.adopt(carry.canvas);
+        self.painter.set_ui(
+            &self.device,
+            &self.queue,
+            UiFrame {
+                primitives: carry.ui,
+                textures: carry.ledger.replay(),
+                pixels_per_point: carry.ppp,
+            },
+        );
+        self.ledger = carry.ledger;
     }
 
     /// Presents one frame: the canvas pass, then the interface pass, over
@@ -917,10 +962,13 @@ impl Gpu {
 /// The adapters to try, best first: the one `WGPU_ADAPTER_NAME` names (a
 /// case-insensitive substring, as `wgpu`'s own helper reads it, but a
 /// missing match is a warning here, not a panic), the high-performance
-/// default, then the software fallback.
+/// default, then the software fallback. With `prefer_software` (safe mode)
+/// the software fallback comes first, so a driver that crashes the
+/// process is not used at all where lavapipe or llvmpipe is installed.
 fn candidate_adapters(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'_>,
+    prefer_software: bool,
 ) -> Vec<wgpu::Adapter> {
     let mut out = Vec::new();
     if let Ok(want) = std::env::var("WGPU_ADAPTER_NAME") {
@@ -937,7 +985,12 @@ fn candidate_adapters(
             }
         }
     }
-    for fallback in [false, true] {
+    let order = if prefer_software {
+        [true, false]
+    } else {
+        [false, true]
+    };
+    for fallback in order {
         if let Ok(a) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(surface),
@@ -950,7 +1003,58 @@ fn candidate_adapters(
             }
         }
     }
+    if prefer_software {
+        // `force_fallback_adapter` is only a request; a software adapter
+        // the named one outranks still goes first.
+        out.sort_by_key(|a| a.get_info().device_type != wgpu::DeviceType::Cpu);
+    }
     out
+}
+
+/// What survives a device: see [`Gpu::into_carry`].
+#[derive(Debug, Default)]
+struct GpuCarry {
+    canvas: CanvasCarry,
+    ledger: TextureLedger,
+    ui: Vec<egui::ClippedPrimitive>,
+    ppp: f32,
+}
+
+impl GpuCarry {
+    /// Takes over what the application handed in while there was no
+    /// device, so that it is shown once there is one and nothing piles
+    /// up meanwhile: only the last canvas frame and view matter, and
+    /// texture changes are applied to the ledger in order.
+    fn absorb(&mut self, pending: &mut PendingFrame) {
+        match pending.canvas.take() {
+            Some(CanvasOp::Move(o)) => {
+                if let Some(v) = self.canvas.view.as_mut() {
+                    v.origin = o;
+                }
+            }
+            Some(CanvasOp::Clear) => self.canvas = CanvasCarry::default(),
+            // A whole image is only ever shown by the self-tests.
+            Some(CanvasOp::Show(_)) | None => {}
+        }
+        let tiles = std::mem::take(&mut pending.tiles);
+        if let Some(f) = tiles.frames.into_iter().last() {
+            self.canvas.last = Some(f);
+        }
+        if let Some(v) = tiles.view {
+            self.canvas.view = Some(v);
+        }
+        if let Some(ui) = pending.ui.take() {
+            self.ledger.apply(&ui.textures);
+            self.ui = ui.primitives;
+            self.ppp = ui.pixels_per_point.max(0.01);
+        }
+    }
+}
+
+/// Records what presents in the crash-report context.
+fn record_renderer(status: &RendererStatus) {
+    xarast_app::crash::set_context("renderer", status.to_string());
+    xarast_app::crash::set_context("gpu_adapter", status.adapter.to_string());
 }
 
 /// A frame copied out for `--screenshot`.
@@ -1022,6 +1126,18 @@ pub(crate) struct ShellLoop<A: ShellApp> {
     /// Frames still to raise a deliberate GPU error in
     /// (`XARAST_INJECT_GPU_ERRORS`); zero in normal use.
     inject_errors: u32,
+    /// Simulate a device loss after this many presented frames
+    /// (`XARAST_INJECT_DEVICE_LOSS`); `None` in normal use. The loss is
+    /// only ever simulated — the device itself is left alone.
+    inject_loss: Option<u32>,
+    /// The device-loss ladder.
+    device_loss: DeviceLoss,
+    /// What the lost device showed, while there is no device.
+    carry: Option<GpuCarry>,
+    /// When to try building a device again after a failed rebuild.
+    rebuild_at: Option<std::time::Instant>,
+    /// Safe mode: a software adapter where there is one, CPU composition.
+    safe_mode: bool,
     pub(crate) report: Option<AdapterReport>,
     pub(crate) error: Option<ShellError>,
 }
@@ -1031,6 +1147,7 @@ impl<A: ShellApp> ShellLoop<A> {
         let env = DisplayEnvironment::from_env();
         let decorations = DecorationPlan::for_environment(&env);
         tracing::info!(session = %env.summary(), decorations = decorations.summary(), "shell starting");
+        let safe_mode = config.safe_mode;
         Self {
             config,
             env,
@@ -1071,6 +1188,13 @@ impl<A: ShellApp> ShellLoop<A> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0),
+            inject_loss: std::env::var("XARAST_INJECT_DEVICE_LOSS")
+                .ok()
+                .and_then(|v| v.parse().ok()),
+            device_loss: DeviceLoss::new(),
+            carry: None,
+            rebuild_at: None,
+            safe_mode,
             report: None,
             error: None,
         }
@@ -1157,6 +1281,86 @@ impl<A: ShellApp> ShellLoop<A> {
         }
     }
 
+    /// The device is gone: keep what it showed and build another. The
+    /// document lives in the application and is never touched.
+    fn on_device_lost(&mut self, event_loop: &ActiveEventLoop) {
+        let plan = self.device_loss.on_lost();
+        tracing::error!(
+            losses = self.device_loss.losses(),
+            gpu_tiles = plan.gpu_tiles,
+            "GPU device lost; rebuilding it"
+        );
+        self.replace_device(
+            event_loop,
+            RebuildCause::Lost {
+                losses: self.device_loss.losses(),
+            },
+        );
+    }
+
+    /// Drops the device, keeping its picture, and builds a new one.
+    fn replace_device(&mut self, event_loop: &ActiveEventLoop, cause: RebuildCause) {
+        if let Some(mut old) = self.gpu.take() {
+            let _ = old.errors.take_report();
+            let carry = old.into_carry();
+            // Frames absorbed before (a failed rebuild) are older.
+            self.carry = Some(carry);
+        }
+        self.rebuild_at = None;
+        self.try_rebuild(event_loop, cause);
+    }
+
+    /// Builds a device and fills it from the carry. A failure is retried
+    /// later, with a growing wait; the loop never exits over it.
+    fn try_rebuild(&mut self, event_loop: &ActiveEventLoop, cause: RebuildCause) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let renderer = if self.safe_mode || !self.device_loss.plan().gpu_tiles {
+            RendererPreference::Cpu
+        } else {
+            self.config.renderer
+        };
+        match Gpu::new(
+            window.clone(),
+            self.config.backends,
+            renderer,
+            self.config.probe,
+            self.safe_mode,
+        ) {
+            Ok(mut gpu) => {
+                if let Some(carry) = self.carry.take() {
+                    gpu.restore(carry);
+                }
+                if matches!(cause, RebuildCause::Lost { .. }) {
+                    gpu.compositor.reason = Some("the GPU device was lost".to_owned());
+                }
+                self.device_loss.on_rebuilt();
+                self.recovery = GpuRecovery::new();
+                self.backoff_until = None;
+                self.consecutive_failures = 0;
+                self.rebuild_at = None;
+                let status = gpu.status();
+                record_renderer(&status);
+                tracing::info!(renderer = %status, ?cause, "GPU device rebuilt");
+                self.report = Some(gpu.report.clone());
+                self.events.push(ShellEvent::GpuRebuilt(DeviceRebuilt {
+                    renderer: status.to_string(),
+                    cause,
+                }));
+                self.gpu = Some(gpu);
+                window.request_redraw();
+            }
+            Err(e) => {
+                let wait = self.device_loss.on_rebuild_failed();
+                tracing::error!(error = %e, wait_ms = wait.as_millis(), "could not rebuild the GPU device; trying again");
+                let at = std::time::Instant::now() + wait;
+                self.rebuild_at = Some(at);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            }
+        }
+    }
+
     fn collect_portal_answers(&mut self) {
         let mut answers = Vec::new();
         self.portals.poll(&mut answers);
@@ -1220,13 +1424,20 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 _ => None,
             };
         }
+        let renderer = if self.safe_mode {
+            RendererPreference::Cpu
+        } else {
+            self.config.renderer
+        };
         match Gpu::new(
             window.clone(),
             self.config.backends,
-            self.config.renderer,
+            renderer,
             self.config.probe,
+            self.safe_mode,
         ) {
             Ok(gpu) => {
+                record_renderer(&gpu.status());
                 self.report = Some(gpu.report.clone());
                 self.gpu = Some(gpu);
             }
@@ -1300,6 +1511,29 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                 self.redraw_at = apply_frame_request(event_loop, self.window.as_ref(), request);
                 self.publish_accessibility();
 
+                if std::mem::take(&mut self.pending.safe_mode) && !self.safe_mode {
+                    self.safe_mode = true;
+                    tracing::warn!("safe mode asked for; rebuilding the GPU device");
+                    self.replace_device(event_loop, RebuildCause::SafeMode);
+                }
+                if self.gpu.is_none() {
+                    // Lost, and not rebuilt yet: keep what the application
+                    // hands in, and try again when the wait is over.
+                    if let Some(carry) = self.carry.as_mut() {
+                        carry.absorb(&mut self.pending);
+                    }
+                    if self
+                        .rebuild_at
+                        .is_some_and(|at| std::time::Instant::now() >= at)
+                    {
+                        self.try_rebuild(
+                            event_loop,
+                            RebuildCause::Lost {
+                                losses: self.device_loss.losses(),
+                            },
+                        );
+                    }
+                }
                 let Some(gpu) = self.gpu.as_mut() else { return };
                 if self.inject_errors > 0 {
                     self.inject_errors -= 1;
@@ -1315,6 +1549,22 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
                     self.pending.capture = capture;
                 } else if let Some((_, true)) = capture {
                     event_loop.exit();
+                }
+                if outcome == FrameOutcome::Presented
+                    && self
+                        .inject_loss
+                        .is_some_and(|n| self.frames.saturating_add(1) >= n)
+                {
+                    self.inject_loss = None;
+                    gpu.errors
+                        .record_lost("simulated by XARAST_INJECT_DEVICE_LOSS");
+                }
+                if gpu.errors.take_lost() {
+                    if outcome == FrameOutcome::Presented {
+                        self.frames += 1;
+                    }
+                    self.on_device_lost(event_loop);
+                    return;
                 }
                 self.recover_from_gpu_errors(event_loop);
                 match outcome {
@@ -1378,6 +1628,16 @@ impl<A: ShellApp> ApplicationHandler for ShellLoop<A> {
             && let Some(w) = &self.window
         {
             w.request_redraw();
+        }
+        // A device rebuild that failed is tried again at a redraw.
+        if let Some(at) = self.rebuild_at {
+            if std::time::Instant::now() >= at {
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            } else {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(at));
+            }
         }
         // A timed redraw (the owed Final frame): a `WaitUntil` only wakes
         // the loop, it draws nothing. Before this, the Final after a

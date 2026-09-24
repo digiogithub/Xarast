@@ -192,6 +192,7 @@ enum Asking {
         path: PathBuf,
     },
     Recovery,
+    Crash(crate::crash::CrashNotice),
 }
 
 /// A save that has been started and not finished.
@@ -256,6 +257,10 @@ pub struct AppState {
     autosave_policy: AutosavePolicy,
     tracks: HashMap<DocumentId, Track>,
     recoverable: Vec<Recoverable>,
+    /// The previous session crashed: asked about before recovery.
+    crash: Option<crate::crash::CrashNotice>,
+    /// This session runs in safe mode.
+    safe_mode: bool,
     deterministic_saves: bool,
     /// The application's own clipboard: the last copy, in full fidelity,
     /// and the SVG text it put on the system clipboard.
@@ -1114,6 +1119,21 @@ impl AppState {
                 self.recoverable.clear();
                 changed
             }
+            (Asking::Crash(notice), PromptAnswer::CopyReport) => {
+                if let Some(path) = &notice.report {
+                    self.requests.push(PlatformRequest::SetClipboardText(
+                        path.display().to_string(),
+                    ));
+                    self.notice = Some("Crash report path copied".to_owned());
+                }
+                // The question stays up until it is answered otherwise.
+                self.prompt = Some((prompt, Asking::Crash(notice)));
+                changed
+            }
+            (Asking::Crash(_), PromptAnswer::SafeMode) => {
+                changed | self.enter_safe_mode() | self.offer_recovery()
+            }
+            (Asking::Crash(_), _) => changed | self.offer_recovery(),
             // Cancel, whatever the question.
             _ => {
                 self.discarded.clear();
@@ -1524,10 +1544,47 @@ impl AppState {
         &self.recoverable
     }
 
-    /// Asks whether to recover what an earlier session left behind, if it
+    /// Tells the application what the start of this session found
+    /// ([`crate::crash::begin_session`]): a crash to report before the
+    /// recovery question, and safe mode.
+    #[must_use]
+    pub fn with_startup_check(mut self, check: &crate::crash::StartupCheck) -> AppState {
+        self.crash = crate::crash::CrashNotice::from_check(check);
+        self.safe_mode = check.safe_mode.active();
+        self
+    }
+
+    /// Whether this session runs in safe mode.
+    #[must_use]
+    pub const fn safe_mode(&self) -> bool {
+        self.safe_mode
+    }
+
+    /// Switches this session to safe mode and asks the platform layer to
+    /// follow ([`PlatformRequest::EnterSafeMode`]). A no-op when it is on.
+    pub fn enter_safe_mode(&mut self) -> Changed {
+        if self.safe_mode {
+            return Changed::empty();
+        }
+        self.safe_mode = true;
+        self.prefs = Preferences::default();
+        self.requests.push(PlatformRequest::EnterSafeMode);
+        self.notice = Some("Safe mode: drawing without GPU tiles".to_owned());
+        Changed::UI
+    }
+
+    /// Asks about a crash of the previous session, if there was one, and
+    /// then whether to recover what an earlier session left behind, if it
     /// left anything. Call once the window is up.
     pub fn offer_recovery(&mut self) -> Changed {
-        if self.recoverable.is_empty() || self.prompt.is_some() {
+        if self.prompt.is_some() {
+            return Changed::empty();
+        }
+        if let Some(notice) = self.crash.take() {
+            self.prompt = Some((Prompt::crashed(&notice), Asking::Crash(notice)));
+            return Changed::UI;
+        }
+        if self.recoverable.is_empty() {
             return Changed::empty();
         }
         let names: Vec<String> = self

@@ -130,6 +130,7 @@ scale factor and calls `Intent::SetDpi`.
 | `save` | `SaveJob` (snapshot → restore → thumbnail ∥ SVG → atomic write), `SaveWorker` (thread per job, waker), `SaveKind`, `SaveOutcome` |
 | `locks` | `HeldLock` (a `DocumentLock` in a process registry), `LockMode`, `release_all` for signals |
 | `autosave` | `AutosaveStore` (entries under `$XDG_STATE_HOME/xarast/autosave/<id>/`), `AutosavePolicy`, `Recoverable`, `scan` |
+| `crash` | Crash reports (`install_panic_hook`, `CrashReport`, `redact`, `scrub_quoted`, the log ring, `set_context`), `expect_panics`, `FatalWatch` + `run_guarded`, `force_panic_point`, the sentinel (`begin_session`, `Sentinel`, `StartupCheck`, `SafeMode`, `CrashNotice`) — XARA-US-0064 |
 | `prompt` | `Prompt`, `PromptChoice`, `PromptAnswer`, `ChoiceRole`: the questions the core asks |
 | `thumbnail` | `CpuThumbnails` (the `ThumbnailProvider`), `thumbnail_png` |
 | `schedule` | `QualityScheduler` (the Draft → Final policy, clock injected), `Canvas` (it joined to a `RenderThread` and a `Session`), `Backdrop`, `FINAL_AFTER` |
@@ -635,6 +636,69 @@ writes there; a `.xar` origin asks for a name), re-records the holder,
 takes the origin's lock (held → read-only) and keeps the entry until a
 save or close.
 
+**Crashes (XARA-US-0064, phase 12 §F).** Module `crash`; the shell
+half is `ui.md` shell decision 43.
+
+- **Report (F1).** The panic hook writes
+  `$XDG_STATE_HOME/xarast/crashes/crash-<unix s>-<pid>.toml` before
+  unwinding: time, build (`CARGO_PKG_VERSION` plus `XARAST_BUILD_ID` if
+  the build sets one — nothing sets it yet), os/arch, thread, location,
+  message, backtrace (200 lines), `[context]` (`platform`, `renderer`,
+  `gpu_adapter`, `safe_mode`, set by the shell) and the last 200 log
+  lines. Hand-written TOML (no new dependency). The hook takes the
+  context and log locks with `try_lock`, so a panic inside them cannot
+  deadlock it. A panic inside `expect_panics` (the image decoder and the
+  gallery thumbnailer, which used to call `catch_unwind` directly) writes
+  no report. `xarast-text`'s font-subsetter `catch_unwind` cannot use it
+  (no dependency on `xarast-app`), so a caught subsetter panic still
+  writes a spurious report.
+- **Privacy rule.** Every string entering a report goes through
+  `redact` (an absolute or `~/` path with two or more slashes becomes
+  `…/basename`). A `String` panic payload (built at run time) also goes
+  through `scrub_quoted` (`"text"` → `"…"`); a `&'static str` payload is
+  source text and is kept. Log lines get both. What is *not* caught: a
+  `%` (Display) log field holding document text — code must never log
+  document text. Nothing is ever uploaded; the UI shows the path and
+  copies it.
+- **Fatal worker panic (F3).** `RenderThread::spawn_with` runs the worker
+  under `crash::run_guarded("xarast-render", …)`: an escaping panic raises
+  `FatalWatch::global()` (flag + waker). The shell then calls
+  `emergency_shutdown` — the existing signal path: snapshot of every
+  modified document into the autosave store, entries kept — and exits
+  101. The recovered file is the autosave entry, **not** a
+  `*.xarast.recovered` beside the document as phase-12 F3 words it:
+  writing beside the user's file fails in read-only folders, leaves
+  clutter, and the autosave entry is what the recovery prompt already
+  offers. Other threads are not guarded: a save or import thread that
+  dies is reported, not fatal.
+- **Sentinel (F4) and crash loop (F6).** `begin_session(state_dir,
+  requested_safe, now)` writes `sessions/<pid>.running` (lock-file holder
+  format) and counts earlier sentinels whose holder is on this host and
+  dead or from another boot (another host's are left alone; an
+  unreadable one is a crash). Each crash appends `now` to
+  `sessions/crash-history` (kept 24 h). `CRASH_LOOP_COUNT` (3) within
+  `CRASH_LOOP_WINDOW` (10 min) → `SafeMode::Forced`; else a crash →
+  `Offered`; else `--safe-mode` → `Requested`. Only `Sentinel::finish`
+  removes the file — dropping it (unwinding) leaves it. Every I/O
+  failure degrades to "no crash found".
+- **Next start (F5/F7).** `AppState::with_startup_check(&check)`:
+  `offer_recovery` first asks `Prompt::crashed` ("Xarast closed
+  unexpectedly", the report path, what safe mode is): *Use safe mode*
+  (only when `Offered`), *Copy report path* (→ `SetClipboardText`, the
+  prompt stays), *Continue* (default and Escape). Safe mode or Continue
+  then asks the usual recovery question. `enter_safe_mode` resets
+  `prefs` in memory and queues `PlatformRequest::EnterSafeMode`.
+- **F8.** `force_panic_point(site)` panics when `XARAST_FORCE_PANIC` is
+  `site` (read once; compiled into release). Sites: `startup` (binary),
+  `ui` (`Viewer::on_frame`), `render` (each render-thread job).
+- **Tests.** `tests/crash_recovery.rs` (phase-12 criteria 12 and 13):
+  the test binary re-runs itself as a child with
+  `XARAST_FORCE_PANIC=render` and a real `RenderThread`; the parent checks
+  exit 101, the report (render thread, context, `…/work.xarast`, no
+  private folder name), the recoverable autosave, the crash prompt, Copy,
+  Safe mode, Recover; three children force safe mode. 8 unit tests in
+  `crash.rs`.
+
 **Thumbnail (T-0082).** `thumbnail::CpuThumbnails`: the active spread's
 first page edge to edge, 256 px on the longer side, page colour beneath,
 parallel CPU configuration (ProbeX16: walk 182 ms + raster 167 ms; the
@@ -686,9 +750,18 @@ placer (XARA-T-0259, 2026-09-24, ext4, load ≈ 3): ProbeX16 UI thread
     the byte identity of the snapshot path over the corpus.
 14. **Nothing closes a modified document without asking** except
     `AppState::close` (the caller's explicit decision) and
-    `emergency_shutdown` (which autosaves first). Every intent that closes
+    `emergency_shutdown` (which autosaves first; called on a signal, a
+    fatal worker panic and a panic unwinding through the viewer). Every intent that closes
     documents goes through `request`.
 15. **An autosave entry's `holder` is written before its snapshot.**
+18. **A crash report never holds document content or a full path.**
+    Everything entering one goes through `crash::redact`; run-time panic
+    messages and log lines also through `scrub_quoted`. Never log
+    document text with `%`.
+19. **The sentinel is removed by `Sentinel::finish` alone**, on a clean
+    return from the event loop. Anything else — a fatal panic (exit 101),
+    an unwinding panic, `SIGKILL`, the signal fallback's `process::exit` —
+    leaves it, and the next start counts a crash.
 16. **A repaint is only ever drawn over the frame it was diffed against,
     at its exact view.** `Plan::Repaint` requires the kept frame's
     transform bit for bit, its page rect and full cover; the pixels

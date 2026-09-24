@@ -223,6 +223,10 @@ pub enum ShellEvent {
     /// The GPU raised errors during the last frame. The shell has already
     /// logged them and is recovering; this is for the status bar.
     GpuError(crate::gpu_errors::GpuErrorReport),
+    /// The shell replaced its GPU device — the old one was lost, or safe
+    /// mode was asked for — and carried the picture over. The document was
+    /// never touched; this is for the status bar.
+    GpuRebuilt(crate::gpu_errors::DeviceRebuilt),
     /// An assistive technology (a screen reader, say) started listening.
     /// From now on the application should publish its accessibility tree
     /// with [`crate::ShellCtx::update_accessibility`], the first time in

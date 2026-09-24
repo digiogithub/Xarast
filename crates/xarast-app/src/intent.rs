@@ -374,6 +374,9 @@ pub enum PlatformRequest {
         /// Passed back in the answer.
         in_place: bool,
     },
+    /// Switch this session to safe mode: CPU canvas composition on a
+    /// software adapter where there is one (`crash`, XARA-US-0064).
+    EnterSafeMode,
 }
 
 /// A dialog or panel of the interface the core can ask for.
