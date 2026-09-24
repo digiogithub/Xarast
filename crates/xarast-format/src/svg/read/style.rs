@@ -392,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn font_face_rules_are_skipped_quietly() {
+    fn font_face_rules_are_read_without_a_warning() {
         let mut sheet = Stylesheet::default();
         sheet.add(
             "@font-face{font-family:'Noto Sans';font-weight:400;font-style:normal;\
