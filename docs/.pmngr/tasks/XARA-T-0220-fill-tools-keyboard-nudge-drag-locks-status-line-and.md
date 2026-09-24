@@ -2,12 +2,13 @@
 id: XARA-T-0220
 type: task
 title: "Fill tools: keyboard nudge, drag locks, status line and outline handles"
-status: backlog
+status: in_review
 parent: XARA-US-0039
 author: mcp
 labels: [phase-8, tools]
 created: 2026-09-23T21:18:03Z
-updated: 2026-09-23T21:18:03Z
+updated: 2026-09-24T18:10:42Z
+started: 2026-09-24T17:19:39Z
 ---
 
 ## Description

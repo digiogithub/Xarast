@@ -2,12 +2,13 @@
 id: XARA-US-0068
 type: story
 title: A/B — Live-object infrastructure and shared offscreen + blur pipeline
-status: backlog
+status: in_progress
 parent: XARA-EP-0014
 author: mcp
 labels: [phase-13, live-effects, render]
 created: 2026-09-23T09:43:25Z
-updated: 2026-09-23T09:43:25Z
+updated: 2026-09-24T17:22:06Z
+started: 2026-09-24T17:22:06Z
 ---
 
 ## Description
