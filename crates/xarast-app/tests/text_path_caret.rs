@@ -4,7 +4,7 @@
 //! fonts.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use kurbo::{Affine, Point, Vec2};
 use xarast_app::fonts::FontService;
@@ -17,8 +17,26 @@ use xarast_app::{
 use xarast_doc::{Document, NodeId, NodeKind, TextLayout};
 use xarast_geom::Mp;
 
+/// The pinned fonts, installed as the process's shared service before any
+/// test here opens a session. Opening one fits the view to the page, which
+/// measures the text with [`xarast_app::fonts::shared`]; that service is
+/// chosen once per process, so a test that opened a session before another
+/// installed the pinned fonts would pin the system's fonts for all of them,
+/// and a session tool laying the story out with those would disagree with a
+/// caret map built from these (XARA-T-0294). Every test calls this first.
 fn fonts() -> Arc<FontService> {
-    FontService::from_dir(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"))
+    static PINNED: OnceLock<Arc<FontService>> = OnceLock::new();
+    let fonts = PINNED.get_or_init(|| {
+        FontService::from_dir(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../xarast-text/tests/fonts"),
+        )
+    });
+    xarast_app::fonts::set_shared(Arc::clone(fonts));
+    assert!(
+        Arc::ptr_eq(&xarast_app::fonts::shared(), fonts),
+        "the process's font service is not the pinned one"
+    );
+    Arc::clone(fonts)
 }
 
 fn corpus() -> Option<PathBuf> {
@@ -294,7 +312,6 @@ fn the_tool_follows_the_path_through_the_session() {
         return;
     };
     let fonts = fonts();
-    xarast_app::fonts::set_shared(Arc::clone(&fonts));
     let mut s = open(&root);
     s.apply(Intent::ChooseTool(ToolId::Text)).unwrap();
     let story = on_path_stories(&s.doc)[0];
