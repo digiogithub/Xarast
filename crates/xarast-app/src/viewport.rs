@@ -522,7 +522,7 @@ fn ink_rect(
                 Some(NodeKind::TextStory(_)) => {
                     let f = match fonts {
                         Some(f) => f,
-                        None => shared.get_or_insert_with(crate::fonts::shared),
+                        None => shared.get_or_insert_with(|| crate::fonts::document(doc)),
                     };
                     add(crate::text::story_rect(f, tree, node, &mut stack));
                     walk.control(xarast_doc::Descend::Skip);

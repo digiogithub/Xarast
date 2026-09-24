@@ -136,6 +136,9 @@ pub fn render_with_fonts(
     opts: &HeadlessOptions,
     fonts: Option<std::sync::Arc<crate::fonts::FontService>>,
 ) -> Result<HeadlessResult, HeadlessError> {
+    // The document's embedded faces on top: the frame is fitted to the
+    // text as the walk lays it out.
+    let fonts = fonts.map(|f| crate::fonts::for_document(&f, &session.doc));
     let mut view = session.viewport.clone();
     if let Some(dpi) = opts.dpi {
         view.set_dpi(dpi);

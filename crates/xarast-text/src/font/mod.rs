@@ -214,7 +214,21 @@ pub(crate) struct DbInner {
     substitutions: Vec<FontSubstitution>,
     families_cache: Option<Arc<[Arc<str>]>>,
     pub(crate) outlines: crate::outline::OutlineCache,
+    /// A document's faces ([`FontDb::register_document_face`]): the private
+    /// family each requested family's document faces live in, by the
+    /// family's lower-case normalised name.
+    doc_families: HashMap<String, Arc<str>>,
+    /// Private family → the family the document names.
+    doc_aliases: HashMap<Arc<str>, Arc<str>>,
+    /// Document faces handed out so far → their private family, which is
+    /// what the shaper must ask `parley` for.
+    doc_faces: HashMap<FaceId, Arc<str>>,
 }
+
+/// What the private family of a document's faces starts with: a
+/// private-use character no real family name holds, so it neither shadows
+/// nor is listed with the machine's families.
+const DOC_PREFIX: char = '\u{F8FF}';
 
 /// System plus embedded font database.
 ///
@@ -278,6 +292,43 @@ impl FontDb {
                 substitutions: Vec::new(),
                 families_cache: None,
                 outlines: crate::outline::OutlineCache::default(),
+                doc_families: HashMap::new(),
+                doc_aliases: HashMap::new(),
+                doc_faces: HashMap::new(),
+            }),
+        }
+    }
+
+    /// A new database that sees every face this one sees now — the
+    /// system's (enumerated or not, as they are here), the registered ones,
+    /// the generic families and fallback preferences — for a document to
+    /// add its own faces to ([`FontDb::register_document_face`]) without
+    /// them reaching any other document. Face ids are this new database's
+    /// own. The system data is shared, not enumerated again.
+    #[must_use]
+    pub fn overlay(&self) -> FontDb {
+        let g = self.lock();
+        let collection = g.fcx.collection.clone();
+        let capacity = g.lru.capacity();
+        let doc_families = g.doc_families.clone();
+        let doc_aliases = g.doc_aliases.clone();
+        drop(g);
+        FontDb {
+            inner: Mutex::new(DbInner {
+                fcx: parley::FontContext {
+                    collection,
+                    source_cache: SourceCache::default(),
+                },
+                faces: Vec::new(),
+                by_source: HashMap::new(),
+                by_blob: HashMap::new(),
+                lru: FaceLru::new(capacity),
+                substitutions: Vec::new(),
+                families_cache: None,
+                outlines: crate::outline::OutlineCache::default(),
+                doc_families,
+                doc_aliases,
+                doc_faces: HashMap::new(),
             }),
         }
     }
@@ -341,6 +392,77 @@ impl FontDb {
         } else {
             Ok(out)
         }
+    }
+
+    /// Registers a face a document carries (its embedded subset) as a face
+    /// of `family`, **for display only**: it is used for a query of
+    /// `family` only when the database has no face of `family` with the
+    /// same weight, style and width (`docs/memory/text.md`, "Embedded
+    /// fonts on read"). It never shadows the machine's faces, is not listed
+    /// by [`FontDb::families`], and is never a fallback for another family.
+    /// Characters it lacks fall back to the machine's faces of `family`,
+    /// then to the usual fallback chain.
+    ///
+    /// Register document faces in an [`FontDb::overlay`], never in a
+    /// database other documents use.
+    ///
+    /// # Errors
+    ///
+    /// [`FontError`] when the bytes are not a font file with a face.
+    pub fn register_document_face(
+        &self,
+        family: &str,
+        data: impl Into<Arc<[u8]>>,
+    ) -> Result<Vec<FaceId>, FontError> {
+        let data: Arc<[u8]> = data.into();
+        let blob = Blob::new(Arc::new(data));
+        if skrifa::FontRef::from_index(blob.as_ref(), 0).is_err() {
+            return Err(FontError::Unreadable);
+        }
+        let real = substitute::normalise(family);
+        if real.is_empty() {
+            return Err(FontError::NoFaces);
+        }
+        let key = real.to_lowercase();
+        let mut g = self.lock();
+        let alias: Arc<str> = g
+            .doc_families
+            .entry(key.clone())
+            .or_insert_with(|| Arc::from(format!("{DOC_PREFIX}{key}")))
+            .clone();
+        let real: Arc<str> = g
+            .doc_aliases
+            .entry(alias.clone())
+            .or_insert_with(|| Arc::from(real.as_str()))
+            .clone();
+        let registered = g.fcx.collection.register_fonts(
+            blob,
+            Some(FontInfoOverride {
+                family_name: Some(&alias),
+                ..FontInfoOverride::default()
+            }),
+        );
+        g.families_cache = None;
+        let mut out = Vec::new();
+        for (_, fonts) in registered {
+            for font in fonts {
+                let id = g.face_for_font_info(&font, &real, true);
+                g.doc_faces.insert(id, alias.clone());
+                out.push(id);
+            }
+        }
+        if out.is_empty() {
+            Err(FontError::NoFaces)
+        } else {
+            Ok(out)
+        }
+    }
+
+    /// Whether `face` is a document's face
+    /// ([`FontDb::register_document_face`]).
+    #[must_use]
+    pub fn is_document_face(&self, face: FaceId) -> bool {
+        self.lock().doc_faces.contains_key(&face)
     }
 
     /// Every family name, sorted case-insensitively and without duplicates.
@@ -494,7 +616,13 @@ impl DbInner {
         if let Some(c) = &self.families_cache {
             return c.clone();
         }
-        let mut v: Vec<Arc<str>> = self.fcx.collection.family_names().map(Arc::from).collect();
+        let mut v: Vec<Arc<str>> = self
+            .fcx
+            .collection
+            .family_names()
+            .filter(|n| !n.starts_with(DOC_PREFIX))
+            .map(Arc::from)
+            .collect();
         v.sort_by(|a, b| {
             a.to_lowercase()
                 .cmp(&b.to_lowercase())
@@ -597,14 +725,87 @@ impl DbInner {
         let idx = fam.match_index(attrs.width, attrs.style, attrs.weight, true)?;
         let font = fam.fonts().get(idx)?.clone();
         let synth = font.synthesis(attrs.width, attrs.style, attrs.weight);
-        let name: Arc<str> = Arc::from(fam.name());
+        let mut name: Arc<str> = Arc::from(fam.name());
+        let alias = name.starts_with(DOC_PREFIX).then(|| name.clone());
+        if let Some(a) = &alias {
+            name = self
+                .doc_aliases
+                .get(a)
+                .cloned()
+                .unwrap_or_else(|| a.clone());
+        }
         let embedded = matches!(font.source().kind(), SourceKind::Memory(_));
         let id = self.face_for_font_info(&font, &name, embedded);
+        if let Some(a) = alias {
+            self.doc_faces.insert(id, a);
+        }
         let synthesis = Synthesis {
             embolden: synth.embolden(),
             skew: synth.skew(),
         };
         Some((id, name, synthesis, embedded))
+    }
+
+    /// [`DbInner::match_in_family`] with the document's faces: a document
+    /// face of `family` is used only when the database has no face of
+    /// `family` with the weight, style and width of the document face that
+    /// matches `q` best. The machine's face wins otherwise: it has every
+    /// glyph (a document face is a subset), and its `GSUB`/`GPOS`, which a
+    /// subset lacks.
+    fn match_family(
+        &mut self,
+        family: &str,
+        q: &FontQuery,
+    ) -> Option<(FaceId, Arc<str>, Synthesis, bool)> {
+        let key = substitute::normalise(family).to_lowercase();
+        let Some(alias) = self.doc_families.get(&key).cloned() else {
+            return self.match_in_family(family, q);
+        };
+        let machine = self.match_in_family(family, q);
+        let Some(doc) = self.match_in_family(&alias, q) else {
+            return machine;
+        };
+        match machine {
+            Some(m) if self.family_has_face_like(family, doc.0) => Some(m),
+            _ => Some(doc),
+        }
+    }
+
+    /// Whether the machine's family `family` has a face with the weight,
+    /// style and width of `face`.
+    fn family_has_face_like(&mut self, family: &str, face: FaceId) -> bool {
+        let Some(info) = self.faces.get(face.0 as usize).map(|e| e.info.clone()) else {
+            return false;
+        };
+        let Some(fam) = self.fcx.collection.family_by_name(family) else {
+            return false;
+        };
+        if fam.name().starts_with(DOC_PREFIX) {
+            return false;
+        }
+        fam.fonts().iter().any(|f| {
+            round_u16(f.weight().value(), 1, 1000) == info.weight
+                && from_fontique_style(f.style()) == info.style
+                && round_u16(f.width().ratio() * 100.0, 50, 200) == info.stretch
+        })
+    }
+
+    /// The family name `parley` must be asked for to shape with `m`'s face:
+    /// the private family of a document face, else the family matched.
+    pub(crate) fn parley_family(&self, m: &FontMatch) -> Arc<str> {
+        self.doc_faces
+            .get(&m.face)
+            .cloned()
+            .unwrap_or_else(|| m.family.clone())
+    }
+
+    /// For a document face's private family, the machine's family of the
+    /// same name when there is one: where characters the subset lacks
+    /// come from first.
+    pub(crate) fn document_family_fallback(&mut self, family: &str) -> Option<Arc<str>> {
+        let real = self.doc_aliases.get(family)?.clone();
+        self.fcx.collection.family_id(&real)?;
+        Some(real)
     }
 
     fn first_generic(&mut self, g: GenericFamily) -> Option<Arc<str>> {
@@ -629,7 +830,7 @@ impl DbInner {
         };
 
         // 1. Exact family name (case-insensitive, whitespace-normalised).
-        if let Some(m) = self.match_in_family(&requested, q) {
+        if let Some(m) = self.match_family(&requested, q) {
             return Some(make(m, None, &requested));
         }
         // 2. Style suffix stripped: "Arial Bold" → "Arial" at weight 700.
@@ -643,7 +844,7 @@ impl DbInner {
             if italic && q2.style == FontStyle::Normal {
                 q2.style = FontStyle::Italic;
             }
-            if let Some(m) = self.match_in_family(&base, &q2) {
+            if let Some(m) = self.match_family(&base, &q2) {
                 return Some(self.record(make(
                     m,
                     Some(SubstitutionReason::StyleSuffix),
@@ -654,7 +855,7 @@ impl DbInner {
         // 3. Metric-compatible aliases.
         let aliases: Vec<&'static str> = substitute::metric_aliases(&requested).collect();
         for alias in aliases {
-            if let Some(m) = self.match_in_family(alias, q) {
+            if let Some(m) = self.match_family(alias, q) {
                 return Some(self.record(make(
                     m,
                     Some(SubstitutionReason::MetricAlias),
@@ -669,7 +870,7 @@ impl DbInner {
             Generic::Monospace => GenericFamily::Monospace,
         };
         if let Some(name) = self.first_generic(generic)
-            && let Some(m) = self.match_in_family(&name, q)
+            && let Some(m) = self.match_family(&name, q)
         {
             return Some(self.record(make(m, Some(SubstitutionReason::Generic), &requested)));
         }
@@ -680,7 +881,7 @@ impl DbInner {
         candidates.extend(self.first_generic(GenericFamily::SansSerif));
         candidates.extend(self.families().iter().next().cloned());
         for name in candidates {
-            if let Some(m) = self.match_in_family(&name, q) {
+            if let Some(m) = self.match_family(&name, q) {
                 return Some(self.record(make(
                     m,
                     Some(SubstitutionReason::LastResort),

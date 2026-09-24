@@ -761,7 +761,8 @@ fn run_path_commands(cmd: &EditCommand, tx: &mut Tx<'_>) -> Result<(), EditError
             Ok(())
         }
         EditCommand::ConvertToPaths { nodes } => {
-            crate::convert::convert_nodes(tx, nodes, &crate::fonts::shared()).map(|_| ())
+            let fonts = crate::fonts::document(tx.doc());
+            crate::convert::convert_nodes(tx, nodes, &fonts).map(|_| ())
         }
         EditCommand::SetWindingRule { nodes, rule } => {
             check_layers(tx, nodes)?;

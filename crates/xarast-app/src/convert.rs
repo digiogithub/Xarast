@@ -66,7 +66,8 @@ impl Command for ConvertCommand {
     }
 
     fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
-        let fonts = self.fonts.clone().unwrap_or_else(crate::fonts::shared);
+        let base = self.fonts.clone().unwrap_or_else(crate::fonts::shared);
+        let fonts = crate::fonts::for_document(&base, tx.doc());
         let converted = convert_nodes(tx, &self.nodes, &fonts)?;
         if converted.is_empty() {
             return Err(crate::structure::NOTHING_TO_DO);

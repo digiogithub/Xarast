@@ -17,10 +17,18 @@
 //! Tests and golden renders never see the host's fonts: they build an
 //! [`FontService::isolated`] service from pinned fonts and hand it to the
 //! walker (`docs/memory/text.md`, invariant 3).
+//!
+//! A document that embeds faces (a `.xarast` package's WOFF2 subsets) is
+//! laid out with an **overlay** ([`for_document`]): a service over a
+//! [`FontDb::overlay`] of the base service's database with the
+//! document's faces added for display. Each document gets its own (two
+//! documents with the same embedded files share one), so no document's
+//! faces reach another (`docs/memory/text.md`, "Embedded fonts on read").
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
+use xarast_doc::{Document, EmbeddedFont};
 use xarast_text::{EmbedError, FaceId, FontDb, Shaper, WebFont};
 
 /// How many web fonts [`FontService::web_font`] remembers.
@@ -39,6 +47,31 @@ pub struct FontService {
     /// Web fonts already made: every save of a document embeds the same
     /// subsets, and autosave saves often.
     web_fonts: Mutex<WebFontCache>,
+    /// For a document's overlay: what it was made from.
+    overlay: Option<OverlayKey>,
+}
+
+/// What an overlay was made from: the base service and the document's
+/// embedded files, compared by identity (a document and its clones share
+/// the files' `Arc`s).
+struct OverlayKey {
+    base: Arc<FontService>,
+    fonts: Vec<EmbeddedFont>,
+}
+
+impl OverlayKey {
+    fn matches(&self, base: &Arc<FontService>, fonts: &[EmbeddedFont]) -> bool {
+        Arc::ptr_eq(&self.base, base) && self.same_fonts(fonts)
+    }
+
+    fn same_fonts(&self, fonts: &[EmbeddedFont]) -> bool {
+        self.fonts.len() == fonts.len()
+            && self
+                .fonts
+                .iter()
+                .zip(fonts)
+                .all(|(a, b)| Arc::ptr_eq(&a.data, &b.data) && a.family == b.family)
+    }
 }
 
 impl std::fmt::Debug for FontService {
@@ -61,6 +94,7 @@ impl FontService {
             loaded: OnceLock::new(),
             system: true,
             web_fonts: Mutex::default(),
+            overlay: None,
         })
     }
 
@@ -77,6 +111,7 @@ impl FontService {
             loaded,
             system: false,
             web_fonts: Mutex::default(),
+            overlay: None,
         })
     }
 
@@ -216,6 +251,96 @@ impl FontService {
         cache.insert(key, made.clone());
         made
     }
+}
+
+/// How many document overlays [`for_document`] keeps.
+const OVERLAY_CACHE: usize = 8;
+
+/// The overlays made so far, most recently used last.
+static OVERLAYS: Mutex<Vec<Arc<FontService>>> = Mutex::new(Vec::new());
+
+/// The fonts `doc` is laid out with over `base`: `base` itself when the
+/// document embeds no faces, else an overlay of `base` with the
+/// document's faces registered for display
+/// ([`FontDb::register_document_face`]). Overlays are remembered (a few,
+/// by the identity of the document's files), so walks, saves and tools of
+/// one document share one. Making one waits for `base` to be complete.
+///
+/// A file that is neither an OpenType font nor a WOFF2 file this build
+/// reads is skipped: its text draws with the machine's fonts, as before.
+#[must_use]
+pub fn for_document(base: &Arc<FontService>, doc: &Document) -> Arc<FontService> {
+    let fonts = doc.resources.fonts();
+    // No faces, or `base` is this document's overlay already.
+    if fonts.is_empty() || base.overlay.as_ref().is_some_and(|k| k.same_fonts(fonts)) {
+        return Arc::clone(base);
+    }
+    let mut cache = OVERLAYS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(i) = cache
+        .iter()
+        .position(|o| o.overlay.as_ref().is_some_and(|k| k.matches(base, fonts)))
+    {
+        let hit = cache.remove(i);
+        cache.push(Arc::clone(&hit));
+        return hit;
+    }
+    base.ready();
+    let db = base.db.overlay();
+    for f in fonts {
+        let bytes: Option<Vec<u8>> = if f.data.starts_with(b"wOF2") {
+            xarast_text::embed::woff2::decode(&f.data)
+        } else {
+            Some(f.data.to_vec())
+        };
+        if let Some(bytes) = bytes {
+            let _ = db.register_document_face(&f.family, bytes);
+        }
+    }
+    let db = Arc::new(db);
+    let loaded = OnceLock::new();
+    let _ = loaded.set(db.families().len());
+    let service = Arc::new(FontService {
+        shaper: Shaper::new(Arc::clone(&db)),
+        db,
+        loaded,
+        system: false,
+        web_fonts: Mutex::default(),
+        overlay: Some(OverlayKey {
+            base: Arc::clone(base),
+            fonts: fonts.to_vec(),
+        }),
+    });
+    if cache.len() >= OVERLAY_CACHE {
+        cache.remove(0);
+    }
+    cache.push(Arc::clone(&service));
+    service
+}
+
+/// Whether `fonts` is what [`for_document`] gives for `doc` over `base`
+/// (the process's service when `None`), without making anything.
+#[must_use]
+pub fn serves(fonts: &Arc<FontService>, base: Option<&Arc<FontService>>, doc: &Document) -> bool {
+    let doc_fonts = doc.resources.fonts();
+    let base = base.cloned().unwrap_or_else(shared);
+    if doc_fonts.is_empty()
+        || base
+            .overlay
+            .as_ref()
+            .is_some_and(|k| k.same_fonts(doc_fonts))
+    {
+        return Arc::ptr_eq(fonts, &base);
+    }
+    fonts
+        .overlay
+        .as_ref()
+        .is_some_and(|k| k.matches(&base, doc_fonts))
+}
+
+/// [`for_document`] over the process's service ([`shared`]).
+#[must_use]
+pub fn document(doc: &Document) -> Arc<FontService> {
+    for_document(&shared(), doc)
 }
 
 static SHARED: OnceLock<Arc<FontService>> = OnceLock::new();

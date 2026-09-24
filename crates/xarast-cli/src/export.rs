@@ -543,7 +543,8 @@ impl ExportSource for SessionSource<'_> {
     }
 
     fn text_as_outlines(&self, all: bool) -> Option<(xarast_doc::Document, Vec<Arc<str>>)> {
-        xarast_app::convert::text_as_outlines(&self.session.doc, &xarast_app::fonts::shared(), all)
+        let fonts = xarast_app::fonts::document(&self.session.doc);
+        xarast_app::convert::text_as_outlines(&self.session.doc, &fonts, all)
     }
 
     fn document(&self) -> Option<&xarast_doc::Document> {
