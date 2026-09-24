@@ -526,3 +526,139 @@ fn subtree_version(tree: &Tree, root: NodeId) -> u64 {
     }
     h
 }
+
+/// The story as if `text` had been typed at byte `at`: the input method's
+/// preedit, drawn and laid out but not in the document (T9.4.7).
+///
+/// The inserted text takes the style typing there would give it: the
+/// character before `at`, or the one at `at` at the start of the story or
+/// of a paragraph. Everything after `at` moves along; `at` past the text
+/// or off a character boundary changes nothing.
+pub(crate) fn splice_text(st: &StoryText, at: usize, text: &str) -> StoryText {
+    let mut out = st.clone();
+    if text.is_empty() || at > st.text.len() || !st.text.is_char_boundary(at) {
+        return out;
+    }
+    let len = text.len();
+    let wide = u32::try_from(len).unwrap_or(u32::MAX);
+    let after_break = at == 0 || st.text[..at].ends_with('\n');
+    // The run whose style the text takes.
+    let style = if after_break {
+        st.runs.iter().position(|r| r.range.contains(&at))
+    } else {
+        st.runs.iter().position(|r| r.range.contains(&(at - 1)))
+    };
+    out.text.insert_str(at, text);
+    if let Some(k) = style {
+        for (i, r) in out.runs.iter_mut().enumerate() {
+            if i == k {
+                r.range.end += len;
+            } else if i > k {
+                r.range.start += len;
+                r.range.end += len;
+            }
+        }
+    } else {
+        // No run covers the place (an empty story's text): one run in the
+        // story's attributes.
+        for r in &mut out.runs {
+            if r.range.start >= at {
+                r.range.start += len;
+                r.range.end += len;
+            }
+        }
+        let i = out.runs.partition_point(|r| r.range.start < at);
+        out.runs.insert(
+            i,
+            xarast_doc::CharRun {
+                range: at..at + len,
+                attrs: st.story_attrs.clone(),
+            },
+        );
+    }
+    for l in &mut out.lines {
+        if l.first_byte as usize > at {
+            l.first_byte = l.first_byte.saturating_add(wide);
+        }
+    }
+    for item in &mut out.items {
+        if item.byte as usize >= at {
+            item.byte = item.byte.saturating_add(wide);
+        }
+    }
+    for k in &mut out.kerns {
+        if k.at >= at {
+            k.at += len;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod splice_tests {
+    use super::*;
+
+    use xarast_doc::builder::{BuildLimits, skeleton};
+    use xarast_doc::{AttrSlot, AttrValue, NodeKind, TextItem};
+
+    /// "ab" at 20 pt then "cd" at 12 pt and a break; "ef" and the final
+    /// break on a second line.
+    fn story() -> StoryText {
+        let mut b = skeleton(BuildLimits::default()).unwrap();
+        let story = b
+            .node(NodeKind::TextStory(Box::default()))
+            .unwrap()
+            .node_id();
+        b.push_scope().unwrap();
+        b.attribute(AttrValue::FontSize(Mp::new(20_000))).unwrap();
+        b.node(NodeKind::TextLine(Box::default())).unwrap();
+        b.push_scope().unwrap();
+        for c in ['a', 'b'] {
+            b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+        }
+        b.attribute(AttrValue::FontSize(Mp::new(12_000))).unwrap();
+        for c in ['c', 'd'] {
+            b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+        }
+        b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+            .unwrap();
+        b.pop_scope();
+        b.node(NodeKind::TextLine(Box::default())).unwrap();
+        b.push_scope().unwrap();
+        for c in ['e', 'f'] {
+            b.node(NodeKind::TextItem(TextItem::Char(c))).unwrap();
+        }
+        b.node(NodeKind::TextItem(TextItem::LineBreak(true)))
+            .unwrap();
+        b.pop_scope();
+        b.pop_scope();
+        let (doc, _) = b.finish().unwrap();
+        crate::text_clip::story_text(&doc, story).unwrap()
+    }
+
+    fn size_at(st: &StoryText, b: usize) -> AttrValue {
+        let run = st.runs.iter().find(|r| r.range.contains(&b)).unwrap();
+        run.attrs.get(AttrSlot::TxtFontSize).clone()
+    }
+
+    #[test]
+    fn a_splice_takes_the_style_before_it_and_moves_the_rest() {
+        let st = story();
+        assert_eq!(st.text, "abcd\nef\n");
+        // After "abc": the 12 pt style of "c".
+        let s = splice_text(&st, 3, "XY");
+        assert_eq!(s.text, "abcXYd\nef\n");
+        assert_eq!(size_at(&s, 3), AttrValue::FontSize(Mp::new(12_000)));
+        assert_eq!(size_at(&s, 1), AttrValue::FontSize(Mp::new(20_000)));
+        assert_eq!(s.runs.last().unwrap().range.end, s.text.len());
+        assert_eq!(s.lines[1].first_byte as usize, 7);
+        // At a paragraph's start: the style of the character after it,
+        // and the line keeps its start.
+        let s = splice_text(&st, 5, "Z");
+        assert_eq!(s.text, "abcd\nZef\n");
+        assert_eq!(s.lines[1].first_byte as usize, 5);
+        assert_eq!(size_at(&s, 5), size_at(&st, 5));
+        // Off a boundary or past the end: unchanged.
+        assert_eq!(splice_text(&st, 99, "Z").text, st.text);
+    }
+}

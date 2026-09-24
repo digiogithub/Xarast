@@ -97,6 +97,7 @@ pub mod snap;
 pub mod structure;
 pub mod svg_text;
 mod text;
+pub mod text_clip;
 pub mod text_edit;
 pub mod text_infobar;
 #[cfg(test)]
@@ -110,7 +111,7 @@ pub mod walker;
 
 pub use app::{
     AppState, DiagnosticEntry, DiagnosticLog, DocumentSessions, InternalClipboard, PendingAction,
-    Severity, xarast_path,
+    Severity, TextClipboard, xarast_path,
 };
 pub use command::{AppCommand, ChordKey, KeyChord};
 pub use edit::{

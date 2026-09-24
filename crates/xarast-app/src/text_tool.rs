@@ -58,6 +58,15 @@
 //! The text ruler (margins, first-line indent, tab stops of the caret's
 //! paragraph) is part of the same description and raises the same edits.
 //!
+//! # Input methods and the clipboard (T9.4.7, T9.4.8)
+//!
+//! An input method's composition is never an edit: it is drawn in the
+//! story through [`crate::tool::Preview::text`] and the caret follows it;
+//! its commit arrives as typing. Cut and paste replace the selection with
+//! one step each ([`EditCommand::CutText`], [`EditCommand::PasteText`]);
+//! the copy itself is taken by the application ([`TextTool::copy_selection`],
+//! [`crate::text_clip`]).
+//!
 //! # Layouts
 //!
 //! The tool lays stories out itself, as the walker does
@@ -81,11 +90,13 @@ use crate::edit::{SelectMode, ToolId};
 use crate::fonts::FontService;
 use crate::geometry::{DocPoint, DocRect};
 use crate::ops::EditCommand;
+use crate::text_clip::{StyledText, TextClipOp};
 use crate::text_edit::{Caret, CaretMap, CaretMotion};
 use crate::text_infobar::{self, Values};
 use crate::tool::{
     CursorKind, GestureEvent, Infobar, InfobarField, InfobarValue, InteractionState, OverlayShape,
-    TextInput, TextInputKind, TextKey, TextNav, TextRuler, Tool, ToolAction, ToolCtx, ToolView,
+    Preedit, TextInput, TextInputKind, TextKey, TextNav, TextPreview, TextRuler, Tool, ToolAction,
+    ToolCtx, ToolView,
 };
 
 /// Typing keys closer together than this, in milliseconds, make one undo
@@ -121,15 +132,7 @@ struct Burst {
     epoch: Option<u64>,
 }
 
-/// What typing inserts: `'\r'` (alone or before `'\n'`) becomes a
-/// paragraph break, other control characters except tab are dropped.
-fn typed(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .replace('\r', "\n")
-        .chars()
-        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
-        .collect()
-}
+use crate::text_clip::typed;
 
 /// A caret and selection in a story: the text between `anchor` and `head`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -223,14 +226,24 @@ struct StoryView {
 }
 
 impl StoryView {
-    fn build(doc: &Document, story: NodeId, fonts: &FontService) -> Option<StoryView> {
+    /// Lays `story` out; with `splice`, as if its text were typed at its
+    /// offset (an input method's composition, as the walker draws it).
+    fn build(
+        doc: &Document,
+        story: NodeId,
+        fonts: &FontService,
+        splice: Option<(usize, &str)>,
+    ) -> Option<StoryView> {
         let Some(NodeKind::TextStory(node)) = doc.tree.kind(story) else {
             return None;
         };
         let mut stack = xarast_doc::attr::resolve_inherited(&doc.tree, story, &doc.defaults);
-        let st = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
+        let mut st = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
             Arc::new(a.value.clone())
         })?;
+        if let Some((at, text)) = splice {
+            st = crate::text::splice_text(&st, at, text);
+        }
         // The walker's own layout: on a path, the path's column and the fit.
         let (_, layout, fit) = crate::text::lay_story(fonts, &doc.tree, &st, node);
         let node = (**node).clone();
@@ -283,6 +296,9 @@ impl StoryView {
 struct Cache {
     epoch: Option<u64>,
     stories: HashMap<NodeId, Option<Arc<StoryView>>>,
+    /// The story laid out with the composition in it, for the preview
+    /// it was built for.
+    composing: Option<(TextPreview, Option<Arc<StoryView>>)>,
 }
 
 /// How far, in device pixels, a click may miss a line box and still land
@@ -320,6 +336,13 @@ pub struct TextTool {
     /// The font families the infobar last offered: what a chosen index
     /// refers to.
     families: Mutex<Option<Arc<[Arc<str>]>>>,
+    /// The input method's composition at the caret, if one is in progress
+    /// (T9.4.7), and where it shows in a story (`None` at a pending caret,
+    /// where there is no story to show it in yet).
+    composing: Option<(Preedit, Option<TextPreview>)>,
+    /// A paste at a pending caret creates a story: the caret goes into it
+    /// at this offset once it exists.
+    adopt: Option<usize>,
 }
 
 impl TextTool {
@@ -348,13 +371,14 @@ impl TextTool {
         let mut cache = self.cache();
         if cache.epoch != Some(doc.epoch.0) {
             cache.stories.clear();
+            cache.composing = None;
             cache.epoch = Some(doc.epoch.0);
         }
         if let Some(v) = cache.stories.get(&story) {
             return v.clone();
         }
         let v = if doc.tree.contains(story) && doc.tree.is_reachable(story) {
-            StoryView::build(doc, story, &self.fonts()).map(Arc::new)
+            StoryView::build(doc, story, &self.fonts(), None).map(Arc::new)
         } else {
             None
         };
@@ -362,7 +386,21 @@ impl TextTool {
         v
     }
 
-    /// The topmost editable story under a document point.
+    /// The story laid out with the input method's composition in it.
+    fn composing_view(&self, doc: &Document, p: &TextPreview) -> Option<Arc<StoryView>> {
+        // Drops a stale cache first.
+        let _ = self.view(doc, p.story);
+        let mut cache = self.cache();
+        if let Some((key, v)) = &cache.composing
+            && key == p
+        {
+            return v.clone();
+        }
+        let v = StoryView::build(doc, p.story, &self.fonts(), Some((p.at, &p.text))).map(Arc::new);
+        cache.composing = Some((p.clone(), v.clone()));
+        v
+    }
+
     /// The topmost editable story under a document point, and the caret
     /// the point hits in it.
     fn story_at(&self, cx: &ToolCtx<'_>, at: DocPoint) -> Option<(NodeId, Arc<StoryView>, Caret)> {
@@ -391,11 +429,15 @@ impl TextTool {
         // Anything that sets the caret ends a typing burst; typing starts
         // its own again right after.
         self.burst = None;
+        self.adopt = None;
         if new != self.editing {
             self.moved = self.moved.wrapping_add(1);
             // A pending style belongs to the caret it was chosen at.
             if new.map(|e| e.state) != self.editing.map(|e| e.state) {
                 self.pending.clear();
+                // So does a composition: it no longer shows anywhere (its
+                // commit, if it comes, types at the new caret).
+                self.end_composition(cx);
             }
         }
         self.editing = new;
@@ -498,6 +540,9 @@ impl TextTool {
         let Some(editing) = self.editing else {
             return false;
         };
+        // A commit arrives as typing: the composition it ends goes.
+        self.end_composition(cx);
+        self.adopt = None;
         if let TextEditing::Pending { at, column } = editing.state {
             if let TextInputKind::Insert(t) = &input.kind {
                 self.start_story(at, column, typed(t), input.time_ms, cx);
@@ -617,22 +662,11 @@ impl TextTool {
         if text.is_empty() {
             return;
         }
-        let layout = match column {
-            Some(width) => TextLayout::InColumn {
-                width,
-                word_wrap: true,
-            },
-            None => TextLayout::AtPoint,
-        };
         let id = next_burst();
         let caret = text.len();
         cx.commands.emit(EditCommand::CreateText {
             layer,
-            story: Box::new(TextStoryNode {
-                transform: Matrix::translate(Vector::new(at.x, at.y)),
-                layout,
-                ..TextStoryNode::default()
-            }),
+            story: new_story_node(at, column),
             attrs: merged(cx.edit.current.values(), &std::mem::take(&mut self.pending)),
             text,
             burst: id,
@@ -645,6 +679,176 @@ impl TextTool {
             last_ms: time_ms,
             epoch: None,
         });
+    }
+
+    /// Ends the composition in progress, if any, and drops its preview.
+    fn end_composition(&mut self, cx: &mut ToolCtx<'_>) {
+        if self.composing.take().is_some() || cx.preview.text.is_some() {
+            cx.preview.text = None;
+            cx.requests.overlay_changed = true;
+        }
+    }
+
+    /// The input method's composition changed (T9.4.7). In a story it is
+    /// drawn in place, at the start of the selection (which its commit
+    /// replaces), through the preview; at a pending caret there is no
+    /// story to draw it in, and only the candidate window follows the
+    /// caret.
+    fn preedit(&mut self, preedit: Option<Preedit>, cx: &mut ToolCtx<'_>) -> bool {
+        let Some(editing) = self.editing else {
+            return false;
+        };
+        let Some(p) = preedit.filter(|p| !p.text.is_empty()) else {
+            self.end_composition(cx);
+            return true;
+        };
+        let shown = match editing.state {
+            TextEditing::Story(_) => self.current(cx.doc).map(|(sel, _)| TextPreview {
+                story: sel.story,
+                at: sel.range().start,
+                text: p.text.clone(),
+            }),
+            TextEditing::Pending { .. } => None,
+        };
+        cx.preview.text.clone_from(&shown);
+        self.composing = Some((p, shown));
+        // A composition is not typing: the next commit starts its own burst.
+        self.burst = None;
+        cx.requests.overlay_changed = true;
+        true
+    }
+
+    /// Cut or paste at the caret (T9.4.8). The copy is not the tool's: the
+    /// application takes it with [`TextTool::copy_selection`].
+    fn clipboard(&mut self, op: TextClipOp, cx: &mut ToolCtx<'_>) -> bool {
+        let Some(editing) = self.editing else {
+            return false;
+        };
+        self.end_composition(cx);
+        match (editing.state, op) {
+            (TextEditing::Pending { .. }, TextClipOp::Cut) => {}
+            (TextEditing::Pending { at, column }, TextClipOp::Paste(text)) => {
+                let Some(layer) = cx.edit.active_layer() else {
+                    return true;
+                };
+                if text.is_empty() {
+                    return true;
+                }
+                let caret = text.text.len();
+                cx.commands.emit(EditCommand::PasteText {
+                    target: crate::ops::PasteTarget::New {
+                        layer,
+                        story: new_story_node(at, column),
+                        attrs: merged(cx.edit.current.values(), &std::mem::take(&mut self.pending)),
+                    },
+                    text,
+                });
+                self.burst = None;
+                self.adopt = Some(caret);
+            }
+            (TextEditing::Story(_), op) => {
+                let Some((sel, _)) = self.current(cx.doc) else {
+                    return true;
+                };
+                let range = sel.range();
+                let caret = match op {
+                    TextClipOp::Cut if sel.is_caret() => return true,
+                    TextClipOp::Cut => {
+                        cx.commands.emit(EditCommand::CutText {
+                            story: sel.story,
+                            range: range.clone(),
+                        });
+                        range.start
+                    }
+                    TextClipOp::Paste(text) => {
+                        if text.is_empty() && sel.is_caret() {
+                            return true;
+                        }
+                        let caret = range.start + text.text.len();
+                        cx.commands.emit(EditCommand::PasteText {
+                            target: crate::ops::PasteTarget::Story {
+                                story: sel.story,
+                                replace: range,
+                            },
+                            text,
+                        });
+                        caret
+                    }
+                };
+                self.set(
+                    Some(TextEditing::Story(TextSelection {
+                        story: sel.story,
+                        anchor: Caret::at(caret),
+                        head: Caret::at(caret),
+                    })),
+                    None,
+                    cx,
+                );
+            }
+        }
+        true
+    }
+
+    /// The styled copy of the selected text (T9.4.8), if text is selected.
+    #[must_use]
+    pub fn copy_selection(&self, doc: &Document) -> Option<StyledText> {
+        let Some(TextEditing::Story(sel)) = self.editing() else {
+            return None;
+        };
+        if sel.is_caret() {
+            return None;
+        }
+        let v = self.view(doc, sel.story)?;
+        let (a, b) = (v.map.snap(sel.anchor).byte, v.map.snap(sel.head).byte);
+        let clip = crate::text_clip::copy_range(&v.st, a.min(b)..a.max(b));
+        (!clip.is_empty()).then_some(clip)
+    }
+
+    /// The caret while composing in a story: at the composition's cursor,
+    /// in the story laid out with it; and where the composition starts.
+    fn composing_caret(&self, doc: &Document) -> Option<(Arc<StoryView>, Caret, usize)> {
+        let (p, Some(shown)) = self.composing.as_ref()? else {
+            return None;
+        };
+        let v = self.composing_view(doc, shown)?;
+        let at = shown.at + p.cursor.map_or(p.text.len(), |c| c.1.min(p.text.len()));
+        Some((v, Caret::at(at), shown.at))
+    }
+
+    /// The composition drawn over its story: underlined, its selected
+    /// segment highlighted, the caret at its cursor (none when the input
+    /// method hides it).
+    fn composition_overlay(&self, doc: &Document, out: &mut Vec<OverlayShape>) {
+        let Some((v, caret, at)) = self.composing_caret(doc) else {
+            return;
+        };
+        let Some((p, _)) = &self.composing else {
+            return;
+        };
+        let map = &v.map;
+        for q in map.selection_quads(at, at + p.text.len()) {
+            out.push(OverlayShape::Polyline {
+                points: vec![v.to_doc(q[0]), v.to_doc(q[1])],
+                closed: false,
+                dashed: false,
+            });
+        }
+        if let Some((a, b)) = p.cursor.filter(|(a, b)| a < b) {
+            for q in map.selection_quads(at + a, at + b) {
+                out.push(OverlayShape::Highlight {
+                    corners: q.map(|pt| v.to_doc(pt)),
+                });
+            }
+        }
+        if p.cursor.is_some() {
+            let (primary, _) = map.caret_segments(caret);
+            out.push(OverlayShape::Caret {
+                from: v.to_doc(primary.bottom),
+                to: v.to_doc(primary.top),
+                primary: true,
+                moved: self.moved,
+            });
+        }
     }
 
     fn navigate(&mut self, nav: TextNav, cx: &mut ToolCtx<'_>) -> bool {
@@ -747,6 +951,23 @@ const ALL_TEXT_SLOTS: [AttrSlot; 16] = [
 ];
 
 /// `base` with every value of `over` replacing the one of its slot.
+/// A new story at a pending caret: a point story, or a column of `column`
+/// width, its first baseline's left end at `at`.
+fn new_story_node(at: DocPoint, column: Option<Mp>) -> Box<TextStoryNode> {
+    let layout = match column {
+        Some(width) => TextLayout::InColumn {
+            width,
+            word_wrap: true,
+        },
+        None => TextLayout::AtPoint,
+    };
+    Box::new(TextStoryNode {
+        transform: Matrix::translate(Vector::new(at.x, at.y)),
+        layout,
+        ..TextStoryNode::default()
+    })
+}
+
 fn merged(base: &[AttrValue], over: &[AttrValue]) -> Vec<AttrValue> {
     let mut out = base.to_vec();
     for v in over {
@@ -977,7 +1198,7 @@ impl TextTool {
 /// `None` when `story` is not a text story.
 #[must_use]
 pub fn caret_map(doc: &Document, story: NodeId, fonts: &FontService) -> Option<CaretMap> {
-    StoryView::build(doc, story, fonts).map(|v| v.map)
+    StoryView::build(doc, story, fonts, None).map(|v| v.map)
 }
 
 /// Every story on a visible, unlocked, non-guide layer, in paint order.
@@ -1122,6 +1343,9 @@ impl Tool for TextTool {
                     moved: self.moved,
                 });
             }
+            Some(TextEditing::Story(_)) if self.composing_caret(view.doc).is_some() => {
+                self.composition_overlay(view.doc, out);
+            }
             Some(TextEditing::Story(sel)) => {
                 let Some(v) = self.view(view.doc, sel.story) else {
                     return;
@@ -1152,6 +1376,30 @@ impl Tool for TextTool {
                 }
             }
             None => {}
+        }
+    }
+
+    fn text_caret(&self, view: ToolView<'_>) -> Option<(DocPoint, DocPoint)> {
+        match self.editing.map(|e| e.state)? {
+            TextEditing::Pending { at, .. } => {
+                let size = Self::pending_size(view.edit);
+                Some((
+                    DocPoint::new(at.x, at.y.saturating_sub(size.mul_ratio(1, 5))),
+                    DocPoint::new(at.x, at.y.saturating_add(size.mul_ratio(4, 5))),
+                ))
+            }
+            TextEditing::Story(sel) => {
+                let (v, caret) = match self.composing_caret(view.doc) {
+                    Some((v, caret, _)) => (v, caret),
+                    None => {
+                        let v = self.view(view.doc, sel.story)?;
+                        let head = v.map.snap(sel.head);
+                        (v, head)
+                    }
+                };
+                let (primary, _) = v.map.caret_segments(caret);
+                Some((v.to_doc(primary.bottom), v.to_doc(primary.top)))
+            }
         }
     }
 
@@ -1301,7 +1549,38 @@ impl Tool for TextTool {
         self.input(input, cx)
     }
 
+    fn text_copy(&self, doc: &Document) -> Option<StyledText> {
+        self.copy_selection(doc)
+    }
+
+    fn text_preedit(&mut self, preedit: Option<Preedit>, cx: &mut ToolCtx<'_>) -> bool {
+        self.preedit(preedit, cx)
+    }
+
+    fn text_clipboard(&mut self, op: TextClipOp, cx: &mut ToolCtx<'_>) -> bool {
+        self.clipboard(op, cx)
+    }
+
     fn after_commands(&mut self, doc: &Document, created: Option<NodeId>) {
+        if let Some(caret) = self.adopt.take() {
+            // The story a paste at a pending caret created: the caret goes
+            // on in it, after the pasted text.
+            if let Some(story) =
+                created.filter(|&n| matches!(doc.tree.kind(n), Some(NodeKind::TextStory(_))))
+            {
+                self.pending.clear();
+                self.editing = Some(Editing {
+                    state: TextEditing::Story(TextSelection {
+                        story,
+                        anchor: Caret::at(caret),
+                        head: Caret::at(caret),
+                    }),
+                    goal_x: None,
+                });
+                self.moved = self.moved.wrapping_add(1);
+            }
+            return;
+        }
         let Some(b) = &mut self.burst else {
             return;
         };

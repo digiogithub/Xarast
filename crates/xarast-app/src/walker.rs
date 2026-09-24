@@ -389,7 +389,8 @@ impl SceneWalker {
                     }
                     if story {
                         self.paint_story_path(doc, edit, node, &mut attrs, quality, &mut b);
-                        self.paint_story(doc, node, &mut attrs, quality, &mut b);
+                        let preedit = preview.text.as_ref().filter(|t| t.story == node);
+                        self.paint_story(doc, node, preedit, &mut attrs, quality, &mut b);
                         walk.control(xarast_doc::Descend::Skip);
                         if previewed && preview_xf.is_some() {
                             b.pop_group();
@@ -728,10 +729,14 @@ impl SceneWalker {
 
     /// Lays a story out (or takes it from the cache) and paints each
     /// attribute run's glyphs with that run's fill, stroke and transparency.
+    ///
+    /// With `preedit`, the story is drawn with an input method's
+    /// composition in it, laid out afresh and never cached.
     fn paint_story(
         &mut self,
         doc: &Document,
         node: NodeId,
+        preedit: Option<&crate::tool::TextPreview>,
         attrs: &mut AttrStack,
         quality: RenderQuality,
         b: &mut SceneBuilder<'_>,
@@ -739,7 +744,19 @@ impl SceneWalker {
         let Some(NodeKind::TextStory(story)) = doc.tree.kind(node) else {
             return;
         };
-        let geom = if let Some(g) = self.stories.get(&node) {
+        let geom = if let Some(p) = preedit {
+            let Some(st) = StoryText::collect(&doc.tree, node, attrs, &mut |_, a| {
+                Arc::new(a.value.clone())
+            }) else {
+                return;
+            };
+            let st = crate::text::splice_text(&st, p.at, &p.text);
+            let fonts = self.fonts.get_or_insert_with(crate::fonts::shared).clone();
+            let mut g = crate::text::build_story(&fonts, &doc.tree, &st, story);
+            // The composition is part of what the node draws.
+            g.version = mix64(g.version, text_fingerprint(&p.text, p.at));
+            Arc::new(g)
+        } else if let Some(g) = self.stories.get(&node) {
             Arc::clone(g)
         } else {
             let cache = &mut self.attr_cache;
@@ -1161,6 +1178,15 @@ fn node_version(doc: &Document, node: NodeId) -> u64 {
 /// The bytes of gradient tables the walker's ramp cache keeps between
 /// frames: 2048 final-quality tables, or 16 384 draft ones.
 pub const RAMP_CACHE_BUDGET: usize = 16 << 20;
+
+/// A fingerprint of an input method's composition and where it shows.
+fn text_fingerprint(text: &str, at: usize) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    at.hash(&mut h);
+    h.finish()
+}
 
 /// A fingerprint of a previewed attribute value. Only computed for the
 /// few nodes a gesture previews, once per scene rebuild.

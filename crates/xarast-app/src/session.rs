@@ -866,6 +866,43 @@ impl Session {
         self.tools.text_editing()
     }
 
+    /// A styled copy of the text selected in the text tool, if any
+    /// (T9.4.8).
+    #[must_use]
+    pub fn copy_text(&self) -> Option<crate::text_clip::StyledText> {
+        self.tools.text_copy(&self.doc)
+    }
+
+    /// Cuts or pastes at the text caret (T9.4.8). Returns what changed and
+    /// whether the tool took it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Session::apply`].
+    pub fn text_clipboard(
+        &mut self,
+        op: crate::text_clip::TextClipOp,
+    ) -> Result<(Changed, bool), SessionError> {
+        let r = self.run_tool(|m, cx| m.text_clipboard(op, cx))?;
+        Ok((self.finish_apply(r.0), r.1))
+    }
+
+    /// Where an input method's candidate window goes: the text caret's box
+    /// in canvas device pixels as `[x, y, width, height]`, while a caret
+    /// is up (T9.4.7). At least one pixel wide, so a vertical caret is
+    /// still a box.
+    #[must_use]
+    pub fn ime_cursor_area(&self) -> Option<[f64; 4]> {
+        let (a, b) = self.tools.text_caret(self.view())?;
+        let (a, b) = (
+            self.viewport.doc_to_device(a),
+            self.viewport.doc_to_device(b),
+        );
+        let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
+        let (y0, y1) = (a.y.min(b.y), a.y.max(b.y));
+        Some([x0, y0, (x1 - x0).max(1.0), (y1 - y0).max(1.0)])
+    }
+
     /// The pointer shape the tool in force wants over the canvas.
     #[must_use]
     pub fn cursor(&self) -> CursorKind {
@@ -950,7 +987,11 @@ impl Session {
             let created_on = match &cmd {
                 EditCommand::CreateShape { layer, .. }
                 | EditCommand::CreatePath { layer, .. }
-                | EditCommand::CreateText { layer, .. } => Some(*layer),
+                | EditCommand::CreateText { layer, .. }
+                | EditCommand::PasteText {
+                    target: crate::ops::PasteTarget::New { layer, .. },
+                    ..
+                } => Some(*layer),
                 _ => None,
             };
             match self.apply_edit(cmd) {
@@ -1151,6 +1192,9 @@ impl Session {
             }
             Intent::TextInput(input) => {
                 changed |= self.run_tool(|m, cx| m.text_input(&input, cx))?.0;
+            }
+            Intent::TextPreedit(preedit) => {
+                changed |= self.run_tool(|m, cx| m.text_preedit(preedit, cx))?.0;
             }
             Intent::ConvertToShapes => {
                 let nodes: Vec<_> = self.edit.selection().collect();

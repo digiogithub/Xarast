@@ -248,6 +248,11 @@ pub enum Intent {
     /// Backspace, Delete. The shell sends these instead of shortcuts while
     /// [`crate::Session::text_editing`] is true.
     TextInput(crate::tool::TextInput),
+    /// The input method's composition for the text being edited (phase 9,
+    /// T9.4.7): shown in the story at the caret, not yet in the document.
+    /// `None` ends it without a commit; a commit arrives as
+    /// [`Intent::TextInput`].
+    TextPreedit(Option<crate::tool::Preedit>),
 
     // ── rendering ─────────────────────────────────────────────────────
     /// Set the render quality. The shell drops to
