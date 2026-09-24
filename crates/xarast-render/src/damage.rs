@@ -811,6 +811,100 @@ mod tests {
     }
 
     #[test]
+    fn a_deferred_bitmap_transparency_with_a_ramp_compares_without_producing() {
+        use crate::blend::{BlendFamily, TranspSource, Transparency};
+        use crate::paint::{Filter, GradMapping, ImageRef, Repeat};
+        use crate::pixel_budget::{BudgetConfig, FnSource, PixelBudget, PixelSource};
+        use crate::ramp::{EffectSpace, Profile, RampLength, Stop};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (w, h) = (16, 8);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let source = || -> Arc<dyn PixelSource> {
+            let c = Arc::clone(&calls);
+            Arc::new(FnSource::expensive(move || {
+                c.fetch_add(1, Ordering::SeqCst);
+                Some([200, 100, 50, 255].repeat((w * h) as usize))
+            }))
+        };
+        let budget = PixelBudget::new(BudgetConfig {
+            spill: false,
+            ..BudgetConfig::unlimited()
+        });
+        let stops = [
+            Stop {
+                offset: 0.0,
+                color: Rgba8::BLACK,
+            },
+            Stop {
+                offset: 1.0,
+                color: Rgba8::WHITE,
+            },
+        ];
+        let resolver = |image: ImageRef, levels: Vec<u8>| {
+            let mut r = Resolver::new();
+            let ramp = r.ramps.intern(
+                &stops,
+                Profile::default(),
+                EffectSpace::default(),
+                RampLength::Short,
+            );
+            r.transparency_ramps
+                .resize(ramp.index() as usize + 1, Vec::new());
+            r.transparency_ramps[ramp.index() as usize] = levels;
+            (r.images.insert(image), ramp, r)
+        };
+        let low: Vec<u8> = (0..=255).collect();
+        let high: Vec<u8> = (0..=255).rev().collect();
+        let a = ImageRef::deferred(w, h, &budget, source(), None);
+        let b = ImageRef::deferred(w, h, &budget, source(), None);
+        let (image, ramp, r1) = resolver(a.clone(), low.clone());
+        let (image2, ramp2, r3) = resolver(b.clone(), low);
+        let (image3, ramp3, r4) = resolver(a.clone(), high);
+        assert_eq!((image, ramp), (image2, ramp2), "first slots on both sides");
+        assert_eq!((image, ramp), (image3, ramp3));
+        let r2 = r1.clone();
+
+        let t = Transparency {
+            family: BlendFamily::Mix,
+            source: TranspSource::Image {
+                image,
+                mapping: GradMapping::unit(),
+                repeat: Repeat::Simple,
+                filter: Filter::Bilinear,
+                ramp: Some(ramp),
+            },
+        };
+        let s = scene(|b, i, p, paint| {
+            if i != 2 {
+                return false;
+            }
+            b.push_transparency(t.clone());
+            b.fill(SceneNodeId(3), p, FillRule::NonZero, paint.clone());
+            b.pop_transparency();
+            true
+        });
+        let hit = vec![bounds_of(&square(200.0, 100.0, 30.0))];
+        let cmp = |x: &Resolver, y: &Resolver| scene_damage((&s, x), (&s, y), &view(), 8).unwrap();
+
+        // The same store and the same levels: nothing to repaint.
+        assert!(cmp(&r1, &r2).rects.is_empty());
+        // Two stores whose bases are not made yet are different, unknown.
+        assert_eq!(cmp(&r1, &r3).rects, hit);
+        // The same store under other levels is different.
+        assert_eq!(cmp(&r1, &r4).rects, hit);
+        assert!(a.is_pending() && b.is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no base was produced");
+
+        // Once both are made they compare by content, and the ramp still counts.
+        a.rematerialise();
+        b.rematerialise();
+        assert!(cmp(&r1, &r3).rects.is_empty());
+        assert_eq!(cmp(&r1, &r4).rects, hit);
+    }
+
+    #[test]
     fn scenes_of_different_quality_are_not_compared() {
         let a = scene(|_, _, _, _| false);
         let mut b = Scene::new();
