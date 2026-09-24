@@ -29,7 +29,7 @@ application's layout; the render round trip is exact for 59/59 again and
 |---|---|---|
 | W1 container | F1.1–F1.8 done | `name.rs`, `sniff.rs`, `eocd.rs`, `reader.rs`, `writer.rs`, `limits.rs` |
 | W2 manifest | F2.1–F2.5, F2.8 (diagnostics only) done; **F2.6/F2.7 `meta.xml` model open** (a minimal `meta.xml` writer exists: `save::meta_xml`) | `manifest.rs`, `digest.rs`, `reader.rs::consistency` |
-| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 baking open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `style`, `emit`), `save.rs` |
+| W3 SVG write | F3.1–F3.8, F3.11 done; F3.9 all eight passes done (4–5: XARA-T-0101, round 3); F3.10 geometry baking of conical, diamond, 3/4-colour fills done (XARA-US-0043), filter/raster baking and `BakeProvider` open (XARA-T-0102) | `svg/` (`num`, `pathdata`, `frame`, `xml`, `defs`, `paint`, `bake`, `style`, `emit`), `save.rs` |
 | W4 SVG read + preservation | F4.1–F4.6, F4.8–F4.10 done; F4.7 marking done, deletion accounting open (XARA-T-0113); XARA-T-0105 (localise + normal form) and T-0107 (passes 4–5) done | `svg/read/` (`dom`, `parse`, `style`, `build/{ink,paint,root}`, `normal`), `open.rs` |
 | W5 resources | F5.1–F5.4, F5.6 done; F5.8 contract + validation done (no provider implementation) | `resource.rs`, `policy.rs`, `thumbnail.rs` |
 | W6 durability | F6.1 (`write_atomic`, `.bak` = F6.2) and F6.3 (`DocumentLock`) done; F6.4 lock UX + signals, F6.5 autosave and F6.7 recovery done **in the app** (`xarast-app` `locks`/`autosave`, XARA-US-0084); F6.6 journal, F6.8, F6.9 open | `durability/` |
@@ -128,12 +128,48 @@ stats, foreign_count, foreign_digest }`.
   `gradientTransform`) must write `cx="0" cy="0"` — found by rendering
   `Fill Types simple.xar` (all elliptical fills came out black). Only the
   "extra" repeat tiles (`spreadMethod="repeat"`), matching the renderer.
-- **Ramp baking**: resolved colours in a `Ramp<ColourValue>`, sampled with
-  `Ramp::sample` (so profile, sin easing and HSV rainbow are the model's own
-  maths), 8 uniform segments bisected up to 5 times until the midpoint error
-  is ≤ 2/255; twin: `xarast:profile`, `xarast:ramp-mapping`,
-  `xarast:fill-effect`, `xarast:stops="pos:#rrggbb[aa] …"`. A plain RGB ramp
-  gets its key stops only (rule 5).
+- **Ramp baking** (reworked in XARA-US-0043): resolved colours in a
+  `Ramp<ColourValue>`, sampled with `Ramp::sample` (so profile, sin easing
+  and HSV rainbow are the model's own maths). Stops sit on the 1/10 000
+  grid `<stop offset>` writes (`GRID`), so the offset sampled is the offset
+  written; spans start as 8 equal ones plus the two grid points either
+  side of every key's image under mapping + profile (`key_breaks`: the
+  kinks), and a span splits while any of its quarter points misses by more
+  than 1 level (`PROBE_ERROR`), down to one grid step. Measured worst error
+  against the curve, 4 097 samples over 32 baked ramps: **1.9/255**
+  (`tests/fill_round_trip.rs`). The old midpoint-only, depth-5 baker was
+  64/255 off on a steep profile. Twin: `xarast:profile` (shortest exact
+  `f64`, `num::f64s_exact`), `xarast:ramp-mapping`, `xarast:fill-effect`,
+  `xarast:stops="pos:#rrggbb[aa] …"`. A plain RGB ramp gets its key stops
+  only (rule 5).
+- **Baked fills** (`svg/bake.rs`, XARA-US-0043; `research/06 §5.4.1`
+  strategy 1): conical, diamond (no perspective), three-colour and
+  four-colour (parallelogram) fills become a `<pattern>` over the element's
+  box + 1 pt (**not** the stroke-padded box: an unstroked element does not
+  write its line width, so that box would change on a re-save); a conical
+  or diamond transparency becomes a `<mask>` over the mask box. Content is
+  one `<g transform="matrix(frame)" shape-rendering="crispEdges">` in the
+  fill's own frame. Diamond: four triangles, each a unit-frame gradient
+  along its axis (exact; `spreadMethod="repeat"` for the extra repeat).
+  Conical: flat wedges from a 1 024-step fan, each a run whose colours stay
+  within 2 levels, coloured at its middle. Meshes: rows across the axis the
+  colour changes least along (`bake::variation`), split on a 1/1 024 grid
+  while any of 17 columns changes by more than 2 levels, each row a
+  gradient along the other axis baked with `bake_spans(…, 1)` (a
+  three-colour row has a kink at `u = 1 − v`), plus a clamped edge row
+  beyond each side. The samplers mirror the CPU renderer's
+  (`xarast-render` `shape_param`, the mesh sampler): conical's second axis
+  is the first turned a quarter anticlockwise in document space, i.e.
+  `(u.y, −u.x)` in SVG space; meshes clamp to the unit square (the
+  renderer ignores the fill mapping for meshes). Pieces overlap their
+  predecessor by a sliver and are crisp: antialiased shared edges showed
+  the background as hairlines. Everything baked is marked
+  `xarast:generated="fill-bake"`; the reader never reads it (twins win).
+  Mesh transparencies stay flat means: the renderer has no mesh
+  transparency either (`xarast-app` `paint.rs`). Unbaked fallbacks (no
+  box, perspective, degenerate frame) keep the old approximations and
+  count in `Stats::fills_approximated`; baked conical/mesh fills count in
+  `Stats::fills_baked`.
 - **Transparency**: flat → multiplied into `fill-opacity`/`stroke-opacity`;
   graduated → `<mask>` over the element's box (+ stroke) with a greyscale
   gradient, `color-interpolation="sRGB"` on both; a fill transparency is
@@ -185,7 +221,9 @@ stats, foreign_count, foreign_digest }`.
   shared code in `svg/text.rs`): `<text xarast:exact="true" transform>`
   (story matrix conjugated by the flip; `xarast:matrix` with the exact
   `a b c d` when six decimals do not pin them), one `<tspan>` per
-  `TextLine` (its node ruler as `xarast:ruler`), and inside it one
+  `TextLine` (its node ruler as `xarast:ruler`; OpenType feature
+  settings of a run as `xarast:features="liga:0 smcp:1"`, only when not
+  empty, since XARA-T-0225), and inside it one
   `<tspan>` per **run**: consecutive items whose *written* attributes are
   identical. Grouping: a snapshot of the `AttrStack` at each item whose
   state changed (dirty flag); an equal snapshot continues the run, a
@@ -201,11 +239,21 @@ stats, foreign_count, foreign_digest }`.
   item-less line writes one empty run from the state **outside** the line
   scope (what `StoryText` resolves for it). Placement: with
   `SvgOptions::text` (a `Placer` over a `TextPlacer`; `xarast-app`'s
-  `svg_text::placer()`, used by `xarast-cli convert`) every run gets `x`
+  `svg_text::placer()`, used by `xarast-cli convert`, SVG export and,
+  since XARA-T-0259, the app's `SaveJob`) every run gets `x`
   / `y` lists from the real layout and substituted families join the
   `font-family` chain (+ `xarast:font-substitute`, informative); without
   it the old line-per-baseline fallback (`x=0`, `y` += line height,
-  `text-anchor`). Stories on a path are still laid out as lines.
+  `text-anchor`). **Stories on a path** (T9.5.6, XARA-T-0252): the placer
+  lays them out as the walker does and sets `StoryPlacement::along_path`;
+  `chars` are then glyph origins on the path and `rotations` their turns,
+  and each run gets a `rotate` list (SVG degrees) next to `x` / `y`. No
+  `<textPath>` (see `text.md`, "Base SVG along the path": resvg and
+  Inkscape 1.2 cannot draw a multi-run story through it). Reflected or
+  sheared characters (`PathFit::is_plain` false) and saves without a
+  placer stay on straight lines and count in `Stats::text_on_path`. The
+  reader ignores `rotate` like `x` / `y` (derived); the corpus round trip
+  saves with the placer and checks the re-save bytes (59/59).
 
 ### Passes 4–5: hoisted paint and CSS classes (XARA-T-0101) — the reader contract
 
@@ -279,6 +327,15 @@ Inkscape on 8 files checked; Chrome is identical on 7 and differs on
 `20000GradFilledShapes50PCtransparent` by ≤ 11/255 on 0.09 % of pixels
 (SSIM 0.99999: Chrome composites an inherited `fill-opacity` over a
 gradient a hair differently than an explicit one).
+
+### Baked fills (2026-09-24, XARA-US-0043)
+
+SVG export against our PNG export (72 dpi, paper, `cargo xtask
+export-check`; the profile writer is shared): Fill Types simple
+**19.70 → 1.87**/255, WATCH2 **16.51 → 0.66**, WATCH 5.07 → 2.35,
+Girard_simple 0.73 → 0.32, testimp1 0.34 → 0.23; nothing got worse. The
+three SVG lines left `xtask/export-limits-corpus.txt`. Corpus SVG size
+83.2 → 85.8 MB (+3 %; Fill Types simple 481 → 976 KB, mostly mesh rows).
 
 ### Conformance with bitmaps decoded (2026-09-23, round 5)
 
@@ -359,8 +416,11 @@ diagnostics, stats, preservation }`; `open` wraps it with the container,
 - **Twins win (F4.2)**: `xarast:parallelogram` over `d`; quick-shape
   parameters (the base `d` is kept as the outline cache when it differs
   from `QuickShape::outline()` — it does for 32k corpus shapes, whose
-  import generated edge templates in shape space); conical, 3/4-colour,
-  fractal/noise twins over their flat approximation; `xarast:stops` /
+  import generated edge templates in shape space); conical, diamond
+  (`<xarast:fill xarast:type="diamond" xarast:points="c c1 c2">` + ramp
+  twin, since XARA-US-0043; a perspective diamond is still a radial
+  gradient marked `xarast:fill="diamond"`), 3/4-colour, fractal/noise
+  twins over their baked or flat base; `xarast:stops` /
   `xarast:levels` keys over baked stops. Generated live-effect subtrees
   under their controller are kept as `LiveRole::Generated` (nothing
   regenerates before Phase 13); an orphan one becomes a plain group plus a
@@ -448,6 +508,30 @@ seeds with a text story added to `fuzz_seeds`): 5 min, 379 577 runs,
 under load avg 18–50, best of 4 interleaved 0.95 s vs 0.92 s for the
 previous build in the same conditions (+≈ 30 ms: system font enumeration
 and 48 layouts); `save_to` without a placer adds nothing.
+
+**App save places text (XARA-T-0259).** `xarast_app::save::SaveJob`
+carries `text: Option<Placer>`, `Some(svg_text::placer())` by default
+(the process's shared font service), and hands it to `prepare_save` /
+`prepare_resave` in `SvgOptions::text`. Stories are laid out while the
+SVG is serialised, **on the save thread** over the restored document;
+the interface thread's `save_job` only clones an `Arc`. So File › Save,
+Save As, a save before closing and the periodic autosave write the same
+`document.svg` as `xarast-cli convert`. `SaveJob::without_text_placer()`
+is used only by `AppState::emergency_shutdown` (the signal path must not
+wait for font enumeration; only Xarast reads a recovery snapshot and the
+reader ignores placement). Evidence: `xarast-cli`
+`tests/app_save.rs` — over the 59-file corpus, an app save
+(`save_job(Document).deterministic().without_thumbnail()`) is
+**byte-identical** to `convert_one(--deterministic)` (59/59; 2 files turn
+characters along a path); with the thumbnail only `thumbnail.png` is
+added (same `document.svg`), and an autosave writes the same SVG at
+deflate 1. `xarast-app` `tests/save.rs` now compares the snapshot path
+against a direct save *with* the placer (59/59, first save and raw-copy
+re-save). Cost (`examples/save_probe.rs`, release, ext4, load avg ≈ 3,
+3 runs): ProbeX16 UI thread 30–38 ms (unchanged), save thread without
+thumbnail 970–984 ms with the placer vs 965–991 ms without (noise);
+TextCurve 7–8 ms vs 5 ms (package 22 271 B vs 6 046 B); Rotated
+6–8 ms vs 4 ms.
 
 Text conformance, resvg vs the CPU reference (`render --frame page`,
 8 × 8 grey SSIM, system fonts both sides), 20 text files, before → after:
@@ -715,6 +799,18 @@ the file means", not crashes; each input is now a unit test in
 
 ## Dead ends (do not retry)
 
+- Baking a fill into the stroke-padded mask box: an unstroked element's
+  line width is not written, so the reloaded box differs and the first
+  re-save is not a fixed point (Girard_simple, Groucho2). Fill patterns
+  use the geometry box + 1 pt.
+- Antialiased baked pieces: shared edges composite to partial coverage
+  and show hairlines of the background; crisp pieces with a sliver of
+  overlap do not.
+- Reading SVG decimals as `mantissa × 10^scale`: `35 × 0.01` is
+  `0.35000000000000003`, so a profile never came back equal. The scanner
+  divides by an exact power of ten (one rounding) and falls back to
+  `str::parse` beyond 2^53 / 10^22.
+
 - Text runs split on snapshot inequality alone: a restore attribute or a
   slot the profile does not write splits a run in the original and not in
   the reload, so the first re-save differs. Split on what is *written*.
@@ -805,8 +901,9 @@ the file means", not crashes; each input is now a unit test in
   written; a reload has empty names (not part of the normal form). The
   SVG mask/pattern of a bitmap ignores `Simple` (clamp) and mirrored
   tiling — patterns always repeat — and a transparency's contone levels.
-- W3 leftovers: baking/`BakeProvider`
-  (XARA-T-0102), arrow markers (XARA-T-0103), PNG rendition of BMPs
+- W3 leftovers: filter/raster baking and `BakeProvider` (fractal, noise,
+  feathers, perspective gradients, projective four-colour fills;
+  XARA-T-0102 — geometry baking is done, XARA-US-0043), arrow markers (XARA-T-0103), PNG rendition of BMPs
   (XARA-T-0104), the conformance harness in CI (XARA-T-0106), `README.txt`
   entry (§5.9, SHOULD), split layout above 32 spreads / 8 MiB.
 - `meta.xml` model (F2.6) and the full `<metadata>` mirror (F2.7):
@@ -815,8 +912,12 @@ the file means", not crashes; each input is now a unit test in
 - Text leftovers (XARA-T-0172): the builder's Info diagnostic "an
   attribute follows an ink node" fires on every multi-run line (text items
   count as ink in `validate`); run-level foreign attributes and elements
-  are dropped (runs are not nodes); text on a path is still a straight
-  line in the base SVG (`<textPath>`, W9.5); a gradient or bitmap fill on
+  are dropped (runs are not nodes); ~~text on a path is still a straight
+  line in the base SVG~~ (done, XARA-T-0252; reflected or sheared
+  characters still are); ~~the app's own save passes no
+  `SvgOptions::text`~~ (done, XARA-T-0259: File › Save, Save As and
+  autosave place text as `xarast-cli convert` does; see "App save places
+  text" below); a gradient or bitmap fill on
   text is written in the spread frame, so browsers misplace it under the
   story's transform (the twin is exact); fonts are not embedded
   (`@font-face`/WOFF2, §6.7 rule 2) and no generic family is guessed from

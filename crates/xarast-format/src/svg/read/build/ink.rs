@@ -639,11 +639,17 @@ impl<'d> Reader<'d, '_, '_> {
                     .split_ascii_whitespace()
                     .collect();
                 let m = |i: usize| p.get(i).and_then(|v| parse::mp(v)).map_or(Mp::ZERO, mp_i32);
+                let fixed = |i: usize| p.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
                 TextLayout::OnPath {
                     reversed: p.first() == Some(&"true"),
                     tangential: p.get(1) == Some(&"true"),
                     left_indent: m(2),
                     right_indent: m(3),
+                    chars: xarast_doc::CharsTransform {
+                        reflected: p.get(4) == Some(&"true"),
+                        rotation: fixed(5),
+                        shear: fixed(6),
+                    },
                 }
             }
             _ => TextLayout::AtPoint,
@@ -1095,6 +1101,9 @@ impl<'d> Reader<'d, '_, '_> {
         if let Some(v) = xa(r, "ruler") {
             out.push(AttrValue::Ruler(parse_ruler(v)));
         }
+        if let Some(v) = xa(r, "features") {
+            out.push(AttrValue::FontFeatures(parse_features(v)));
+        }
         let info = InkInfo {
             filled: true,
             stroked: true,
@@ -1270,6 +1279,18 @@ fn parse_panose(v: &str) -> Option<[u8; 10]> {
 
 /// A ruler, `position:kind` pairs (`svg/text.rs`); malformed pairs are
 /// skipped.
+/// `xarast:features`: `tag:value` pairs; a malformed pair is skipped.
+fn parse_features(v: &str) -> Arc<[xarast_doc::FeatureSetting]> {
+    let settings: Vec<xarast_doc::FeatureSetting> = v
+        .split_ascii_whitespace()
+        .filter_map(|pair| {
+            let (tag, value) = pair.split_once(':')?;
+            xarast_doc::FeatureSetting::new(tag, value.parse::<u16>().ok()?)
+        })
+        .collect();
+    xarast_doc::FeatureSetting::normalised(&settings)
+}
+
 fn parse_ruler(v: &str) -> Arc<[xarast_doc::TabStop]> {
     v.split_ascii_whitespace()
         .filter_map(|pair| {

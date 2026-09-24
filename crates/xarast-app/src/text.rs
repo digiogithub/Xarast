@@ -21,8 +21,9 @@ use xarast_doc::{
 use xarast_geom::{Mp, Path};
 use xarast_render::PathRef;
 use xarast_text::{
-    FontQuery, FontStyle, FontSubstitution, Justification, LineSpacing, ManualKern, ParagraphStyle,
-    StoryInput, StoryMode, StyleRange, TabKind, TabStop, TextScript,
+    FontQuery, FontStyle, FontSubstitution, Justification, Layout, LineSpacing, ManualKern,
+    ParagraphStyle, PathFit, PathFitStyle, StoryInput, StoryMode, StyleRange, TabKind, TabStop,
+    TextPath, TextScript,
 };
 
 use crate::fonts::FontService;
@@ -34,8 +35,9 @@ pub(crate) struct StoryGeometry {
     pub runs: Vec<RunGeometry>,
     /// Families substituted while laying the story out.
     pub substitutions: Vec<FontSubstitution>,
-    /// Text on a path, drawn along a straight baseline until W9.5.
-    pub on_path: bool,
+    /// Text on a path whose path is missing or has no length: drawn along
+    /// a straight baseline instead.
+    pub on_path_unfitted: bool,
     /// Visible characters that produced no glyph at all: no font could be
     /// found, so the story could not be drawn.
     pub unrendered: bool,
@@ -146,6 +148,17 @@ fn style_range(range: std::ops::Range<usize>, a: &ResolvedAttrs) -> StyleRange {
     if let AttrValue::AspectRatio(x) = a.get(AttrSlot::TxtAspectRatio) {
         r.aspect = *x;
     }
+    if let AttrValue::FontFeatures(f) = a.get(AttrSlot::TxtFeatures)
+        && !f.is_empty()
+    {
+        r.features = f
+            .iter()
+            .map(|s| xarast_text::FontFeature {
+                tag: s.tag,
+                value: s.value,
+            })
+            .collect();
+    }
     if let AttrValue::Baseline(b) = a.get(AttrSlot::TxtBaseline) {
         r.baseline_shift = *b;
     }
@@ -218,6 +231,67 @@ fn paragraph_style(
     p
 }
 
+/// The path a story on a path follows, in story space, ready to fit:
+/// its first `Path` child (the original's rule), brought out of the
+/// story's transform. `None` when the story is not on a path, has no path
+/// child, the path has no length, or the transform cannot be inverted.
+pub(crate) fn path_fit(tree: &Tree, story_node: NodeId, story: &TextStoryNode) -> Option<PathFit> {
+    let xarast_doc::TextLayout::OnPath {
+        reversed,
+        tangential,
+        left_indent,
+        right_indent,
+        chars,
+    } = &story.layout
+    else {
+        return None;
+    };
+    let path = tree.children(story_node).find_map(|c| match tree.kind(c) {
+        Some(NodeKind::Path(p)) => Some(Arc::clone(&p.data)),
+        _ => None,
+    })?;
+    let xf = story.transform.to_affine();
+    let det = xf.determinant();
+    if !det.is_finite() || det.abs() < 1e-12 {
+        return None;
+    }
+    let local = xf.inverse() * path.to_bez_path();
+    let path = TextPath::new(&local, *reversed)?;
+    Some(PathFit::new(
+        path,
+        PathFitStyle {
+            tangential: *tangential,
+            reflected: chars.reflected,
+            shear: xarast_doc::CharsTransform::radians(chars.shear),
+            left_indent: *left_indent,
+            right_indent: *right_indent,
+        },
+    ))
+}
+
+/// Lays a story out: the bridge's input, the layout, and the fit onto the
+/// story's path when it is on one.
+pub(crate) fn lay_story(
+    fonts: &FontService,
+    tree: &Tree,
+    st: &StoryText,
+    story: &TextStoryNode,
+) -> (Input, Layout, Option<PathFit>) {
+    let mut input = story_input(tree, st, story);
+    let fit = path_fit(tree, st.story, story);
+    if let Some(f) = &fit {
+        input.mode = f.story_mode();
+    }
+    let layout = fonts.ready().layout(&StoryInput {
+        text: layout_text(st),
+        runs: &input.runs,
+        paragraphs: &input.paragraphs,
+        kerns: &input.kerns,
+        mode: input.mode,
+    });
+    (input, layout, fit)
+}
+
 /// Lays a story out and turns it into document-space outlines.
 pub(crate) fn build_story(
     fonts: &FontService,
@@ -225,15 +299,7 @@ pub(crate) fn build_story(
     st: &StoryText,
     story: &TextStoryNode,
 ) -> StoryGeometry {
-    let input = story_input(tree, st, story);
-    let shaper = fonts.ready();
-    let layout = shaper.layout(&StoryInput {
-        text: layout_text(st),
-        runs: &input.runs,
-        paragraphs: &input.paragraphs,
-        kerns: &input.kerns,
-        mode: input.mode,
-    });
+    let (input, layout, fit) = lay_story(fonts, tree, st, story);
     let db = fonts.db();
     let story_xf = story.transform.to_affine();
 
@@ -245,6 +311,13 @@ pub(crate) fn build_story(
     // visible text has none could not be drawn.
     let mut inked = 0usize;
     for line in &layout.lines {
+        // On a path, each cluster has its own transform onto the path.
+        let onto = |cluster: usize| -> Affine {
+            match (&fit, line.cluster_at(cluster)) {
+                (Some(f), Some(c)) => story_xf * f.cluster_transform(line, c),
+                _ => story_xf,
+            }
+        };
         for run in &line.runs {
             let Some(target) = paths.get_mut(run.style) else {
                 continue;
@@ -273,24 +346,42 @@ pub(crate) fn build_story(
                         * Affine::translate((-x, -y))
                         * xf;
                 }
-                let xf = story_xf * xf;
+                let xf = onto(g.cluster) * xf;
                 for el in outline.elements() {
                     target.push(xf * *el);
                 }
             }
             if input.runs[run.style].underline && !run.glyphs.is_empty() {
-                let first = &run.glyphs[0];
-                let last = &run.glyphs[run.glyphs.len() - 1];
-                let x0 = first.x.to_f64();
-                let x1 = last.x.to_f64() + last.advance.to_f64();
-                let size = run.size.to_f64();
                 // Position and thickness are the usual typographic defaults
                 // (a tenth of the size below the baseline, a twentieth
                 // thick): the original's own values come from the font.
+                let size = run.size.to_f64();
                 let y = line.baseline_y.to_f64() - size * 0.1;
-                let rect = kurbo::Rect::new(x0, y - size * 0.05, x1, y);
-                for el in rect.path_elements(0.1) {
-                    target.push(story_xf * el);
+                let mut bar = |x0: f64, x1: f64, xf: Affine| {
+                    let rect = kurbo::Rect::new(x0, y - size * 0.05, x1, y);
+                    for el in rect.path_elements(0.1) {
+                        target.push(xf * el);
+                    }
+                };
+                if fit.is_some() {
+                    // Along a path the bar is broken into one piece per
+                    // character, each turned with its character.
+                    let mut last = None;
+                    for g in &run.glyphs {
+                        if last == Some(g.cluster) {
+                            continue;
+                        }
+                        last = Some(g.cluster);
+                        if let Some(c) = line.cluster_at(g.cluster) {
+                            bar(c.x.to_f64(), (c.x + c.width).to_f64(), onto(g.cluster));
+                        }
+                    }
+                } else {
+                    let first = &run.glyphs[0];
+                    let last = &run.glyphs[run.glyphs.len() - 1];
+                    let x0 = first.x.to_f64();
+                    let x1 = last.x.to_f64() + last.advance.to_f64();
+                    bar(x0, x1, story_xf);
                 }
             }
         }
@@ -324,7 +415,7 @@ pub(crate) fn build_story(
     StoryGeometry {
         runs,
         substitutions: layout.substitutions,
-        on_path: matches!(StoryFlow::of(story), StoryFlow::OnPath),
+        on_path_unfitted: matches!(StoryFlow::of(story), StoryFlow::OnPath) && fit.is_none(),
         unrendered: visible && (glyphs == 0 || inked == 0),
         version: subtree_version(tree, st.story),
         bounds,
@@ -382,18 +473,38 @@ pub(crate) fn story_rect(
     if st.text.trim().is_empty() {
         return xarast_geom::Rect::EMPTY;
     }
-    let input = story_input(tree, &st, story);
-    let layout = fonts.ready().layout(&StoryInput {
-        text: layout_text(&st),
-        runs: &input.runs,
-        paragraphs: &input.paragraphs,
-        kerns: &input.kerns,
-        mode: input.mode,
-    });
+    let (_, layout, fit) = lay_story(fonts, tree, &st, story);
     if layout.bounds.is_empty() {
         return xarast_geom::Rect::EMPTY;
     }
-    story.transform.transform_rect(layout.bounds)
+    let Some(fit) = fit else {
+        return story.transform.transform_rect(layout.bounds);
+    };
+    // On a path: every cluster's line box, carried onto the path.
+    let story_xf = story.transform.to_affine();
+    let mut out: Option<kurbo::Rect> = None;
+    for line in &layout.lines {
+        let top = (line.baseline_y + line.ascent).to_f64();
+        let bottom = (line.baseline_y - line.descent).to_f64();
+        for c in &line.clusters {
+            let xf = story_xf * fit.cluster_transform(line, c);
+            let (x0, x1) = (c.x.to_f64(), (c.x + c.width).to_f64());
+            for (x, y) in [(x0, top), (x1, top), (x0, bottom), (x1, bottom)] {
+                let q = xf * kurbo::Point::new(x, y);
+                out = Some(match out {
+                    Some(r) => r.union_pt(q),
+                    None => kurbo::Rect::from_points(q, q),
+                });
+            }
+        }
+    }
+    let Some(r) = out else {
+        return xarast_geom::Rect::EMPTY;
+    };
+    xarast_geom::Rect::new(
+        xarast_geom::Point::new(Mp::from_f64_round(r.x0), Mp::from_f64_round(r.y0)),
+        xarast_geom::Point::new(Mp::from_f64_round(r.x1), Mp::from_f64_round(r.y1)),
+    )
 }
 
 /// The text layout sees: the logical text without the paragraph break

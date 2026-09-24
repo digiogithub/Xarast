@@ -2,12 +2,14 @@
 id: XARA-US-0043
 type: story
 title: W8.8 — Fill import, round-trip and corpus verification
-status: backlog
+status: done
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, xar, xarast-format]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T09:42:03Z
+updated: 2026-09-24T00:15:02Z
+started: 2026-09-23T23:26:12Z
+closed: 2026-09-24T00:15:02Z
 ---
 
 ## Tasks (full table: phase-08 §W8.8)

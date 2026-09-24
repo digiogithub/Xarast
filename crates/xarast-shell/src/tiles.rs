@@ -45,11 +45,14 @@ pub struct TiledFrame {
     pub transform: Transform2D,
     /// What the pixels are a picture of. Frames with equal keys show the
     /// same picture wherever they overlap (same document, scene epoch and
-    /// backdrop); a new key forgets every tile.
+    /// backdrop). A new key forgets every tile, unless the frame repainted
+    /// the last frame uploaded (`base`, same document): then the tiles
+    /// under it are kept and only its `fresh` rectangles go up.
     pub content: (u64, u64),
     /// The frame's generation.
     pub generation: u64,
-    /// The generation whose pixels this frame moved, when it is a scroll.
+    /// The generation whose pixels this frame moved (a scroll) or kept (a
+    /// repaint of an edit's damage).
     pub base: Option<u64>,
     /// The part of the surface that holds the picture.
     pub covered: DeviceRect,
@@ -109,6 +112,8 @@ pub trait TileStore {
     ) -> Result<(), String>;
     /// Forgets one tile.
     fn invalidate(&mut self, key: &TileKey);
+    /// Forgets every tile `keep` refuses.
+    fn retain(&mut self, keep: &mut dyn FnMut(&TileKey) -> bool);
     /// Forgets every tile.
     fn clear(&mut self);
     /// Tiles held at most.
@@ -219,6 +224,10 @@ impl TileStore for CpuTileStore {
         self.tiles.remove(key);
     }
 
+    fn retain(&mut self, keep: &mut dyn FnMut(&TileKey) -> bool) {
+        self.tiles.retain(|k, _| keep(k));
+    }
+
     fn clear(&mut self) {
         self.tiles.clear();
     }
@@ -254,6 +263,10 @@ impl TileStore for GpuTileStore {
 
     fn invalidate(&mut self, key: &TileKey) {
         self.cache.invalidate(key);
+    }
+
+    fn retain(&mut self, keep: &mut dyn FnMut(&TileKey) -> bool) {
+        self.cache.retain(keep);
     }
 
     fn clear(&mut self) {
@@ -406,17 +419,36 @@ impl TilePlanner {
     /// Keeps a frame's pixels as tiles, uploading only what the store does
     /// not already hold for this picture.
     pub fn accept(&mut self, f: &TiledFrame, store: &mut dyn TileStore) -> UploadStats {
-        if self.content != Some(f.content) {
-            store.clear();
-            self.levels.clear();
-            self.last = None;
-            self.content = Some(f.content);
+        // A new picture drawn over the last frame uploaded (an edit's
+        // repaint, XARA-T-0221): what the tiles hold under the frame is
+        // that frame, so only the fresh pixels change.
+        let edit = self
+            .content
+            .is_some_and(|c| c != f.content && c.0 == f.content.0)
+            && f.base.is_some()
+            && self.last.map(|(_, g)| g) == f.base;
+        if self.content != Some(f.content) && !edit {
+            self.forget(store, f.content);
         }
-        let (level, d) = self.level_for(f.transform);
+        let (mut level, mut d) = self.level_for(f.transform);
         let incremental = f.base.is_some_and(|b| self.last == Some((level, b)));
         let covered = f.covered.intersection(f.surface.bounds());
+        if edit && !incremental {
+            self.forget(store, f.content);
+            (level, d) = self.level_for(f.transform);
+        }
         let to_level = |r: DeviceRect| r.translated(-d[0], -d[1]);
         let covered_l = to_level(covered);
+        // An edit that is incremental keeps only this level's tiles under
+        // the frame: every other resident tile shows the old picture.
+        let edit = edit && incremental;
+        if edit {
+            let under: std::collections::HashSet<TileKey> =
+                self.grid.covering(level, covered_l).into_iter().collect();
+            store.retain(&mut |k| under.contains(k));
+            self.levels.retain(|l| l.id == level);
+            self.content = Some(f.content);
+        }
         let fresh_l: Vec<DeviceRect> = f
             .fresh
             .iter()
@@ -470,7 +502,19 @@ impl TilePlanner {
                 ]
             };
             let piece_t = texels(piece);
+            // After an edit, a tile holding texels outside the frame holds
+            // the old picture there: start it afresh.
+            let stale = |v: TexelRect| {
+                edit && !(v[0] >= piece_t[0]
+                    && v[1] >= piece_t[1]
+                    && v[2] <= piece_t[2]
+                    && v[3] <= piece_t[3])
+            };
             match store.valid(&key) {
+                Some(v) if stale(v) => {
+                    store.invalidate(&key);
+                    upload(store, &mut stats, key, piece, tile);
+                }
                 Some(v) if incremental && joins_into_a_rectangle(v, piece_t) => {
                     // What the tile holds is this picture already: send
                     // what it lacks, and the fresh pixels over what it has.
@@ -503,6 +547,14 @@ impl TilePlanner {
         }
         self.last = Some((level, f.generation));
         stats
+    }
+
+    /// Forgets every tile and level: the picture is now `content`.
+    fn forget(&mut self, store: &mut dyn TileStore, content: (u64, u64)) {
+        store.clear();
+        self.levels.clear();
+        self.last = None;
+        self.content = Some(content);
     }
 
     /// The placements that show `view` from the resident tiles, oldest
@@ -973,6 +1025,100 @@ mod tests {
         p.accept(&h, &mut s);
         assert_eq!(p.levels.len(), 1);
         assert_eq!(s.tiles.len(), 4);
+    }
+
+    /// `f`'s picture with `r` painted a flat colour: the same frame after
+    /// an edit that recoloured what is under `r`.
+    fn edited(f: &TiledFrame, r: DeviceRect, generation: u64) -> TiledFrame {
+        let mut g = f.clone();
+        for y in r.y0..r.y1 {
+            for x in r.x0..r.x1 {
+                g.surface.set_pixel(x, y, [200, 10, 10, 255]);
+            }
+        }
+        g.content = (f.content.0, f.content.1 + 1);
+        g.generation = generation;
+        g.base = Some(f.generation);
+        g.fresh = vec![r];
+        g
+    }
+
+    #[test]
+    fn an_edit_uploads_only_its_damage_and_forgets_what_is_out_of_view() {
+        let t = Transform2D::scale(1.0);
+        let mut p = TilePlanner::new(TS);
+        let mut s = CpuTileStore::new(TS, 256);
+        let f = frame(t, 48, 40, 1, None, vec![DeviceRect::from_size(48, 40)]);
+        p.accept(&f, &mut s);
+        // A pan leaves tiles resident beyond the view.
+        let panned = t.then(Transform2D::translate(-16.0, 0.0));
+        let strip = vec![DeviceRect::new(32, 0, 48, 40)];
+        let g = frame(panned, 48, 40, 2, Some(1), strip);
+        p.accept(&g, &mut s);
+        let resident = s.tiles.len();
+
+        let damage = DeviceRect::new(5, 6, 13, 20);
+        let h = edited(&g, damage, 3);
+        let st = p.accept(&h, &mut s);
+        assert!(st.incremental, "{st:?}");
+        // The damage (split across the tiles it crosses), and nothing more.
+        assert_eq!(st.pixels, damage.area(), "{st:?}");
+        assert_eq!(composite(&p, &mut s, &view(panned, 48, 40)), h.surface);
+        // The column that scrolled out held the old picture: forgotten.
+        assert!(s.tiles.len() < resident);
+        let back = composite(&p, &mut s, &view(t, 48, 40));
+        assert_eq!(back.pixel(3, 3), Some([9, 9, 9, 255]));
+    }
+
+    #[test]
+    fn an_edit_over_a_frame_never_seen_is_uploaded_whole() {
+        let t = Transform2D::scale(1.0);
+        let mut p = TilePlanner::new(TS);
+        let mut s = CpuTileStore::new(TS, 256);
+        let f = frame(t, 40, 40, 1, None, vec![DeviceRect::from_size(40, 40)]);
+        p.accept(&f, &mut s);
+        // Its base is generation 2, which was dropped before collection.
+        let mut g = f.clone();
+        g.generation = 2;
+        let h = edited(&g, DeviceRect::new(0, 0, 8, 8), 3);
+        let st = p.accept(&h, &mut s);
+        assert!(!st.incremental);
+        assert_eq!(st.pixels, 40 * 40);
+        assert_eq!(composite(&p, &mut s, &view(t, 40, 40)), h.surface);
+    }
+
+    #[test]
+    fn an_edit_restarts_a_tile_that_holds_texels_outside_the_frame() {
+        let t = Transform2D::scale(1.0);
+        let mut p = TilePlanner::new(TS);
+        let mut s = CpuTileStore::new(TS, 256);
+        // A frame at a whole-pixel offset from the tile grid, then a pan by
+        // 5: the edge tiles hold texels from both frames.
+        let f = frame(t, 40, 40, 1, None, vec![DeviceRect::from_size(40, 40)]);
+        p.accept(&f, &mut s);
+        let panned = t.then(Transform2D::translate(-5.0, 0.0));
+        let g = frame(
+            panned,
+            40,
+            40,
+            2,
+            Some(1),
+            vec![DeviceRect::new(35, 0, 40, 40)],
+        );
+        p.accept(&g, &mut s);
+        let h = edited(&g, DeviceRect::new(20, 20, 24, 24), 3);
+        let st = p.accept(&h, &mut s);
+        assert!(st.incremental);
+        // The left column of tiles restarts; the rest takes the damage only.
+        assert!(st.pixels > 16, "{st:?}");
+        assert!(st.pixels < 40 * 40 / 2, "{st:?}");
+        assert_eq!(composite(&p, &mut s, &view(panned, 40, 40)), h.surface);
+        let back = composite(&p, &mut s, &view(t, 40, 40));
+        assert_eq!(
+            back.pixel(1, 1),
+            Some([9, 9, 9, 255]),
+            "old texels forgotten"
+        );
     }
 
     #[test]

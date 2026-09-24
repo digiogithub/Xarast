@@ -2,12 +2,14 @@
 id: XARA-T-0246
 type: task
 title: Convert to shapes follows the path for text on a path (after W9.5)
-status: backlog
+status: done
 parent: XARA-US-0049
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T22:35:23Z
-updated: 2026-09-23T22:35:23Z
+updated: 2026-09-24T00:15:02Z
+started: 2026-09-23T23:30:56Z
+closed: 2026-09-24T00:15:02Z
 ---
 
 ## Description

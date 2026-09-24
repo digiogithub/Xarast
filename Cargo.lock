@@ -5800,6 +5800,7 @@ dependencies = [
  "wgpu 30.0.1",
  "winit",
  "xarast-app",
+ "xarast-color",
  "xarast-doc",
  "xarast-geom",
  "xarast-render",
@@ -5836,6 +5837,7 @@ dependencies = [
  "thiserror 2.0.20",
  "xarast-app",
  "xarast-color",
+ "xarast-doc",
  "xarast-geom",
  "xarast-render",
 ]

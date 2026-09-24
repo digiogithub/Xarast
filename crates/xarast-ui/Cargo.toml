@@ -24,6 +24,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+xarast-doc = { path = "../xarast-doc" }
 criterion = { workspace = true }
 egui_kittest = { workspace = true }
 serde_json = { workspace = true }

@@ -13,16 +13,22 @@ use xarast_doc::fill::{FillGeometry, Paint, Ramp, RampMapping, Tiling, TranspPai
 use xarast_geom::{BiasGain, Point};
 
 use super::Stats;
+use super::bake::{self, Frame2, SvgBox, Target};
 use super::defs::Defs;
 use super::frame::Frame;
-use super::num::{f32s, f64s, mp};
+use super::num::{f32s, f64s, f64s_exact, mp};
 use super::xml::attr;
 
-/// The largest per-channel error a baked ramp may have (`§6.4`): 2/255.
-const MAX_RAMP_ERROR: f32 = 2.0 / 255.0;
-/// Baked stops per key span, at least and at most (`§6.4`).
+/// What a probe inside a baked span may miss the curve by. The bound of
+/// `§6.4` is 2/255 per channel; the 8-bit stops and the 8-bit reference
+/// each round half a level away, and the curve bends between probes, so
+/// the probes hold to half the bound (measured worst over the fill test
+/// document: 1.9/255, `tests/fill_round_trip.rs`).
+const PROBE_ERROR: f32 = 1.0 / 255.0;
+/// Equal spans a baked ramp starts from: at least nine stops (`§6.4`).
 const MIN_SEGMENTS: usize = 8;
-const MAX_DEPTH: u32 = 5;
+/// The offsets a baked stop may take: `<stop offset>` has four decimals.
+pub(super) const GRID: u32 = 10_000;
 
 /// Everything a paint needs besides the paint.
 pub(crate) struct PaintCtx<'a> {
@@ -96,7 +102,7 @@ fn rgba(c: &Colour, t: &ColourTable) -> Rgba8 {
     c.resolve(t).to_rgba8()
 }
 
-fn opacity_of(a: u8) -> Option<f64> {
+pub(super) fn opacity_of(a: u8) -> Option<f64> {
     (a < 255).then(|| f64::from(a) / 255.0)
 }
 
@@ -134,8 +140,10 @@ fn effect_attr(out: &mut String, e: FillEffect) {
     }
 }
 
+/// `bias gain`, each in its shortest exact spelling: the twin must give
+/// the reader the model's profile bit for bit (acceptance criterion 9).
 fn profile_attr(p: BiasGain) -> String {
-    format!("{} {}", f64s(p.bias, 6), f64s(p.gain, 6))
+    format!("{} {}", f64s_exact(p.bias), f64s_exact(p.gain))
 }
 
 /// `x y` in points, SVG space.
@@ -237,48 +245,116 @@ impl KeyRamp {
 }
 
 /// Samples `f` over `0..=1` until piecewise-linear interpolation is within
-/// [`MAX_RAMP_ERROR`] per channel: at least [`MIN_SEGMENTS`] segments, each
-/// bisected at most [`MAX_DEPTH`] times (so at most 33 stops per eighth).
-fn bake(f: &dyn Fn(f32) -> Rgba8) -> Vec<(f32, Rgba8)> {
-    fn err(a: Rgba8, b: Rgba8, mid: Rgba8) -> f32 {
+/// 2/255 per channel (`§6.4`; probing to [`PROBE_ERROR`]).
+///
+/// Stops sit on the grid of `<stop offset>`'s four decimals ([`GRID`]), so
+/// the offset written is the offset sampled. The ramp starts as
+/// [`MIN_SEGMENTS`] equal spans; a span is split in two while the straight
+/// line between its ends misses `f` by more than the bound at any of its
+/// quarter points, down to one grid step. Checking three points rather
+/// than the midpoint alone catches S-shaped spans, and going down to the
+/// grid rather than a fixed depth follows a steep profile wherever it
+/// crowds the keys together (a gain of 0.6 packs seven keys into the last
+/// 1 % of the ramp). `breaks` are grid points every span must end at: the
+/// two grid points around each key stop ([`key_breaks`]), where the curve
+/// has a kink no probe inside a span would find.
+fn bake(f: &dyn Fn(f32) -> Rgba8, breaks: &[u32]) -> Vec<(f32, Rgba8)> {
+    bake_spans(f, breaks, MIN_SEGMENTS as u32)
+}
+
+/// [`bake`] from `min_segments` equal spans: one for a curve known to be
+/// close to straight, such as a row of a baked mesh fill.
+pub(super) fn bake_spans(
+    f: &dyn Fn(f32) -> Rgba8,
+    breaks: &[u32],
+    min_segments: u32,
+) -> Vec<(f32, Rgba8)> {
+    fn at(f: &dyn Fn(f32) -> Rgba8, i: u32) -> Rgba8 {
+        f(i as f32 / GRID as f32)
+    }
+    fn err(a: Rgba8, b: Rgba8, u: f32, m: Rgba8) -> f32 {
         let ch = |x: u8, y: u8, m: u8| {
-            ((f32::from(x) + f32::from(y)) / 2.0 - f32::from(m)).abs() / 255.0
+            (f32::from(x) + (f32::from(y) - f32::from(x)) * u - f32::from(m)).abs() / 255.0
         };
-        ch(a.r, b.r, mid.r)
-            .max(ch(a.g, b.g, mid.g))
-            .max(ch(a.b, b.b, mid.b))
-            .max(ch(a.a, b.a, mid.a))
+        ch(a.r, b.r, m.r)
+            .max(ch(a.g, b.g, m.g))
+            .max(ch(a.b, b.b, m.b))
+            .max(ch(a.a, b.a, m.a))
     }
     fn split(
         f: &dyn Fn(f32) -> Rgba8,
-        t0: f32,
+        i0: u32,
         c0: Rgba8,
-        t1: f32,
+        i1: u32,
         c1: Rgba8,
-        depth: u32,
         out: &mut Vec<(f32, Rgba8)>,
     ) {
-        let tm = (t0 + t1) / 2.0;
-        let cm = f(tm);
-        if depth < MAX_DEPTH && err(c0, c1, cm) > MAX_RAMP_ERROR {
-            split(f, t0, c0, tm, cm, depth + 1, out);
-            split(f, tm, cm, t1, c1, depth + 1, out);
-        } else {
-            out.push((t1, c1));
+        let span = i1 - i0;
+        if span >= 2 {
+            let probes = [i0 + span / 4, i0 + span / 2, i1 - span / 4];
+            let off = probes.iter().any(|&m| {
+                m > i0
+                    && m < i1
+                    && err(c0, c1, (m - i0) as f32 / span as f32, at(f, m)) > PROBE_ERROR
+            });
+            if off {
+                let m = i0 + span / 2;
+                let cm = at(f, m);
+                split(f, i0, c0, m, cm, out);
+                split(f, m, cm, i1, c1, out);
+                return;
+            }
         }
+        out.push((i1 as f32 / GRID as f32, c1));
     }
-    let mut out = vec![(0.0, f(0.0))];
-    for i in 0..MIN_SEGMENTS {
-        let t0 = i as f32 / MIN_SEGMENTS as f32;
-        let t1 = (i + 1) as f32 / MIN_SEGMENTS as f32;
-        let c0 = out.last().map_or_else(|| f(t0), |l| l.1);
-        let c1 = f(t1);
-        split(f, t0, c0, t1, c1, 0, &mut out);
+    let min_segments = min_segments.clamp(1, GRID);
+    let mut bounds: Vec<u32> = (0..=min_segments)
+        .map(|k| k * GRID / min_segments)
+        .chain(breaks.iter().copied().filter(|&i| i < GRID))
+        .collect();
+    bounds.sort_unstable();
+    bounds.dedup();
+    let mut out = vec![(0.0, at(f, 0))];
+    for (&i0, &i1) in bounds.iter().zip(bounds.iter().skip(1)) {
+        let c0 = out.last().map_or_else(|| at(f, i0), |l| l.1);
+        let c1 = at(f, i1);
+        split(f, i0, c0, i1, c1, &mut out);
     }
     out
 }
 
-fn push_stops(body: &mut String, stops: &[(f32, Rgba8)]) {
+/// The grid points on either side of where each intermediate key of `ramp`
+/// falls once its ramp mapping and profile have moved it: the kinks of the
+/// sampled curve, as [`Ramp::sample`] computes the parameter.
+fn key_breaks<S: xarast_color::Stop>(ramp: &Ramp<S>) -> Vec<u32> {
+    let param = |i: u32| {
+        let t = i as f32 / GRID as f32;
+        let t = match ramp.mapping {
+            RampMapping::Linear => t,
+            RampMapping::Sin => (1.0 - (t * std::f32::consts::PI).cos()) * 0.5,
+        };
+        ramp.profile.map(f64::from(t)) as f32
+    };
+    let mut out = Vec::new();
+    for s in ramp.stops() {
+        // The first grid point at or past the key (the parameter only
+        // grows with `t`).
+        let (mut lo, mut hi) = (0u32, GRID);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if param(mid) < s.pos {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        out.push(lo.saturating_sub(1));
+        out.push(lo);
+    }
+    out
+}
+
+pub(super) fn push_stops(body: &mut String, stops: &[(f32, Rgba8)]) {
     for (pos, c) in stops {
         body.push_str("<stop");
         attr(body, "offset", &f64s(f64::from(*pos), 4));
@@ -314,7 +390,7 @@ fn ramp_body(k: &KeyRamp, ext: &mut String, stats: &mut Stats) -> Vec<(f32, Rgba
     }
     attr(ext, "xarast:stops", &colour_keys(&k.keys()));
     refs_attr(ext, "xarast:stop-refs", &k.refs);
-    bake(&|t| k.sample(t))
+    bake(&|t| k.sample(t), &key_breaks(&k.ramp))
 }
 
 /// `pos:#rrggbb[aa] …`: a colour ramp's keys.
@@ -477,12 +553,64 @@ fn circle_twins(
     out
 }
 
+/// The fill frame `origin`, `a`, `b` (document points) in SVG space.
+fn frame_of(ctx: &PaintCtx<'_>, origin: Point, a: Point, b: Point) -> Frame2 {
+    let o = ctx.frame.pt(origin);
+    let (a, b) = (ctx.frame.pt(a), ctx.frame.pt(b));
+    Frame2 {
+        origin: o,
+        u: (a.0 - o.0, a.1 - o.1),
+        v: (b.0 - o.0, b.1 - o.1),
+    }
+}
+
+/// A conical fill's frame: the sweep starts along `zero_dir` and turns
+/// towards its quarter turn anticlockwise in document space, as the
+/// renderer's implied frame does. The Y flip makes that `(u.y, -u.x)` in
+/// SVG space.
+fn conical_frame(ctx: &PaintCtx<'_>, centre: Point, zero_dir: Point) -> Frame2 {
+    let o = ctx.frame.pt(centre);
+    let a = ctx.frame.pt(zero_dir);
+    let u = (a.0 - o.0, a.1 - o.1);
+    Frame2 {
+        origin: o,
+        u,
+        v: (u.1, -u.0),
+    }
+}
+
+/// Bakes a three- or four-colour fill, with its rows across whichever
+/// axis the colour changes least along (fewer rows for the same error).
+#[allow(clippy::too_many_arguments)]
+fn bake_mesh(
+    ctx: &mut PaintCtx<'_>,
+    origin: Point,
+    axis1: Point,
+    axis2: Point,
+    f: &dyn Fn(f64, f64) -> Rgba8,
+    breaks: &dyn Fn(f64) -> Vec<u32>,
+    b: SvgBox,
+) -> Option<String> {
+    let (along_u, along_v) = bake::variation(f);
+    if along_v <= along_u {
+        let fr = frame_of(ctx, origin, axis1, axis2);
+        bake::mesh(ctx, fr, b, f, breaks, Target::Pattern)
+    } else {
+        let fr = frame_of(ctx, origin, axis2, axis1);
+        bake::mesh(ctx, fr, b, &|u, v| f(v, u), breaks, Target::Pattern)
+    }
+}
+
 /// The colour paint of a fill or a stroke.
+///
+/// `bounds` is the element's box in SVG space (millipoints): with it, the
+/// fills SVG has no paint for are baked into geometry over it (`bake.rs`).
 pub(crate) fn colour_paint(
     ctx: &mut PaintCtx<'_>,
     paint: &Paint,
     tiling: Tiling,
     effect: FillEffect,
+    bounds: Option<SvgBox>,
 ) -> PaintOut {
     let t = ctx.colours;
     match paint {
@@ -565,12 +693,41 @@ pub(crate) fn colour_paint(
             to,
             ramp,
         } => {
-            // §6.3: a radial gradient through the diamond's frame is the
-            // accepted approximation (round rather than straight corners).
-            ctx.stats.fills_approximated += 1;
             let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
             let mut ext = String::new();
             let stops = ramp_body(&k, &mut ext, ctx.stats);
+            if persp.is_none() {
+                let fr = frame_of(ctx, *centre, *corner1, *corner2);
+                let spread = spread_method(tiling);
+                if let Some(id) =
+                    bounds.and_then(|b| bake::diamond(ctx, fr, b, &stops, spread, Target::Pattern))
+                {
+                    // Four exact gradients over the diamond's own frame;
+                    // the twin is the model.
+                    let mut side = String::from("<xarast:fill");
+                    attr(&mut side, "xarast:type", "diamond");
+                    attr(
+                        &mut side,
+                        "xarast:points",
+                        &format!(
+                            "{} {} {}",
+                            pt_pair(ctx, *centre),
+                            pt_pair(ctx, *corner1),
+                            pt_pair(ctx, *corner2)
+                        ),
+                    );
+                    ramp_twin(&mut side, &k, tiling);
+                    side.push_str("/>");
+                    return PaintOut {
+                        value: format!("url(#{id})"),
+                        sidecar: Some(side),
+                        ..PaintOut::default()
+                    };
+                }
+            }
+            // §6.3: a radial gradient through the diamond's frame is the
+            // accepted approximation (round rather than straight corners).
+            ctx.stats.fills_approximated += 1;
             let geo = radial_geometry(ctx, *centre, *corner1, *corner2, false);
             let mut extra = String::new();
             attr(&mut extra, "xarast:fill", "diamond");
@@ -595,16 +752,25 @@ pub(crate) fn colour_paint(
             to,
             ramp,
         } => {
-            ctx.stats.fills_approximated += 1;
             let k = KeyRamp::from_paint(from, to, ramp, effect, ctx);
-            let mid = k.sample(0.5);
             let mut side = String::from("<xarast:fill");
             attr(&mut side, "xarast:type", "conical");
             attr(&mut side, "xarast:centre", &pt_pair(ctx, *centre));
             attr(&mut side, "xarast:zero-dir", &pt_pair(ctx, *zero_dir));
             ramp_twin(&mut side, &k, tiling);
             side.push_str("/>");
-            flat_approx(mid, side)
+            let fr = conical_frame(ctx, *centre, *zero_dir);
+            if let Some(id) =
+                bounds.and_then(|b| bake::conical(ctx, fr, b, &|t| k.sample(t), Target::Pattern))
+            {
+                return PaintOut {
+                    value: format!("url(#{id})"),
+                    sidecar: Some(side),
+                    ..PaintOut::default()
+                };
+            }
+            ctx.stats.fills_approximated += 1;
+            flat_approx(k.sample(0.5), side)
         }
         FillGeometry::ThreeColour {
             origin,
@@ -614,7 +780,6 @@ pub(crate) fn colour_paint(
             c1,
             c2,
         } => {
-            ctx.stats.fills_approximated += 1;
             let cs = [rgba(c0, t), rgba(c1, t), rgba(c2, t)];
             let mut side = String::from("<xarast:fill");
             attr(&mut side, "xarast:type", "three-point");
@@ -639,6 +804,26 @@ pub(crate) fn colour_paint(
             }
             effect_attr(&mut side, effect);
             side.push_str("/>");
+            let [a, b, c] = cs;
+            let f = move |u: f64, v: f64| bake::three_colour([a, b, c], u, v);
+            if let Some(id) = bounds.and_then(|bx| {
+                bake_mesh(
+                    ctx,
+                    *origin,
+                    *axis1,
+                    *axis2,
+                    &f,
+                    &bake::three_colour_breaks,
+                    bx,
+                )
+            }) {
+                return PaintOut {
+                    value: format!("url(#{id})"),
+                    sidecar: Some(side),
+                    ..PaintOut::default()
+                };
+            }
+            ctx.stats.fills_approximated += 1;
             flat_approx(mean(&cs), side)
         }
         FillGeometry::FourColour {
@@ -651,7 +836,6 @@ pub(crate) fn colour_paint(
             c2,
             c3,
         } => {
-            ctx.stats.fills_approximated += 1;
             let cs = [rgba(c0, t), rgba(c1, t), rgba(c2, t), rgba(c3, t)];
             let mut side = String::from("<xarast:fill");
             attr(&mut side, "xarast:type", "four-point");
@@ -677,6 +861,24 @@ pub(crate) fn colour_paint(
             }
             effect_attr(&mut side, effect);
             side.push_str("/>");
+            // Only a parallelogram is affine; a true quadrilateral is
+            // projective, which no SVG paint follows.
+            let parallelogram = i64::from(origin.x.raw()) + i64::from(axis3.x.raw())
+                == i64::from(axis1.x.raw()) + i64::from(axis2.x.raw())
+                && i64::from(origin.y.raw()) + i64::from(axis3.y.raw())
+                    == i64::from(axis1.y.raw()) + i64::from(axis2.y.raw());
+            let f = move |u: f64, v: f64| bake::four_colour(cs, u, v);
+            if let Some(id) = bounds
+                .filter(|_| parallelogram)
+                .and_then(|bx| bake_mesh(ctx, *origin, *axis1, *axis2, &f, &|_| Vec::new(), bx))
+            {
+                return PaintOut {
+                    value: format!("url(#{id})"),
+                    sidecar: Some(side),
+                    ..PaintOut::default()
+                };
+            }
+            ctx.stats.fills_approximated += 1;
             flat_approx(mean(&cs), side)
         }
         FillGeometry::Fractal {
@@ -1086,6 +1288,23 @@ pub(crate) fn transparency(
             to,
             ramp,
         } => {
+            if persp.is_none()
+                && let Some(b) = bounds
+            {
+                let fr = frame_of(ctx, *centre, *corner1, *corner2);
+                let mut ext = String::new();
+                let stops = level_stops(ctx, *from, *to, ramp, &mut ext);
+                if let Some(mask) =
+                    bake::diamond(ctx, fr, b, &stops, spread_method(tiling), Target::Mask)
+                {
+                    return TranspOut {
+                        mode: from.mode,
+                        mask: Some(mask),
+                        sidecar: Some(transparency_twin(ctx, t, tiling)),
+                        ..TranspOut::default()
+                    };
+                }
+            }
             ctx.stats.fills_approximated += 1;
             let mut geo = radial_geometry(ctx, *centre, *corner1, *corner2, false);
             // As for a diamond fill: the radial gradient is the drawing,
@@ -1106,6 +1325,35 @@ pub(crate) fn transparency(
                 mode: from.mode,
                 mask,
                 ..TranspOut::default()
+            }
+        }
+        FillGeometry::Conical {
+            centre,
+            zero_dir,
+            from,
+            to,
+            ramp,
+        } if bounds.is_some() => {
+            let fr = conical_frame(ctx, *centre, *zero_dir);
+            let (from, to) = (*from, *to);
+            let f = |t: f32| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level);
+            match bounds.and_then(|b| bake::conical(ctx, fr, b, &f, Target::Mask)) {
+                Some(mask) => TranspOut {
+                    mode: from.mode,
+                    mask: Some(mask),
+                    sidecar: Some(transparency_twin(ctx, t, tiling)),
+                    ..TranspOut::default()
+                },
+                None => {
+                    ctx.stats.fills_approximated += 1;
+                    let level = ((u16::from(from.level) + u16::from(to.level)) / 2) as u8;
+                    TranspOut {
+                        alpha: opt_alpha(level),
+                        mode: from.mode,
+                        mask: None,
+                        sidecar: Some(transparency_twin(ctx, t, tiling)),
+                    }
+                }
             }
         }
         FillGeometry::Conical { from, to, .. }
@@ -1176,6 +1424,7 @@ pub(crate) fn transparency(
 fn transparency_twin(ctx: &mut PaintCtx<'_>, t: &TranspPaint, tiling: Tiling) -> String {
     let kind = match t {
         FillGeometry::Conical { .. } => "conical",
+        FillGeometry::Diamond { .. } => "diamond",
         FillGeometry::ThreeColour { .. } => "three-point",
         FillGeometry::FourColour { .. } => "four-point",
         FillGeometry::Bitmap { .. } => "bitmap",
@@ -1200,7 +1449,8 @@ fn transparency_twin(ctx: &mut PaintCtx<'_>, t: &TranspPaint, tiling: Tiling) ->
             .join(" ")
     };
     match t {
-        FillGeometry::Conical { from, to, ramp, .. } => {
+        FillGeometry::Conical { from, to, ramp, .. }
+        | FillGeometry::Diamond { from, to, ramp, .. } => {
             attr(&mut s, "xarast:levels", &level_keys(from, to, ramp));
             if ramp.profile != BiasGain::IDENTITY {
                 attr(&mut s, "xarast:profile", &profile_attr(ramp.profile));
@@ -1300,6 +1550,51 @@ fn pos_s(p: f32) -> String {
     f32s(p)
 }
 
+/// A transparency level as the grey a luminance mask needs.
+fn grey(level: u8) -> Rgba8 {
+    let a = 255 - level;
+    Rgba8 {
+        r: a,
+        g: a,
+        b: a,
+        a: 255,
+    }
+}
+
+/// The mask stops of a transparency ramp: its keys when SVG interpolates
+/// it exactly, else baked; the twin attributes go into `ext`.
+fn level_stops(
+    ctx: &mut PaintCtx<'_>,
+    from: Transparency,
+    to: Transparency,
+    ramp: &Ramp<Transparency>,
+    ext: &mut String,
+) -> Vec<(f32, Rgba8)> {
+    let exact = ramp.profile == BiasGain::IDENTITY && ramp.mapping == RampMapping::Linear;
+    if exact {
+        let mut v = vec![(0.0, grey(from.level))];
+        v.extend(ramp.stops().iter().map(|s| (s.pos, grey(s.value.level))));
+        v.push((1.0, grey(to.level)));
+        if !offsets_exact(v.iter().map(|(p, _)| *p)) {
+            attr(ext, "xarast:levels", &level_keys(&from, &to, ramp));
+        }
+        v
+    } else {
+        ctx.stats.ramps_baked += 1;
+        if ramp.profile != BiasGain::IDENTITY {
+            attr(ext, "xarast:profile", &profile_attr(ramp.profile));
+        }
+        if ramp.mapping == RampMapping::Sin {
+            attr(ext, "xarast:ramp-mapping", "sin");
+        }
+        attr(ext, "xarast:levels", &level_keys(&from, &to, ramp));
+        bake(
+            &|t| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level),
+            &key_breaks(ramp),
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transparency_mask(
     ctx: &mut PaintCtx<'_>,
@@ -1313,36 +1608,8 @@ fn transparency_mask(
     bounds: Option<(i64, i64, i64, i64)>,
 ) -> Option<String> {
     let (x0, y0, x1, y1) = bounds?;
-    let grey = |level: u8| {
-        let a = 255 - level;
-        Rgba8 {
-            r: a,
-            g: a,
-            b: a,
-            a: 255,
-        }
-    };
-    let exact = ramp.profile == BiasGain::IDENTITY && ramp.mapping == RampMapping::Linear;
     let mut ext = String::new();
-    let stops: Vec<(f32, Rgba8)> = if exact {
-        let mut v = vec![(0.0, grey(from.level))];
-        v.extend(ramp.stops().iter().map(|s| (s.pos, grey(s.value.level))));
-        v.push((1.0, grey(to.level)));
-        if !offsets_exact(v.iter().map(|(p, _)| *p)) {
-            attr(&mut ext, "xarast:levels", &level_keys(&from, &to, ramp));
-        }
-        v
-    } else {
-        ctx.stats.ramps_baked += 1;
-        if ramp.profile != BiasGain::IDENTITY {
-            attr(&mut ext, "xarast:profile", &profile_attr(ramp.profile));
-        }
-        if ramp.mapping == RampMapping::Sin {
-            attr(&mut ext, "xarast:ramp-mapping", "sin");
-        }
-        attr(&mut ext, "xarast:levels", &level_keys(&from, &to, ramp));
-        bake(&|t| grey(ramp.sample(&from, &to, t, FillEffect::Fade).level))
-    };
+    let stops = level_stops(ctx, from, to, ramp, &mut ext);
     attr(&mut ext, "color-interpolation", "sRGB");
     let g = gradient(ctx, geometry, linear, persp, tiling, &stops, &ext, "");
     let mut body = String::new();
@@ -1387,9 +1654,9 @@ mod tests {
                 a: 255,
             }
         };
-        let stops = bake(&f);
+        let stops = bake(&f, &[]);
         assert!(stops.len() >= 9, "{}", stops.len());
-        assert!(stops.len() <= 8 * 32 + 1);
+        assert!(stops.len() <= 64, "{}", stops.len());
         assert_eq!(stops.first().map(|s| s.0), Some(0.0));
         assert_eq!(stops.last().map(|s| s.0), Some(1.0));
         // Check the bound between every pair of baked stops.
@@ -1402,7 +1669,7 @@ mod tests {
                 let k = (t - t0) / (t1 - t0);
                 let lerp = |a: u8, b: u8| f32::from(a) + (f32::from(b) - f32::from(a)) * k;
                 let e = (lerp(c0.r, c1.r) - f32::from(want.r)).abs() / 255.0;
-                assert!(e <= 3.0 / 255.0, "error {e} at {t}");
+                assert!(e <= 2.0 / 255.0, "error {e} at {t}");
             }
         }
     }

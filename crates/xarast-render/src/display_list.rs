@@ -945,7 +945,7 @@ fn device_bounds_of_rect(r: kurbo::Rect, xf: Transform2D) -> DeviceRect {
 }
 
 /// The device bounds of a gradient or image mapping.
-fn mapping_bounds(m: GradMapping) -> DeviceRect {
+pub(crate) fn mapping_bounds(m: GradMapping) -> DeviceRect {
     let pts = match m {
         GradMapping::Affine { a, b, c } => {
             // The parallelogram's fourth corner is b + c - a.

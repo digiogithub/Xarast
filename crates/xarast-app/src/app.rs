@@ -1203,8 +1203,11 @@ impl AppState {
                     continue;
                 }
                 let path = store.snapshot_path(&id.id);
+                // No text placer: laying stories out may wait for the font
+                // service, and only Xarast ever reads a recovery snapshot
+                // (placement is for browsers; the reader ignores it).
                 if let Ok(job) = s.save_job(SaveKind::Autosave, &path)
-                    && job.run().result.is_ok()
+                    && job.without_text_placer().run().result.is_ok()
                     && store.record(&id.id, s.path.as_deref()).is_ok()
                 {
                     written += 1;

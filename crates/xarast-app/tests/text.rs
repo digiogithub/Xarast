@@ -18,6 +18,12 @@ fn fonts() -> Arc<FontService> {
 /// One point story at (100 pt, 200 pt): "Hi" in a family nobody has, then
 /// " there" at twice the size.
 fn doc(layout: TextLayout) -> xarast_doc::Document {
+    doc_with(layout, None)
+}
+
+/// [`doc`], with `path` as the story's first child (the path text on a
+/// path follows).
+fn doc_with(layout: TextLayout, path: Option<xarast_geom::Path>) -> xarast_doc::Document {
     let mut b = skeleton(BuildLimits::default()).unwrap();
     b.node(NodeKind::TextStory(Box::new(TextStoryNode {
         transform: Matrix::translate(Vector::new(Mp::new(100_000), Mp::new(200_000))),
@@ -33,6 +39,11 @@ fn doc(layout: TextLayout) -> xarast_doc::Document {
     })))
     .unwrap();
     b.attribute(AttrValue::FontSize(Mp::new(10_000))).unwrap();
+    if let Some(path) = path {
+        let mut p = xarast_doc::PathNode::new(path);
+        p.filled = false;
+        b.node(NodeKind::Path(Box::new(p))).unwrap();
+    }
     b.node(NodeKind::TextLine(Box::default())).unwrap();
     b.push_scope().unwrap();
     for c in "Hi".chars() {
@@ -97,18 +108,52 @@ fn a_missing_family_is_substituted_and_recorded() {
 }
 
 #[test]
-fn text_on_a_path_is_drawn_straight_and_reported() {
+fn text_on_a_path_without_its_path_is_drawn_straight_and_reported() {
     let d = doc(TextLayout::OnPath {
         reversed: false,
         tangential: true,
         left_indent: Mp::ZERO,
         right_indent: Mp::ZERO,
+        chars: xarast_doc::CharsTransform::default(),
     });
     let (w, _) = walk(&d);
     let stats = w.stats();
     assert_eq!(stats.text_stories, 1);
     assert_eq!(stats.text_on_path_pending, 1);
     assert!(!stats.is_complete());
+}
+
+/// The same story on a path straight up from its anchor: the text runs up
+/// the path, turned a quarter, and the path is painted under it.
+#[test]
+fn text_on_a_path_follows_its_path_and_the_path_is_painted() {
+    let mut pb = xarast_geom::Path::builder();
+    pb.move_to(xarast_geom::Point::raw(100_000, 200_000))
+        .line_to(xarast_geom::Point::raw(100_000, 400_000));
+    let d = doc_with(
+        TextLayout::OnPath {
+            reversed: false,
+            tangential: true,
+            left_indent: Mp::ZERO,
+            right_indent: Mp::ZERO,
+            chars: xarast_doc::CharsTransform::default(),
+        },
+        Some(pb.build()),
+    );
+    let (w, _) = walk(&d);
+    let stats = w.stats();
+    assert_eq!(stats.text_on_path_pending, 0);
+    assert!(stats.is_complete(), "{stats:?}");
+    // Two text runs and the path, each a stroke with the defaults.
+    let ss = w.scene_stats();
+    assert_eq!((ss.fills, ss.strokes), (0, 3), "{ss:?}");
+    // Up the path: tall and narrow, left of the path (the glyph tops point
+    // left when the text reads upwards), starting at the anchor.
+    let ink = w.text_ink();
+    assert!(ink.height() > Mp::new(40_000), "{ink:?}");
+    assert!(ink.width() < Mp::new(25_000), "{ink:?}");
+    assert!(ink.hi.x <= Mp::new(101_000), "{ink:?}");
+    assert!(ink.lo.y >= Mp::new(199_000), "{ink:?}");
 }
 
 #[test]

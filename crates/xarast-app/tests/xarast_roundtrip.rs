@@ -13,7 +13,9 @@
 //! snapped to (`xarast:palette`, XARA-T-0154). Text stories carry every
 //! run's attributes, kerns and breaks (`xarast:exact`, XARA-T-0172), so
 //! text is laid out and drawn identically after the reload; the renders
-//! use the pinned test fonts.
+//! use the pinned test fonts. The save uses the SVG text placer, as
+//! `xarast-cli convert` does (text placed for browsers, on a path too:
+//! T9.5.6), and saving the reopened document must give the same bytes.
 //!
 //! The corpus is found through `XARAST_XAR_CORPUS`; nothing from it is
 //! written into the repository.
@@ -82,18 +84,28 @@ fn every_corpus_file_renders_the_same_after_a_xarast_round_trip() {
         let original = Session::open_bytes(DocumentId(1), Path::new(rel), &bytes)
             .unwrap_or_else(|e| panic!("{rel}: {e}"));
         let mut package = std::io::Cursor::new(Vec::new());
+        // With the text placer, as `xarast-cli convert` saves: the base SVG
+        // places text (on a path too, T9.5.6), which a reader ignores.
         let opts = xarast_format::SaveOptions {
             write: xarast_format::WriteOptions::deterministic(),
+            svg: xarast_format::svg::SvgOptions {
+                text: Some(xarast_app::svg_text::placer()),
+                ..xarast_format::svg::SvgOptions::default()
+            },
             ..xarast_format::SaveOptions::default()
         };
         xarast_format::save_to(&original.doc, &mut package, &opts)
             .unwrap_or_else(|e| panic!("{rel}: save: {e}"));
-        let reopened = Session::open_bytes(
-            DocumentId(2),
-            Path::new("round-trip.xarast"),
-            &package.into_inner(),
-        )
-        .unwrap_or_else(|e| panic!("{rel}: open .xarast: {e}"));
+        let package = package.into_inner();
+        let reopened = Session::open_bytes(DocumentId(2), Path::new("round-trip.xarast"), &package)
+            .unwrap_or_else(|e| panic!("{rel}: open .xarast: {e}"));
+        // Saving what was read gives the same bytes.
+        let mut again = std::io::Cursor::new(Vec::new());
+        xarast_format::save_to(&reopened.doc, &mut again, &opts)
+            .unwrap_or_else(|e| panic!("{rel}: save again: {e}"));
+        if again.into_inner() != package {
+            failures.push(format!("{rel}: a re-save differs"));
+        }
 
         let frame = drawing_or_page_rect(&original.doc);
         let (a, b) = (render(&original, frame), render(&reopened, frame));

@@ -107,6 +107,16 @@ Plain round-to-nearest would get **545** of them wrong.
 `redefine` on 256 entries with a 4-deep chain **0.94 µs** (budget 20 µs);
 `ColourContext::convert` RGB→CMYK 6.5 ns, RGB→HSV 9.0 ns (budget 20 ns).
 
+### W8.8 — fill import, round trip, corpus (XARA-US-0043)
+
+| Piece | Where | State |
+|---|---|---|
+| T8.8.1 `.xar` fill records → model, one to one (corpus census, 355 831 fills) | `xarast-cli/tests/fills.rs`, `xar-import.md` finding 15 | done; fixed definitions lost inside dropped atomic subtrees |
+| T8.8.2 `.xarast` fills: every shape × 7-stop ramp × profiles × sin × effects × mappings reload **equal** and the second save is byte-identical (criterion 9) | `xarast-format/tests/fill_round_trip.rs` | done; profiles are now written exactly and SVG decimals read correctly rounded |
+| T8.8.3 baked ramp stops within 2/255 (measured 1.9) and the reader discards them | `svg/paint.rs` `bake`, same test | done |
+| T8.8.4 `xarast-cli inspect --fills` | `xarast-cli/src/inspect.rs` | done |
+| Conical/diamond/3-4-colour fills baked into SVG geometry (part of XARA-T-0102) | `xarast-format/src/svg/bake.rs` | done |
+
 ## Decisions taken (and why)
 
 1. **Conversions follow the shipped (non-CMS) branch of the original.**

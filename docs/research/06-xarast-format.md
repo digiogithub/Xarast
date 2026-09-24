@@ -1368,7 +1368,7 @@ indentation 4201-4204, linked stories 4205-4207).
 |---|---|---|---|---|
 | Simple text (one line) | `TAG_TEXT_STORY_SIMPLE` 2100 | `<text x y>…</text>` | `xarast:story="simple"` | None |
 | Paragraph / area text | `TAG_TEXT_STORY_COMPLEX` 2101 | `<text>` with one `<tspan x y>` **per line**, with baked positions | `<xarast:text-area>` with the containing shape, the indents and the reflow | The text stops reflowing when edited |
-| Text on a path | 2110-2117 | `<textPath xlink:href="#p">` (SVG 1.1 supports it) | `<xarast:text-path xarast:start-offset xarast:side xarast:reverse xarast:justify-along>` | Placement differences between renderers |
+| Text on a path | 2110-2117 | Each character placed on the path and turned (`x`, `y`, `rotate` lists, §6.7.1 rule 6); `<textPath>` was the first idea and is not used (T9.5.6: resvg and Inkscape 1.2 cannot draw a multi-run story through it) | `xarast:layout="path"` + `xarast:path-params`, the path as the story's first child (§6.7.1 rule 0) | Reflected or sheared characters stay on straight lines |
 | Linked stories | `TAG_TEXT_STORY_LINK_INFO` 4206 | Each story is an independent `<text>` | `xarast:story-next="#idNext"`, `xarast:story-prev` | Reflow between frames is lost |
 | Justification | 2902-2905 | `text-anchor="start|middle|end"`; full justification **baked** word by word | `xarast:justify="left|centre|right|full"` | Full justification is frozen |
 | Font size | `TAG_TEXT_FONT_SIZE` 2906 | `font-size` (in pt) | — | — |
@@ -1383,6 +1383,7 @@ indentation 4201-4204, linked stories 4205-4207).
 | Manual kerning | `TAG_TEXT_KERN` 2204 | Baked into the characters' `x` (§6.7.1) | `<xarast:kern xarast:em="N"/>` in place | None |
 | Tab stops and ruler | `TAG_TEXT_TAB` 4200, `TAG_TEXT_RULER` 4204 | Baked positions | `<xarast:tabs>` and `<xarast:ruler>` | They are frozen |
 | Indents | 4201-4203 | Baked into `x` | `xarast:indent-left/first/right` | They are frozen |
+| OpenType features | — (Xarast's own `TxtFeatures` attribute, T9.4.9) | The glyphs a browser shapes without them (no `font-feature-settings`) | `xarast:features="liga:0 smcp:1"`: `tag:value` pairs sorted by tag, written only when not empty | The base SVG ignores them |
 | Text converted to curves | — | `<path>` | `xarast:was-text="true"` + `<xarast:text-source>` with the original text (accessibility and search) | — |
 
 **Fonts.** Normative rules:
@@ -1417,6 +1418,7 @@ render then follow — while the base SVG shows the text where Xarast draws it.
 <text id="x…" xarast:kind="text" transform="matrix(a -b -c d e f)"
       [xarast:matrix="a b c d"] xml:space="preserve" xarast:exact="true"
       [xarast:layout="column" xarast:width="…" [xarast:word-wrap="false"]]
+      [xarast:layout="path" xarast:path-params="REV TAN LEFT RIGHT [REFL ROT SHEAR]"]
       [xarast:auto-kern="false"] …>
   <tspan id="x…" x="…" y="…" [xarast:ruler="36:0 72:2"]>        <!-- one per TextLine -->
     <tspan font-family="'Family', ['Substitute', ]generic" font-size="…" …twins… …paint…>
@@ -1428,6 +1430,13 @@ render then follow — while the base SVG shows the text where Xarast draws it.
 </text>
 ```
 
+0. **Text on a path.** `xarast:path-params` holds, space-separated: reversed
+   (`true`/`false`), tangential, the left and right indents in points, then — only when
+   the story has a pre-fit character transform — reflected, rotation and shear as
+   integers (radians in 16.16 fixed point, the `.xar` `ANGLE`). Missing trailing values
+   are `false`/0. The path the text follows is the story's first path child, written
+   inside the `<g xarast:kind="text-story">` that then wraps the `<text>`. The base SVG
+   shows the text along the path (rule 6), not through `<textPath>`.
 1. **One line `<tspan>` per `TextLine`**, with the line's id. A line node's own ruler
    (the one a `.xar` line carried) is `xarast:ruler`: `position:kind` pairs, the
    position in points, the kind the format's `type_and_flags` byte.
@@ -1468,7 +1477,14 @@ render then follow — while the base SVG shows the text where Xarast draws it.
    list (one value per character the browser draws) and a `y` (one value when the run
    sits on one baseline, a list otherwise), in the story's frame (y down): the left edge
    of the character's cluster box on its baseline, shifts included; a cluster of several
-   characters shares its box evenly. `text-anchor` is then never written. Without the
+   characters shares its box evenly. `text-anchor` is then never written. **On a path**
+   (T9.5.6) the story is laid out as the application draws it (a line as long as the path,
+   then carried onto it by arc length) and each run also carries a `rotate` list, one
+   value per drawn character: its glyph origin is where the application puts it on the
+   path and it turns by the path's angle there (SVG degrees, clockwise); a cluster of
+   several characters shares its advance evenly. `rotate` is written only when a value is
+   not zero. When the characters are reflected, or sheared by more than a tangent of
+   0.005, SVG cannot say it per character and the story stays on straight lines. Without the
    layout, a line `<tspan>` has `x="0"` and a `y` one line height below the previous
    line, and `text-anchor` reflects the line's alignment. Positions are **derived**: a
    reader ignores them.

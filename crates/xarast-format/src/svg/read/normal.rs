@@ -725,18 +725,18 @@ impl Nf<'_> {
             value: "none".into(),
             ..PaintOut::default()
         };
-        let fill = fill_paint
-            .as_ref()
-            .map_or_else(none, |p| colour_paint(&mut ctx, p, fill_tiling, effect));
+        let fill = fill_paint.as_ref().map_or_else(none, |p| {
+            colour_paint(&mut ctx, p, fill_tiling, effect, None)
+        });
         let ft: TranspOut = match &fill_t {
             Some(t) if fill.value != "none" || image => {
                 transparency(&mut ctx, t, transp_tiling, mbox)
             }
             _ => TranspOut::default(),
         };
-        let stroke = stroke_paint
-            .as_ref()
-            .map_or_else(none, |p| colour_paint(&mut ctx, p, Tiling::None, effect));
+        let stroke = stroke_paint.as_ref().map_or_else(none, |p| {
+            colour_paint(&mut ctx, p, Tiling::None, effect, None)
+        });
         let st: TranspOut = match &stroke_t {
             Some(t) if stroke.value != "none" => transparency(&mut ctx, t, Tiling::None, mbox),
             _ => TranspOut::default(),
@@ -921,12 +921,16 @@ impl Nf<'_> {
                 tangential,
                 left_indent,
                 right_indent,
+                chars,
             } => format!(
-                "path {} {} {} {}",
+                "path {} {} {} {} chars={} {} {}",
                 b(*reversed),
                 b(*tangential),
                 left_indent.raw(),
-                right_indent.raw()
+                right_indent.raw(),
+                b(chars.reflected),
+                chars.rotation,
+                chars.shear
             ),
         };
         let line = format!(

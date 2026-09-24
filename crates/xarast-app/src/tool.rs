@@ -463,6 +463,39 @@ pub enum InfobarField {
     StopPosition,
     /// The selected handle's transparency, in per cent.
     StopLevel,
+    /// The text's font family (phase 9, T9.4.9).
+    TextFont,
+    /// The text's size, in points.
+    TextSize,
+    /// Bold text.
+    TextBold,
+    /// Italic text.
+    TextItalic,
+    /// Underlined text.
+    TextUnderline,
+    /// Paragraph alignment.
+    TextJustify,
+    /// Line spacing: per cent of the line's height, or points when the
+    /// paragraph has an absolute spacing.
+    TextLineSpacing,
+    /// Tracking, in thousandths of an em.
+    TextTracking,
+    /// One OpenType feature, by tag, in the feature panel.
+    TextFeature([u8; 4]),
+    /// The kind of tab stop a click on the text ruler adds.
+    TextTabKind,
+    /// The paragraph's left margin (the text ruler).
+    TextLeftMargin,
+    /// The paragraph's right margin, from the column's right edge.
+    TextRightMargin,
+    /// The paragraph's first-line indent, from the column's left edge.
+    TextFirstIndent,
+    /// Add a tab stop at a position (the text ruler).
+    TextTabAdd,
+    /// Move the tab stop with this index (the text ruler).
+    TextTabMove(u16),
+    /// Remove the tab stop with this index (dragged off the text ruler).
+    TextTabRemove(u16),
 }
 
 impl InfobarField {
@@ -490,6 +523,22 @@ impl InfobarField {
             InfobarField::TranspMode => "Mode",
             InfobarField::StopPosition => "Position",
             InfobarField::StopLevel => "Transparency",
+            InfobarField::TextFont => "Font",
+            InfobarField::TextSize => "Size",
+            InfobarField::TextBold => "Bold",
+            InfobarField::TextItalic => "Italic",
+            InfobarField::TextUnderline => "Underline",
+            InfobarField::TextJustify => "Align",
+            InfobarField::TextLineSpacing => "Spacing",
+            InfobarField::TextTracking => "Tracking",
+            InfobarField::TextFeature(_) => "OpenType",
+            InfobarField::TextTabKind => "Tab",
+            InfobarField::TextLeftMargin => "Left margin",
+            InfobarField::TextRightMargin => "Right margin",
+            InfobarField::TextFirstIndent => "First-line indent",
+            InfobarField::TextTabAdd => "Add tab stop",
+            InfobarField::TextTabMove(_) => "Tab stop",
+            InfobarField::TextTabRemove(_) => "Remove tab stop",
         }
     }
 
@@ -517,6 +566,24 @@ impl InfobarField {
             InfobarField::TranspMode => "How the transparency combines with what is below",
             InfobarField::StopPosition => "Position of the selected stop, in per cent",
             InfobarField::StopLevel => "Transparency of the selected handle, in per cent",
+            InfobarField::TextFont => "Font family of the text",
+            InfobarField::TextSize => "Font size in points",
+            InfobarField::TextBold => "Bold text",
+            InfobarField::TextItalic => "Italic text",
+            InfobarField::TextUnderline => "Underlined text",
+            InfobarField::TextJustify => "Paragraph alignment",
+            InfobarField::TextLineSpacing => {
+                "Line spacing, in per cent of the line height or in points"
+            }
+            InfobarField::TextTracking => "Letter spacing, in thousandths of an em",
+            InfobarField::TextFeature(_) => "OpenType feature of the text",
+            InfobarField::TextTabKind => "Kind of tab stop a click on the ruler adds",
+            InfobarField::TextLeftMargin => "Left margin of the paragraph",
+            InfobarField::TextRightMargin => "Right margin of the paragraph",
+            InfobarField::TextFirstIndent => "First-line indent of the paragraph",
+            InfobarField::TextTabAdd => "Add a tab stop",
+            InfobarField::TextTabMove(_) => "Move a tab stop",
+            InfobarField::TextTabRemove(_) => "Remove a tab stop",
         }
     }
 }
@@ -610,8 +677,98 @@ pub enum InfobarItem {
         /// The largest value.
         max: f64,
     },
+    /// A number typed into a field, with a unit suffix: the text size in
+    /// points, line spacing in per cent. Raises [`InfobarValue::Real`],
+    /// clamped to `min..=max`.
+    Scalar {
+        /// Which field.
+        field: InfobarField,
+        /// Its value; `None` shows an empty field (a mixed selection).
+        value: Option<f64>,
+        /// What follows the number (`"pt"`, `"%"`, or nothing).
+        suffix: &'static str,
+        /// The smallest value.
+        min: f64,
+        /// The largest value.
+        max: f64,
+    },
+    /// A font family chooser. Raises [`InfobarValue::Choice`] with an
+    /// index into `families`.
+    FontFamily {
+        /// Which field.
+        field: InfobarField,
+        /// The installed families, sorted.
+        families: std::sync::Arc<[std::sync::Arc<str>]>,
+        /// The family in force (installed or not); `None` for a selection
+        /// mixing several.
+        selected: Option<std::sync::Arc<str>>,
+    },
+    /// The OpenType feature panel: one check box per feature, raising
+    /// [`InfobarValue::Toggle`] for [`InfobarField::TextFeature`].
+    Features {
+        /// The features offered, in order.
+        options: Vec<FeatureOption>,
+    },
+    /// The text ruler of the paragraph being edited: not drawn in the bar
+    /// but on the horizontal ruler, which raises the margin, indent and
+    /// tab stop fields.
+    TextRuler(TextRuler),
     /// A line of text.
     Note(String),
+}
+
+/// One feature of the OpenType panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureOption {
+    /// The feature tag.
+    pub tag: [u8; 4],
+    /// What the panel calls it.
+    pub label: &'static str,
+    /// Whether it is on; `None` for a selection mixing both.
+    pub on: Option<bool>,
+}
+
+/// What the text ruler shows (phase 9, T9.4.10): the paragraph the caret
+/// is in, along the story's x axis.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextRuler {
+    /// Document x of the story's x = 0: a column's left edge, a point
+    /// story's anchor.
+    pub origin: Mp,
+    /// Document units per story unit along x (the story's scale).
+    pub scale: f64,
+    /// The column's width; `None` for a point story.
+    pub width: Option<Mp>,
+    /// The left margin, from the left edge.
+    pub left_margin: Mp,
+    /// The right margin, from the right edge.
+    pub right_margin: Mp,
+    /// The first-line indent, from the left edge (it replaces the left
+    /// margin on a paragraph's first line).
+    pub first_indent: Mp,
+    /// The tab stops, in order.
+    pub tabs: Vec<xarast_doc::TabStop>,
+    /// The kind (the format's `kind & 3`) a click on the ruler adds.
+    pub tab_kind: u8,
+}
+
+impl TextRuler {
+    /// Document x of a story-space x.
+    #[must_use]
+    pub fn doc_x(&self, x: Mp) -> f64 {
+        self.origin.to_f64() + x.to_f64() * self.scale
+    }
+
+    /// Story-space x of a document x.
+    #[must_use]
+    pub fn story_x(&self, doc_x: f64) -> Mp {
+        let s = if self.scale.abs() > 1e-12 {
+            self.scale
+        } else {
+            1.0
+        };
+        Mp::from_f64_round((doc_x - self.origin.to_f64()) / s)
+    }
 }
 
 /// A tool's infobar, described rather than drawn.
@@ -688,6 +845,9 @@ pub struct ToolRequests {
     /// Points to select on the object a creation command makes (the pen
     /// selects the end it will continue from).
     pub created_points: Option<Vec<u32>>,
+    /// Current attributes to set (what new objects get): the text tool's
+    /// infobar with nothing to apply its edits to.
+    pub current: Vec<xarast_doc::AttrValue>,
     /// What the last snapped point of this step landed on, for the
     /// feedback marker (set by [`ToolCtx::snap_point`]).
     pub snapped: Option<crate::snap::SnapHit>,

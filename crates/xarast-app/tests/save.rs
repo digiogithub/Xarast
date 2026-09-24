@@ -674,8 +674,8 @@ fn corpus() -> Option<(PathBuf, Vec<String>)> {
 /// The application's save goes through a snapshot of the document, rebuilt
 /// on the save thread. Over the whole corpus that must write exactly the
 /// bytes a direct save of the live document writes — first save and
-/// re-save with raw copies alike — and every package carries a valid
-/// thumbnail.
+/// re-save with raw copies alike, text placed for browsers by the same
+/// placer (XARA-T-0259) — and every package carries a valid thumbnail.
 #[test]
 fn saving_through_a_snapshot_writes_the_same_bytes_over_the_corpus() {
     let Some((root, files)) = corpus() else {
@@ -684,6 +684,10 @@ fn saving_through_a_snapshot_writes_the_same_bytes_over_the_corpus() {
     let dir = scratch("corpus");
     let det = xarast_format::SaveOptions {
         write: xarast_format::WriteOptions::deterministic(),
+        svg: xarast_format::svg::SvgOptions {
+            text: Some(xarast_app::svg_text::placer()),
+            ..xarast_format::svg::SvgOptions::default()
+        },
         ..xarast_format::SaveOptions::default()
     };
     let mut inked = 0;

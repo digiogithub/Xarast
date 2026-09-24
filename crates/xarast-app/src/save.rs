@@ -10,6 +10,13 @@
 //! [`SaveWorker`] runs jobs on their own threads and hands the outcomes
 //! back; [`crate::AppState::poll_saves`] applies them.
 //!
+//! The SVG base is written with the text placer
+//! ([`crate::svg_text::placer`]), exactly as `xarast-cli convert` and SVG
+//! export write it (XARA-T-0259): a file saved from the app shows its text
+//! placed in a browser, on a path too. The stories are laid out while the
+//! SVG is serialised, on the save thread; the interface thread pays only
+//! for the snapshot.
+//!
 //! The in-memory document is never touched by a save, so a failure cannot
 //! lose it: the worst outcome is an error in the status bar and a document
 //! that is still marked modified. The target file is replaced only once the
@@ -24,6 +31,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use xarast_doc::{Document, Snapshot};
+use xarast_format::svg::{Placer, SvgOptions};
 use xarast_format::{SaveOptions, WriteOptions};
 
 use crate::session::DocumentId;
@@ -53,6 +61,7 @@ pub struct SaveJob {
     source: Option<Arc<[u8]>>,
     thumbnail: bool,
     deterministic: bool,
+    text: Option<Placer>,
 }
 
 impl std::fmt::Debug for SaveJob {
@@ -64,6 +73,7 @@ impl std::fmt::Debug for SaveJob {
             .field("serial", &self.serial)
             .field("nodes", &self.snapshot.len())
             .field("source", &self.source.as_ref().map(|s| s.len()))
+            .field("text_placer", &self.text.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -116,6 +126,7 @@ impl SaveJob {
             source,
             thumbnail: kind == SaveKind::Document,
             deterministic: false,
+            text: Some(crate::svg_text::placer()),
         }
     }
 
@@ -130,6 +141,18 @@ impl SaveJob {
     #[must_use]
     pub fn without_thumbnail(mut self) -> SaveJob {
         self.thumbnail = false;
+        self
+    }
+
+    /// Writes the SVG base without placed text: each story on straight
+    /// lines at its first baseline, as a browser would guess. Xarast reads
+    /// the package back identically either way (the reader ignores
+    /// placement); only a browser or Inkscape sees the difference. For a
+    /// save that must not wait for the font service (the emergency
+    /// snapshot on a signal).
+    #[must_use]
+    pub fn without_text_placer(mut self) -> SaveJob {
+        self.text = None;
         self
     }
 
@@ -162,6 +185,12 @@ impl SaveJob {
         }
         let opts = SaveOptions {
             write,
+            // Placed text for browsers, as `xarast-cli convert` writes it;
+            // the placer lays stories out here, on the save thread.
+            svg: SvgOptions {
+                text: self.text.clone(),
+                ..SvgOptions::default()
+            },
             ..SaveOptions::default()
         };
         if let Some(dir) = self.path.parent()

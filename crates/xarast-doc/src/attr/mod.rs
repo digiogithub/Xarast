@@ -33,7 +33,7 @@ use crate::fill::{Paint, Tiling, TranspPaint};
 use crate::kind::{ArrowSpec, BrushRef, ClipViewMode, StrokeDef, TypefaceRef, WidthProfile};
 use crate::live::BevelType;
 use crate::resources::ResourceRef;
-use crate::text::{Justification, LineSpacing, Script, TabStop};
+use crate::text::{FeatureSetting, Justification, LineSpacing, Script, TabStop};
 
 pub use resolve::{AttrResolver, resolve_inherited, resolve_uncached};
 pub use stack::{AttrStack, ResolvedAttrs};
@@ -44,7 +44,8 @@ pub use tags::{SLOTS_WITHOUT_ATTRIBUTE_TAG, TagMapping, XAR_ATTRIBUTE_TAGS, mapp
 /// The set was reconciled tag by tag against the `.xar` attribute tags of
 /// `research/01 §8` and `§4.12`; the mapping table is in
 /// `docs/memory/document-model.md`. It came out at the 46 slots
-/// `research/02 §10.6` proposed, unchanged.
+/// `research/02 §10.6` proposed, unchanged; one Xarast-only slot follows
+/// them ([`AttrSlot::TxtFeatures`], no `.xar` tag).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 #[repr(u16)]
 pub enum AttrSlot {
@@ -141,10 +142,12 @@ pub enum AttrSlot {
     ClipRegion,
     /// Which side of a clip is kept.
     ClipView,
+    /// OpenType feature settings of text (Xarast's own; no `.xar` tag).
+    TxtFeatures,
 }
 
 /// How many slots the dense attribute table has.
-pub const ATTR_SLOT_COUNT: usize = 46;
+pub const ATTR_SLOT_COUNT: usize = 47;
 
 /// Every slot, in order. The array is what [`DefaultAttrs`] and the
 /// reconciliation test iterate.
@@ -195,6 +198,7 @@ pub const ALL_ATTR_SLOTS: [AttrSlot; ATTR_SLOT_COUNT] = [
     AttrSlot::Feather,
     AttrSlot::ClipRegion,
     AttrSlot::ClipView,
+    AttrSlot::TxtFeatures,
 ];
 
 /// Rendering quality, as the format's `TAG_QUALITY` gives it.
@@ -321,6 +325,9 @@ pub enum AttrValue {
     ClipRegion(Arc<Path>),
     /// Which side of a clip is kept.
     ClipView(ClipViewMode),
+    /// OpenType feature settings, sorted by tag
+    /// ([`FeatureSetting::normalised`]); empty = the font's defaults.
+    FontFeatures(Arc<[FeatureSetting]>),
     /// A user key/value pair. Multi-applicable: occupies no slot.
     User(MultiAttr),
     /// The object's name. Multi-applicable: an object may carry several.
@@ -379,6 +386,7 @@ impl AttrValue {
             AttrValue::Feather { .. } => AttrSlot::Feather,
             AttrValue::ClipRegion(_) => AttrSlot::ClipRegion,
             AttrValue::ClipView(_) => AttrSlot::ClipView,
+            AttrValue::FontFeatures(_) => AttrSlot::TxtFeatures,
             AttrValue::User(_) | AttrValue::ObjectName(_) => return None,
         })
     }
@@ -510,6 +518,7 @@ impl AttrValue {
             AttrValue::DashPattern(d) => d.elements.len() * size_of::<Mp>(),
             AttrValue::ClipRegion(p) => p.verbs().len() + p.points().len() * 8,
             AttrValue::Ruler(r) => r.len() * size_of::<TabStop>(),
+            AttrValue::FontFeatures(f) => f.len() * size_of::<FeatureSetting>(),
             AttrValue::VariableWidth(w) => w.samples.len() * 4,
             AttrValue::WebAddress(s) | AttrValue::ObjectName(s) => s.len(),
             AttrValue::User(m) => m.key.len() + m.value.len(),
@@ -580,6 +589,7 @@ pub fn slot_name(s: AttrSlot) -> &'static str {
         AttrSlot::Feather => "Feather",
         AttrSlot::ClipRegion => "ClipRegion",
         AttrSlot::ClipView => "ClipView",
+        AttrSlot::TxtFeatures => "TxtFeatures",
     }
 }
 
@@ -726,6 +736,7 @@ pub fn default_for(slot: AttrSlot) -> AttrValue {
         },
         AttrSlot::ClipRegion => AttrValue::ClipRegion(Arc::new(Path::new())),
         AttrSlot::ClipView => AttrValue::ClipView(ClipViewMode::Inside),
+        AttrSlot::TxtFeatures => AttrValue::FontFeatures(Arc::from(Vec::new())),
     }
 }
 

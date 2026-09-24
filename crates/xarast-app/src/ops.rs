@@ -229,6 +229,18 @@ pub enum EditCommand {
         /// The typing burst it starts.
         burst: u64,
     },
+    /// Sets text attributes on byte ranges of a story (phase 9, T9.2.4):
+    /// the text infobar and ruler. Each pair sets one value on one range
+    /// ([`xarast_doc::set_text_attr`]); all of them are one undo step,
+    /// merged into the typing burst `burst` when it styles typed text.
+    SetTextAttr {
+        /// The `TextStory`.
+        story: NodeId,
+        /// The ranges and the value each gets.
+        edits: Vec<(Range<usize>, AttrValue)>,
+        /// The typing burst whose text it styles, if any.
+        burst: Option<u64>,
+    },
 }
 
 /// The coalescing kind of typing: [`EditCommand::TypeText`] and
@@ -301,6 +313,10 @@ impl EditCommand {
             EditCommand::TypeText { .. } => "Typing",
             EditCommand::DeleteText { .. } => "Delete Text",
             EditCommand::CreateText { .. } => "New Text",
+            EditCommand::SetTextAttr { edits, .. } => edits
+                .first()
+                .and_then(|(_, v)| v.slot())
+                .map_or("Text Attribute", xarast_doc::text_attr_label),
         }
     }
 
@@ -357,6 +373,7 @@ impl EditCommand {
             EditCommand::TypeText { replace, text, .. } => replace.is_empty() && text.is_empty(),
             EditCommand::DeleteText { range, .. } => range.is_empty(),
             EditCommand::CreateText { text, .. } => text.is_empty(),
+            EditCommand::SetTextAttr { edits, .. } => edits.is_empty(),
             EditCommand::CreateShape { .. }
             | EditCommand::SetShapeParams { .. }
             | EditCommand::SetPath { .. }
@@ -560,6 +577,13 @@ impl xarast_doc::Command for EditCommand {
                 let node = xarast_doc::new_story(tx, *layer, (**story).clone(), attrs)?;
                 xarast_doc::insert_text(tx, node, 0, text).map(|_| ())
             }
+            EditCommand::SetTextAttr { story, edits, .. } => {
+                check_layers(tx, &[*story])?;
+                for (range, value) in edits {
+                    xarast_doc::set_text_attr(tx, *story, range.clone(), value)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -574,6 +598,12 @@ impl xarast_doc::Command for EditCommand {
             EditCommand::DeleteText { burst, .. } => Some(CoalesceKey {
                 gesture: *burst,
                 kind: TEXT_DELETE_KIND,
+            }),
+            EditCommand::SetTextAttr {
+                burst: Some(burst), ..
+            } => Some(CoalesceKey {
+                gesture: *burst,
+                kind: TYPING_KIND,
             }),
             _ => None,
         }

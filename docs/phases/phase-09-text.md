@@ -304,6 +304,12 @@ Note that architecture §7 lists this question as decided by "Phase 7". That was
 written before the roadmap settled text into phase 9; the substance is
 unchanged, only the phase number. Fix the table when you close this phase.
 
+**Outcome (2026-09-24, XARA-US-0048): spike A won on all five fixtures**
+(worst p95 0.0021 of an advance; spike B up to 5.8 advances off), and the
+architecture table says so. T9.5.1–T9.5.4 are done; spike B lives only as the
+measurement's comparator. T9.5.5 and T9.5.6 remain. Details in
+`docs/memory/text.md`, "Text on a path".
+
 ### W9.6 — Convert to shapes
 
 | ID | Task | Crate | Size | Depends on |
@@ -357,6 +363,17 @@ something else has its row corrected rather than the test weakened.
 | 12 | `Rotated.xar` | 241.0 KB | The whole story transformed by `StoryMatrix`, at volume. Also the phase's **performance** fixture: it is 20× the size of the others | W9.3, perf |
 | 13 | `embeddedFonts.xar` | 3.9 KB | Fonts carried inside the document: the embedded-face path, and what happens when the face is also installed | W9.1 |
 | 14 | `hebrew.xar` | 12.4 KB | RTL text: bidi resolution, visual-order caret movement, right-aligned defaults, mixed-direction runs | W9.3, W9.4 |
+
+**T9.7.1 inventory (2026-09-24, XARA-T-0260).** Confirmed against
+`xar-dump --tags`; the per-file table is in `docs/memory/text.md`
+("TextDesigns acceptance gate"). Corrections to the column above:
+`Kerning.xar` also carries manual kerns (`TAG_TEXT_KERN`), its automatic
+kerning being the story's flag; `AngledText.xar` also sets bold, italic
+and tracking; `LineSpacing.xar` uses only proportional spacing (no
+absolute line-spacing tag occurs in any of the 14); `Rotated.xar` covers
+every justification, super/subscript, tracking and kerns;
+`embeddedFonts.xar` carries no font data, so criterion 5 needs a
+synthetic document.
 
 `Designs/TextCurve.xar` is the fifteenth fixture, from the other corpus
 directory: it is the text-on-a-path gate for W9.5.

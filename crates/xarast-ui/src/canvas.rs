@@ -146,6 +146,10 @@ pub enum CanvasNavigation {
 pub struct CanvasWidget {
     dragging_guide: Option<usize>,
     creating_guide: Option<Axis>,
+    /// The text ruler to show on the horizontal ruler this frame.
+    text_ruler: Option<xarast_app::TextRuler>,
+    /// The text ruler marker being dragged.
+    text_marker: Option<crate::text_ruler::Marker>,
     panning: bool,
     navigation: CanvasNavigation,
 }
@@ -174,6 +178,16 @@ impl CanvasWidget {
     /// Who navigates.
     pub fn navigation(&self) -> CanvasNavigation {
         self.navigation
+    }
+
+    /// Shows the text tool's ruler (margins, indent, tab stops of the
+    /// caret's paragraph) on the horizontal ruler from the next
+    /// [`CanvasWidget::show`] on; `None` hides it.
+    pub fn set_text_ruler(&mut self, ruler: Option<xarast_app::TextRuler>) {
+        if ruler.is_none() {
+            self.text_marker = None;
+        }
+        self.text_ruler = ruler;
     }
 
     /// True while the user is dragging a guide out of, or along, a ruler.
@@ -238,7 +252,8 @@ impl CanvasWidget {
             pointer_doc,
         };
         let mut unconsumed = Vec::new();
-        let mut interacting = self.handle_guides(&frame, out);
+        let mut interacting = self.handle_text_ruler(&frame, out);
+        interacting |= self.handle_guides(&frame, out);
         interacting |= self.handle_navigation(&frame, out, &mut unconsumed);
 
         // Painting, in the same order the shell paints its own passes:
@@ -268,6 +283,22 @@ impl CanvasWidget {
                     egui::pos2(full.max.x, full.min.y + ruler),
                 ),
             );
+            if let Some(tr) = &self.text_ruler {
+                let strip = egui::Rect::from_min_max(
+                    egui::pos2(full.min.x + ruler, full.min.y),
+                    egui::pos2(full.max.x, full.min.y + ruler),
+                );
+                let dragged = self
+                    .text_marker
+                    .zip(pointer.map(|p| (p.x - region.min.x) as f64));
+                crate::text_ruler::Geometry { ruler: tr, view }.paint(
+                    &ui.painter_at(strip),
+                    strip,
+                    region.min.x,
+                    tokens,
+                    dragged,
+                );
+            }
             Ruler {
                 axis: Axis::Vertical,
                 unit: doc.unit,
@@ -296,10 +327,63 @@ impl CanvasWidget {
         }
     }
 
+    /// The text ruler's markers: a press on one grabs it, the release
+    /// drops it (one edit), a click elsewhere on the strip adds a tab stop.
+    fn handle_text_ruler(&mut self, f: &FrameCtx<'_>, out: &mut CommandSink) -> bool {
+        let (doc, response, pointer) = (f.doc, f.response, f.pointer);
+        let Some(tr) = self.text_ruler.as_ref().filter(|_| doc.show_rulers) else {
+            self.text_marker = None;
+            return false;
+        };
+        let depth = f.ruler_depth();
+        let geo = crate::text_ruler::Geometry {
+            ruler: tr,
+            view: &doc.view,
+        };
+        let on_strip = |lx: f64, ly: f64| lx >= 0.0 && ly < 0.0 && ly >= -depth;
+        // Where the press was, not where the drag is recognised: a marker
+        // next to the one pressed must not be the one taken.
+        if response.drag_started()
+            && let Some(p) = f.ui.input(|i| i.pointer.press_origin()).or(pointer)
+        {
+            let (lx, ly) = f.local(p);
+            if on_strip(lx, ly) {
+                self.text_marker = geo.marker_at(lx, ly < -depth / 2.0);
+            }
+        }
+        if let Some(marker) = self.text_marker {
+            if response.drag_stopped() {
+                if let Some(p) = pointer {
+                    let (lx, ly) = f.local(p);
+                    // More than a strip's depth below the ruler: off it.
+                    if let Some((field, value)) = geo.release(marker, lx, ly > depth) {
+                        out.push(UiCommand::InfobarEdit { field, value });
+                    }
+                }
+                self.text_marker = None;
+            }
+            f.ui.ctx().request_repaint();
+            return true;
+        }
+        if response.clicked()
+            && let Some(p) = pointer
+        {
+            let (lx, ly) = f.local(p);
+            if on_strip(lx, ly)
+                && geo.marker_at(lx, ly < -depth / 2.0).is_none()
+                && let Some((field, value)) = geo.click(lx)
+            {
+                out.push(UiCommand::InfobarEdit { field, value });
+                return true;
+            }
+        }
+        false
+    }
+
     /// Guide creation, dragging and deletion.
     fn handle_guides(&mut self, f: &FrameCtx<'_>, out: &mut CommandSink) -> bool {
         let (doc, response, pointer) = (f.doc, f.response, f.pointer);
-        if !doc.show_guides {
+        if !doc.show_guides || self.text_marker.is_some() {
             return false;
         }
         let ruler = f.ruler_depth();

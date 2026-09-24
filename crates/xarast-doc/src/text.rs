@@ -31,7 +31,58 @@ pub enum TextLayout {
         left_indent: Mp,
         /// Indent from the end of the path.
         right_indent: Mp,
+        /// What was done to the characters before they were fitted.
+        chars: CharsTransform,
     },
+}
+
+/// The transform applied to the characters of a story on a path **before**
+/// they are fitted to it (the original's `CharsScale`, `CharsRotation` and
+/// `CharsShear`, `docs/research/02-document-model.md` §7.2). A story's own
+/// matrix keeps only what applies after the fit.
+///
+/// Angles are radians in 16.16 fixed point, the file's `ANGLE`, so that the
+/// value survives a round trip bit for bit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct CharsTransform {
+    /// A negative character scale: every character is reflected about its
+    /// baseline, so the text hangs on the other side of the path.
+    pub reflected: bool,
+    /// Rotation. Carried, not drawn: the fit places characters by the
+    /// path's tangent alone (as the original does).
+    pub rotation: i32,
+    /// Shear, the slant of every character.
+    pub shear: i32,
+}
+
+impl CharsTransform {
+    /// Converts a 16.16 angle to radians.
+    #[must_use]
+    pub fn radians(fixed: i32) -> f64 {
+        f64::from(fixed) / 65_536.0
+    }
+
+    /// Converts radians to the 16.16 angle, rounding to the nearest step
+    /// and saturating.
+    #[must_use]
+    pub fn fixed(radians: f64) -> i32 {
+        let v = (radians * 65_536.0).round();
+        if v.is_nan() {
+            0
+        } else {
+            // Saturating by construction: the clamp keeps it in range.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                v.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32
+            }
+        }
+    }
+
+    /// Whether this is the identity (nothing to write or apply).
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        *self == CharsTransform::default()
+    }
 }
 
 /// Paragraph alignment.
@@ -115,6 +166,51 @@ pub struct TabStop {
     pub position: Mp,
     /// The stop's kind, as the format's `type_and_flags` byte gives it.
     pub kind: u8,
+}
+
+/// One OpenType feature setting of a text run (phase 9, T9.3.10 and the
+/// T9.4.9 feature panel): `liga` off, `smcp` on, `ss01` = 1…
+///
+/// Xarast's own attribute: the `.xar` format has no record for it, so it
+/// only ever comes from the text tool or a `.xarast` file. A list of them
+/// is kept sorted by tag with no tag twice ([`FeatureSetting::normalised`]).
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub struct FeatureSetting {
+    /// The four-byte feature tag, as in the font (`b"smcp"`).
+    pub tag: [u8; 4],
+    /// 0 disables the feature, 1 enables it, larger values pick an
+    /// alternate.
+    pub value: u16,
+}
+
+impl FeatureSetting {
+    /// A setting from a four-character tag. `None` when the tag is not
+    /// four printable ASCII characters.
+    #[must_use]
+    pub fn new(tag: &str, value: u16) -> Option<FeatureSetting> {
+        let tag: [u8; 4] = tag.as_bytes().try_into().ok()?;
+        tag.iter()
+            .all(|c| (0x21..0x7f).contains(c))
+            .then_some(FeatureSetting { tag, value })
+    }
+
+    /// The tag as text.
+    #[must_use]
+    pub fn tag_str(&self) -> &str {
+        std::str::from_utf8(&self.tag).unwrap_or("????")
+    }
+
+    /// `settings` sorted by tag, the last setting of a tag winning.
+    #[must_use]
+    pub fn normalised(settings: &[FeatureSetting]) -> Arc<[FeatureSetting]> {
+        let mut v: Vec<FeatureSetting> = Vec::with_capacity(settings.len());
+        for s in settings {
+            v.retain(|o| o.tag != s.tag);
+            v.push(*s);
+        }
+        v.sort_by_key(|s| s.tag);
+        Arc::from(v)
+    }
 }
 
 /// One item inside a line.

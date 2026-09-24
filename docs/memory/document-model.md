@@ -376,6 +376,15 @@ that no tag appears twice, that every slot is either reached by a tag or listed
 as tagless, and that the count is still 46. Phase 3 reads that table; it does
 not invent its own.
 
+**One Xarast-only slot since XARA-T-0225 (2026-09-24): `TxtFeatures`**
+(`AttrValue::FontFeatures(Arc<[FeatureSetting]>)`, OpenType feature settings
+sorted by tag, empty = the font's defaults). It is appended *after* the 46
+(index 46, `ATTR_SLOT_COUNT` = 47), listed in `SLOTS_WITHOUT_ATTRIBUTE_TAG`
+(the `.xar` format has no record for it), and the count test now says "46
+reconciled plus Xarast's own". Appending kept every existing slot index, so
+nothing indexed by slot moved; the canonical digest of every document changes
+(the defaults block hashes all slots), but no digest is pinned anywhere.
+
 | `.xar` tags | Slot |
 |---|---|
 | 151, 193–195 line colour | `StrokeColour` |

@@ -291,7 +291,9 @@ reason the walker *reports*, which is its own test.
     scene epoch, resize, dpi, colours, rotation) is a full frame.
     `RenderedFrame::{reuse, exact}` say what happened; the viewer's
     screenshot waits for an exact frame. Scrolled and column-drawn frames
-    match a one-call render to within 1/255 (tests).
+    match a one-call render byte for byte (tests; they were within 1/255
+    until the rasteriser's origin was fixed, `render.md` invariant 15).
+    A new scene at the same view is decision 40.
 26. **A Draft zoom-out's border is left to the Final.** Rasterising it
     cost ~190 ms a frame over 100 000 objects: the border is short, wide
     strips, and the CPU backend runs a strip shorter than a band on one
@@ -387,6 +389,41 @@ reason the walker *reports*, which is its own test.
 
 39. **Saving (XARA-US-0084).** See the section below.
 
+40. **An edit repaints its damage, decided on the render thread**
+    (XARA-T-0221). `reuse::plan` asks `reuse::repaint` first: when the
+    job's transform is bit-identical to the kept frame's, the page rect
+    equal and the kept frame fully covered, the job's scene is diffed
+    against the kept frame's (`xarast_render::scene_damage`); for a `Final`
+    the kept frame's Draft rectangle (`Kept::inexact`) is added. Empty
+    damage under a new epoch reuses every pixel; up to four rectangles
+    under half the view are `Plan::Repaint` (`FrameReuse::Repainted`,
+    `fresh` = the rectangles, `base` = the kept generation); anything
+    bigger, or an edit during a pan or zoom, is a full frame.
+    * **Why on the render thread and not in `Session::after_mutation`.**
+      Only the worker knows which frame is on screen (decision 25 and the
+      dead end "Deciding pixel reuse on the main thread"), and a diff of
+      the scenes covers every command, undo, redo, preview and palette
+      redefinition without per-command extents. `after_mutation` still
+      marks the whole view in `Dirty`, which nothing narrower consumes;
+      it is an upper bound.
+    * **`Kept` holds the scene and resolver it was drawn from**, the page
+      rect and `inexact` (a rectangle holding every non-`Final` pixel;
+      `final_exact()` is its emptiness). A `Draft` repaint adds its
+      rectangles to `inexact`; a `Final` repaint includes it and clears it,
+      so the Final after a fill drag redraws the dragged area only.
+    * **The session double-buffers its scene** (`spare_scene`): the kept
+      frame holds the scene on screen, so after an edit the current scene
+      is always shared; the rebuild takes the spare once nobody else holds
+      it (`strong_count == 1`, which cannot rise behind our back) instead
+      of allocating a whole scene.
+    * **The shell keeps its tiles.** A frame whose epoch changed but whose
+      `base` is the last frame uploaded keeps the tiles of its level under
+      the view, restarts any tile with texels outside the view, forgets
+      every other tile and level, and uploads only `fresh`
+      (`xarast-shell/src/tiles.rs`, `TileStore::retain`).
+    * Measured over the corpus: repainted frames rasterise 4 % of the
+      pixels a full frame would (`perf.md`, "An edit repaints its damage").
+
 ---
 
 ## Saving (XARA-US-0084)
@@ -407,9 +444,17 @@ serial it wrote). A recovered snapshot has `clean_serial = None`.
 ~50 ms) and the source package bytes; `SaveJob::run` (on a `SaveWorker`
 thread) restores a document from it (~130 ms), renders `thumbnail.png`
 on a scoped thread while `xarast_format::prepare_save`/`prepare_resave`
-serialise the SVG, then writes atomically. Over the corpus the snapshot
-path writes **byte-identical** packages to a direct save of the live
-document, first save and raw-copy re-save alike (`tests/save.rs`).
+serialise the SVG, then writes atomically. The SVG is written **with the
+text placer** (`svg_text::placer()` in `SvgOptions::text`, XARA-T-0259),
+so stories are laid out on the save thread and an app save places text
+for browsers exactly as `xarast-cli convert` does; `save_job` itself only
+clones the placer's `Arc`. `without_text_placer()` exists for
+`emergency_shutdown` alone (no wait on font enumeration on the signal
+path). Over the corpus the snapshot path writes **byte-identical**
+packages to a direct save of the live document with the same placer,
+first save and raw-copy re-save alike (`tests/save.rs`), and to
+`xarast-cli convert --deterministic` (`xarast-cli` `tests/app_save.rs`,
+59/59; File › Save adds only `thumbnail.png`).
 The live document is never touched by a save: a failure is a status line
 and a problem-list entry, the document stays modified, the target file is
 untouched (`write_atomic`).
@@ -487,7 +532,10 @@ thumbnail, 1.05 s without (restore 126 ms + `xarast_format::save` 856 ms
 of which serialise 507 ms, package 327 ms). Groucho2 — 15 ms. On the
 99 %-full md RAID of the dev machine the fsync alone added 0.5–7 s:
 measure on tmpfs. The ≤ 1 s budget is missed by ~9 % on ProbeX16 — the
-restore is the part the app adds (follow-up task filed).
+restore is the part the app adds (follow-up task filed). With the text
+placer (XARA-T-0259, 2026-09-24, ext4, load ≈ 3): ProbeX16 UI thread
+30–38 ms, save thread 1.05–1.07 s with thumbnail, 970–984 ms without
+(965–991 ms without the placer: within noise); TextCurve +2–3 ms.
 
 ---
 
@@ -525,6 +573,13 @@ restore is the part the app adds (follow-up task filed).
     `emergency_shutdown` (which autosaves first). Every intent that closes
     documents goes through `request`.
 15. **An autosave entry's `holder` is written before its snapshot.**
+16. **A repaint is only ever drawn over the frame it was diffed against,
+    at its exact view.** `Plan::Repaint` requires the kept frame's
+    transform bit for bit, its page rect and full cover; the pixels
+    outside the damage are that frame's. Loosening any of these (a
+    whole-pixel pan plus an edit, say) needs the damage moved with the
+    pixels first. `tests/edit_damage.rs` in the shell checks every frame
+    and the tiles against a full render byte for byte.
 12. **New intents** (phase 7): `Cancel`, `DeleteSelection`,
     `InfobarEdit` (typed `InfobarValue`), `AutoScroll`,
     `SetCurrentAttribute`; pointer intents now drive the `ToolMachine`,
@@ -661,8 +716,11 @@ be better run once at `Tx::commit` than after every call.
 - [x] **Text draws** (phase 9 round 2). A story is painted whole at its
       visit (`walker::paint_story`, `text.rs`, `fonts.rs`; contract in
       `text.md`, "Walker integration"). `text_pending` is 0 on the corpus;
-      `text_on_path_pending` is 1 (`Designs/TextCurve.xar`, drawn straight
-      until W9.5). `WalkStats::text_stories` counts drawn stories.
+      `text_on_path_pending` is 0 since W9.5: a story on a path is fitted
+      to its first path child (`text::path_fit`, `lay_story`) and that
+      path is painted under the text (`walker::paint_story_path`); only a
+      story with no usable path is still drawn straight and counted.
+      `WalkStats::text_stories` counts drawn stories.
       `SceneWalker::with_fonts` / `headless::render_with_fonts` pin fonts;
       `viewport::drawing_rect_with` and `Session::scene_ink` include text,
       which has no cached bounds. Font substitutions flow walker →

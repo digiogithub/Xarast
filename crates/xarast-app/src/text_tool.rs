@@ -39,11 +39,32 @@
 //! first burst at a pending caret creates the story, so one undo removes
 //! the story with everything typed into it.
 //!
+//! # Text attributes (T9.4.9, T9.4.10)
+//!
+//! The infobar ([`crate::text_infobar`]) shows the attributes of what is
+//! being edited and its edits go, in order of preference, to:
+//!
+//! * the **selection**: one [`EditCommand::SetTextAttr`] step (a character
+//!   attribute on the selected characters, a paragraph attribute on the
+//!   paragraphs they touch);
+//! * a **caret**: a paragraph attribute to its paragraph at once; a
+//!   character attribute becomes the caret's *pending style*, which the
+//!   next typed text gets (merged into that typing burst's undo step) and
+//!   which any caret move drops. A pending caret keeps its style for the
+//!   story typing creates;
+//! * with no caret, the **selected stories**, whole;
+//! * with nothing selected, the **current attributes** new text gets.
+//!
+//! The text ruler (margins, first-line indent, tab stops of the caret's
+//! paragraph) is part of the same description and raises the same edits.
+//!
 //! # Layouts
 //!
-//! The tool lays stories out itself, with the same bridge as the walker
-//! ([`crate::text::story_input`]), and keeps them in a cache keyed by the
-//! document's epoch: any committed edit (undo included) drops them all.
+//! The tool lays stories out itself, as the walker does
+//! ([`crate::text::lay_story`]), and keeps them in a cache keyed by the
+//! document's epoch: any committed edit (undo included) drops them all. A
+//! story on a path keeps its fit, so the caret, hit tests and highlight
+//! follow the drawn text ([`CaretMap::on_path`]).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,19 +72,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use kurbo::Affine;
 use xarast_doc::{
-    AttrValue, Document, NodeId, NodeKind, StoryText, TextCursor, TextLayout, TextStoryNode,
+    AttrSlot, AttrValue, Document, NodeId, NodeKind, StoryText, TextCursor, TextLayout,
+    TextStoryNode,
 };
 use xarast_geom::{Matrix, Mp, Vector};
-use xarast_text::StoryInput;
 
 use crate::edit::{SelectMode, ToolId};
 use crate::fonts::FontService;
 use crate::geometry::{DocPoint, DocRect};
 use crate::ops::EditCommand;
 use crate::text_edit::{Caret, CaretMap, CaretMotion};
+use crate::text_infobar::{self, Values};
 use crate::tool::{
-    CursorKind, GestureEvent, Infobar, InfobarItem, InteractionState, OverlayShape, TextInput,
-    TextInputKind, TextKey, TextNav, Tool, ToolAction, ToolCtx, ToolView,
+    CursorKind, GestureEvent, Infobar, InfobarField, InfobarValue, InteractionState, OverlayShape,
+    TextInput, TextInputKind, TextKey, TextNav, TextRuler, Tool, ToolAction, ToolCtx, ToolView,
 };
 
 /// Typing keys closer together than this, in milliseconds, make one undo
@@ -190,6 +212,10 @@ enum Drag {
 #[derive(Debug)]
 struct StoryView {
     map: CaretMap,
+    /// The story's text and resolved attributes, as laid out.
+    st: StoryText,
+    /// The story node, as laid out.
+    node: TextStoryNode,
     /// Story space to document space.
     xf: Affine,
     /// Document space to story space.
@@ -205,36 +231,44 @@ impl StoryView {
         let st = StoryText::collect(&doc.tree, story, &mut stack, &mut |_, a| {
             Arc::new(a.value.clone())
         })?;
-        let input = crate::text::story_input(&doc.tree, &st, node);
+        // The walker's own layout: on a path, the path's column and the fit.
+        let (_, layout, fit) = crate::text::lay_story(fonts, &doc.tree, &st, node);
+        let node = (**node).clone();
         let text = crate::text::layout_text(&st).to_owned();
-        let layout = fonts.ready().layout(&StoryInput {
-            text: &text,
-            runs: &input.runs,
-            paragraphs: &input.paragraphs,
-            kerns: &input.kerns,
-            mode: input.mode,
-        });
         let xf = node.transform.to_affine();
         let inv = if xf.determinant().abs() > f64::EPSILON {
             xf.inverse()
         } else {
             Affine::IDENTITY
         };
+        let map = match fit {
+            Some(fit) => CaretMap::on_path(text, layout, fit),
+            None => CaretMap::new(text, layout),
+        };
         Some(StoryView {
-            map: CaretMap::new(text, layout),
+            map,
+            st,
+            node,
             xf,
             inv,
         })
     }
 
-    fn to_doc(&self, x: Mp, y: Mp) -> DocPoint {
-        let p = self.xf * kurbo::Point::new(x.to_f64(), y.to_f64());
+    fn to_doc(&self, p: kurbo::Point) -> DocPoint {
+        let p = self.xf * p;
         DocPoint::from_f64_round(p.x, p.y)
     }
 
-    fn to_story(&self, p: DocPoint) -> (Mp, Mp) {
-        let q = self.inv * kurbo::Point::new(p.x.to_f64(), p.y.to_f64());
-        (Mp::from_f64_round(q.x), Mp::from_f64_round(q.y))
+    fn to_story(&self, p: DocPoint) -> kurbo::Point {
+        self.inv * kurbo::Point::new(p.x.to_f64(), p.y.to_f64())
+    }
+
+    /// The caret a document point hits, and whether it is on the story
+    /// (within `tol` document units of a line or, on a path, of a fitted
+    /// cluster).
+    fn hit(&self, p: DocPoint, tol: f64) -> (Caret, bool) {
+        let (caret, dist) = self.map.hit_point(self.to_story(p));
+        (caret, dist <= tol * self.story_scale())
     }
 
     /// Story units per document unit: how far a device tolerance reaches
@@ -242,22 +276,6 @@ impl StoryView {
     fn story_scale(&self) -> f64 {
         let d = self.inv.determinant().abs().sqrt();
         if d.is_finite() && d > 0.0 { d } else { 1.0 }
-    }
-
-    /// Whether a story-space point is on a line box, within `tol`.
-    fn contains(&self, x: Mp, y: Mp, tol: f64) -> bool {
-        let layout = self.map.layout();
-        layout.lines.iter().enumerate().any(|(i, l)| {
-            let (bottom, top) = self.map.line_band(i);
-            let (x0, x1) = l.clusters.iter().fold((l.x, l.x), |(a, b), c| {
-                (a.min(c.x), b.max(c.x.saturating_add(c.width)))
-            });
-            let (x, y) = (x.to_f64(), y.to_f64());
-            x >= x0.to_f64() - tol
-                && x <= x1.to_f64() + tol
-                && y >= bottom.to_f64() - tol
-                && y <= top.to_f64() + tol
-        })
     }
 }
 
@@ -294,6 +312,14 @@ pub struct TextTool {
     moved: u64,
     /// The typing burst the next key may join.
     burst: Option<Burst>,
+    /// Attributes chosen at a caret, for the text typed there next: the
+    /// character attributes in a story, any at a pending caret.
+    pending: Vec<AttrValue>,
+    /// The kind of tab stop a click on the text ruler adds (`kind & 3`).
+    tab_kind: u8,
+    /// The font families the infobar last offered: what a chosen index
+    /// refers to.
+    families: Mutex<Option<Arc<[Arc<str>]>>>,
 }
 
 impl TextTool {
@@ -337,16 +363,18 @@ impl TextTool {
     }
 
     /// The topmost editable story under a document point.
-    fn story_at(&self, cx: &ToolCtx<'_>, at: DocPoint) -> Option<(NodeId, Arc<StoryView>)> {
+    /// The topmost editable story under a document point, and the caret
+    /// the point hits in it.
+    fn story_at(&self, cx: &ToolCtx<'_>, at: DocPoint) -> Option<(NodeId, Arc<StoryView>, Caret)> {
         let tol = STORY_HIT_PX * cx.device_px();
         let mut found = None;
         for id in editable_stories(cx.doc) {
             let Some(v) = self.view(cx.doc, id) else {
                 continue;
             };
-            let (x, y) = v.to_story(at);
-            if v.contains(x, y, tol * v.story_scale()) {
-                found = Some((id, v));
+            let (caret, on) = v.hit(at, tol);
+            if on {
+                found = Some((id, v, caret));
             }
         }
         found
@@ -365,6 +393,10 @@ impl TextTool {
         self.burst = None;
         if new != self.editing {
             self.moved = self.moved.wrapping_add(1);
+            // A pending style belongs to the caret it was chosen at.
+            if new.map(|e| e.state) != self.editing.map(|e| e.state) {
+                self.pending.clear();
+            }
         }
         self.editing = new;
         cx.requests.overlay_changed = true;
@@ -418,12 +450,10 @@ impl TextTool {
     }
 
     fn click(&mut self, at: DocPoint, count: u8, cx: &mut ToolCtx<'_>) {
-        let Some((story, v)) = self.story_at(cx, at) else {
+        let Some((story, v, hit)) = self.story_at(cx, at) else {
             self.pending(at, None, cx);
             return;
         };
-        let (x, y) = v.to_story(at);
-        let hit = v.map.hit(x, y);
         match count {
             1 => {
                 let anchor = match self.current(cx.doc) {
@@ -521,6 +551,13 @@ impl TextTool {
             _ => next_burst(),
         };
         let caret = range.start + text.len();
+        // The style chosen at the caret styles what is typed there.
+        let style = if kind == BurstKind::Typing && !text.is_empty() {
+            std::mem::take(&mut self.pending)
+        } else {
+            Vec::new()
+        };
+        let typed_range = range.start..caret;
         cx.commands.emit(match kind {
             BurstKind::Typing => EditCommand::TypeText {
                 story: sel.story,
@@ -534,6 +571,16 @@ impl TextTool {
                 burst: id,
             },
         });
+        if !style.is_empty() {
+            cx.commands.emit(EditCommand::SetTextAttr {
+                story: sel.story,
+                edits: style
+                    .into_iter()
+                    .map(|v| (typed_range.clone(), v))
+                    .collect(),
+                burst: Some(id),
+            });
+        }
         self.set(
             Some(TextEditing::Story(TextSelection {
                 story: sel.story,
@@ -586,7 +633,7 @@ impl TextTool {
                 layout,
                 ..TextStoryNode::default()
             }),
-            attrs: cx.edit.current.values().to_vec(),
+            attrs: merged(cx.edit.current.values(), &std::mem::take(&mut self.pending)),
             text,
             burst: id,
         });
@@ -667,6 +714,264 @@ impl TextTool {
     }
 }
 
+/// Where the text infobar's edits go.
+enum Target {
+    /// The selection or caret in a story.
+    Story(TextSelection, Arc<StoryView>),
+    /// A caret where typing will create a story.
+    Pending,
+    /// No caret: the selected stories, whole.
+    Stories(Vec<(NodeId, Arc<StoryView>)>),
+    /// Nothing to apply to: the current attributes.
+    Current,
+}
+
+/// Every text slot, for merging the values of several stories.
+const ALL_TEXT_SLOTS: [AttrSlot; 16] = [
+    AttrSlot::TxtFontTypeface,
+    AttrSlot::TxtBold,
+    AttrSlot::TxtItalic,
+    AttrSlot::TxtAspectRatio,
+    AttrSlot::TxtJustification,
+    AttrSlot::TxtTracking,
+    AttrSlot::TxtUnderline,
+    AttrSlot::TxtFontSize,
+    AttrSlot::TxtScript,
+    AttrSlot::TxtBaseline,
+    AttrSlot::TxtLineSpace,
+    AttrSlot::TxtLeftMargin,
+    AttrSlot::TxtRightMargin,
+    AttrSlot::TxtFirstIndent,
+    AttrSlot::TxtRuler,
+    AttrSlot::TxtFeatures,
+];
+
+/// `base` with every value of `over` replacing the one of its slot.
+fn merged(base: &[AttrValue], over: &[AttrValue]) -> Vec<AttrValue> {
+    let mut out = base.to_vec();
+    for v in over {
+        set_slot(&mut out, v.clone());
+    }
+    out
+}
+
+/// Puts `v` into `list`, replacing the value of its slot.
+fn set_slot(list: &mut Vec<AttrValue>, v: AttrValue) {
+    list.retain(|o| o.slot() != v.slot());
+    list.push(v);
+}
+
+/// The attribute an edit sets when it has no text to go through: a
+/// pending caret's style or the current attributes. Tab stops are not
+/// edited there (no ruler shows).
+fn plain_edit(
+    field: InfobarField,
+    value: InfobarValue,
+    shown: &Values,
+    families: &[Arc<str>],
+) -> Option<AttrValue> {
+    if let (InfobarField::TextFeature(tag), InfobarValue::Toggle(on)) = (field, value) {
+        let list = match shown.one(AttrSlot::TxtFeatures) {
+            Some(AttrValue::FontFeatures(f)) => Arc::clone(f),
+            _ => Arc::from(Vec::new()),
+        };
+        return Some(AttrValue::FontFeatures(text_infobar::with_feature(
+            &list, tag, on,
+        )));
+    }
+    let v = text_infobar::value_for(field, value, shown, families)?;
+    (shown.one(v.slot()?) != Some(&v)).then_some(v)
+}
+
+/// The edits a field sets on a byte range of a story: nothing when the
+/// range already has the value. `tabs` are the stops of the range's
+/// paragraph, `tab_kind` the kind a ruler click adds.
+#[allow(clippy::too_many_arguments)]
+fn story_edits(
+    field: InfobarField,
+    value: InfobarValue,
+    st: &StoryText,
+    range: &std::ops::Range<usize>,
+    shown: &Values,
+    families: &[Arc<str>],
+    tabs: &[xarast_doc::TabStop],
+    tab_kind: u8,
+) -> Vec<(std::ops::Range<usize>, AttrValue)> {
+    if let (InfobarField::TextFeature(tag), InfobarValue::Toggle(on)) = (field, value) {
+        return text_infobar::feature_edits(st, range, tag, on);
+    }
+    if let Some(t) = text_infobar::tabs_after(field, value, tabs, tab_kind) {
+        return vec![(range.clone(), AttrValue::Ruler(t))];
+    }
+    match text_infobar::value_for(field, value, shown, families) {
+        Some(v) if v.slot().is_some_and(|s| shown.one(s) != Some(&v)) => {
+            vec![(range.clone(), v)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+impl TextTool {
+    /// The font families the chooser offers: the database's, once it is
+    /// enumerated (an empty list until then). Remembered, so that a chosen
+    /// index finds the family it was shown for.
+    fn families(&self) -> Arc<[Arc<str>]> {
+        let fonts = self.fonts();
+        let list = if fonts.is_loaded() {
+            fonts.db().families()
+        } else {
+            fonts.start_loading();
+            Arc::from(Vec::new())
+        };
+        *self
+            .families
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&list));
+        list
+    }
+
+    /// Where the infobar's edits go now.
+    fn target(&self, doc: &Document, edit: &crate::edit::EditState) -> Target {
+        match self.editing.map(|e| e.state) {
+            Some(TextEditing::Story(s)) => match self.view(doc, s.story) {
+                Some(v) => {
+                    let clamp = |c: Caret| v.map.snap(c);
+                    let sel = TextSelection {
+                        anchor: clamp(s.anchor),
+                        head: clamp(s.head),
+                        ..s
+                    };
+                    Target::Story(sel, v)
+                }
+                None => Target::Current,
+            },
+            Some(TextEditing::Pending { .. }) => Target::Pending,
+            None => {
+                let stories: Vec<(NodeId, Arc<StoryView>)> = edit
+                    .selection()
+                    .filter(|&n| matches!(doc.tree.kind(n), Some(NodeKind::TextStory(_))))
+                    .filter(|&n| !crate::ops::on_locked_layer(doc, n))
+                    .filter_map(|n| self.view(doc, n).map(|v| (n, v)))
+                    .collect();
+                if stories.is_empty() {
+                    Target::Current
+                } else {
+                    Target::Stories(stories)
+                }
+            }
+        }
+    }
+
+    /// The tab stops of the paragraph the caret is in: its ruler
+    /// attribute, else the ruler its first line carries from the file.
+    fn paragraph_tabs(
+        doc: &Document,
+        sel: TextSelection,
+        v: &StoryView,
+        values: &Values,
+    ) -> Vec<xarast_doc::TabStop> {
+        if let Some(AttrValue::Ruler(r)) = values.one(AttrSlot::TxtRuler)
+            && !r.is_empty()
+        {
+            return r.to_vec();
+        }
+        let lines = xarast_doc::paragraph_line_range(&v.st, &(sel.head.byte..sel.head.byte));
+        v.st.lines
+            .get(lines.start)
+            .and_then(|l| match doc.tree.kind(l.node) {
+                Some(NodeKind::TextLine(t)) => t.ruler.as_ref().map(|r| r.to_vec()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// The text ruler of the caret's paragraph: shown for a straight story
+    /// whose x axis is the page's (a turned, sheared or mirrored story, or
+    /// text on a path, has no horizontal ruler to show it on).
+    fn ruler(
+        &self,
+        doc: &Document,
+        sel: TextSelection,
+        v: &StoryView,
+        values: &Values,
+    ) -> Option<TextRuler> {
+        let m = v.node.transform;
+        if m.b.abs() > 1e-9 || m.c.abs() > 1e-9 || m.a <= 0.0 || m.d <= 0.0 {
+            return None;
+        }
+        let width = match v.node.layout {
+            TextLayout::AtPoint => None,
+            TextLayout::InColumn { width, .. } => Some(width),
+            TextLayout::OnPath { .. } => return None,
+        };
+        let mp = |slot| match values.one(slot) {
+            Some(
+                AttrValue::LeftMargin(m) | AttrValue::RightMargin(m) | AttrValue::FirstIndent(m),
+            ) => *m,
+            _ => Mp::ZERO,
+        };
+        Some(TextRuler {
+            origin: m.e,
+            scale: m.a,
+            width,
+            left_margin: mp(AttrSlot::TxtLeftMargin),
+            right_margin: mp(AttrSlot::TxtRightMargin),
+            first_indent: mp(AttrSlot::TxtFirstIndent),
+            tabs: Self::paragraph_tabs(doc, sel, v, values),
+            tab_kind: self.tab_kind,
+        })
+    }
+
+    /// An infobar edit with a caret or a selection in a story.
+    fn edit_story(
+        &mut self,
+        field: InfobarField,
+        value: InfobarValue,
+        sel: TextSelection,
+        v: &StoryView,
+        families: &[Arc<str>],
+        cx: &mut ToolCtx<'_>,
+    ) {
+        let range = sel.range();
+        let mut shown = text_infobar::story_values(&v.st, &range);
+        let slot = match (field, value) {
+            (InfobarField::TextFeature(_), _) => Some(AttrSlot::TxtFeatures),
+            _ => text_infobar::value_for(field, value, &shown, families).and_then(|a| a.slot()),
+        };
+        let paragraph = slot.is_none_or(xarast_doc::is_paragraph_slot);
+        if sel.is_caret() && !paragraph {
+            // A character attribute at a caret: the style of what is typed
+            // next, nothing in the document yet.
+            for p in &self.pending {
+                shown.force(p);
+            }
+            if let Some(a) = plain_edit(field, value, &shown, families) {
+                set_slot(&mut self.pending, a);
+                cx.requests.overlay_changed = true;
+            }
+            return;
+        }
+        let tabs = Self::paragraph_tabs(cx.doc, sel, v, &shown);
+        let edits = story_edits(
+            field,
+            value,
+            &v.st,
+            &range,
+            &shown,
+            families,
+            &tabs,
+            self.tab_kind,
+        );
+        if !edits.is_empty() {
+            cx.commands.emit(EditCommand::SetTextAttr {
+                story: sel.story,
+                edits,
+                burst: None,
+            });
+        }
+    }
+}
+
 /// The caret map of a story laid out with `fonts`, as the text tool sees
 /// it: for tests and for callers that want caret geometry without a tool.
 /// `None` when `story` is not a text story.
@@ -716,9 +1021,7 @@ impl Tool for TextTool {
             GestureEvent::DragStart { from, .. } => {
                 let before = self.editing;
                 self.drag = Some(match self.story_at(cx, *from) {
-                    Some((story, v)) => {
-                        let (x, y) = v.to_story(*from);
-                        let hit = v.map.hit(x, y);
+                    Some((story, _, hit)) => {
                         let anchor = match self.current(cx.doc) {
                             Some((s, _)) if cx.modifiers.adjust && s.story == story => s.anchor,
                             _ => hit,
@@ -742,8 +1045,7 @@ impl Tool for TextTool {
                 Some(Drag::Select { story, anchor, .. }) => {
                     let (story, anchor) = (*story, *anchor);
                     if let Some(v) = self.view(cx.doc, story) {
-                        let (x, y) = v.to_story(*to);
-                        let head = v.map.hit(x, y);
+                        let head = v.map.hit_point(v.to_story(*to)).0;
                         self.set(
                             Some(TextEditing::Story(TextSelection {
                                 story,
@@ -826,29 +1128,24 @@ impl Tool for TextTool {
                 };
                 let map = &v.map;
                 let (anchor, head) = (map.snap(sel.anchor), map.snap(sel.head));
-                for r in map.selection_rects(anchor.byte, head.byte) {
+                // In story space: on a path, bent with the fitted text.
+                for q in map.selection_quads(anchor.byte, head.byte) {
                     out.push(OverlayShape::Highlight {
-                        corners: [
-                            v.to_doc(r.x0, r.bottom),
-                            v.to_doc(r.x1, r.bottom),
-                            v.to_doc(r.x1, r.top),
-                            v.to_doc(r.x0, r.top),
-                        ],
+                        corners: q.map(|p| v.to_doc(p)),
                     });
                 }
-                let g = map.caret_geometry(head);
+                let (primary, secondary) = map.caret_segments(head);
                 out.push(OverlayShape::Caret {
-                    from: v.to_doc(g.x, g.bottom),
-                    to: v.to_doc(g.x, g.top),
+                    from: v.to_doc(primary.bottom),
+                    to: v.to_doc(primary.top),
                     primary: true,
                     moved: self.moved,
                 });
-                if let Some(x) = g.split {
+                if let Some(s) = secondary {
                     // The secondary caret: half height, from the baseline side.
-                    let mid = g.bottom.midpoint(g.top);
                     out.push(OverlayShape::Caret {
-                        from: v.to_doc(x, g.bottom),
-                        to: v.to_doc(x, mid),
+                        from: v.to_doc(s.bottom),
+                        to: v.to_doc(s.bottom.midpoint(s.top)),
                         primary: false,
                         moved: self.moved,
                     });
@@ -858,24 +1155,100 @@ impl Tool for TextTool {
         }
     }
 
-    fn infobar(&self, _view: ToolView<'_>) -> Infobar {
-        let note = match self.editing.map(|e| e.state) {
-            Some(TextEditing::Story(s)) if s.is_caret() => "Editing text".to_owned(),
-            Some(TextEditing::Story(s)) => {
-                format!("Editing text: {} bytes selected", s.range().len())
+    fn infobar(&self, view: ToolView<'_>) -> Infobar {
+        let families = self.families();
+        let (values, ruler) = match self.target(view.doc, view.edit) {
+            Target::Story(sel, v) => {
+                let mut values = text_infobar::story_values(&v.st, &sel.range());
+                if sel.is_caret() {
+                    for p in &self.pending {
+                        values.force(p);
+                    }
+                }
+                let ruler = self.ruler(view.doc, sel, &v, &values);
+                (values, ruler)
             }
-            Some(TextEditing::Pending {
-                column: Some(_), ..
-            }) => "New text column: typing starts it".to_owned(),
-            Some(TextEditing::Pending { column: None, .. }) => {
-                "New text: typing starts it".to_owned()
+            Target::Pending => {
+                let mut values =
+                    text_infobar::plain_values(&view.doc.defaults, view.edit.current.values());
+                for p in &self.pending {
+                    values.force(p);
+                }
+                (values, None)
             }
-            None => {
-                "Click text to edit it, click the page for new text, drag for a column".to_owned()
+            Target::Stories(stories) => {
+                let mut values = Values::default();
+                for (_, v) in &stories {
+                    let all = text_infobar::story_values(&v.st, &(0..v.st.text.len()));
+                    for s in ALL_TEXT_SLOTS {
+                        for x in all.all(s) {
+                            values.add(x);
+                        }
+                    }
+                }
+                (values, None)
             }
+            Target::Current => (
+                text_infobar::plain_values(&view.doc.defaults, view.edit.current.values()),
+                None,
+            ),
         };
         Infobar {
-            items: vec![InfobarItem::Note(note)],
+            items: text_infobar::items(&values, families, ruler),
+        }
+    }
+
+    fn infobar_edit(&mut self, field: InfobarField, value: InfobarValue, cx: &mut ToolCtx<'_>) {
+        if field == InfobarField::TextTabKind {
+            if let InfobarValue::Choice(i) = value
+                && i < text_infobar::TAB_KINDS.len()
+            {
+                self.tab_kind = i as u8;
+            }
+            return;
+        }
+        let families = self
+            .families
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| Arc::from(Vec::new()));
+        // An attribute change ends a typing burst (phase 9, W9.4).
+        self.burst = None;
+        match self.target(cx.doc, cx.edit) {
+            Target::Story(sel, v) => self.edit_story(field, value, sel, &v, &families, cx),
+            Target::Pending => {
+                let mut shown =
+                    text_infobar::plain_values(&cx.doc.defaults, cx.edit.current.values());
+                for p in &self.pending {
+                    shown.force(p);
+                }
+                if let Some(a) = plain_edit(field, value, &shown, &families) {
+                    set_slot(&mut self.pending, a);
+                    cx.requests.overlay_changed = true;
+                }
+            }
+            Target::Stories(stories) => {
+                let burst = Some(next_burst());
+                for (story, v) in stories {
+                    let range = 0..v.st.text.len();
+                    let shown = text_infobar::story_values(&v.st, &range);
+                    let edits = story_edits(field, value, &v.st, &range, &shown, &families, &[], 0);
+                    if !edits.is_empty() {
+                        cx.commands.emit(EditCommand::SetTextAttr {
+                            story,
+                            edits,
+                            burst,
+                        });
+                    }
+                }
+            }
+            Target::Current => {
+                let shown = text_infobar::plain_values(&cx.doc.defaults, cx.edit.current.values());
+                if let Some(a) = plain_edit(field, value, &shown, &families) {
+                    cx.requests.current.push(a);
+                }
+            }
         }
     }
 
@@ -939,6 +1312,7 @@ impl Tool for TextTool {
         {
             // The story typing created: the caret goes on in it.
             b.story = Some(story);
+            self.pending.clear();
             let caret = Caret::at(b.caret);
             self.editing = Some(Editing {
                 state: TextEditing::Story(TextSelection {

@@ -193,6 +193,35 @@ fn an_unknown_essential_tag_aborts_and_an_unknown_atomic_one_does_not() {
 }
 
 #[test]
+fn a_definition_inside_a_dropped_atomic_subtree_is_kept_in_its_place() {
+    // Definitions are the document's, whatever subtree they sit in: a
+    // record after the dropped subtree may refer to them by number
+    // (`Designs/Groucho2.xar` defines a bitmap inside a shadow).
+    let mut colour = vec![0u8, 0, 0, 3, 0];
+    colour.extend_from_slice(&24u32.to_le_bytes());
+    colour.extend_from_slice(&0i32.to_le_bytes());
+    colour.extend_from_slice(&[0u8; 16]);
+    colour.extend_from_slice(&0u16.to_le_bytes());
+    let bytes = XarBuilder::new()
+        .record(10, &7777u32.to_le_bytes())
+        .record(7777, &[])
+        .down()
+        .record(104, &[])
+        .down()
+        .record(51, &colour)
+        .up()
+        .up()
+        .record(43, &[])
+        .end_of_file()
+        .finish();
+    let a = analyse(&bytes, limits()).unwrap();
+    let kept: Vec<u32> = a.tree.roots.iter().map(|n| n.record.tag).collect();
+    assert_eq!(kept, vec![2, 10, 51, 43, 3]);
+    assert_eq!(a.tree.rescued, 1);
+    assert_eq!(a.tree.stripped, 6);
+}
+
+#[test]
 fn every_prefix_of_a_realistic_file_is_handled() {
     let mut colour = vec![0u8, 0, 0, 3, 0];
     colour.extend_from_slice(&24u32.to_le_bytes());

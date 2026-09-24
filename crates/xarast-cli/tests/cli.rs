@@ -119,6 +119,25 @@ fn no_arguments_is_a_usage_error_and_help_is_not() {
 }
 
 #[test]
+fn inspect_fills_lists_the_fill_and_its_histogram() {
+    let dir = scratch("inspect-fills");
+    let src = write(&dir, "square.xar", &square_xar());
+    let src = src.to_str().unwrap();
+    let out = run(&["inspect", "--fills", src]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(": 1 fills"), "{text}");
+    assert!(text.contains("     0  fill              flat"), "{text}");
+    assert!(text.contains("  histogram\n"), "{text}");
+    let summary = stdout(&run(&["inspect", "--fills", "--summary", src]));
+    assert!(!summary.contains("     0  fill"), "{summary}");
+    assert!(summary.contains("    fill              flat"), "{summary}");
+    // What to inspect must be said.
+    assert_eq!(run(&["inspect", src]).status.code(), Some(1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn render_at_100_percent_is_the_drawing_at_96_dpi() {
     let dir = scratch("render100");
     let input = write(&dir, "square.xar", &square_xar());

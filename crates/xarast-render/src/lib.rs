@@ -64,6 +64,7 @@ pub mod blend;
 pub mod cache;
 pub mod compose;
 pub mod corpus;
+pub mod damage;
 pub mod display_list;
 pub mod export;
 pub mod golden;
@@ -89,6 +90,7 @@ pub use compose::{
     TexelRect, TileGrid, TileKey, TilePlacement, compose_cpu, source_texel, texel_intersection,
     texel_rect_is_empty, whole_tile,
 };
+pub use damage::{Damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,

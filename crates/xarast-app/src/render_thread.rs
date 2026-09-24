@@ -48,9 +48,12 @@
 //!
 //! The worker keeps the last frame it published and draws the next one
 //! from it where it can — a pan scrolls it and rasterises only the exposed
-//! strips, a `Draft` zoom resamples it. That is why a [`FrameJob`] carries
-//! the scene rather than a display list: which list to build depends on
-//! what the worker holds. The policy is in `reuse.rs`.
+//! strips, a `Draft` zoom resamples it, and an edit at the same view
+//! compares the new scene with the kept frame's and rasterises only the
+//! rectangles whose pixels may differ ([`FrameReuse::Repainted`]). That is
+//! why a [`FrameJob`] carries the scene rather than a display list: which
+//! list to build depends on what the worker holds. The policy is in
+//! `reuse.rs`.
 //!
 //! # Waking the main thread
 //!
@@ -154,6 +157,12 @@ pub enum FrameReuse {
     /// The previous frame resampled to a new zoom; the border a zoom-out
     /// uncovers shows the backdrop until the `Final`. `Draft` only.
     Rescaled,
+    /// The previous frame at the same view, with only
+    /// [`RenderedFrame::fresh`] rasterised: what an edit changed between
+    /// the two scenes, and for a `Final`, what the previous frame held at
+    /// `Draft` quality. An empty `fresh` means the new scene draws the
+    /// same picture.
+    Repainted,
 }
 
 /// A finished frame.
@@ -190,13 +199,14 @@ pub struct RenderedFrame {
     /// frame, which moves the rectangle).
     pub covered: DeviceRect,
     /// The rectangles rasterised for this frame. The whole viewport for a
-    /// full frame, the exposed strips for a scroll, nothing for a rescale.
-    /// Every other pixel of `covered` was moved from the frame
-    /// [`RenderedFrame::base`].
+    /// full frame, the exposed strips for a scroll, the damage for a
+    /// repaint, nothing for a rescale. Every other pixel of `covered` was
+    /// moved from the frame [`RenderedFrame::base`].
     pub fresh: Vec<DeviceRect>,
-    /// For a [`FrameReuse::Scrolled`] frame, the generation of the frame
-    /// whose pixels it moved. A presenter that holds that frame's pixels
-    /// only needs `fresh`; one that never saw it (it was dropped, or not
+    /// For a [`FrameReuse::Scrolled`] or [`FrameReuse::Repainted`] frame,
+    /// the generation of the frame whose pixels it kept. A presenter that
+    /// holds that frame's pixels only needs `fresh`, even when the scene
+    /// epoch changed; one that never saw it (it was dropped, or not
     /// collected) needs all of `covered`.
     pub base: Option<u64>,
 }
@@ -220,6 +230,9 @@ pub struct RenderStats {
     pub scrolled: u64,
     /// Frames drawn by resampling the previous one.
     pub rescaled: u64,
+    /// Frames of a new scene drawn by repainting only its damage over the
+    /// previous frame.
+    pub repainted: u64,
     /// `Draft` zooms skipped because the job asked for no CPU rescale
     /// ([`FrameJob::cpu_rescale`]).
     pub skipped: u64,
@@ -486,6 +499,8 @@ struct Produced {
     covered: DeviceRect,
     fresh: Vec<DeviceRect>,
     base: Option<u64>,
+    /// Pixels that are not `Final`-exact, for the kept frame.
+    inexact: DeviceRect,
 }
 
 /// The worker's side: the renderer, the kept frame and a way to ask
@@ -582,6 +597,7 @@ impl<R: FrameRenderer> Worker<'_, R> {
                 let Some(kept) = self.kept.take() else {
                     return self.produce_full(job, timings);
                 };
+                let kept_exact = kept.final_exact();
                 let mut surface = kept.surface;
                 let mut error = None;
                 let strips = reuse::scroll(&mut surface, dx, dy);
@@ -590,18 +606,23 @@ impl<R: FrameRenderer> Worker<'_, R> {
                     error = error.or(e);
                 }
                 let covered = reuse::scrolled_cover(kept.covered, kept.view.viewport, dx, dy);
+                let exact =
+                    kept_exact && job.view.quality == RenderQuality::Final && error.is_none();
                 Ok(Produced {
                     surface,
                     view,
                     timings,
                     reuse: FrameReuse::Scrolled { dx, dy },
-                    exact: kept.final_exact
-                        && job.view.quality == RenderQuality::Final
-                        && error.is_none(),
+                    exact,
                     error,
                     covered,
                     fresh: strips,
                     base: Some(kept.generation),
+                    inexact: if exact {
+                        DeviceRect::EMPTY
+                    } else {
+                        job.view.viewport
+                    },
                 })
             }
             Plan::Rescale if !job.cpu_rescale => Err(Abandoned::Skipped),
@@ -631,6 +652,38 @@ impl<R: FrameRenderer> Worker<'_, R> {
                     covered,
                     fresh: Vec::new(),
                     base: None,
+                    inexact: job.view.viewport,
+                })
+            }
+            Plan::Repaint { rects } => {
+                let Some(kept) = self.kept.take() else {
+                    return self.produce_full(job, timings);
+                };
+                let mut surface = kept.surface;
+                let mut error = None;
+                for r in &rects {
+                    let e = self.draw_rect(job, &job.view, *r, &mut surface, &mut timings);
+                    error = error.or(e);
+                }
+                let fin = job.view.quality == RenderQuality::Final;
+                // A `Final` repaint included the kept frame's inexact
+                // rectangle; a `Draft` one adds its own to it.
+                let inexact = if fin && error.is_none() {
+                    DeviceRect::EMPTY
+                } else {
+                    rects.iter().fold(kept.inexact, |a, r| a.union(*r))
+                };
+                Ok(Produced {
+                    surface,
+                    view: job.view,
+                    timings,
+                    reuse: FrameReuse::Repainted,
+                    exact: inexact.is_empty(),
+                    error,
+                    covered: kept.covered,
+                    fresh: rects,
+                    base: Some(kept.generation),
+                    inexact,
                 })
             }
             Plan::Full => self.produce_full(job, timings),
@@ -643,16 +696,22 @@ impl<R: FrameRenderer> Worker<'_, R> {
         mut timings: FrameTimings,
     ) -> Result<Produced, Abandoned> {
         let (surface, error) = self.full(job, &mut timings)?;
+        let exact = job.view.quality == RenderQuality::Final && error.is_none();
         Ok(Produced {
             surface,
             view: job.view,
             timings,
             reuse: FrameReuse::Full,
-            exact: job.view.quality == RenderQuality::Final && error.is_none(),
+            exact,
             error,
             covered: job.view.viewport,
             fresh: vec![job.view.viewport],
             base: None,
+            inexact: if exact {
+                DeviceRect::EMPTY
+            } else {
+                job.view.viewport
+            },
         })
     }
 }
@@ -722,6 +781,7 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
         match p.reuse {
             FrameReuse::Scrolled { .. } => st.stats.scrolled += 1,
             FrameReuse::Rescaled => st.stats.rescaled += 1,
+            FrameReuse::Repainted => st.stats.repainted += 1,
             FrameReuse::Full => {}
         }
         // The pixels are kept whatever happens to the frame: they are a
@@ -730,10 +790,12 @@ fn worker_loop<R: FrameRenderer>(shared: &Shared, renderer: R, waker: &Waker) {
         w.kept = Some(Kept {
             doc: job.doc,
             scene_epoch: job.scene_epoch,
+            scene: Arc::clone(&job.scene),
+            resolver: Arc::clone(&job.resolver),
             background: job.background,
-            page_colour: job.page.map(|(_, c)| c),
+            page: job.page,
             view: p.view,
-            final_exact: p.exact,
+            inexact: p.inexact,
             surface: p.surface,
             generation: job.generation,
             covered: p.covered,
@@ -776,19 +838,43 @@ mod tests {
     use std::time::Duration;
     use xarast_render::{DeviceRect, Scene};
 
-    /// A frame of an empty scene. Every call has a new scene epoch, so the
-    /// worker never reuses one for another and each one reaches the
-    /// renderer.
+    /// A frame of one invisible rectangle over the whole view, in a colour
+    /// of its own (alpha 0, so the backdrop shows). Every call has a new scene epoch and a scene whose damage is
+    /// the whole view, so the worker never reuses one for another and each
+    /// one reaches the renderer.
     fn job(w: u32, h: u32) -> FrameJob {
         static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let view = ViewParams {
             viewport: DeviceRect::from_size(w, h),
             ..ViewParams::default()
         };
+        let epoch = EPOCH.fetch_add(1, Ordering::SeqCst);
+        let mut scene = Scene::new();
+        {
+            use xarast_geom::{Mp, Point, Rect};
+            let mut p = xarast_geom::Path::builder();
+            p.rect(Rect::new(
+                Point::new(Mp::ZERO, Mp::ZERO),
+                Point::new(Mp::from_pt(f64::from(w)), Mp::from_pt(f64::from(h))),
+            ));
+            let mut b = xarast_render::SceneBuilder::begin(&mut scene, RenderQuality::Final);
+            b.fill(
+                xarast_render::SceneNodeId(1),
+                &xarast_render::PathRef::new(p.build()),
+                xarast_geom::FillRule::NonZero,
+                xarast_render::Paint::Solid(xarast_color::Rgba8 {
+                    r: epoch.to_le_bytes()[0],
+                    g: epoch.to_le_bytes()[1],
+                    b: 0,
+                    a: 0,
+                }),
+            );
+            b.finish().unwrap();
+        }
         FrameJob {
             doc: DocumentId(7),
-            scene: Arc::new(Scene::new()),
-            scene_epoch: EPOCH.fetch_add(1, Ordering::SeqCst),
+            scene: Arc::new(scene),
+            scene_epoch: epoch,
             ink: view.viewport,
             resolver: Arc::new(Resolver::new()),
             view,
@@ -1156,11 +1242,120 @@ mod tests {
         let full = next_frame(&fresh, &fresh_woken);
         assert_eq!(full.reuse, FrameReuse::Full);
         assert_ne!(full.surface, first.surface, "the pan moved something");
-        assert!(
-            max_diff(&scrolled.surface, &full.surface) <= 1,
-            "scrolled and full renders differ by {}",
-            max_diff(&scrolled.surface, &full.surface)
+        // Exact: the rasteriser's origin does not depend on the strip
+        // (`determinism::coverage_does_not_depend_on_the_draw_area`).
+        assert_eq!(
+            max_diff(&scrolled.surface, &full.surface),
+            0,
+            "scrolled and full renders differ"
         );
+    }
+
+    /// Recolours the smallest path wholly in view; returns its device
+    /// bounds.
+    fn recolour_one(s: &mut crate::Session) -> DeviceRect {
+        let vp = s.viewport.device_rect();
+        let (n, r) = s
+            .doc
+            .tree
+            .preorder(s.doc.tree.root())
+            .filter(|n| matches!(s.doc.tree.kind(*n), Some(xarast_doc::NodeKind::Path(_))))
+            .map(|n| {
+                let r = crate::viewport::device_rect_of(
+                    &s.viewport,
+                    crate::viewport::nodes_rect(&s.doc, [n]),
+                );
+                (n, r)
+            })
+            .filter(|(_, r)| r.intersection(vp) == *r && r.area() >= 16)
+            .min_by_key(|(_, r)| r.area())
+            .expect("an object in view");
+        let fill = xarast_doc::fill::FillGeometry::Flat {
+            value: xarast_color::Colour::Direct(xarast_color::ColourValue::Rgbt {
+                r: 0.9,
+                g: 0.1,
+                b: 0.6,
+                t: 0.0,
+            }),
+        };
+        s.apply_edit(crate::EditCommand::Fill {
+            edits: vec![crate::fill_tool::FillCommand::SetGeometry(
+                xarast_doc::SetFillGeometry {
+                    node: n,
+                    slot: xarast_doc::fill_edit::PaintSlot::Fill,
+                    value: xarast_doc::fill_edit::FillValue::Colour(fill),
+                },
+            )],
+        })
+        .unwrap();
+        s.rebuild_scene(None).unwrap();
+        r
+    }
+
+    #[test]
+    fn an_edit_repaints_its_damage_and_matches_a_full_render() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        let first = next_frame(&rt, &woken);
+
+        let object = recolour_one(&mut s);
+        let job = s.frame_job(BG, PAGE);
+        rt.submit(job.clone());
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Repainted);
+        assert!(f.exact);
+        assert_eq!(f.base, Some(first.generation));
+        assert_ne!(f.scene_epoch, first.scene_epoch);
+        let fresh = f.fresh.iter().fold(DeviceRect::EMPTY, |a, r| a.union(*r));
+        // The object's bounds with the slack of its outline, not the view.
+        assert!(fresh.intersection(object) == object, "{fresh:?} {object:?}");
+        assert!(
+            object.inflated(6).intersection(fresh) == fresh,
+            "{fresh:?} {object:?}"
+        );
+        assert!(fresh.area() * 4 < f.view.viewport.area(), "{fresh:?}");
+        let (mut full, full_woken) = cpu_thread();
+        full.submit(job);
+        let whole = next_frame(&full, &full_woken);
+        assert_ne!(whole.surface, first.surface, "the edit changed something");
+        assert_eq!(f.surface, whole.surface, "the repaint is the full frame");
+
+        // Undo repaints the same rectangles back to the first frame.
+        s.undo().unwrap();
+        s.rebuild_scene(None).unwrap();
+        rt.submit(s.frame_job(BG, PAGE));
+        let u = next_frame(&rt, &woken);
+        assert_eq!(u.reuse, FrameReuse::Repainted);
+        assert_eq!(u.fresh, f.fresh);
+        assert_eq!(u.surface, first.surface);
+        assert_eq!(rt.stats().repainted, 2);
+    }
+
+    #[test]
+    fn a_draft_repaint_is_made_exact_by_the_final() {
+        let mut s = drawing();
+        let (mut rt, woken) = cpu_thread();
+        rt.submit(s.frame_job(BG, PAGE));
+        next_frame(&rt, &woken);
+        recolour_one(&mut s);
+        let mut draft = s.frame_job(BG, PAGE);
+        draft.view.quality = RenderQuality::Draft;
+        rt.submit(draft);
+        let d = next_frame(&rt, &woken);
+        assert_eq!(d.reuse, FrameReuse::Repainted);
+        assert!(!d.exact);
+        // Same scene, now Final: only the Draft rectangles are redrawn.
+        let fin = s.frame_job(BG, PAGE);
+        rt.submit(fin.clone());
+        let f = next_frame(&rt, &woken);
+        assert_eq!(f.reuse, FrameReuse::Repainted);
+        assert!(f.exact);
+        let drafted = d.fresh.iter().fold(DeviceRect::EMPTY, |a, r| a.union(*r));
+        assert_eq!(f.fresh, vec![drafted]);
+        let (mut full, full_woken) = cpu_thread();
+        full.submit(fin);
+        assert_eq!(f.surface, next_frame(&full, &full_woken).surface);
     }
 
     #[test]
@@ -1280,10 +1475,10 @@ mod tests {
         CpuBackend::new(CpuConfig::deterministic())
             .render(&list, &job.resolver, &mut one)
             .unwrap();
-        assert!(
-            max_diff(&f.surface, &one) <= 1,
-            "{}",
-            max_diff(&f.surface, &one)
+        assert_eq!(
+            max_diff(&f.surface, &one),
+            0,
+            "columns differ from one call"
         );
     }
 }

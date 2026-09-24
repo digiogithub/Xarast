@@ -35,7 +35,8 @@ revisions) is in [`document-model.md`](document-model.md) decisions 7, 19,
 | Snapping: `SnapSource`, resolver, grid, guides, objects (corners, then outlines), NumPad toggles, marker | `snap.rs`, `ToolCtx::snap_point`/`snap_move` | done (XARA-US-0036, T-0153) |
 | Guides/grid as undoable document edits; ruler guides and grid settings wired | `snap.rs` `GuideCommand`, shell `ui_intent` | done |
 | `--probe snap|arrange|paste` | `xarast-shell` | done |
-| Text tool (F8): caret, selection, visual/logical bidi navigation, pending point/column story; `Intent::TextNav`; text stories pickable by their line box; selector double click on text → text tool | `text_edit.rs`, `text_tool.rs`, `picking.rs` | done (XARA-US-0047, T9.4.1–T9.4.4 + the T9.4.5 gestures); typing/IME/clipboard are T9.4.6–T9.4.8 |
+| Text tool (F8): caret, selection, visual/logical bidi navigation, pending point/column story; `Intent::TextNav`; text stories pickable by their line box; selector double click on text → text tool | `text_edit.rs`, `text_tool.rs`, `picking.rs` | done (XARA-US-0047, T9.4.1–T9.4.4 + the T9.4.5 gestures); typing T9.4.6 done; IME/clipboard are T9.4.7–T9.4.8 |
+| Text infobar (font, size, B/I/U, align, spacing, tracking), OpenType panel, text ruler; `EditCommand::SetTextAttr`; `ToolRequests::current` | `text_infobar.rs`, `text_tool.rs`, `ops.rs`, `tool.rs` | done (XARA-T-0225, T9.4.9–T9.4.10; decision 59) |
 
 Tests: `crates/xarast-app/tests/transforms.rs` (18: dual state, scale
 corner/aspect/centre, live Ctrl mid-scale, line widths, rotate with
@@ -424,13 +425,15 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     never delete the story object. Choosing the tool
     with one story selected enters it with the caret at the end; the
     selector's double click on a story does that (decision 27).
-54. **The tool lays stories out itself**, through the walker's bridge
-    (`text::story_input`, `layout_text`) with the attributes resolved at
-    the story (`resolve_inherited`), cached per story and dropped
-    wholesale when `Document::epoch` moves. Hit testing walks every story
-    on a visible, unlocked, non-guide layer (topmost wins), inverse-maps
-    the point with the story matrix and tests the line boxes with a 4 px
-    tolerance. Fonts are the process's shared service
+54. **The tool lays stories out itself**, with the walker's own function
+    (`text::lay_story`: bridge, `layout_text`, and on a path the path's
+    column plus the `PathFit`) with the attributes resolved at the story
+    (`resolve_inherited`), cached per story and dropped wholesale when
+    `Document::epoch` moves. Hit testing walks every story on a visible,
+    unlocked, non-guide layer (topmost wins), inverse-maps the point with
+    the story matrix and asks `CaretMap::hit_point` for the caret and the
+    distance to the text (line boxes, or fitted cluster boxes on a path),
+    with a 4 px tolerance. Fonts are the process's shared service
     (`TextTool::with_fonts` for pinned fonts).
 55. **Text is picked by its line box.** The pick index adds each
     `TextStory` as one `Geometry::Bounds` leaf (the `story_rect` of its
@@ -469,6 +472,46 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     removes the story too). `ToolAction::Delete` (Edit › Delete) deletes
     forwards and `ToolAction::Finish` breaks the paragraph, never joining a
     burst.
+58. **Text on a path in the tool (XARA-T-0250).** The overlay is built
+    from story-space geometry the `CaretMap` computes
+    (`caret_segments`, `selection_quads`), mapped by the story matrix
+    only; the tool no longer builds carets or highlights from
+    `caret_geometry`/`selection_rects` itself. So on a path the caret is
+    the fitted cluster's edge, turned (and sheared) with the glyph, the
+    highlight is one `OverlayShape::Highlight` quad per selected cluster
+    (plus one for a selected paragraph break), and no shell or `xarast-ui`
+    change was needed (`Caret` was already any segment, `Highlight` any
+    quad). Caret motion (arrows, Home/End, Up/Down with a goal x) stays in
+    the straight layout: bending a line changes neither logical nor
+    visual order.
+
+59. **Text attributes from the infobar (XARA-T-0225, T9.4.9–T9.4.10).**
+    The text tool describes font family (`InfobarItem::FontFamily`,
+    `InfobarValue::Choice` = index into the list it offered), size
+    (`InfobarItem::Scalar`, points), bold/italic/underline (`Toggle`),
+    alignment (`Choice`), line spacing and tracking (`Scalar`), the
+    OpenType panel (`InfobarItem::Features`, `InfobarField::TextFeature(tag)`
+    + `Toggle`) and, for a straight story with a caret, the tab kind choice
+    and `InfobarItem::TextRuler` (drawn by the UI on the horizontal ruler,
+    raising `TextLeftMargin`/`TextRightMargin`/`TextFirstIndent`/
+    `TextTabAdd`/`TextTabMove(i)`/`TextTabRemove(i)`). All through the
+    existing `Intent::InfobarEdit`, so no shell change. **Where an edit
+    goes**, in order: a selection in a story → one `EditCommand::SetTextAttr`
+    step (label from the slot: "Bold", "Font Size", "Tab Stops"…); a caret →
+    a paragraph attribute at once on its paragraph, a character attribute
+    into the tool's **pending style** (document untouched, bar shows it),
+    which the next `TypeText` gets through a `SetTextAttr` with the same
+    burst key (**one undo step "Typing"**); any caret change drops it; a
+    pending caret keeps its style (any attribute) and `CreateText` gets it
+    over the current attributes; no caret but stories selected → each whole
+    story, all in one step (a shared fresh burst key); nothing selected →
+    `ToolRequests::current` (new, additive) and the session sets the current
+    attributes. An attribute edit ends a typing burst. An edit whose value
+    is already what the bar shows emits nothing (no empty undo steps). The
+    ruler commits **on release**, one step per drag.
+60. **Invariant 11 widened**: the text tool mutates the document only by
+    typing and by attribute edits the user asked for; choosing an attribute
+    at a caret changes nothing until text is typed.
 
 ### Shortcuts added (`research/04 §4.2–4.4`)
 
@@ -525,17 +568,21 @@ duplicate while plain `D` is fit drawing — different chords.
 10. A fill or transparency drag emits nothing before release; the release
     is one `EditCommand::Fill` step, and what the preview drew is what the
     commit renders (pixel-identical, `tests/fill_tool.rs`).
-11. The text tool never mutates the document except by typing:
-    entering, selecting, navigating and preparing a new story leave the
-    canonical digest and the undo history as they were
-    (`tests/text_tool.rs`); a click on empty canvas never creates an empty
-    story.
+11. The text tool never mutates the document except by typing and by
+    infobar/ruler attribute edits: entering, selecting, navigating,
+    preparing a new story and choosing a character attribute at a caret
+    leave the canonical digest and the undo history as they were
+    (`tests/text_tool.rs`, `tests/text_infobar.rs`); a click on empty
+    canvas never creates an empty story.
 12. While a text caret is up, Delete/Backspace/Enter never reach the
     object-level commands.
 13. A typing burst is one undo step and one `Ctrl+Z` restores the digest
     from before it, story creation included
     (`typing_200_characters_is_one_undo_step`,
     `the_first_character_at_a_pending_caret_creates_the_story`).
+14. An infobar attribute edit is at most one undo step, and none when the
+    value is already in force; at a caret it merges into the typing step
+    it styles.
 
 ## Dead ends (do not retry)
 

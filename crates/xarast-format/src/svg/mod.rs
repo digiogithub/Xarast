@@ -37,6 +37,7 @@
 //! re-emitted verbatim only when it is a well-formed fragment; stripping
 //! active content from baggage is the reader's job (`§5.3`).
 
+mod bake;
 pub mod defs;
 mod emit;
 pub mod frame;
@@ -211,7 +212,10 @@ pub struct Stats {
     pub images_unrenderable: usize,
     pub texts: usize,
     pub characters: usize,
-    /// Stories on a path, laid out as ordinary lines until Phase 9.
+    /// Stories on a path the base SVG shows on straight lines: no
+    /// [`TextPlacer`] placed them along the path (it cannot when the
+    /// characters are reflected or sheared). The others have each
+    /// character placed and turned on the path (T9.5.6).
     pub text_on_path: usize,
     pub clips: usize,
     /// ClipViews whose clipping shape is not a path or shape.
@@ -225,6 +229,10 @@ pub struct Stats {
     /// Fills SVG cannot draw (conical, diamond, 3/4-colour, fractal, noise,
     /// bitmap transparency), written as an approximation plus their twin.
     pub fills_approximated: usize,
+    /// Conical and three- and four-colour fills and transparencies drawn
+    /// as fine SVG geometry within a few levels of the model (`bake.rs`),
+    /// plus their twin. Diamonds are baked exactly and not counted.
+    pub fills_baked: usize,
     /// Perspective gradients drawn as their affine part.
     pub perspective_approximated: usize,
     pub blend_modes: usize,

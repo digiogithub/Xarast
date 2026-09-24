@@ -54,6 +54,7 @@ pub mod panel;
 pub mod panels;
 pub mod rulers;
 pub mod scale;
+pub mod text_ruler;
 pub mod theme;
 pub mod toolbar;
 pub mod units;

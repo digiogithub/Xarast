@@ -20,6 +20,7 @@ pub mod convert;
 pub mod export;
 pub mod fixtures;
 pub mod inputs;
+pub mod inspect;
 pub mod render;
 pub mod smoke;
 
@@ -56,6 +57,7 @@ SUBCOMMANDS
     convert      convert .xar documents to .xarast packages
     export       export documents to PNG, JPEG, WebP, PDF or SVG
     fixtures     export the built-in test documents (CI's export checks)
+    inspect      report what a document holds (--fills: every fill)
     render       render documents to PNG on the CPU backend
     smoke-open   import documents, walk the scene and report what is missing
     version      print the version
@@ -87,6 +89,7 @@ pub fn run(argv: &[String]) -> Exit {
         "convert" => dispatch(rest, convert::USAGE, convert::parse, convert::run),
         "export" => dispatch(rest, export::USAGE, export::parse, export::run),
         "fixtures" => dispatch(rest, fixtures::USAGE, fixtures::parse, fixtures::run),
+        "inspect" => dispatch(rest, inspect::USAGE, inspect::parse, inspect::run),
         "render" => dispatch(rest, render::USAGE, render::parse, render::run),
         "smoke-open" => dispatch(rest, smoke::USAGE, smoke::parse, smoke::run),
         other => {

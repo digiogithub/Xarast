@@ -1290,6 +1290,12 @@ impl<'d, 'b> Emitter<'d, 'b> {
             let p = width / 2 + 1;
             (a - p, b - p, c + p, d + p)
         });
+        // The box a baked fill covers (`bake.rs`): the geometry plus a
+        // point, so an antialiased edge pixel never samples the pattern's
+        // next tile. Not the line width: an unstroked element does not
+        // write it, and the box must come back the same on a re-save.
+        let fill_box = bounds.map(|(a, b, c, d)| (a - 1000, b - 1000, c + 1000, d + 1000));
+        let stroke_box = mbox.map(|(a, b, c, d)| (a - 1000, b - 1000, c + 1000, d + 1000));
 
         let this = &mut *self;
         let mut ctx = PaintCtx {
@@ -1301,7 +1307,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             bitmap_href: &mut *this.bitmap_href,
         };
         let fill = match &fill_paint {
-            Some(p) => colour_paint(&mut ctx, p, fill_tiling, effect),
+            Some(p) => colour_paint(&mut ctx, p, fill_tiling, effect, fill_box),
             None => PaintOut {
                 value: "none".into(),
                 ..PaintOut::default()
@@ -1314,7 +1320,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             _ => TranspOut::default(),
         };
         let stroke = match &stroke_paint {
-            Some(p) => colour_paint(&mut ctx, p, Tiling::None, effect),
+            Some(p) => colour_paint(&mut ctx, p, Tiling::None, effect, stroke_box),
             None => PaintOut {
                 value: "none".into(),
                 ..PaintOut::default()
@@ -1738,19 +1744,27 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 tangential,
                 left_indent,
                 right_indent,
+                chars,
             } => {
-                self.stats.text_on_path += 1;
                 el.a("xarast:layout", "path");
-                el.a(
-                    "xarast:path-params",
-                    format!(
-                        "{} {} {} {}",
-                        bool_s(*reversed),
-                        bool_s(*tangential),
-                        mp(i64::from(left_indent.raw())),
-                        mp(i64::from(right_indent.raw()))
-                    ),
+                let mut params = format!(
+                    "{} {} {} {}",
+                    bool_s(*reversed),
+                    bool_s(*tangential),
+                    mp(i64::from(left_indent.raw())),
+                    mp(i64::from(right_indent.raw()))
                 );
+                // The pre-fit character transform, only when there is one:
+                // reflected, then rotation and shear as 16.16 radians.
+                if !chars.is_identity() {
+                    params.push_str(&format!(
+                        " {} {} {}",
+                        bool_s(chars.reflected),
+                        chars.rotation,
+                        chars.shear
+                    ));
+                }
+                el.a("xarast:path-params", params);
             }
         }
         if !story.auto_kern {
@@ -1765,6 +1779,13 @@ impl<'d, 'b> Emitter<'d, 'b> {
             Some(p) => p.0.place(self.doc, n, &mut self.attrs),
             None => None,
         };
+        // Text on a path is drawn along it when the placer placed each
+        // character on the path (T9.5.6); otherwise on straight lines.
+        if matches!(story.layout, TextLayout::OnPath { .. })
+            && !placement.as_ref().is_some_and(|p| p.along_path)
+        {
+            self.stats.text_on_path += 1;
+        }
         let others: Vec<NodeId> = self
             .doc
             .tree
@@ -2002,6 +2023,9 @@ impl<'d, 'b> Emitter<'d, 'b> {
             // One position per character the browser draws.
             let mut xs: Vec<i64> = Vec::new();
             let mut ys: Vec<i64> = Vec::new();
+            // Along a path, each character's turn in SVG degrees
+            // (clockwise, y down).
+            let mut turns: Vec<f64> = Vec::new();
             for (n, item) in &items {
                 let drawn = match item {
                     TextItem::Char(c) => is_xml_char(*c),
@@ -2011,23 +2035,34 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 if !drawn {
                     continue;
                 }
-                let (x, y) = match p.chars.get(n) {
-                    Some((x, y)) => (i64::from(x.raw()), -i64::from(y.raw())),
-                    None => match (xs.last(), ys.last()) {
-                        (Some(x), Some(y)) => (*x, *y),
+                let (x, y, turn) = match p.chars.get(n) {
+                    Some((x, y)) => (
+                        i64::from(x.raw()),
+                        -i64::from(y.raw()),
+                        -p.rotations.get(n).copied().unwrap_or(0.0),
+                    ),
+                    None => match (xs.last(), ys.last(), turns.last()) {
+                        (Some(x), Some(y), Some(t)) => (*x, *y, *t),
                         _ => continue,
                     },
                 };
                 xs.push(x);
                 ys.push(y);
+                turns.push(turn);
             }
             if let Some(&y0) = ys.first() {
-                let mut pos = Vec::with_capacity(2);
+                let mut pos = Vec::with_capacity(3);
                 pos.push(("x".to_owned(), join_mp(&xs)));
                 if ys.iter().all(|v| *v == y0) {
                     pos.push(("y".to_owned(), mp(y0)));
                 } else {
                     pos.push(("y".to_owned(), join_mp(&ys)));
+                }
+                // One turn per character (SVG repeats the last value for
+                // the characters a shorter list does not reach).
+                if p.along_path && turns.iter().any(|t| *t != 0.0) {
+                    let t: Vec<String> = turns.iter().map(|t| f64s(*t + 0.0, 3)).collect();
+                    pos.push(("rotate".to_owned(), t.join(" ")));
                 }
                 el.attrs.splice(0..0, pos);
             }

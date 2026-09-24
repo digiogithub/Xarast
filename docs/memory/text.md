@@ -9,19 +9,20 @@ Round 1 of phase 9 (2026-09-23) built `xarast-text` in isolation. Round 2
 (the same day, text integration) made **imported text render**: the text
 model in `xarast-doc` (W9.2, read side), the attribute bridge and the
 walker's text path in `xarast-app`, font service and substitution reporting.
-`text_pending` is 0 on the whole corpus; only `Designs/TextCurve.xar` is
-approximate (text on a path drawn straight, `text_on_path_pending`). Edit
-commands (T9.2.4), `format_story` writing lines back (T9.3.12), the text
-tool (W9.4) and text on a path (W9.5) are later rounds.
+`text_pending` is 0 on the whole corpus. Text on a path (W9.5,
+2026-09-24) follows its path: `Designs/TextCurve.xar` draws every story
+along its curve, `text_on_path_pending` is 0 on the corpus, and
+architecture open question 4 is closed (see "Text on a path" below).
 
 | Story | Tasks | State |
 |---|---|---|
 | XARA-US-0044 W9.1 font database | T9.1.1–T9.1.4 done; T9.1.5 (substitution ladder) implemented and tested too | in review |
 | XARA-US-0046 W9.3 shaping and layout | T9.3.1–T9.3.4 done; T9.3.5 (line metrics), T9.3.6 (tracking, manual kerns, auto-kern), T9.3.7 (baseline, script, aspect) and a first T9.3.9 (bidi) came along because layout cannot return lines without them | in review |
 | XARA-US-0049 W9.6 outlines | T9.6.1–T9.6.2 done; T9.6.3 convert command (XARA-T-0243) and T9.6.4 source text (XARA-T-0244) done, see "Convert to shapes" below; T9.6.5 export fallback open (XARA-T-0245) | in review |
-| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr`, `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
-| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). IME, clipboard, infobar, ruler (T9.4.7–T9.4.10) open | in review |
-| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip); golden images open | in progress |
+| XARA-US-0045 W9.2 text model | read side done: `StoryText`, `TextPos`/`TextCursor`, attribute bridge, importer scoping and surrogates; edit commands (T9.2.4): `InsertText`, `DeleteRange` done (XARA-T-0223), `SetTextAttr` done (XARA-T-0225), `InsertKern`, `SetStoryMode` open; story invariants (T9.2.5) open | in review |
+| XARA-US-0047 W9.4 text tool | T9.4.1 state machine, T9.4.2 caret (blinking, split at direction boundaries), T9.4.3 selection spans in visual order, T9.4.4 keyboard navigation done; the T9.4.5 mouse gestures (click-to-position, drag, double/triple click) came along. T9.4.6 typing, grapheme deletion, undo per burst done (XARA-T-0223, with the T9.2.4 `InsertText`/`DeleteRange` commands). Text infobar, OpenType panel and interactive ruler (T9.4.9–T9.4.10) done (XARA-T-0225). IME, clipboard (T9.4.7–T9.4.8) open | in review |
+| XARA-US-0048 W9.5 text on a path | T9.5.1 spike A, T9.5.2 spike B (test only), T9.5.3 measurement, T9.5.4 A shipped; the walker paints the followed path; convert to shapes follows the path (XARA-T-0246); T9.5.6 the base SVG follows the path (XARA-T-0252, per-character `rotate`, not `<textPath>`: see "Base SVG along the path"). T9.5.5 editing (reverse, fit/remove commands, path editing) open | in review |
+| XARA-US-0050 W9.7 corpus | text renders in the walker (every corpus story); the `.xarast` text writer is exact (XARA-T-0172, done: 59/59 render round trip, T9.7.3); T9.7.1 tag inventory and T9.7.2 golden renders done (XARA-T-0260, see "TextDesigns acceptance gate"); T9.7.4 WOFF2/fsType open (XARA-T-0218), T9.7.5 multi-script open (XARA-T-0261), gate against the original's reference bitmaps open (XARA-T-0262) | in review |
 
 Public API (`crates/xarast-text/src/lib.rs`):
 
@@ -209,8 +210,11 @@ decisions 53–56 and `ui.md` decision 40 for the tool and shell sides.
 - **Pending caret.** A click on empty canvas or a column drag makes a
   *pending* caret, not a story; the first typed character creates it
   (below).
-- **Text on a path** (`OnPath`): the caret follows the straight layout the
-  walker draws until W9.5.
+- **Text on a path** (`OnPath`, XARA-T-0250): the tool lays the story out
+  exactly as the walker does (`text::lay_story`: the path's column, then
+  the fit) and builds `CaretMap::on_path(text, layout, fit)`. Motion is
+  unchanged (straight layout); drawing and hit testing go through the
+  fitted clusters — see "Carets on a path" under "Text on a path".
 
 Measured (`cargo bench -p xarast-app --bench text_caret`, 10 000
 characters, Latin + Hebrew, 300 pt column, pinned fonts; budget 1 ms per
@@ -288,6 +292,65 @@ step, column wrap), `xarast-shell`
 `a_text_caret_takes_the_navigation_and_character_keys` (typing via key
 events).
 
+## Text attributes: `SetTextAttr`, the infobar, the ruler (XARA-T-0225, as built)
+
+Code: `xarast-doc/src/text_edit.rs` (`SetTextAttr`, `set_text_attr`,
+`is_paragraph_slot`, `paragraph_line_range`, `text_attr_label`),
+`xarast-app/src/text_infobar.rs` (values shown, field → attribute, feature
+and tab edits), `text_tool.rs` (targets, pending style),
+`ops.rs` (`EditCommand::SetTextAttr { story, edits, burst }`),
+`xarast-ui/src/toolbar.rs` (widgets) and `text_ruler.rs` (the ruler).
+
+- **Byte ranges, like the other edit commands.** `SetTextAttr { story,
+  range, value }`; the app's `EditCommand::SetTextAttr` carries several
+  `(range, value)` pairs so one step can set, per run, a feature list that
+  keeps each run's other features.
+- **A character attribute becomes an own attribute child of every item in
+  the range** (chars, tabs, paragraph breaks; not kerns), replacing the
+  item's own child of that slot (`set_attr` when one exists). Own children
+  apply to their item alone (the collector pushes them in the item's own
+  scope), so nothing outside the range changes, and `insert_text` copies the
+  previous character's own children onto typed text, so typing after bold
+  text is bold. No sibling attribute + "restore" pair (the importer's
+  representation): it would need the value in force after the range, per
+  slot, and a delete could strand the restore.
+- **A paragraph attribute** (justification, line spacing, left/right margin,
+  first-line indent, ruler: `is_paragraph_slot`) goes on **every line of
+  every paragraph the range touches** (`paragraph_line_range`; the caret's
+  paragraph for an empty range) as one line-level attribute right before the
+  line's first item; other attributes of that slot before the first item,
+  and the first item's own child of that slot, are removed, because layout
+  reads a line's attributes at its first item. A line with no items is left
+  alone (it reads its attributes from outside itself).
+- **Setting a value an item already has** changes nothing but still records
+  an (empty) step through the bare bus; the tool therefore never emits an
+  edit whose value is already shown (`plain_edit`/`story_edits` compare).
+- **OpenType features** are Xarast's own attribute slot `TxtFeatures`
+  (`AttrValue::FontFeatures`, `FeatureSetting { tag, value }` sorted by tag,
+  `document-model.md`), bridged to `StyleRange::features` and written as
+  `xarast:features` (`research/06 §6.7`). The panel offers liga, dlig, smcp,
+  c2sc, onum, lnum, tnum, pnum, frac, zero, swsh, ss01; a setting equal to
+  the font's default (only `liga` defaults on) is dropped from the list
+  rather than stored. Whether a feature *renders* depends on the font:
+  the pinned Noto Sans subsets have no `smcp`, so no test asserts glyphs.
+- **Font family chooser**: the database's families (`FontDb::families`,
+  sorted) once enumerated, empty until then (the tool never waits for
+  enumeration from the infobar); the tool remembers the list it offered so
+  a chosen index resolves to the family shown. A chosen family becomes
+  `TypefaceRef { family, full_name: family, panose: None }`. A substituted
+  family still shows its own name.
+- **Line spacing field**: per cent of the ratio, or points when the
+  paragraph already spaces absolutely; the typed number is read in the
+  field's current mode (no way to switch mode from the bar yet).
+
+Tests: `xarast-doc` `text_edit::tests` (+3: a character attribute styles
+exactly its range and typing after it; a paragraph attribute on every line
+of the touched paragraphs, also after a break was deleted; non-text values
+and bad ranges refused), `xarast-format` `tests/svg_text_features.rs` (2),
+`xarast-app` `text_infobar::tests` (3) and `tests/text_infobar.rs` (8, through
+`Session` intents), `xarast-ui` `tests/text_bar.rs` (4, AccessKit) and
+`text_ruler::tests` (5, two through the canvas widget's raw input).
+
 ## Convert to shapes (W9.6, as built, XARA-US-0049)
 
 Code: `xarast-doc/src/text_convert.rs` (`convert_story_to_shapes`,
@@ -316,8 +379,12 @@ Code: `xarast-doc/src/text_convert.rs` (`convert_story_to_shapes`,
   group. Multi attributes of the runs are not copied (the walker ignores
   them on text).
 - **A story with no ink** (only spaces, or no font at all) is left alone,
-  not replaced by an empty group. Text on a path converts to what the
-  walker draws today: straight (XARA-T-0246 after W9.5).
+  not replaced by an empty group.
+- **Text on a path** converts to outlines along the path (the walker's
+  fitted geometry), and the path it followed goes into the group first,
+  with the non-text attributes it painted with, as the original keeps it
+  (`Kernel/nodetxts.cpp:1791-1806`). `Designs/TextCurve.xar`: every story
+  converted, 0 differing pixels, exact undo (XARA-T-0246).
 - **Source text in `.xarast`**: `<g xarast:kind="group"
   xarast:was-text="true">` with a first child
   `<xarast:text-source>…</xarast:text-source>` (`research/06 §6.7`);
@@ -416,6 +483,78 @@ aliases used: Liberation Sans/Serif/Mono), Calisto MT, Book Antiqua (→
 Noto Serif via PANOSE), Calligraphic, Margaret, Myriad Web (→ Noto Sans),
 KirbysHand and Swis721 Blk BT (defined in files, never reached a laid-out
 run).
+
+### TextDesigns acceptance gate (W9.7, XARA-T-0260, as built)
+
+`crates/xarast-cli/tests/text_designs.rs`, over the 14 files the corpus
+lock lists under `TextDesigns/` (skips without `XARAST_XAR_CORPUS`):
+
+- **Criterion 3.** `xar-dump --tags` on each file; a row whose name carries
+  the `!` (no decoder) inside 2100-2117, 2200-2204, 2900-2920 or 4200-4207
+  fails. None does.
+- **Criterion 2.** `xarast-cli render <dir> --out-dir <tmp> --zoom 200`
+  with `XARAST_FONT_DIR` = the pinned set: exit 0, `14 rendered (14 with
+  ink)`, no `[not drawn: …]`, and each PNG's
+  `xarast_render::golden::digest` (SHA-256 of size + RGBA) equals the row
+  in `crates/xarast-cli/tests/golden/text_designs.sha256` (gate A, exact).
+  `XARAST_UPDATE_GOLDEN=1` rewrites the file; a mismatch keeps the render
+  in the temp directory and prints its path.
+- **No missing-glyph boxes.** Each story's layout through
+  `text_tool::caret_map(..).layout()` (the walker's own `lay_story`): no
+  glyph id 0 on a non-space, non-control character.
+- **Criterion 12 / T9.7.3** is `xarast-app/tests/xarast_roundtrip.rs`
+  (all 59 files, these 14 included, zero differing pixels).
+
+**Golden policy for corpus renders.** The files are Xara's artwork and
+each carries a bitmap of the original's own rendering, so neither they
+nor our renders of them are committed (the PNG goldens of
+`xarast-render/tests/golden/` are our own synthetic scenes). A corpus
+golden is a **digest plus the size**: derived, small, and exact. It is a
+regression gate only: with the pinned set every family here (Arial, Times
+New Roman, Calisto MT, Book Antiqua, Calligraphic, Margaret, Myriad Web)
+falls to Noto Sans, wider than Arial, so the renders do *not* overlay the
+reference bitmaps. Gating against those (metric-compatible pinned faces,
+gate C) is XARA-T-0262. 200 % rather than 100 % so a sub-point move
+changes pixels; the whole test runs in ≈ 0.5 s (release deps) and the
+render in ≈ 1.2 s debug.
+
+**Tag inventory (T9.7.1)** — text tags per file, from `xar-dump --tags`:
+
+| File | Text tags |
+|---|---|
+| AngledText | 2100 2101 2200 2201 2203 2900 2906 2907 2908 2910 2918 |
+| BaselineShift | 2100 2200 2201 2203 2900 2906 2907 2919 2920 |
+| FontChangesInText | 2100 2200 2201 2203 2900 2906 2907 2919 2920 |
+| Kerning | 2100 2200 2201 2202 2203 2204 2907 |
+| LineSpacing | 2100 2200 2201 2202 2203 2900 2906 2907 2919 2920 |
+| ManualKern | 2100 2200 2201 2203 2204 2900 2906 2907 2919 2920 |
+| Paragraph | 2100 2200 2201 2202 2203 2900 2906 2907 2919 2920 |
+| Rotated | 2101 2200 2201 2202 2203 2204 2900 2903 2904 2905 2906 2907 2916 2917 2918 2919 2920 |
+| SimpleText | 2100 2200 2201 2203 2906 2907 |
+| SuperSub | 2100 2200 2201 2202 2203 2900 2906 2907 2916 2917 2919 2920 |
+| TextJust | 2100 2200 2201 2203 2903 2904 2905 2906 2907 |
+| Tracking | 2100 2200 2201 2202 2203 2900 2906 2907 2918 2919 2920 |
+| embeddedFonts | 2100 2200 2201 2203 2906 2907 |
+| hebrew | 2101 2200 2201 2203 2900 2906 2907 2919 2920 |
+
+Tag names: 2100 STORY_SIMPLE, 2101 STORY_COMPLEX, 2200 LINE, 2201 STRING,
+2202 CHAR, 2203 EOL, 2204 KERN, 2900 LINESPACE_RATIO, 2903/2904/2905
+JUSTIFICATION_CENTRE/RIGHT/FULL, 2906 FONT_SIZE, 2907 FONT_TYPEFACE, 2908
+BOLD_ON, 2910 ITALIC_ON, 2916/2917 SUPERSCRIPT/SUBSCRIPT_ON, 2918
+TRACKING, 2919 ASPECT_RATIO, 2920 BASELINE. Nothing in 4200-4207 occurs.
+Where the phase table's "exercises" column differs from the inventory:
+
+- **Kerning.xar carries manual kerns** (2204, as ManualKern does); its
+  automatic kerning is the story's auto-kern flag, not a tag.
+- **AngledText.xar**: no attribute tag carries character rotation or
+  shear (none exists in 2900-2920); the angles travel in the story
+  records (2100/2101). It also exercises bold, italic and tracking.
+- **Rotated.xar** is the broadest file: every justification, super/sub,
+  tracking and kerns, besides the story matrix.
+- **LineSpacing.xar** uses only the ratio form (2900); no absolute line
+  spacing tag occurs in any of the 14.
+- **embeddedFonts.xar** has no font data (already noted above), so the
+  embedded-face path (criterion 5) is untested by the corpus.
 
 ## Facts about the original's formatter (read, not copied)
 
@@ -550,7 +689,7 @@ the same line-level attributes); `StoryInput::paragraphs` has one entry per
 |---|---|
 | `AtPoint` | `Point` |
 | `InColumn { width, word_wrap }` | `Column { width, wrap: word_wrap }` (a non-wrapping column still aligns to its width) |
-| `OnPath { .. }` | W9.5: lay out as `Point`, then fit to the path (spike A) |
+| `OnPath { .. }` | `PathFit::story_mode()`: a non-wrapping `Column` as long as the path minus both indents, then fit to the path (W9.5, below). `Point` when the path is missing |
 
 `TextStoryNode.transform` (the `.xar` story matrix) is applied by the
 renderer on top of the story-space layout; `Layout` never includes it.
@@ -583,6 +722,222 @@ format_story(tree, story, shaper):
         TextLine nodes; never touch LineBreak(true))
     cache layout per line; return substitutions for the UI
 ```
+
+## Text on a path (W9.5, as built, XARA-US-0048)
+
+**Architecture open question 4 — decided 2026-09-24: no layout pass of our
+own.** Parley's output (through our own line layout) is laid out straight
+and then carried onto the path by arc length: spike A of the phase doc,
+implemented in `xarast-text/src/path.rs` (`TextPath`, `PathFit`,
+`PathFitStyle`). Spike B (layout-aware spacing) exists only as the
+comparator inside the measurement test and is not shipped.
+
+**The measurement (T9.5.3)**, `xarast-app/src/text_path_fidelity.rs`,
+pinned fonts, per glyph origin displacement over the glyph's advance,
+against the original's rule evaluated independently (a 0.25 mp polyline
+walk, extension along the end control points). Pass = p95 ≤ 0.25 and max
+≤ 0.5:
+
+| Fixture | Glyphs | A p95 / max | B p95 / max |
+|---|---|---|---|
+| Tight open arc (r = 24 pt, 12 pt text inside) | 18 | 0.0021 / 0.0021 | 3.14 / 3.14 |
+| Closed circle, full justification (r = 60 pt, 14 pt) | 51 | 0.0013 / 0.0014 | 5.29 / 5.81 |
+| `Designs/TextCurve.xar` (3 stories) | 1 388 | 0.0007 / 0.0015 | 1.30 / 3.32 |
+| `TextDesigns/AngledText.xar`, `Rotated.xar` | 0 on a path | 0 / 0 (the fit never runs) | 0 / 0 |
+
+A passes on all five fixtures, so by the phase doc's rule A wins. There is
+no rendering of the original to compare with for these files (the
+`TextDesigns` bitmaps are straight text), so the reference is the
+original's documented rule; B fails *because* the original does not
+respace: any layout-aware pass moves glyphs away from where it puts them.
+
+**Known limitation, kept on purpose.** On the inside of a tight curve the
+tops of letters crowd and can touch, exactly as in the original; spacing
+them apart (spike B) is a deliberate departure to consider only as an
+opt-in style (phase 15), never the default.
+
+Facts about the original (read, not copied):
+
+- **Width and margins.** A story on a path formats with `StoryWidth` =
+  the path's length; the physical left margin is the left indent and the
+  physical right margin is the length minus the right indent
+  (`Kernel/nodetxts.cpp:2716-2731`, `Kernel/nodetxtl.cpp:815-816`). So
+  alignment and full justification work along the path. We lay out a
+  `Column { width: length − indents, wrap: false }` and add the left
+  indent to the distance. Word wrap on a path (possible in the original)
+  is not modelled: `OnPath` has no wrap flag and the corpus never wraps.
+- **Placement** (`TextLine::FitTextToPath`, `Kernel/nodetxtl.cpp:1686-1755`):
+  distance = position in line + half the character's *width* (its advance
+  without tracking or kerns); point and tangent at that distance; the
+  character's local frame (origin at its left end on the baseline) is
+  pre-transformed (x by |scale| × aspect, shear, y by scale), turned by
+  the tangent angle about (half width, 0), and translated so that point
+  lands on the path. `LaidCluster::pen` and `::advance` were added for
+  this.
+- **Closed paths** wrap the distance modulo the length; **open paths**
+  extend past either end in a straight line along the end direction
+  (`Kernel/pathproc.cpp:965-1030`: the last two coordinates of the path,
+  so for a curve its end tangent). The original walks a 64 mp flattening
+  and takes the tangent of the flattened segment; we invert kurbo's exact
+  arc length (0.01 mp accuracy) and take the exact derivative. Difference
+  < 64 mp in position.
+- **Lines after the first** are offset by (baseline × scale) along the
+  unit normal of the path's **start** direction (first two coordinates),
+  the same vector for every character of the line — not along each
+  point's normal. Parallel copies of the curve, so lines can meet where
+  the curve turns towards that normal.
+- **The path is the story's first `NodePath` child**
+  (`Kernel/nodetxts.cpp:1932-1935`), stored in document space; the
+  story's matrix is removed from a copy before fitting (reversed first
+  when the text is reversed), so doc = story matrix × fitted character
+  (`CreateUntransformedPath`, `Kernel/nodetxts.cpp:3242-3316`).
+- **The path renders** as an ordinary child (its own attributes, the
+  story's before it); `TextCurve.xar`'s own instructions say to hide it
+  with "no colour". The walker paints it under the text
+  (`paint_story_path`).
+- **The eight on-path records** (`Kernel/cxftext.cpp:671-700`,
+  `Kernel/rechtext.cpp:335-540`): START_LEFT plain, END_RIGHT reversed,
+  START_RIGHT reflected (a negative `CharsScale`), END_LEFT both; the
+  COMPLEX forms add a full story matrix plus `CharsRotation` and
+  `CharsShear` (`ANGLE`, 16.16 radians). The importer used to read
+  "reversed = odd tag", which was wrong for 2111/2112/2115/2116 (none in
+  the corpus). The model keeps these as `TextLayout::OnPath::chars:
+  CharsTransform`; `CharsRotation` is carried but not drawn — the
+  original's own fit has it commented out.
+- **`tangential: false`** (upright characters) is supported by the fit;
+  the original asserts it is always true ("not yet supported").
+- The large horizontal kern at a line's start is how the original lets a
+  user click where text on a path starts (`TextCurve.xar` says so); it is
+  an ordinary manual kern (em/1000), nothing special in the fit.
+
+Evidence: `xarast-text` `path::tests` (8: arc length, reversal, wrapping,
+collapsed handle, degenerate paths, turning about the centre, upright,
+indents and reflection) and `tests/layout.rs`
+`a_cluster_knows_its_glyph_pen_and_its_own_advance`; `xarast-app`
+`tests/text.rs` `text_on_a_path_follows_its_path_and_the_path_is_painted`,
+`tests/corpus.rs` (no story drawn straight), `tests/text_convert.rs`
+`text_on_a_path_converts_to_outlines_along_the_path`; `xarast-format`
+`a_story_on_a_path_keeps_its_parameters_and_its_path`; `xarast-xar`
+`the_eight_on_path_tags_say_reversed_and_reflected`.
+
+### Carets on a path (XARA-T-0250, as built)
+
+Code: `xarast-app/src/text_edit.rs` (`CaretMap::on_path`, `place`,
+`caret_segments`, `selection_quads`, `hit_point`; `Stop::cluster`),
+`text_tool.rs` (`StoryView`).
+
+- **A stop belongs to a cluster** (`Stop::cluster`, the index in the
+  line's clusters). The caret is drawn at *its own* cluster's edge, not
+  "at x on the line": on a curve the right edge of one cluster and the
+  left edge of the next are two different points (the boxes turn apart
+  on the outside of a bend, overlap on the inside). Affinity picks which:
+  downstream = the next cluster's left edge, upstream = the previous
+  one's right edge, as for soft line ends.
+- **Pieces.** Each line is cut into rigid pieces of straight-layout x,
+  each with one transform: a cluster's box under
+  `PathFit::cluster_transform`, except that a gap in the box longer than
+  both the glyphs' advance and half the line's size (a manual kern, e.g.
+  `TextCurve.xar`'s long kern at a line's start) is cut into chunks no
+  longer than that, each fitted as a character of its own
+  (`span_transform`). Without this the caret before a long kern stuck out
+  along the first glyph's tangent, off the path. An empty line is one
+  zero-width piece at its start. Pieces (and their inverses) are built
+  once per layout.
+- **Hit test on a path**: every piece inverse-maps the point; the score
+  is (distance outside the box — the larger of across and along —, then
+  how deep inside along x), lowest wins, so where neighbouring boxes
+  overlap on the inside of a bend the one the point is deeper in wins.
+  The caret goes to the nearer edge of the winning piece's cluster. The
+  distance is also "is the click on this story" (4 px, decision 54 of
+  `tools.md`). Straight text keeps the old rule (nearest line band, then
+  nearest stop) and the old Chebyshev distance to the line boxes.
+- **Selection**: one quad per selected cluster, left corners from its
+  first piece and right corners from its last (so a kerned cluster is
+  still one quad), plus one for a selected paragraph break fitted as a
+  character of its own. Spans are not merged on a path (a merged span
+  cannot bend).
+- **The caret leans with shear**: the segment is the fitted glyph's own
+  vertical, so a sheared story (`CharsShear`) gets a slanted caret, and a
+  reflected one a caret hanging on the other side.
+
+Tests: `xarast-app/tests/text_path_caret.rs` (6; all but the last on
+`Designs/TextCurve.xar`, 3 stories): every stop of every line is the
+fitted cluster edge within 1 mp, on the glyph's baseline and parallel to
+its vertical (> 1000 stops, most of them turned); a click at 20 % / 80 %
+of every glyph gives the nearer edge; every stop round-trips through a
+click a quarter of its cluster inwards; Right walks every boundary in
+logical order and the caret moves at most a cluster along the path per
+step; through `Session` intents a click on a glyph, Right, and a 3-character
+selection drawn as 3 turned quads; and a synthetic half-circle arc
+(no corpus).
+
+**Dead end:** asserting a round trip 0.2 pt inside a cluster's edge fails
+on `TextCurve.xar` line 7: with tight tracking (advance 14.1 pt in a
+12.4 pt box) and a hard bend, the neighbour's fitted box covers that
+point too. Both carets are the same offset; the test clicks a quarter of
+the cluster inwards instead.
+
+Not done (tracker tasks): editing (T9.5.5, XARA-T-0251: fit text to
+a path, remove from path, reverse, drag the indents; word wrap on a
+path).
+
+### Base SVG along the path (T9.5.6, as built, XARA-T-0252)
+
+**Decision: each character is placed and turned, no `<textPath>`.** The
+SVG text placer (`xarast-app/src/svg_text.rs`) lays a story on a path out
+exactly as the walker does (`path_fit` → `PathFit::story_mode`) and, when
+`PathFit::is_plain` (not reflected, shear tangent ≤ `PLAIN_SHEAR` = 0.005),
+reports per character item its glyph origin carried by
+`PathFit::cluster_transform` and the turn of that transform
+(`StoryPlacement { along_path: true, chars, rotations }`). The writer adds
+a `rotate` list to each run next to `x` / `y` (`research/06 §6.7.1` rules
+0 and 6). Same output in `.xarast` and SVG export (no dialect branch).
+Glyph *origins* are placed, so kerns, tracking, justification, wrap on a
+closed path, the straight extension past an open path's ends, the
+parallel copies for later lines and baseline shifts all come out exact;
+only the renderer's own glyph shapes differ.
+
+**Dead end: `<textPath>`** (built, measured, dropped the same day). A
+`<textPath href>` per line over a derived path in a `<defs>` (moved to the
+line's baseline, extended or lapped so no glyph falls off) with per-glyph
+`x` distances along it:
+
+- **resvg 0.45** follows the path only until the first child *element* of
+  the `<textPath>` closes (`usvg` resets its text flow to linear after
+  every element child): a line `<tspan>` holding several run `<tspan>`s,
+  or a line starting with an empty kern-only run, came out straight.
+  Working around it needs one `<textPath>` per run, which Inkscape cannot
+  draw:
+- **Inkscape 1.2**: it ignores `x` lists inside `<textPath>` (glyphs laid
+  end to end with its own advances) and draws nothing sensible when a
+  `<text>` has several `<textPath>` children — every multi-line or
+  multi-run story on `TextCurve.xar` vanished. It also follows only
+  `xlink:href`, not `href`.
+- Measured on `TextCurve.xar` (SVG export vs our PNG, resvg): straight
+  16.27 → one `<textPath>` per line 8.01 → one per run 3.47 → per-character
+  `rotate` **3.06**; Inkscape and resvg both draw the per-character version
+  on the curves. It needs no reader change (the reader ignores `rotate`,
+  like `x` / `y`), no derived `<defs>`, no new structure.
+
+Kept limitation: reflected or sheared characters cannot be said per
+character in SVG (a mirror or a slant is not a rotation), so those stories
+stay on straight lines and count in `svg::Stats::text_on_path` (none in
+the corpus; `TextCurve.xar`'s one story with a shear has 0.11°, under
+`PLAIN_SHEAR`). The app's own save places text too since XARA-T-0259
+(`SaveJob` passes `svg_text::placer()`, on the save thread;
+`xarast-format.md`, "App save places text"), so File › Save, Save As,
+autosave, `xarast-cli convert` and SVG export all write the same base
+SVG; only the emergency snapshot on a signal skips the placer.
+
+Evidence: `xarast-text` `path::tests::a_fit_is_plain_unless_characters_are_mirrored_or_visibly_sheared`;
+`xarast-format` `tests/svg_text.rs`
+`text_on_a_path_is_placed_and_turned_per_character_and_reads_back_unchanged`
+(read back, normal form, byte-identical re-save, interchange, the
+straight fallback counted); `xarast-app` `tests/svg_text_path.rs` (up a
+vertical path: origins on it, turned −90°; reflected stays straight);
+`tests/xarast_roundtrip.rs` now saves with the placer and checks the
+re-save bytes (59/59 render and bytes); corpus export-check TextCurve svg
+3.06 (limit removed).
 
 ## Invariants that must not be broken
 
@@ -682,6 +1037,16 @@ first story of a process waits for enumeration when nothing prewarmed
   loaded after the clone are invisible to it (the system handle is per
   clone). Keeping the font context inside the database is simpler.
 - **"Roman" as a style suffix**: it strips "Times New Roman" to "Times New".
+- **`<textPath>` for text on a path in the base SVG** (T9.5.6): resvg
+  loses the path after the first element inside it and Inkscape 1.2
+  cannot draw several `<textPath>`s in one `<text>`; per-character `x` /
+  `y` / `rotate` works in both (see "Base SVG along the path").
+- **A layout-aware pass for text on a path** (spike B: respacing by the
+  curvature at each position): it departs from the original by up to 5.8
+  advances on the fixtures (above). Do not reopen it for fidelity; only
+  as an opt-in style.
+- **Offsetting each line along each point's own normal** looks nicer but
+  is not what the original does (one start-normal vector per line).
 
 ## Open TODOs
 
@@ -690,17 +1055,29 @@ first story of a process waits for enumeration when nothing prewarmed
   character still not in the model; the layer bounds cache (when warm)
   ignores text, so `drawing_rect` misses text once `update_bounds` has run;
   `Viewport::fit_bounds_to` (scroll bounds) ignores text; a per-document
-  embedded-font overlay; W9.5 text on a path; golden images of
-  `TextDesigns` with pinned fonts (W9.7).
+  embedded-font overlay; ~~golden images of `TextDesigns` with pinned
+  fonts (W9.7)~~ (done, XARA-T-0260).
 - Typing leftovers (T9.4.6): a story emptied by deleting all its text stays
   (the original deletes an empty story when the caret leaves it; doing so
-  here would add an undo step — decide with the maintainer); typed text
-  does not pick up attributes chosen while the caret is up (needs
-  `SetTextAttr`, T9.2.4); Unicode line/paragraph separators (U+2028/9)
-  type as characters, not breaks.
+  here would add an undo step — decide with the maintainer); ~~typed text
+  does not pick up attributes chosen while the caret is up~~ (done,
+  XARA-T-0225: the caret's pending style); Unicode line/paragraph
+  separators (U+2028/9) type as characters, not breaks.
+- Text attribute leftovers (XARA-T-0225): text typed at the start of a line
+  takes the line's scope, not the following character's own attributes (the
+  bar shows the following character's); the bar has no control for
+  baseline shift, super/subscript or aspect ratio (the model and
+  `SetTextAttr` handle them); line spacing cannot be switched between ratio
+  and absolute from the bar; a ruler with every tab removed falls back to
+  the ruler a `.xar` line node carries; centre/right/decimal stops can be
+  set but layout still treats every stop as left (T9.3.8); the ruler is not
+  shown for turned, sheared or mirrored stories or text on a path.
 - Convert to shapes leftovers: T9.6.5 (outline fallback for export and
-  profile C, XARA-T-0245); on-path geometry once W9.5 lands
-  (XARA-T-0246).
+  profile C, XARA-T-0245).
+- Base SVG leftovers (T9.5.6): reflected or sheared text on a path stays
+  straight (an SVG `transform` per character would need one element per
+  character); ~~the GUI save passes no text placer~~ (done,
+  XARA-T-0259).
 
 ## The `.xarast` text writer (XARA-T-0172, done)
 
@@ -715,15 +1092,17 @@ first story of a process waits for enumeration when nothing prewarmed
   (`text::story_input`, `layout_text`) and reports each character item's
   cluster box left edge on its baseline (`PlacedGlyph::y` of the
   cluster's first glyph; the line baseline when it has none). The app's
-  save path (not written yet) should pass `svg_text::placer()` in
-  `SvgOptions::text`, as `xarast-cli convert` does.
+  save path (`save::SaveJob`) passes `svg_text::placer()` in
+  `SvgOptions::text`, as `xarast-cli convert` does (XARA-T-0259; bytes
+  pinned equal over the corpus by `xarast-cli` `tests/app_save.rs`).
 - An empty `TextLine` resolves its line attributes from the state *after*
   its scope closes (`StoryText::end_line`), so its own attributes never
   matter; the format writes and reads that outer state at story level.
 
 - W9.1: T9.1.6 background enumeration (the API is ready; the app must call
   `load_system_fonts` on its I/O thread), T9.1.7 gallery, T9.1.8 Windows and
-  macOS smoke tests. A per-document embedded-font overlay: today an embedded
+  macOS smoke tests (T9.1.7's gallery would replace the infobar's plain
+  family list, which has no previews). A per-document embedded-font overlay: today an embedded
   face registered in a shared `FontDb` is visible to every document.
 - W9.3: T9.3.8 centre/right/decimal tabs (only left stops now), T9.3.10
   features/variations are plumbed per run but untested beyond `kern`/`liga`/
@@ -731,8 +1110,9 @@ first story of a process waits for enumeration when nothing prewarmed
   cache of `CaretMap`s; the walker another).
 - W9.4 leftovers: typing and grapheme-aware deletion with undo per burst
   (T9.4.6, creates the pending story), IME preedit and the IME caret area
-  from the text caret (T9.4.7), clipboard (T9.4.8), text infobar and
-  OpenType panel (T9.4.9), the interactive ruler (T9.4.10); Ctrl+Up/Down
+  from the text caret (T9.4.7), clipboard (T9.4.8); ~~text infobar and
+  OpenType panel (T9.4.9), the interactive ruler (T9.4.10)~~ (done,
+  XARA-T-0225); Ctrl+Up/Down
   by paragraph (they move by line now); the pending caret's height uses
   0.8/0.2 of the current size, not the face's metrics.
 - Shaping across a soft line break is not redone: an Arabic word split by

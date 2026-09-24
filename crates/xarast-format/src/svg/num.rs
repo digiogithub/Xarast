@@ -163,6 +163,28 @@ pub fn f32s(v: f32) -> String {
     }
 }
 
+/// An `f64` in the shortest decimal that parses back to the same `f64`,
+/// spelt as [`f32s`] spells an `f32`. Used for the fill profile, whose
+/// bias and gain must survive a reload bit for bit (phase 8, T8.8.2).
+#[must_use]
+pub fn f64s_exact(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".into();
+    }
+    // `Display` for `f64` is the shortest round-trip form, never an
+    // exponent.
+    let s = format!("{v}");
+    if let Some(rest) = s.strip_prefix("0.") {
+        format!(".{rest}")
+    } else if let Some(rest) = s.strip_prefix("-0.") {
+        format!("-.{rest}")
+    } else if s == "-0" {
+        "0".into()
+    } else {
+        s
+    }
+}
+
 /// A unitless float, as a new string.
 #[must_use]
 pub fn f64s(v: f64, decimals: u32) -> String {
