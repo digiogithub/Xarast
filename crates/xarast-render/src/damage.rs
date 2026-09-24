@@ -514,7 +514,7 @@ fn transparency_refs(t: &Transparency, f: &mut impl FnMut(Ref)) {
     match &t.source {
         TranspSource::Gradient { ramp, .. } => f(Ref::Ramp(*ramp)),
         TranspSource::Image { image, .. } => f(Ref::Image(*image)),
-        TranspSource::Flat(_) => {}
+        TranspSource::Flat(_) | TranspSource::Mesh { .. } => {}
     }
 }
 

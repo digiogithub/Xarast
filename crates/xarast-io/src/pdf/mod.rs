@@ -754,6 +754,12 @@ impl Translator<'_> {
                     "bitmap transparency (T11.4.5, T11.4.8)".into(),
                 ));
             }
+            TranspSource::Mesh { .. } => {
+                return Err((
+                    blend != Blend::Normal,
+                    "three- or four-colour transparency".into(),
+                ));
+            }
         };
         if a == 0 && blend == Blend::Normal {
             return Ok(None);

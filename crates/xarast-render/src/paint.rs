@@ -885,18 +885,73 @@ impl Paint {
     }
 }
 
-fn lerp_rgba(a: Rgba8, b: Rgba8, t: f64) -> Rgba8 {
-    let t = t.clamp(0.0, 1.0);
-    let m = |x: u8, y: u8| -> u8 {
+/// Folds a point of a mesh's `(u, v)` frame into the unit square.
+///
+/// Both axes go through [`apply_repeat`], so a mesh clamps under
+/// [`Repeat::Simple`] and tiles the unit square otherwise. The original
+/// knows only those two behaviours for a mesh (`research/01 §8.3`): the
+/// fill-mapping attribute picks "simple" for do-not-repeat and "tiled" for
+/// every other value, the default included.
+#[inline]
+#[must_use]
+pub fn mesh_uv((u, v): (f64, f64), repeat: Repeat) -> (f64, f64) {
+    (apply_repeat(u, repeat), apply_repeat(v, repeat))
+}
+
+/// One channel of a three-colour mesh at a point of the unit square.
+///
+/// The corners sit at `(0, 0)`, `(1, 0)` and `(0, 1)`. Inside the triangle
+/// this is the barycentric blend; beyond its long edge the origin's weight
+/// is zero and the two far corners are blended in proportion, which keeps
+/// the square free of extrapolated colours.
+#[inline]
+#[must_use]
+pub fn mesh3_channel(c: [u8; 3], u: f64, v: f64) -> u8 {
+    let w0 = (1.0 - u - v).max(0.0);
+    let sum = w0 + u + v;
+    if sum <= 0.0 {
+        return c[0];
+    }
+    ((w0 * f64::from(c[0]) + u * f64::from(c[1]) + v * f64::from(c[2])) / sum)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// One channel of a four-colour mesh at a point of the unit square: the
+/// bilinear blend of `c[0]` at `(0, 0)`, `c[1]` at `(1, 0)`, `c[2]` at
+/// `(0, 1)` and `c[3]` at `(1, 1)`, each edge rounded before the second
+/// interpolation.
+#[inline]
+#[must_use]
+pub fn mesh4_channel(c: [u8; 4], u: f64, v: f64) -> u8 {
+    let lerp = |x: u8, y: u8, t: f64| -> u8 {
+        let t = t.clamp(0.0, 1.0);
         (f64::from(x) + (f64::from(y) - f64::from(x)) * t)
             .round()
             .clamp(0.0, 255.0) as u8
     };
-    Rgba8 {
-        r: m(a.r, b.r),
-        g: m(a.g, b.g),
-        b: m(a.b, b.b),
-        a: m(a.a, b.a),
+    lerp(lerp(c[0], c[1], u), lerp(c[2], c[3], u), v)
+}
+
+/// The corner levels of a three- or four-colour transparency, placed as the
+/// colours of [`GradRamp::Mesh3`] and [`GradRamp::Mesh4`] are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MeshLevels {
+    /// At `(0, 0)`, `(1, 0)` and `(0, 1)`.
+    Three([u8; 3]),
+    /// At `(0, 0)`, `(1, 0)`, `(0, 1)` and `(1, 1)`.
+    Four([u8; 4]),
+}
+
+impl MeshLevels {
+    /// The level at a point of the unit square.
+    #[inline]
+    #[must_use]
+    pub fn at(self, u: f64, v: f64) -> u8 {
+        match self {
+            MeshLevels::Three(c) => mesh3_channel(c, u, v),
+            MeshLevels::Four(c) => mesh4_channel(c, u, v),
+        }
     }
 }
 
@@ -1001,23 +1056,12 @@ impl<'a> PaintSampler<'a> {
                     table[ramp_index(apply_repeat(s, *repeat), table.len())]
                 }
                 GradRamp::Mesh3(c) => {
-                    let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                    let Some(uv) = self.frame.and_then(|f| f.apply(p)) else {
                         return Rgba8::TRANSPARENT;
                     };
-                    let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-                    let w0 = (1.0 - u - v).max(0.0);
-                    let sum = w0 + u + v;
-                    if sum <= 0.0 {
-                        return c[0];
-                    }
-                    let ch = |f: fn(&Rgba8) -> u8| -> u8 {
-                        ((w0 * f64::from(f(&c[0]))
-                            + u * f64::from(f(&c[1]))
-                            + v * f64::from(f(&c[2])))
-                            / sum)
-                            .round()
-                            .clamp(0.0, 255.0) as u8
-                    };
+                    let (u, v) = mesh_uv(uv, *repeat);
+                    let ch =
+                        |f: fn(&Rgba8) -> u8| mesh3_channel([f(&c[0]), f(&c[1]), f(&c[2])], u, v);
                     Rgba8 {
                         r: ch(|c| c.r),
                         g: ch(|c| c.g),
@@ -1026,13 +1070,19 @@ impl<'a> PaintSampler<'a> {
                     }
                 }
                 GradRamp::Mesh4(c) => {
-                    let Some((u, v)) = self.frame.and_then(|f| f.apply(p)) else {
+                    let Some(uv) = self.frame.and_then(|f| f.apply(p)) else {
                         return Rgba8::TRANSPARENT;
                     };
-                    let (u, v) = (u.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
-                    let top = lerp_rgba(c[0], c[1], u);
-                    let bottom = lerp_rgba(c[2], c[3], u);
-                    lerp_rgba(top, bottom, v)
+                    let (u, v) = mesh_uv(uv, *repeat);
+                    let ch = |f: fn(&Rgba8) -> u8| {
+                        mesh4_channel([f(&c[0]), f(&c[1]), f(&c[2]), f(&c[3])], u, v)
+                    };
+                    Rgba8 {
+                        r: ch(|c| c.r),
+                        g: ch(|c| c.g),
+                        b: ch(|c| c.b),
+                        a: ch(|c| c.a),
+                    }
                 }
             },
             Paint::Image { adjust, .. } => {

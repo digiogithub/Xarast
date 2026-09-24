@@ -99,7 +99,8 @@ pub use damage::{Damage, image_damage, scene_damage};
 pub use display_list::{DisplayList, DrawCmd, ViewParams};
 pub use paint::{
     ALL_MAPPINGS, ALL_REPEATS, ALL_SHAPES, BitmapAdjust, Filter, FractalParams, GradMapping,
-    GradRamp, GradShape, ImageId, ImageRef, ImageRegistry, MappingKind, Paint, PaintError, Repeat,
+    GradRamp, GradShape, ImageId, ImageRef, ImageRegistry, MappingKind, MeshLevels, Paint,
+    PaintError, Repeat,
 };
 pub use path::PathRef;
 pub use pixel_budget::{
