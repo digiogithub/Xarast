@@ -31,6 +31,17 @@ fn effect_cases() -> Vec<Case> {
     cases
 }
 
+/// The corpus's shadow cases (XARA-T-0318): wall, floor, glow, a shadow
+/// whose object is outside the view, and a feathered shadow.
+fn shadow_cases() -> Vec<Case> {
+    let cases: Vec<Case> = effect_cases()
+        .into_iter()
+        .filter(|c| c.name.starts_with("effect_shadow_"))
+        .collect();
+    assert_eq!(cases.len(), 5, "the corpus's shadow cases");
+    cases
+}
+
 /// A full frame of `scene` by a fresh backend: the recomputed picture.
 fn fresh(scene: &Scene, res: &Resolver, view: &ViewParams, cfg: CpuConfig) -> Surface {
     let mut t = Surface::new(view.viewport.width(), view.viewport.height());
@@ -135,6 +146,126 @@ fn a_cached_frame_is_byte_identical_to_a_recomputed_one() {
             assert_eq!(s.misses, stored.misses, "{}: {s:?}", case.name);
             assert_eq!(s.hits, 3 * stored.misses, "{}: {s:?}", case.name);
             assert!(s.bytes <= backend.effect_cache().limit());
+        }
+    }
+}
+
+/// A shadow's warp samples its silhouette through a device-space map from
+/// absolute device positions, so a layer is valid wherever its region
+/// started: every region the draw areas below start at (odd columns, thin
+/// row strips, one-pixel strips at the view's edges) is a different
+/// origin, and warm frames and warm strips are the cold frame, byte for
+/// byte.
+#[test]
+fn shadow_layers_are_exact_over_columns_and_strips() {
+    for cfg in configs() {
+        for case in shadow_cases() {
+            let want = fresh(&case.scene, &case.resolver, &case.view, cfg);
+            let (w, h) = size(&case.view);
+            let mut areas: Vec<DeviceRect> = (0..7)
+                .map(|i| DeviceRect::new(i * w / 7, 0, (i + 1) * w / 7, h))
+                .collect();
+            areas.extend(
+                (0..h)
+                    .step_by(5)
+                    .map(|y| DeviceRect::new(0, y, w, (y + 5).min(h))),
+            );
+            areas.extend([
+                DeviceRect::new(0, 0, 1, h),
+                DeviceRect::new(w - 1, 0, w, h),
+                DeviceRect::new(0, h - 1, w, h),
+                DeviceRect::new(w / 2, 0, w / 2 + 1, h),
+            ]);
+            let mut backend = CpuBackend::new(cfg);
+            // Cold strips fill the cache; the same strips again, then a
+            // whole frame, are drawn from it.
+            let mut frame = Surface::new(w as u32, h as u32);
+            for pass in 0..2 {
+                for r in &areas {
+                    draw(
+                        &mut backend,
+                        &case.scene,
+                        &case.resolver,
+                        &case.view,
+                        Some(*r),
+                        &mut frame,
+                    );
+                }
+                assert!(
+                    frame == want,
+                    "{}: strips, pass {pass}, differ ({cfg:?})",
+                    case.name
+                );
+            }
+            let s = backend.effect_cache().stats();
+            assert!(s.hits + s.partial > 0, "{}: {s:?}", case.name);
+            let warm = whole(&mut backend, &case);
+            assert!(warm == want, "{}: warm frame differs ({cfg:?})", case.name);
+            // And the other way round: a whole frame cached, then strips.
+            let mut backend = CpuBackend::new(cfg);
+            let cold = whole(&mut backend, &case);
+            assert!(cold == want, "{}", case.name);
+            let stored = backend.effect_cache().stats();
+            let mut frame = want.clone();
+            for r in &areas {
+                draw(
+                    &mut backend,
+                    &case.scene,
+                    &case.resolver,
+                    &case.view,
+                    Some(*r),
+                    &mut frame,
+                );
+            }
+            assert!(frame == want, "{}: warm strips differ ({cfg:?})", case.name);
+            // Everything the strips need was computed by the frame.
+            let s = backend.effect_cache().stats();
+            assert_eq!(s.misses, stored.misses, "{}: {s:?}", case.name);
+            assert_eq!(s.partial, stored.partial, "{}: {s:?}", case.name);
+        }
+    }
+}
+
+/// A shadow's pixels depend on the whole device transform (its map is
+/// taken to device space through it): the same content under a view that
+/// only differs by a sub-pixel pan, a zoom or a flip misses and is exact.
+#[test]
+fn a_shadow_under_another_view_misses_and_stays_exact() {
+    let cfg = CpuConfig::deterministic();
+    for case in shadow_cases() {
+        let mut backend = CpuBackend::new(cfg);
+        let _ = whole(&mut backend, &case);
+        let base = case.view.transform;
+        let flip = Transform2D::new([
+            1.0,
+            0.0,
+            0.0,
+            -1.0,
+            0.0,
+            f64::from(case.view.viewport.height()),
+        ]);
+        for xf in [
+            Transform2D::translate(0.25, 0.0).then(base),
+            base.then(Transform2D::translate(0.0, 0.5)),
+            base.then(Transform2D::scale(1.0 + 1.0 / 64.0)),
+            base.then(flip),
+        ] {
+            let mut view = case.view;
+            view.transform = xf;
+            let want = fresh(&case.scene, &case.resolver, &view, cfg);
+            let before = backend.effect_cache().stats();
+            let mut t = Surface::new(view.viewport.width(), view.viewport.height());
+            draw(
+                &mut backend,
+                &case.scene,
+                &case.resolver,
+                &view,
+                None,
+                &mut t,
+            );
+            assert!(t == want, "{}: {xf:?}", case.name);
+            let after = backend.effect_cache().stats();
+            assert_eq!(after.hits, before.hits, "{}: {xf:?} hit", case.name);
         }
     }
 }
