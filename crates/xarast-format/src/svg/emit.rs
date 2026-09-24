@@ -246,6 +246,8 @@ pub(crate) struct Emitter<'d, 'b> {
     spread_index: usize,
     spread_y: i64,
     bitmap_href: &'b mut dyn FnMut(BitmapId) -> Option<BitmapRef>,
+    /// Interchange only: bakes a bitmap object's photo operations.
+    derived: Option<super::DerivedLinker>,
     /// Where the application lays text out, for the base SVG of text.
     pub placer: Option<Placer>,
     /// `SvgDialect::Interchange`: foreign baggage is not written.
@@ -305,6 +307,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
             spread_index: 0,
             spread_y: 0,
             bitmap_href,
+            derived: opts.derived_bitmaps.clone(),
             placer: opts.text.clone(),
             interchange: opts.dialect == super::SvgDialect::Interchange,
             fonts: BTreeMap::new(),
@@ -1178,7 +1181,37 @@ impl<'d, 'b> Emitter<'d, 'b> {
     }
 
     fn bitmap(&mut self, n: NodeId, b: &xarast_doc::BitmapNode) {
-        let bm = (self.bitmap_href)(b.image);
+        let mut bm = (self.bitmap_href)(b.image);
+        // Photo operations (W10.6): inside `.xarast` the chain is written
+        // beside the master; an interchange SVG shows the adjusted pixels
+        // when the exporter bakes them, the master otherwise.
+        let mut children = Vec::new();
+        if !b.photo_ops.is_empty() {
+            self.stats.photo_ops += 1;
+            if self.interchange {
+                let baked = self.derived.as_ref().and_then(|d| {
+                    let res = self.doc.resources.bitmap(b.image)?;
+                    (d.0)(b.image, res, &b.photo_ops)
+                });
+                match (baked, bm.as_mut()) {
+                    (Some(href), Some(r)) => {
+                        r.href = href;
+                        r.palette = None;
+                    }
+                    (Some(href), None) => {
+                        bm = Some(BitmapRef {
+                            href,
+                            width: 0,
+                            height: 0,
+                            palette: None,
+                        });
+                    }
+                    (None, _) => self.stats.photo_ops_unbaked += 1,
+                }
+            } else {
+                children.push(super::photo::write_photo_ops(&b.photo_ops));
+            }
+        }
         self.ink(n, |e, el| {
             el.tag = "image";
             let (ox, oy) = e.frame.pt(b.origin);
@@ -1236,7 +1269,7 @@ impl<'d, 'b> Emitter<'d, 'b> {
                 ys.iter().copied().max().unwrap_or(0),
             );
             // A bitmap node takes the fill transparency, and no paint.
-            (Some(bbox), false, false, Vec::new())
+            (Some(bbox), false, false, children)
         });
     }
 

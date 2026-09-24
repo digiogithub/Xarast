@@ -59,6 +59,7 @@ pub fn bitmap_node_centred(image: BitmapId, centre: Point, width: Mp, height: Mp
         origin,
         major: Vector::new(Mp::new(w), Mp::ZERO),
         minor: Vector::new(Mp::ZERO, Mp::new(h.saturating_neg())),
+        photo_ops: Default::default(),
     }
 }
 

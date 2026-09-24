@@ -530,6 +530,11 @@ invent them.
 
 ### Open TODOs
 
+- **Photo panel** (phase 10 T10.6.8, XARA-T-0301): the model, the
+  cached evaluation and `Session::set_photo_ops` (one undo step, "Adjust
+  Photo"; `tools.md`) exist since XARA-US-0054, but no panel shows or
+  edits a bitmap object's chain yet. It must show a chain with an unknown
+  operation read-only (`PhotoOps::is_editable`).
 - Re-measure P3, P7, P9 and the presented halves of P2 and P4 on hardware
   with a display; until then they stay "unmeasured" in this note.
 - `egui_kittest` **image** snapshots (phase criterion 17) need the `wgpu`

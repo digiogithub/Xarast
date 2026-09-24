@@ -518,7 +518,7 @@ impl Nf<'_> {
                 let u = self.frame.vec(bm.major);
                 let v = self.frame.vec(bm.minor);
                 let r = self.bitmap_ref(bm.image);
-                let head = format!(
+                let mut head = format!(
                     "bitmap origin={o:?} major={u:?} minor={v:?} image={:?}",
                     r.map(|r| (
                         r.href,
@@ -530,6 +530,10 @@ impl Nf<'_> {
                         r.palette
                     ))
                 );
+                if !bm.photo_ops.is_empty() {
+                    head.push_str(" photo-ops=");
+                    head.push_str(&crate::svg::photo::write_photo_ops(&bm.photo_ops));
+                }
                 self.ink(n, depth, head, Some(corners(o, u, v)), false, false, true);
             }
             NodeKind::Guideline(g) => {

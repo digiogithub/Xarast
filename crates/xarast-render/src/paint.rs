@@ -660,6 +660,18 @@ impl ImageRegistry {
         id
     }
 
+    /// Puts `image` in `id`'s slot and returns what was there (`None`, and
+    /// nothing changes, when `id` was never handed out). How a caller
+    /// that registers short-lived images (the walker's photo-adjusted
+    /// bitmaps) reuses slots instead of growing the registry. A scene
+    /// built before the swap must be drawn with a resolver cloned before
+    /// it; damage compares images by content, so a reused id is safe.
+    pub fn replace(&mut self, id: ImageId, image: ImageRef) -> Option<ImageRef> {
+        self.images
+            .get_mut(id.0 as usize)
+            .map(|slot| std::mem::replace(slot, image))
+    }
+
     /// Looks an image up.
     #[must_use]
     pub fn get(&self, id: ImageId) -> Option<&ImageRef> {

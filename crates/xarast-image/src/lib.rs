@@ -17,6 +17,7 @@ mod decode;
 mod limits;
 mod model;
 pub mod orient;
+pub mod photo;
 pub mod pixels;
 pub mod sniff;
 pub mod xar;

@@ -205,6 +205,7 @@ fn a_missing_resource_is_detected() {
             origin: Point::ORIGIN,
             major: Vector::raw(1000, 0),
             minor: Vector::raw(0, 1000),
+            photo_ops: Default::default(),
         })));
     f.doc.tree.attach(b, f.layer, Attach::LastChild).unwrap();
     let r = f.doc.validate();

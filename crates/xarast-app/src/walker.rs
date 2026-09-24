@@ -161,6 +161,19 @@ pub struct SceneWalker {
     /// The document's decoded bitmaps, shared with its other walkers
     /// ([`crate::decoded`]); `None` decodes for this walker alone.
     decoded: Option<DecodedImages>,
+    /// Photo-adjusted images registered, by master bitmap and the hash of
+    /// the evaluable chain ([`SceneWalker::derived_image`]).
+    derived: HashMap<(BitmapId, [u8; 32]), ImageId>,
+    /// Chains whose evaluation failed: not tried again by this walker.
+    derived_failed: HashSet<(BitmapId, [u8; 32])>,
+    /// Registry slots of derived images no attached object uses any
+    /// more, holding [`SceneWalker::placeholder`]: reused before the
+    /// registry grows, so dragging a slider does not pile up images.
+    derived_free: Vec<ImageId>,
+    /// The document epoch the derived images were last pruned at.
+    derived_epoch: Epoch,
+    /// A 1 × 1 transparent image parked in freed slots.
+    placeholder: Option<ImageRef>,
 }
 
 /// What a scope opened in the scene, so that `LeaveScope` can close it.
@@ -282,6 +295,10 @@ impl SceneWalker {
         self.resolver = Resolver::new();
         self.images.clear();
         self.failed.clear();
+        self.derived.clear();
+        self.derived_failed.clear();
+        self.derived_free.clear();
+        self.derived_epoch = Epoch::default();
         self.attr_cache.clear();
         self.attr_epoch = Epoch::default();
         self.text_fonts = None;
@@ -547,6 +564,122 @@ impl SceneWalker {
             self.stories.clear();
         }
         self.register_images(doc);
+        if self.derived_epoch != doc.epoch {
+            self.prune_derived(doc);
+            self.derived_epoch = doc.epoch;
+        }
+    }
+
+    /// Drops the derived images no object attached to the document shows
+    /// any more, here and in the shared cache. Run when the document
+    /// changes: an edited chain leaves its old image behind, and a slider
+    /// dragged through twenty values would otherwise keep twenty.
+    fn prune_derived(&mut self, doc: &Document) {
+        // Nothing derived anywhere: no scan of the tree. (The shared cache
+        // may hold images another walker evaluated, so it counts.)
+        if self.derived.is_empty()
+            && self.derived_failed.is_empty()
+            && self.decoded.as_ref().is_none_or(|c| c.derived_len() == 0)
+        {
+            return;
+        }
+        let root = doc.tree.root();
+        let live: HashSet<(BitmapId, [u8; 32])> = doc
+            .tree
+            .iter()
+            .filter_map(|(id, data)| match &data.kind {
+                NodeKind::Bitmap(b) if !b.photo_ops.is_empty() => Some((id, b)),
+                _ => None,
+            })
+            .filter(|(id, _)| doc.tree.ancestors(*id).any(|a| a == root))
+            .map(|(_, b)| (b.image, b.photo_ops.evaluable().hash()))
+            .collect();
+        self.derived_failed.retain(|k| live.contains(k));
+        let dead: Vec<(BitmapId, [u8; 32])> = self
+            .derived
+            .keys()
+            .filter(|k| !live.contains(*k))
+            .copied()
+            .collect();
+        if !dead.is_empty() {
+            let placeholder = self
+                .placeholder
+                .get_or_insert_with(|| ImageRef::new(1, 1, vec![0; 4]))
+                .clone();
+            for k in dead {
+                if let Some(slot) = self.derived.remove(&k) {
+                    self.resolver.images.replace(slot, placeholder.clone());
+                    self.derived_free.push(slot);
+                }
+            }
+        }
+        if let Some(cache) = &self.decoded {
+            cache.retain_derived(
+                live.iter()
+                    .filter_map(|(id, h)| doc.resources.bitmap(*id).map(|r| (r, *h))),
+            );
+        }
+    }
+
+    /// The image a bitmap object with photo operations shows: its master
+    /// (`master`, registered) put through the chain, evaluated once per
+    /// (master, chain) and cached here and in the document's shared
+    /// cache. `master` itself when the chain changes no pixel; `None`
+    /// when the evaluation failed.
+    fn derived_image(
+        &mut self,
+        doc: &Document,
+        bm: &xarast_doc::BitmapNode,
+        master: ImageId,
+    ) -> Option<ImageId> {
+        let ops = bm.photo_ops.evaluable();
+        if ops.is_empty() {
+            return Some(master);
+        }
+        let key = (bm.image, ops.hash());
+        if let Some(id) = self.derived.get(&key) {
+            return Some(*id);
+        }
+        if self.derived_failed.contains(&key) {
+            return None;
+        }
+        let base = self.resolver.images.get(master)?.clone();
+        let recipe = xarast_io::photo::recipe(&ops);
+        if recipe.is_identity(base.width(), base.height()) {
+            return Some(master);
+        }
+        let budget = self
+            .pixel_budget
+            .clone()
+            .unwrap_or_else(|| Arc::clone(PixelBudget::global()));
+        let res = doc.resources.bitmap(bm.image)?;
+        let cached = self
+            .decoded
+            .as_ref()
+            .and_then(|c| c.get_derived(res, &budget, key.1));
+        let image = match cached {
+            Some(image) => image,
+            None => {
+                let made = derive(&base, recipe, &budget);
+                match &self.decoded {
+                    Some(c) => c.insert_derived(res, &budget, key.1, made),
+                    None => made,
+                }
+            }
+        };
+        let Some(image) = image else {
+            self.derived_failed.insert(key);
+            return None;
+        };
+        let id = match self.derived_free.pop() {
+            Some(slot) => {
+                self.resolver.images.replace(slot, image);
+                slot
+            }
+            None => self.resolver.images.insert(image),
+        };
+        self.derived.insert(key, id);
+        Some(id)
     }
 
     /// Registers every bitmap with the renderer, decoding it first when
@@ -956,8 +1089,14 @@ impl SceneWalker {
         quality: RenderQuality,
         b: &mut SceneBuilder<'_>,
     ) {
-        let Some(image) = self.images.get(&bm.image).copied() else {
+        let Some(master) = self.images.get(&bm.image).copied() else {
             self.image_missing(bm.image);
+            return;
+        };
+        // The parallelogram maps the derived image: with photo operations
+        // the object shows the master put through them (W10.6).
+        let Some(image) = self.derived_image(doc, bm, master) else {
+            self.stats.images_failed += 1;
             return;
         };
         self.check_transparency_image(attrs);
@@ -1092,6 +1231,34 @@ fn make_image(res: &xarast_doc::BitmapResource, budget: &Arc<PixelBudget>) -> Op
             .map(|(_, _, d)| d)
     }));
     Some(ImageRef::with_budget(w, h, data, budget, Some(source)))
+}
+
+/// A master's derived image under `recipe`, registered under `budget`
+/// with its mip pyramid built. Its source evaluates the recipe again from
+/// the master's base (which the budget may itself bring back): the
+/// evaluation is deterministic, so the bytes are the same, and the budget
+/// spills the derived base rather than pay for it twice.
+fn derive(
+    master: &ImageRef,
+    recipe: xarast_image::photo::Recipe,
+    budget: &Arc<PixelBudget>,
+) -> Option<ImageRef> {
+    let run = {
+        let master = master.clone();
+        move || {
+            let base = master.level(0);
+            xarast_image::photo::evaluate(base.width, base.height, &base.data, &recipe)
+        }
+    };
+    let (w, h, data) = run()?;
+    let source: Arc<dyn PixelSource> = Arc::new(FnSource::expensive(move || {
+        run()
+            .filter(|&(dw, dh, _)| (dw, dh) == (w, h))
+            .map(|(_, _, d)| d)
+    }));
+    let image = ImageRef::with_budget(w, h, data, budget, Some(source));
+    image.prepare();
+    Some(image)
 }
 
 /// What decoding a bitmap needs: its encoded bytes and, for tag 71, the

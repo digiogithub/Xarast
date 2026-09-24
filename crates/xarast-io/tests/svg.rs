@@ -81,12 +81,25 @@ fn bitmap_node(image: xarast_doc::BitmapId, x: i32) -> NodeKind {
         origin: Point::raw(x, 400_000),
         major: Vector::raw(100_000, 0),
         minor: Vector::raw(0, 100_000),
+        photo_ops: Default::default(),
     }))
 }
 
 /// A red rectangle carrying foreign baggage, a PNG bitmap placed twice and
 /// a bitmap that exists only as pixels.
 fn fixture() -> Document {
+    fixture_with(xarast_doc::PhotoOps::new())
+}
+
+/// The 4 × 4 pixels of the fixture's PNG.
+fn png_pixels() -> Vec<u8> {
+    (0..16u8)
+        .flat_map(|i| [i * 16, 255 - i * 16, 64, 255])
+        .collect()
+}
+
+/// [`fixture`] with `ops` on the second placement of the PNG.
+fn fixture_with(ops: xarast_doc::PhotoOps) -> Document {
     let mut b = xarast_doc::builder::skeleton(BuildLimits::default()).unwrap();
     let red = b.node(rect(100_000, 100_000, 200_000, 100_000)).unwrap();
     b.push_scope().unwrap();
@@ -108,9 +121,7 @@ fn fixture() -> Document {
             marks: ForeignMarks::empty(),
         },
     );
-    let pixels: Vec<u8> = (0..16u8)
-        .flat_map(|i| [i * 16, 255 - i * 16, 64, 255])
-        .collect();
+    let pixels = png_pixels();
     let png = b.define_bitmap(BitmapResource {
         name: Arc::from("png"),
         info: BitmapInfo {
@@ -144,7 +155,11 @@ fn fixture() -> Document {
         transparent_index: None,
     });
     b.node(bitmap_node(png, 100_000)).unwrap();
-    b.node(bitmap_node(png, 250_000)).unwrap();
+    let mut second = bitmap_node(png, 250_000);
+    if let NodeKind::Bitmap(bm) = &mut second {
+        bm.photo_ops = ops;
+    }
+    b.node(second).unwrap();
     b.node(bitmap_node(raw, 400_000)).unwrap();
     b.finish().unwrap().0
 }
@@ -348,4 +363,58 @@ fn a_scene_only_source_is_refused_and_cancelling_writes_nothing() {
         .unwrap_err();
     assert!(matches!(e, ExportError::Cancelled));
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn photo_adjustments_are_baked_into_a_png_of_their_own() {
+    use xarast_doc::photo::{PhotoOp, PhotoOps, PhotoOrient, PixelRect};
+    let ops = PhotoOps {
+        ops: vec![
+            PhotoOp::Crop(PixelRect {
+                x: 1,
+                y: 0,
+                width: 3,
+                height: 2,
+            }),
+            PhotoOp::Orient(PhotoOrient::CW),
+            PhotoOp::Brightness(0.2),
+            PhotoOp::Saturation(0.5),
+        ],
+    }
+    .normalised();
+    let dir = tempfile::tempdir().unwrap();
+    let src = DocSource {
+        doc: fixture_with(ops.clone()),
+        area: Rect::raw(50_000, 50_000, 550_000, 550_000),
+    };
+    let req = svg_request(
+        dir.path(),
+        "adjusted.svg",
+        SvgOptions {
+            resources: SvgResources::Sidecar,
+            ..SvgOptions::default()
+        },
+    );
+    let report = Registry::with_builtin()
+        .export(&src, &req, &NoProgress)
+        .unwrap();
+    let svg = std::fs::read_to_string(&req.destination).unwrap();
+    assert!(!svg.contains("xarast"), "{svg}");
+    // The master (first placement), the adjusted image, the raw bitmap.
+    let side = dir.path().join("adjusted_files");
+    assert_eq!(std::fs::read_dir(&side).unwrap().count(), 3);
+    let baked = std::fs::read(side.join("image-2.png")).unwrap();
+    let decoded = image::load_from_memory(&baked).unwrap().to_rgba8();
+    let (w, h, want) = xarast_io::photo::bake(4, 4, &png_pixels(), &ops).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (w, h));
+    assert_eq!((w, h), (2, 3), "cropped to 3 x 2, then turned");
+    assert_eq!(decoded.into_raw(), want);
+    assert!(
+        report.compromises.contains(&Compromise::Simplified {
+            what: "photo adjustments baked into a PNG of the adjusted pixels".into(),
+            count: 1,
+        }),
+        "{:?}",
+        report.compromises
+    );
 }

@@ -365,6 +365,16 @@ New in Phase 2:
     own attribute of the slot or adds one as the first child — the same
     rule `xarast-app`'s private `set_own_attr` follows; the app can switch
     to the public one.
+40. **A placed bitmap carries its photo operations**
+    (`BitmapNode::photo_ops: PhotoOps`, XARA-US-0054; `image.md`, "Photo
+    adjustments"). A field of the node, not an attribute: the chain is
+    per object, never inherited, and changing it may move the object
+    (crop, orientation), which only a `set_kind` of the whole node records
+    as one step (`SetPhotoOps`). The node is boxed, so `NodeData` stays
+    within its 64-byte gate. `canonical_digest` adds the chain's hash
+    **only when it is non-empty**, so every existing digest is unchanged.
+    `bitmap_usage` / `collect_unused` need nothing new: the chain names no
+    resource (the master is the node's `image`).
 
 ## The `.xar` attribute tag reconciliation
 

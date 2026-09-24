@@ -33,9 +33,11 @@ the corpus test.
 - The bitmap gallery, File › Import…, background imports and file-list
   paste (XARA-US-0055) — see "Bitmap gallery, import UX and the
   colour-space slot".
+- Non-destructive photo adjustments (XARA-US-0054): see "Photo
+  adjustments".
 - Not yet: `xarast-doc` still has its own `BitmapResource` (SHA-256 over
-  pixels + original; XARA-T-0156). Encoders (T10.2.5) and photo ops are
-  later workstreams. The pyramid (XARA-US-0052) and the pixel
+  pixels + original; XARA-T-0156). Encoders (T10.2.5) are a later
+  workstream. The pyramid (XARA-US-0052) and the pixel
   budget (XARA-US-0053) were built in `xarast-render`; see below.
 
 ### Corpus census (all 59 files, `tests/corpus.rs`)
@@ -430,6 +432,90 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
   eviction state too (an export at 300 dpi may grow a proxy for the
   session's view — the proxy rule is per image, not per walker).
 
+### Photo adjustments (XARA-US-0054, W10.6, 2026-09-24)
+
+Non-destructive: the resource is the **master** and is never touched; a
+bitmap object shows the master put through its chain. Three crates, one
+job each:
+
+- **Model — `xarast_doc::photo`.** `BitmapNode::photo_ops: PhotoOps`
+  (empty for every `.xar` import). `PhotoOp`: `Crop(PixelRect)` in master
+  pixels, `Orient(PhotoOrient { turns, flip })` (mirror left-right, then
+  quarter turns clockwise; `then` composes, the dihedral law is tested),
+  `Levels { channel: rgb|red|green|blue, in_lo, in_hi, out_lo, out_hi }`,
+  `Gamma` (`x^(1/γ)`, clamped to 0.05–8), `Brightness` (`x + b`),
+  `Contrast` (`(x − ½)(1 + c) + ½`), `Saturation` (distance from Rec.601
+  luma × `1 + s`), `Greyscale`, and `Unknown { kind, raw }`.
+  **The chain is a set with one canonical order**, not a free sequence:
+  crop → orient → levels R, G, B, then rgb → gamma → brightness →
+  contrast → saturation → greyscale. `normalise` sorts into it, keeps the
+  **last** value per kind, clamps, drops neutral ops; `hash` (SHA-256 of
+  the normalised chain) is therefore independent of the order the user
+  set things in (criterion 13's second half, tested). The parameter
+  semantics are ours: the research has only the `GBitmap_Set*` names,
+  CDraw is closed.
+- **Unknown ops** make the chain non-editable: `normalise` leaves it
+  exactly as read, `SetPhotoOps` refuses it (`NotPermitted`), rendering
+  skips them (`PhotoOps::evaluable`) and the writer re-emits their text.
+- **`SetPhotoOps { node, ops, master, label }`**: one undo step
+  (`set_kind`); stores the normalised chain. With the master's size it
+  moves the object: a crop keeps the kept pixels where they were on the
+  page (`place ∘ M_old⁻¹ ∘ M_new`, `M` = `unit_to_master`, the derived
+  unit square to master pixels); a change of orientation turns the
+  picture *inside* the object (same centre, same edge directions, same
+  size per pixel, new width/height). `Session::set_photo_ops` supplies
+  the size (`place::bitmap_pixels`) and records no step for a chain that
+  normalises to the current one.
+- **Pixels — `xarast_image::photo`.** `Recipe { crop, flip, turns, lut,
+  mix }` over straight RGBA8, alpha untouched. **LUT fusion (T10.6.4):**
+  `fuse` runs each of the 256 levels through every point op in `f64` and
+  rounds **once**, per channel; saturation and greyscale mix channels and
+  run per pixel after the table. Geometry is pure copies (crop + mirror in
+  one pass, then a quarter-turn or 180° pass). Deterministic by
+  construction (the budget re-creates evicted derived images from it).
+  24 Mpx brightness + contrast + gamma: **66 ms** single-threaded in the
+  test profile (budget 200 ms; no rayon needed yet), checked pixel by
+  pixel against the fused table (`tests/photo.rs`, criterion 13).
+- **The translation — `xarast_io::photo`.** `recipe(&PhotoOps)` and
+  `bake(w, h, rgba, ops)`: the only place a document chain becomes a
+  recipe, used by the walker and the SVG exporter alike, so the screen,
+  PNG/PDF and SVG show the same pixels. `baked_pixels_sit_where_the_model_
+  says` pins the model's `unit_to_master` to the baked pixels for all 8
+  orientations × 3 crops.
+- **The walker** (`derived_image`, `derive`): a bitmap object with a
+  non-empty evaluable chain paints a **derived image** keyed by
+  (master `BitmapId`, chain hash). Evaluated on first paint from the
+  registered master's base, registered with an *expensive* `PixelSource`
+  that re-evaluates (so the budget spills it on first eviction), pyramid
+  built (`prepare`). An identity recipe paints the master itself. Cached
+  in the walker and in `DecodedImages` (`get_derived`/`insert_derived`,
+  stats `derived`, `derived_hits`, `derived_pruned`), so export,
+  thumbnail and `build_scene` walkers reuse the view's evaluation
+  (tested: an export walk evaluates nothing). **Pruning:** when the
+  document epoch moves, pairs used by no *attached* bitmap object are
+  dropped from both caches (history-only chains are re-evaluated on
+  undo); the walker's registry slot is parked with a 1 × 1 placeholder
+  and reused (`ImageRegistry::replace`), so twenty slider values leave
+  the registry at most one slot bigger (tested). Evaluation happens on
+  the walk thread, at full resolution — the live proxy preview is
+  XARA-T-0301.
+- **Damage:** an adjustment changes one leaf's image id; `scene_damage`
+  compares images by content, so only that object repaints and undo gives
+  no damage against the frame before (tested with a second picture
+  beside it). A reused slot is safe: the render thread holds a resolver
+  snapshot per rebuild.
+- **Export:** PNG/JPEG/WebP and PDF render the scene, so they show the
+  derived image with no extra code (PDF rasterises placed images anyway).
+  SVG bakes: `SvgOptions::derived_bitmaps` (`DerivedLinker`) makes a PNG
+  of the adjusted pixels (the master's ICC profile travels) and the
+  report says `Simplified { "photo adjustments baked into a PNG of the
+  adjusted pixels" }`; without a baker the master shows and the report
+  says `NotRendered`.
+- **`.xarast`:** `<xarast:photo-ops>` inside the `<image>`, `href` = the
+  master (`xarast-format.md`). Derived renditions in `resources/derived/`
+  (T10.6.6) and a browser-correct base picture are XARA-T-0302; chains on
+  bitmap fills are XARA-T-0303.
+
 ## Dead ends (do not retry)
 
 - Inverting a tag-68 PNG's alpha **after** `decode` (on premultiplied
@@ -465,6 +551,9 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
 - TIFF/WebP/GIF resolution; PNG `iCCP`-vs-`sRGB` precedence when both exist.
 - `DecodeLimits::max_frames` is informational: every decoder already takes
   the first frame only.
+- Photo adjustments: the panel and live proxy preview (XARA-T-0301);
+  derived renditions in `.xarast` and a browser-correct base picture
+  (XARA-T-0302); chains on bitmap fills (XARA-T-0303).
 - Bitmap gallery (XARA-US-0055): thumbnails on disk and the thumbnail
   budget (XARA-T-0289); Replace and Save a copy (XARA-T-0290); ICC
   profiles as resources and through the placement PNG conversion

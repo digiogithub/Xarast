@@ -351,6 +351,10 @@ pub struct BitmapNode {
     pub major: Vector,
     /// The second edge vector.
     pub minor: Vector,
+    /// Non-destructive adjustments ([`crate::photo`]): the object shows
+    /// `image` put through them. The parallelogram maps the **derived**
+    /// image. Empty for every bitmap the `.xar` importer makes.
+    pub photo_ops: crate::photo::PhotoOps,
 }
 
 /// A guideline on a guide layer.

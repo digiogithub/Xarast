@@ -387,6 +387,7 @@ fn emit(b: &mut DocumentBuilder, s: &Script) -> Result<(), BuildError> {
                 origin: Point::ORIGIN,
                 major: Vector::raw(1, 0),
                 minor: Vector::raw(0, 1),
+                photo_ops: Default::default(),
             })))
             .map(|_| ()),
     }

@@ -143,6 +143,7 @@ impl Ctx {
                 origin: origin.point(),
                 major: Vector::raw(1_000, 0),
                 minor: Vector::raw(0, 1_000),
+                photo_ops: Default::default(),
             })),
             Kind::Guideline(horizontal, position, colour) => {
                 NodeKind::Guideline(Box::new(GuidelineNode {

@@ -1124,6 +1124,30 @@ zoomed-out Draft of many evicted photographs read every base back.
   24 corpus files × Final/Draft × spill/re-decode) are unchanged and
   green.
 
+### Photo-adjusted images (XARA-US-0054, W10.6, 2026-09-24)
+
+The renderer does not evaluate photo operations: a bitmap object with a
+chain reaches it as an ordinary `Op::Image` naming a **derived**
+`ImageRef` the walker made (`image.md`, "Photo adjustments"). What
+changed here is one additive method, `ImageRegistry::replace(id, image)`:
+the walker parks a 1 × 1 placeholder in the slot of a derived image no
+object uses any more and reuses the slot for the next one, so a slider
+dragged through many values does not grow the registry. Why it is safe:
+
+- the render thread draws a scene with the resolver snapshot cloned at
+  its rebuild (`Session::resolver_snapshot`), never the live registry;
+- `scene_damage` checks a matched op's image ids against **both**
+  resolvers by content (as it does for reused ramp slots), so an id that
+  now names another image is damage exactly where it is drawn.
+
+`Paint::Image::adjust` (`BitmapAdjust`, the sampler-time brightness /
+contrast / gamma / saturation) is **not** used for photo adjustments and
+stays at its default in the walker: sampling-time adjustment would run
+per texel per frame, would not cover crop, orientation or levels, and
+would not reach SVG export. A derived image is evaluated once and then
+sampled, filtered and budgeted like any other image (an expensive
+`PixelSource`, spilled on first eviction).
+
 ### GPU tests: on by default, serialised machine-wide (2026-09-24)
 
 Tests that open a real `wgpu` device run by default again;
