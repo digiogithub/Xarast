@@ -2,12 +2,13 @@
 id: XARA-T-0233
 type: task
 title: "T11.3.4 — SVG export: embed fonts (@font-face WOFF2 subset) or write text as outlines"
-status: backlog
+status: in_review
 parent: XARA-US-0058
 author: mcp
 labels: [phase-11, io, svg, text]
 created: 2026-09-23T22:10:40Z
-updated: 2026-09-23T22:10:40Z
+updated: 2026-09-24T08:51:14Z
+started: 2026-09-24T08:50:57Z
 ---
 
 ## Description

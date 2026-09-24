@@ -2,12 +2,13 @@
 id: XARA-T-0245
 type: task
 title: T9.6.5 — Outline fallback for export when a font cannot be embedded (profile C, PDF/SVG)
-status: backlog
+status: in_review
 parent: XARA-US-0049
 author: mcp
 labels: [phase-9, text]
 created: 2026-09-23T22:35:23Z
-updated: 2026-09-23T22:35:23Z
+updated: 2026-09-24T08:51:14Z
+started: 2026-09-24T08:50:57Z
 ---
 
 ## Description
