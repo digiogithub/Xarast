@@ -127,7 +127,10 @@ pub use text::{
     TextLayout, TextLineNode, TextStoryNode,
 };
 pub use text_convert::{OutlineRun, convert_story_to_shapes, is_text_slot};
-pub use text_edit::{DeleteRange, InsertText, delete_range, insert_text, new_story};
+pub use text_edit::{
+    DeleteRange, InsertText, SetTextAttr, delete_range, insert_text, is_paragraph_slot, new_story,
+    set_text_attr, text_attr_label,
+};
 pub use text_model::{
     CharRun, ItemEntry, KernAt, LineEntry, StoryFlow, StoryText, TextCursor, TextPos,
 };

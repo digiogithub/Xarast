@@ -1,5 +1,6 @@
-//! Text edit commands (phase 9, T9.2.4): typing into a story and deleting
-//! from it, through the transaction like every other edit.
+//! Text edit commands (phase 9, T9.2.4): typing into a story, deleting
+//! from it and setting text attributes on it, through the transaction like
+//! every other edit.
 //!
 //! Positions are **byte offsets into the story's logical text**
 //! ([`StoryText::text`]), not [`TextPos`](crate::TextPos): the text tool,
@@ -19,6 +20,17 @@
 //!   starts with copies of the line's attributes in scope at the split (the
 //!   last of each slot), so no character changes style. Every line keeps
 //!   ending with its break.
+//! * **A character attribute** ([`SetTextAttr`]: typeface, size, bold,
+//!   tracking, features…) becomes an attribute child of every item in the
+//!   range, replacing the item's own child of that slot. An item's own
+//!   children apply to it alone, so nothing outside the range changes, and
+//!   text typed after it copies them (insertion above).
+//! * **A paragraph attribute** (justification, line spacing, margins,
+//!   first-line indent, ruler) is read from a line's first item, and a
+//!   paragraph from its first line; it is set on **every line of every
+//!   paragraph the range touches**, as a line-level attribute right before
+//!   the line's first item (any other of that slot there goes), so the
+//!   lines of a paragraph keep agreeing.
 //! * **Deletion** detaches the items in the range. Deleting a paragraph
 //!   break does not merge lines: the line simply no longer ends with a
 //!   break and its paragraph runs on into the next line, which keeps every
@@ -31,12 +43,246 @@
 
 use std::ops::Range;
 
-use crate::attr::{AttrNode, AttrValue};
+use crate::attr::{AttrNode, AttrSlot, AttrValue};
 use crate::history::{CoalesceKey, Command, EditError, Tx};
 use crate::kind::NodeKind;
 use crate::text::{TextItem, TextLineNode, TextStoryNode};
 use crate::text_model::StoryText;
 use crate::tree::{Attach, NodeId};
+
+/// Sets one text attribute on a byte range of a story (T9.2.4): a
+/// character attribute on the characters in the range, a paragraph
+/// attribute ([`is_paragraph_slot`]) on the paragraphs it touches (the
+/// caret's paragraph for an empty range).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SetTextAttr {
+    /// The `TextStory` node.
+    pub story: NodeId,
+    /// Byte range in the story's logical text.
+    pub range: Range<usize>,
+    /// The value; its slot must be a text slot.
+    pub value: AttrValue,
+    /// The key it merges on (the typing burst it styles).
+    pub coalesce: Option<CoalesceKey>,
+}
+
+impl Command for SetTextAttr {
+    fn label(&self) -> &'static str {
+        self.value.slot().map_or("Text Attribute", text_attr_label)
+    }
+
+    fn run(&self, tx: &mut Tx<'_>) -> Result<(), EditError> {
+        set_text_attr(tx, self.story, self.range.clone(), &self.value)
+    }
+
+    fn coalesce_key(&self) -> Option<CoalesceKey> {
+        self.coalesce
+    }
+}
+
+/// Whether a text slot is read per paragraph (from the first item of a
+/// paragraph's first line) rather than per character.
+#[must_use]
+pub fn is_paragraph_slot(slot: AttrSlot) -> bool {
+    matches!(
+        slot,
+        AttrSlot::TxtJustification
+            | AttrSlot::TxtLineSpace
+            | AttrSlot::TxtLeftMargin
+            | AttrSlot::TxtRightMargin
+            | AttrSlot::TxtFirstIndent
+            | AttrSlot::TxtRuler
+    )
+}
+
+/// The Edit menu's name for setting a text attribute of `slot`.
+#[must_use]
+pub fn text_attr_label(slot: AttrSlot) -> &'static str {
+    match slot {
+        AttrSlot::TxtFontTypeface => "Font",
+        AttrSlot::TxtBold => "Bold",
+        AttrSlot::TxtItalic => "Italic",
+        AttrSlot::TxtUnderline => "Underline",
+        AttrSlot::TxtFontSize => "Font Size",
+        AttrSlot::TxtAspectRatio => "Aspect Ratio",
+        AttrSlot::TxtTracking => "Tracking",
+        AttrSlot::TxtScript => "Superscript/Subscript",
+        AttrSlot::TxtBaseline => "Baseline Shift",
+        AttrSlot::TxtJustification => "Justification",
+        AttrSlot::TxtLineSpace => "Line Spacing",
+        AttrSlot::TxtLeftMargin => "Left Margin",
+        AttrSlot::TxtRightMargin => "Right Margin",
+        AttrSlot::TxtFirstIndent => "First-Line Indent",
+        AttrSlot::TxtRuler => "Tab Stops",
+        AttrSlot::TxtFeatures => "OpenType Features",
+        _ => "Text Attribute",
+    }
+}
+
+/// Sets `value` on the byte range `range` of `story` (see
+/// [`SetTextAttr`]). An empty range sets a paragraph attribute on the
+/// paragraph holding it and a character attribute nowhere.
+///
+/// # Errors
+///
+/// [`EditError::WrongKind`] when `story` is not a story,
+/// [`EditError::TextEdit`] when `value` is not a text attribute or the
+/// range is reversed, past the text or cuts a character, and whatever the
+/// transaction refuses (a locked story).
+pub fn set_text_attr(
+    tx: &mut Tx<'_>,
+    story: NodeId,
+    range: Range<usize>,
+    value: &AttrValue,
+) -> Result<(), EditError> {
+    let Some(slot) = value
+        .slot()
+        .filter(|s| crate::text_convert::is_text_slot(*s))
+    else {
+        return Err(EditError::TextEdit("not a text attribute"));
+    };
+    let st = collect(tx, story)?;
+    if range.start > range.end
+        || range.end > st.text.len()
+        || !st.text.is_char_boundary(range.start)
+        || !st.text.is_char_boundary(range.end)
+    {
+        return Err(EditError::TextEdit("range outside the story's text"));
+    }
+    if is_paragraph_slot(slot) {
+        for line in paragraph_lines(&st, &range) {
+            set_line_attr(tx, line, slot, value)?;
+        }
+        return Ok(());
+    }
+    let items: Vec<NodeId> = st
+        .items
+        .iter()
+        .filter(|e| e.len > 0 && e.byte as usize >= range.start && (e.byte as usize) < range.end)
+        .map(|e| e.node)
+        .collect();
+    for item in items {
+        set_own_attr(tx, item, slot, value)?;
+    }
+    Ok(())
+}
+
+/// The line index holding byte `b`: the last line starting at or before
+/// it.
+fn line_at(st: &StoryText, b: usize) -> usize {
+    st.lines
+        .partition_point(|l| l.first_byte as usize <= b)
+        .saturating_sub(1)
+}
+
+/// Every line of every paragraph `range` touches.
+fn paragraph_lines(st: &StoryText, range: &Range<usize>) -> Vec<NodeId> {
+    if st.lines.is_empty() {
+        return Vec::new();
+    }
+    let first = line_at(st, range.start);
+    let last = if range.end > range.start {
+        line_at(st, range.end - 1)
+    } else {
+        first
+    };
+    // Back to the first line of the first paragraph, on to the last line
+    // of the last one.
+    let mut a = first;
+    while a > 0 && !st.lines[a - 1].ends_paragraph {
+        a -= 1;
+    }
+    let mut b = last.max(a);
+    while b + 1 < st.lines.len() && !st.lines[b].ends_paragraph {
+        b += 1;
+    }
+    st.lines[a..=b].iter().map(|l| l.node).collect()
+}
+
+fn attr_of(tx: &Tx<'_>, node: NodeId, slot: AttrSlot) -> bool {
+    matches!(tx.doc().tree.kind(node), Some(NodeKind::Attr(a)) if a.value.slot() == Some(slot))
+}
+
+/// Gives `item` its own attribute child `value`, replacing any it has of
+/// that slot.
+fn set_own_attr(
+    tx: &mut Tx<'_>,
+    item: NodeId,
+    slot: AttrSlot,
+    value: &AttrValue,
+) -> Result<(), EditError> {
+    let own: Vec<NodeId> = tx
+        .doc()
+        .tree
+        .children(item)
+        .filter(|&c| attr_of(tx, c, slot))
+        .collect();
+    match own.split_last() {
+        Some((&last, rest)) => {
+            for &r in rest {
+                tx.delete(r)?;
+            }
+            if !matches!(tx.doc().tree.kind(last), Some(NodeKind::Attr(a)) if a.value == *value) {
+                tx.set_attr(last, value.clone())?;
+            }
+        }
+        None => {
+            let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(value.clone()))))?;
+            tx.attach(attr, item, Attach::LastChild)?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets a paragraph attribute on `line`: one attribute of the slot right
+/// before its first item, none of that slot before it or on the first
+/// item itself. A line with no items reads its attributes from outside
+/// itself and is left alone.
+fn set_line_attr(
+    tx: &mut Tx<'_>,
+    line: NodeId,
+    slot: AttrSlot,
+    value: &AttrValue,
+) -> Result<(), EditError> {
+    let tree = &tx.doc().tree;
+    let kids: Vec<NodeId> = tree.children(line).collect();
+    let Some(first) = kids
+        .iter()
+        .position(|&k| matches!(tree.kind(k), Some(NodeKind::TextItem(_))))
+    else {
+        return Ok(());
+    };
+    let first_item = kids[first];
+    let before: Vec<NodeId> = kids[..first]
+        .iter()
+        .copied()
+        .filter(|&k| attr_of(tx, k, slot))
+        .collect();
+    let on_item: Vec<NodeId> = tx
+        .doc()
+        .tree
+        .children(first_item)
+        .filter(|&c| attr_of(tx, c, slot))
+        .collect();
+    for n in on_item {
+        tx.delete(n)?;
+    }
+    match before.split_last() {
+        Some((&last, rest)) => {
+            for &r in rest {
+                tx.delete(r)?;
+            }
+            if !matches!(tx.doc().tree.kind(last), Some(NodeKind::Attr(a)) if a.value == *value) {
+                tx.set_attr(last, value.clone())?;
+            }
+        }
+        None => {
+            let attr = tx.create(NodeKind::Attr(Box::new(AttrNode::new(value.clone()))))?;
+            tx.attach(attr, first_item, Attach::Prev)?;
+        }
+    }
+    Ok(())
+}
 
 /// Types `text` into a story at a byte offset. `'\n'` starts a paragraph,
 /// `'\t'` is a tab, `'\r'` and other control characters are dropped.
@@ -532,6 +778,129 @@ mod tests {
             Err(EditError::TextEdit(_))
         ));
         assert_eq!(doc.canonical_digest(), before);
+    }
+
+    fn attr_at(st: &StoryText, at: usize, slot: AttrSlot) -> AttrValue {
+        st.runs[st.run_at(at).unwrap()].attrs.get(slot).clone()
+    }
+
+    fn set(bus: &mut CommandBus, doc: &mut Document, story: NodeId, r: Range<usize>, v: AttrValue) {
+        let cmd = SetTextAttr {
+            story,
+            range: r,
+            value: v,
+            coalesce: None,
+        };
+        bus.dispatch(doc, &cmd).unwrap();
+    }
+
+    #[test]
+    fn a_character_attribute_styles_exactly_the_range_and_typing_after_it() {
+        let (mut doc, story) = doc();
+        let before = doc.canonical_digest();
+        let mut bus = CommandBus::new();
+        // "abcd\nef\n": bold on "bcd\ne" (across the paragraph break).
+        set(&mut bus, &mut doc, story, 1..6, AttrValue::Bold(true));
+        let st = text(&doc, story);
+        let bold: Vec<bool> = (0..st.text.len())
+            .map(|i| attr_at(&st, i, AttrSlot::TxtBold) == AttrValue::Bold(true))
+            .collect();
+        assert_eq!(bold, [false, true, true, true, true, true, false, false]);
+        // Sizes are untouched.
+        assert_eq!(
+            sizes(&st)[..4],
+            [('a', 20_000), ('b', 20_000), ('c', 12_000), ('d', 12_000)]
+        );
+        // Setting it again changes nothing more; unbolding one character.
+        set(&mut bus, &mut doc, story, 1..6, AttrValue::Bold(true));
+        set(&mut bus, &mut doc, story, 2..3, AttrValue::Bold(false));
+        let st = text(&doc, story);
+        assert_eq!(attr_at(&st, 2, AttrSlot::TxtBold), AttrValue::Bold(false));
+        assert_eq!(attr_at(&st, 3, AttrSlot::TxtBold), AttrValue::Bold(true));
+        // Typed after a bold character, text is bold.
+        insert(&mut bus, &mut doc, story, 4, "Z");
+        let st = text(&doc, story);
+        assert_eq!(&st.text[4..5], "Z");
+        assert_eq!(attr_at(&st, 4, AttrSlot::TxtBold), AttrValue::Bold(true));
+        assert!(crate::validate::validate_document(&doc).errors.is_empty());
+        for _ in 0..4 {
+            bus.undo(&mut doc).unwrap();
+        }
+        assert_eq!(doc.canonical_digest(), before);
+    }
+
+    #[test]
+    fn a_paragraph_attribute_goes_on_every_line_of_the_touched_paragraphs() {
+        let (mut doc, story) = doc();
+        let before = doc.canonical_digest();
+        let mut bus = CommandBus::new();
+        let just =
+            |st: &StoryText, l: usize| st.lines[l].attrs.get(AttrSlot::TxtJustification).clone();
+        let centre = AttrValue::Justification(crate::text::Justification::Centre);
+        // A caret in the second paragraph.
+        set(&mut bus, &mut doc, story, 6..6, centre.clone());
+        let st = text(&doc, story);
+        assert_ne!(just(&st, 0), centre);
+        assert_eq!(just(&st, 1), centre);
+        // Paragraph 1 run on into paragraph 2 (its break deleted): one
+        // paragraph of two lines; a caret in its first line styles both.
+        bus.dispatch(
+            &mut doc,
+            &DeleteRange {
+                story,
+                range: 4..5,
+                coalesce: None,
+            },
+        )
+        .unwrap();
+        let right = AttrValue::Justification(crate::text::Justification::Right);
+        set(&mut bus, &mut doc, story, 1..1, right.clone());
+        let st = text(&doc, story);
+        assert_eq!((just(&st, 0), just(&st, 1)), (right.clone(), right));
+        // Characters are not given paragraph attributes.
+        assert!(
+            st.items
+                .iter()
+                .all(|e| doc.tree.children(e.node).next().is_none())
+        );
+        assert!(crate::validate::validate_document(&doc).errors.is_empty());
+        for _ in 0..3 {
+            bus.undo(&mut doc).unwrap();
+        }
+        assert_eq!(doc.canonical_digest(), before);
+    }
+
+    #[test]
+    fn a_non_text_attribute_or_a_bad_range_is_refused() {
+        let (mut doc, story) = doc();
+        let before = doc.canonical_digest();
+        let mut bus = CommandBus::new();
+        for (range, value) in [
+            (0..2, AttrValue::LineWidth(Mp::new(1_000))),
+            (3..99, AttrValue::Bold(true)),
+        ] {
+            let cmd = SetTextAttr {
+                story,
+                range,
+                value,
+                coalesce: None,
+            };
+            assert!(matches!(
+                bus.dispatch(&mut doc, &cmd),
+                Err(EditError::TextEdit(_))
+            ));
+        }
+        assert_eq!(doc.canonical_digest(), before);
+        assert_eq!(
+            SetTextAttr {
+                story,
+                range: 0..1,
+                value: AttrValue::FontSize(Mp::new(9_000)),
+                coalesce: None
+            }
+            .label(),
+            "Font Size"
+        );
     }
 
     #[test]
