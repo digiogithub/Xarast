@@ -221,7 +221,9 @@ stats, foreign_count, foreign_digest }`.
   shared code in `svg/text.rs`): `<text xarast:exact="true" transform>`
   (story matrix conjugated by the flip; `xarast:matrix` with the exact
   `a b c d` when six decimals do not pin them), one `<tspan>` per
-  `TextLine` (its node ruler as `xarast:ruler`), and inside it one
+  `TextLine` (its node ruler as `xarast:ruler`; OpenType feature
+  settings of a run as `xarast:features="liga:0 smcp:1"`, only when not
+  empty, since XARA-T-0225), and inside it one
   `<tspan>` per **run**: consecutive items whose *written* attributes are
   identical. Grouping: a snapshot of the `AttrStack` at each item whose
   state changed (dirty flag); an equal snapshot continues the run, a
