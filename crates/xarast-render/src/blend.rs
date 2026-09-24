@@ -225,6 +225,7 @@ impl BlendFamily {
             TranspMode::Lighten => BlendFamily::Lighten,
             TranspMode::Brightness => BlendFamily::Brightness,
             TranspMode::Luminosity => BlendFamily::Luminosity,
+            TranspMode::Hue => BlendFamily::Hue,
         }
     }
 

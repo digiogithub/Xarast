@@ -1203,6 +1203,7 @@ pub(crate) fn blend_of(m: TranspMode) -> Option<(Option<&'static str>, &'static 
         TranspMode::Luminosity => (Some("luminosity"), "luminosity"),
         TranspMode::Contrast => (None, "contrast"),
         TranspMode::Brightness => (None, "brightness"),
+        TranspMode::Hue => (Some("hue"), "hue"),
     })
 }
 

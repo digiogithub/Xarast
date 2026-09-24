@@ -373,7 +373,7 @@ pub type GradFillTool = FillLikeTool<ColourFill>;
 pub type TransparencyTool = FillLikeTool<TranspFill>;
 
 /// The transparency modes the infobar offers, in menu order.
-pub const TRANSP_MODES: [TranspMode; 9] = [
+pub const TRANSP_MODES: [TranspMode; 10] = [
     TranspMode::Mix,
     TranspMode::StainedGlass,
     TranspMode::Bleach,
@@ -383,6 +383,7 @@ pub const TRANSP_MODES: [TranspMode; 9] = [
     TranspMode::Lighten,
     TranspMode::Brightness,
     TranspMode::Luminosity,
+    TranspMode::Hue,
 ];
 
 /// The label of a transparency mode.
@@ -398,6 +399,7 @@ pub const fn transp_mode_label(m: TranspMode) -> &'static str {
         TranspMode::Lighten => "Lighten",
         TranspMode::Brightness => "Brightness",
         TranspMode::Luminosity => "Luminosity",
+        TranspMode::Hue => "Hue",
     }
 }
 
