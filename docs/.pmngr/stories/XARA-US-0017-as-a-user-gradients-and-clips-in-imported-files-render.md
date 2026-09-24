@@ -2,13 +2,14 @@
 id: XARA-US-0017
 type: story
 title: As a user, gradients and clips in imported files render faithfully
-status: backlog
+status: in_review
 parent: XARA-EP-0018
 author: mcp
 labels: [render, app-core]
 estimate: 5
 created: 2026-09-23T09:40:52Z
-updated: 2026-09-23T09:40:52Z
+updated: 2026-09-24T15:24:46Z
+started: 2026-09-24T14:44:31Z
 ---
 
 ## Acceptance Criteria

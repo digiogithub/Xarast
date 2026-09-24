@@ -2,13 +2,14 @@
 id: XARA-T-0256
 type: task
 title: "Renderer: mesh fills ignore their repeat mode and mesh transparencies are flat means"
-status: backlog
+status: in_progress
 priority: medium
 parent: XARA-US-0043
 author: mcp
 labels: [phase-8, render]
 created: 2026-09-24T00:01:44Z
-updated: 2026-09-24T00:01:44Z
+updated: 2026-09-24T15:07:38Z
+started: 2026-09-24T15:07:38Z
 ---
 
 ## Description

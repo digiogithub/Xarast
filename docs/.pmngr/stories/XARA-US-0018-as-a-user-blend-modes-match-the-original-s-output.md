@@ -2,13 +2,14 @@
 id: XARA-US-0018
 type: story
 title: As a user, blend modes match the original's output
-status: backlog
+status: in_progress
 parent: XARA-EP-0018
 author: mcp
 labels: [render, research]
 estimate: 5
 created: 2026-09-23T09:40:52Z
-updated: 2026-09-23T09:40:52Z
+updated: 2026-09-24T15:07:38Z
+started: 2026-09-24T15:07:38Z
 ---
 
 ## Description

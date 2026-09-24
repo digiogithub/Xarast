@@ -2,12 +2,13 @@
 id: XARA-T-0301
 type: task
 title: Photo panel UI with live proxy-resolution preview (T10.6.5 preview, T10.6.8)
-status: backlog
+status: in_progress
 parent: XARA-US-0054
 author: mcp
 labels: [phase-10, image, ui]
 created: 2026-09-24T13:19:22Z
-updated: 2026-09-24T13:19:22Z
+updated: 2026-09-24T14:36:13Z
+started: 2026-09-24T14:36:13Z
 ---
 
 ## Description
