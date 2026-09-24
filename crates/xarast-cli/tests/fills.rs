@@ -138,3 +138,28 @@ fn inspect_fills_lists_every_fill_of_fill_types_simple() {
     assert!(text.contains("effect=alt-rainbow"), "{text}");
     assert!(text.contains("mapping=repeat-extra"), "{text}");
 }
+
+/// The corpus's three bitmap transparencies (JagSS100 simple, scope3
+/// simple) keep their mode through import and the census says which
+/// (XARA-T-0307): all three are Mix.
+#[test]
+fn bitmap_transparencies_are_listed_with_their_mode() {
+    let Some(root) = corpus_root() else { return };
+    let mut modes = Vec::new();
+    for name in ["Designs/JagSS100 simple.xar", "Designs/scope3 simple.xar"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_xarast-cli"))
+            .args(["inspect", "--fills"])
+            .arg(root.join(name))
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let text = String::from_utf8_lossy(&out.stdout);
+        modes.extend(
+            text.lines()
+                .filter(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+                .filter(|l| l.contains(" transparency ") && l.contains(" bitmap "))
+                .map(|l| l.split("mode=").nth(1).unwrap_or("").trim().to_owned()),
+        );
+    }
+    assert_eq!(modes, ["mix", "mix", "mix"]);
+}

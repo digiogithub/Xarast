@@ -1094,9 +1094,11 @@ fn contone_filter(ctx: &mut PaintCtx<'_>, a: &Colour, b: &Colour, effect: FillEf
 
 /// A bitmap transparency as a luminance `<mask>` over the element's box:
 /// the image tiled as a bitmap fill is, through a filter that turns each
-/// texel into `1 - luma` (BT.601 on the straight colour, alpha ignored).
-/// A texel's transparency level is its luma (0 opaque … 255 clear), so the
-/// mask is its complement. The mask carries no model data: the twin does.
+/// texel into `1 - level`, where the level runs linearly from the start
+/// level at black to the end level at white (BT.601 luma on the straight
+/// colour, alpha ignored; 0 opaque … 255 clear). With the default levels,
+/// 0 and 255, that is `1 - luma`. The fill's profile is not applied. The
+/// mask carries no model data: the twin does.
 fn bitmap_mask(
     ctx: &mut PaintCtx<'_>,
     bm: &BitmapRef,
@@ -1104,12 +1106,27 @@ fn bitmap_mask(
     axis_x: Point,
     axis_y: Point,
     bounds: (i64, i64, i64, i64),
+    levels: (u8, u8),
 ) -> String {
     let (x0, y0, x1, y1) = bounds;
     let mut pattern = bitmap_pattern_head(ctx, origin, axis_x, axis_y);
     bitmap_pattern_tail(&mut pattern, bm, None);
     let pattern = ctx.defs.add('p', "pattern", &pattern);
-    let row = "-.299 -.587 -.114 0 1";
+    let row = if levels == (0, 255) {
+        "-.299 -.587 -.114 0 1".to_owned()
+    } else {
+        // mask = 1 - (a + (b - a) * luma), with a and b in 0..1.
+        let a = f64::from(levels.0) / 255.0;
+        let span = (f64::from(levels.1) - f64::from(levels.0)) / 255.0;
+        let w = |k: f64| f64s(-span * k, 4);
+        format!(
+            "{} {} {} 0 {}",
+            w(0.299),
+            w(0.587),
+            w(0.114),
+            f64s(1.0 - a, 4)
+        )
+    };
     let filter = ctx.defs.add(
         'f',
         "filter",
@@ -1493,12 +1510,16 @@ pub(crate) fn transparency(
             origin,
             axis_x,
             axis_y,
+            contone,
             ..
         } => {
             // The twin is the model; the mask is what a browser draws.
             let sidecar = Some(transparency_twin(ctx, t, tiling));
+            let levels = contone.map_or((0, 255), |(a, b)| (a.level, b.level));
             let mask = match (bounds, (ctx.bitmap_href)(*image)) {
-                (Some(b), Some(bm)) => Some(bitmap_mask(ctx, &bm, *origin, *axis_x, *axis_y, b)),
+                (Some(b), Some(bm)) => {
+                    Some(bitmap_mask(ctx, &bm, *origin, *axis_x, *axis_y, b, levels))
+                }
                 _ => {
                     ctx.stats.fills_approximated += 1;
                     None

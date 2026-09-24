@@ -455,6 +455,13 @@ pub enum Decoded {
     Layer,
     /// `TAG_GROUP`.
     Group,
+    /// `TAG_CLIPVIEWCONTROLLER` (4084): a group whose ink children before
+    /// its `TAG_CLIPVIEW` child are the clipping objects ("keyholes") and
+    /// whose ink children after it are clipped (`research/01 §4.9`). Empty.
+    ClipViewController,
+    /// `TAG_CLIPVIEW` (4085): the marker inside a ClipView controller that
+    /// separates the keyholes from the clipped objects. Empty.
+    ClipView,
     /// `TAG_SETSENTINEL`.
     SetSentinel,
     /// `TAG_SPREADINFORMATION`.
@@ -722,7 +729,7 @@ pub const fn has_decoder(tag: u32) -> bool {
         | 2100 | 2101 | 2110..=2117 | 2150 | 2151
         | 2200..=2204 | 2206
         | 2900..=2920
-        | 4010 | 4011 | 4070 | 4075..=4078 | 4086 | 4087 | 4088
+        | 4010 | 4011 | 4070 | 4075..=4078 | 4084 | 4085 | 4086 | 4087 | 4088
         | 4114 | 4115 | 4116 | 4119 | 4120 | 4121 | 4123 | 4124 | 4129
         | 4030 | 4031 | 4201..=4203)
 }
@@ -932,6 +939,10 @@ pub fn decode(
             Decoded::SpreadAnimProps(w)
         }
         4070 => Decoded::SetSentinel,
+        // Both records are empty (`Kernel/nodeclip.cpp:503`,
+        // `Kernel/ndclpcnt.cpp:2408`); whatever a payload holds is ignored.
+        4084 => Decoded::ClipViewController,
+        4085 => Decoded::ClipView,
         4086 => Decoded::Feather {
             size: c.mp()?,
             bias: c.opt_f64().unwrap_or(0.0),

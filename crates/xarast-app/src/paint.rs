@@ -617,22 +617,45 @@ pub(crate) fn transparency(
             axis_y,
             persp,
             tiling: own,
+            contone,
+            profile,
             ..
-        } => match ctx.images.get(image) {
-            Some(id) => {
-                let mapping = bitmap_frame(*origin, *axis_x, *axis_y, persp.as_ref());
-                Transparency {
-                    family: BlendFamily::Mix,
-                    source: TranspSource::Image {
-                        image: *id,
-                        mapping,
-                        repeat: bitmap_repeat(*own, tiling),
-                        filter: ctx.filter,
-                    },
-                }
+        } => {
+            // The pair is the start and end level and the mode
+            // (XARA-T-0307). Without one — a transparency built before the
+            // importer kept them — the bitmap composites in Mix, reading
+            // its luminance as the level.
+            let (from, to) = contone.unwrap_or((
+                xarast_color::Transparency {
+                    level: 0,
+                    mode: TranspMode::Mix,
+                },
+                xarast_color::Transparency {
+                    level: 255,
+                    mode: TranspMode::Mix,
+                },
+            ));
+            if from.mode == TranspMode::None {
+                return Transparency::OPAQUE;
             }
-            None => Transparency::OPAQUE,
-        },
+            match ctx.images.get(image) {
+                Some(id) => {
+                    let id = *id;
+                    let mapping = bitmap_frame(*origin, *axis_x, *axis_y, persp.as_ref());
+                    Transparency {
+                        family: family_of(from.mode),
+                        source: TranspSource::Image {
+                            image: id,
+                            mapping,
+                            repeat: bitmap_repeat(*own, tiling),
+                            filter: ctx.filter,
+                            ramp: bitmap_level_ramp(from, to, *profile, ctx),
+                        },
+                    }
+                }
+                None => Transparency::OPAQUE,
+            }
+        }
         // A mesh transparency is interpolated per pixel on the colour
         // mesh's own frame and corner order, and tiles as it does.
         FillGeometry::ThreeColour {
@@ -679,6 +702,39 @@ pub(crate) fn transparency(
             }
         }
     }
+}
+
+/// The table a bitmap transparency maps its luminance through: black
+/// takes the start level, white the end, shaped by the fill's profile.
+/// The original builds the same 256-entry table from the two levels and
+/// the profile (`research/03 §2.8`, `SetOutputRange` on channel 3).
+/// `None` for the identity (0 to 255, no profile), which reads the
+/// luminance as the level exactly as before the levels were kept.
+fn bitmap_level_ramp(
+    from: xarast_color::Transparency,
+    to: xarast_color::Transparency,
+    profile: Profile,
+    ctx: &mut PaintCtx<'_>,
+) -> Option<xarast_render::RampId> {
+    if from.level == 0 && to.level == 255 && profile == Profile::IDENTITY {
+        return None;
+    }
+    let stops = [
+        TranspStop {
+            offset: 0.0,
+            level: from.level,
+        },
+        TranspStop {
+            offset: 1.0,
+            level: to.level,
+        },
+    ];
+    Some(intern_transparency_ramp(
+        &stops,
+        profile,
+        RampEase::Linear,
+        ctx,
+    ))
 }
 
 fn mesh_transparency(

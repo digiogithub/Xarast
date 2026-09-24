@@ -852,11 +852,13 @@ fn push_mapped_transparency(
             mapping,
             repeat,
             filter,
+            ramp,
         } => TranspSource::Image {
             image: *image,
             mapping: mapping.transformed(xf),
             repeat: *repeat,
             filter: *filter,
+            ramp: *ramp,
         },
     };
     let slot = idx(transps.len());

@@ -1187,6 +1187,23 @@ Typical observed size: 119 bytes (75 + 40 for a 4-point path + 4 for the empty p
 | 4040 | `TAG_WIZOP` (var) | 4 × `UNICODE-Z`: internal name, question, parameter, empty string (`Kernel/tmpltatr.cpp:395-415`) |
 | 4042 | `TAG_WIZOP_STYLEREF` (4) | `i32 reference to the style` |
 
+**ClipView structure** (XARA-T-0306). Both records are empty; the meaning is
+in the order of the controller's children. The ink children **before** the
+`TAG_CLIPVIEW` child are the *keyholes*, the ones **after** it are clipped
+(`Kernel/ndclpcnt.h:123-133`: `Keyhole — NCV — Clipped Node N1 — N2 …`;
+`Kernel/ndclpcnt.cpp:328-339` walks left of the `NodeClipView` for keyholes).
+Only the first `TAG_CLIPVIEW` child counts (`GetClipView`,
+`Kernel/ndclpcnt.cpp:288-296`). The keyholes are the bottom-most objects of
+the group and are **drawn as ordinary objects** — the controller renders as a
+plain group (`Kernel/ndclpcnt.cpp:513-527`) — and the clip region is the
+**union** of their filled areas with outlines stripped (`UpdateKeyholePath`,
+`Kernel/ndclpcnt.cpp:1938-2000`: `PathBecomeA … STRIP_OUTLINES`, combined with
+`ClipPathToPath` style 7, which is `Source OR Clip`, `Kernel/paths.cpp:5461-5468`).
+An empty union clips everything away (a degenerate keyhole path, `:1996-2007`).
+Xara LX declares both tags atomic, so a reader that does not know them drops
+the whole controller. `TAG_CLIPVIEW_PATH` (4137) is declared and never
+written.
+
 ### 4.9. Category: printing and imagesetting
 
 | tag | record | payload |

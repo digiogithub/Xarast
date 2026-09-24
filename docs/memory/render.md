@@ -821,6 +821,19 @@ WATCH 0.980 → 0.991, Spitfire 0.850 → 0.958, TestBitmapFill 0.985 → 0.999.
 No golden encoded the bug (none has a bitmap fill); pinned by
 `crates/xarast-app/tests/bitmap_orientation.rs`.
 
+**Bitmap transparency levels (XARA-T-0307, 2026-09-24).**
+`TranspSource::Image` has a `ramp: Option<RampId>`: a transparency ramp
+(the same table `TranspSource::Gradient` uses, in
+`Resolver::transparency_ramps`) indexed by `luma / 255`, so black takes the
+ramp's start level and white its end — the original's 256-entry bitmap
+table (`Kernel/gradtbl.cpp:1421-1458`). `None` reads the luminance as the
+level, exactly as before; the walker passes `None` for levels 0..255 with
+no profile, so no existing render or golden moved. The ramp is a damage
+reference like a gradient's. The family is the mode's (it used to be Mix
+for every bitmap transparency). Evidence against the embedded previews is
+in `xar-import.md`, finding 18; pinned by
+`crates/xarast-app/tests/xar_clips_and_masks.rs`.
+
 ### Resampling quality (XARA-US-0052, W10.4, 2026-09-24)
 
 `crates/xarast-render/src/resample.rs` is the one image sampler, behind
