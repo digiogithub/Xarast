@@ -239,6 +239,13 @@ pub enum Intent {
     /// W8.7): a click, a colour drag and its drop, a reorder, a rename, a
     /// delete. See [`crate::colour_bar`].
     ColourBar(crate::colour_bar::ColourBarOp),
+    /// A drag of one of the active tool's infobar sliders: previewed while
+    /// held, one undo step on release, nothing on `Esc` (XARA-T-0220).
+    InfobarDrag(crate::tool::InfobarDrag),
+    /// An arrow key nudging what the tool in force has selected (a fill
+    /// handle); the shell sends it while [`crate::Session::takes_nudge`]
+    /// says so, and pans otherwise. A run of nudges is one undo step.
+    Nudge(crate::tool::Nudge),
     /// A value typed into a field of the active tool's infobar.
     InfobarEdit {
         /// Which field.

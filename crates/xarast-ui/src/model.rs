@@ -527,6 +527,9 @@ pub enum UiCommand {
     ClearRecent,
     /// The answer to [`UiModel::prompt`].
     AnswerPrompt(xarast_app::PromptAnswer),
+    /// A drag of one of the infobar's sliders: a live value, the
+    /// release, or `Esc` (XARA-T-0220).
+    InfobarDrag(xarast_app::InfobarDrag),
     /// A value typed, ticked or chosen in the tool's infobar, already
     /// parsed (lengths into millipoints, angles into degrees).
     InfobarEdit {

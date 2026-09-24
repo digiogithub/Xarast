@@ -132,10 +132,22 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
 - **State machine** (`xarast-app/src/fill_tool.rs`, full rules in
   `tools.md` decisions 45–52): hover a handle → Move cursor; press+drag a
   handle → live preview through `Preview::attrs`, one step on release; press
-  elsewhere → drag out a new fill; double click on an arm → insert a stop;
+  elsewhere → drag out a new fill (a double click held and dragged: a
+  conical one); double click on an arm → insert a stop;
   click a handle → it becomes the selected handle and the infobar rebinds;
   Esc mid-drag → nothing happened (no command was emitted, so nothing to
-  undo); Esc idle → deselect the handle, then the objects.
+  undo); Esc idle → deselect the handle, then the objects. An outline
+  painted with a gradient shows its own handles (`tools.md` decision 78).
+- **Arrow keys** (XARA-T-0220, `tools.md` decision 79): with a fill handle
+  selected and the canvas (or nothing) holding the keyboard, the viewer's
+  `arrow_nudge` sends `Intent::Nudge` — Ctrl ×5, Shift ×10, Ctrl+Shift ⅕,
+  Alt one pixel, Alt+Shift ten — and does **not** pan; with no handle
+  selected the arrows pan as before. A run of nudges is one undo step.
+- **Status line and cursors** (T8.4.6): the status bar shows
+  `Session::tool_status()` after a colour/bitmap drag's text and before the
+  viewer's own notices; over a handle the cursor is the move cross, over an
+  arm the pointing hand (`CursorKind::Pointer` → `CursorShape::Hand`), over
+  an object the crosshair, over nothing the arrow.
 - **Pick radius**: 5 device px (`FILL_PICK_RADIUS_PX`, the phase's
   proposal), measured in device space at every zoom; stops beat end
   handles, which beat the arm line. The 8 px pen/touch radius is not wired:
@@ -143,11 +155,19 @@ Full note: [`tools.md`](tools.md). What the interface side owns:
 - **Infobar items added**: `Choice` (an `egui::ComboBox`, AccessKit label
   "description: option") and `Real` (an `egui::Slider` over `min..=max`,
   disabled without a value), raising `InfobarValue::Choice(i)` /
-  `InfobarValue::Real(v)`. **No preview/commit split**: every change of
-  a `Real` or `Number` slider is its own `InfobarEdit`, applied at once,
-  so `Esc` mid-drag (checked for XARA-T-0305) commits nothing extra but
-  cannot take back what was applied either. Cancelling needs the drag
-  to be one gesture first — XARA-T-0220's "one undo step per change".
+  `InfobarValue::Real(v)`. **A `Real` slider drag is one gesture**
+  (XARA-T-0220, `tools.md` decision 81): `InfobarRow::real_slider` sends
+  `UiCommand::InfobarDrag(Preview { field, value })` each frame the
+  dragged value moves, `Commit` on `drag_stopped` (after a last `Preview`
+  when the release frame moved it), `Cancel` on `Esc` — also when egui
+  reports the stop in the `Esc` frame — and ignores the rest of a
+  cancelled drag (`cancelled_drag`); a keyboard step is still one
+  `InfobarEdit`. The app previews and commits one undo step; the slider
+  shows the previewed value because the tool's infobar reads the preview.
+  Tests: `tests/toolbar.rs` (kittest drag: previews then exactly one
+  `Commit`, no `InfobarEdit`; `Esc` mid-drag: a `Cancel`, nothing after).
+  The freehand smoothing `Number` slider is a tool setting, not a
+  document edit, and still applies as it goes.
 - **Overlay items added**: `OverlayItem::Arrow` (accent line over a darker
   3-hairline halo, open 9 × 8 px head, no head for a zero-length arm),
   `HandleKind::FillBlob` (square) and `HandleKind::FillCentre` (round);

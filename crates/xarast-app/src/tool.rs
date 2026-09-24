@@ -151,6 +151,10 @@ pub enum GestureEvent {
         from: DocPoint,
         /// What was under the press.
         hit: Option<HitResult>,
+        /// 1 for a plain press, 2 when the press is the second of a double
+        /// click (a double click held and dragged), and so on — counted as
+        /// [`GestureEvent::Click::count`] is.
+        count: u8,
     },
     /// The drag moved, or a modifier changed mid-drag.
     DragUpdate {
@@ -845,6 +849,9 @@ pub enum CursorKind {
     NotAllowed,
     /// The text tool: an I-beam.
     Text,
+    /// Over something a click acts on (a fill arm, where a double click
+    /// adds a stop): a pointing hand.
+    Pointer,
 }
 
 /// A change of view a tool asks for (the push and zoom tools).
@@ -1108,6 +1115,107 @@ impl ToolAction {
     }
 }
 
+/// The document's nudge unit when it sets none: one millimetre, in
+/// millipoints (provisional; the `.xar` document nudge is not kept yet).
+pub const NUDGE_UNIT_MP: f64 = 72_000.0 / 25.4;
+
+/// Which way an arrow key nudges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NudgeDir {
+    /// Up the screen.
+    Up,
+    /// Down the screen.
+    Down,
+    /// Left.
+    Left,
+    /// Right.
+    Right,
+}
+
+/// How far a nudge goes: the six steps of `research/04 §4.5`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum NudgeStep {
+    /// One nudge unit (no modifier).
+    #[default]
+    One,
+    /// Five units (Constrain).
+    Times5,
+    /// Ten units (Adjust).
+    Times10,
+    /// A fifth of a unit (Constrain and Adjust).
+    Fifth,
+    /// One device pixel at the current zoom (Alternative).
+    Pixel,
+    /// Ten device pixels (Alternative and Adjust).
+    TenPixels,
+}
+
+impl NudgeStep {
+    /// The step the held keys ask for: `Ctrl` is Constrain, `Shift`
+    /// Adjust, `Alt` Alternative (`research/04 §4.5`).
+    #[must_use]
+    pub const fn from_keys(ctrl: bool, shift: bool, alt: bool) -> NudgeStep {
+        match (alt, ctrl, shift) {
+            (true, _, true) => NudgeStep::TenPixels,
+            (true, _, false) => NudgeStep::Pixel,
+            (false, true, true) => NudgeStep::Fifth,
+            (false, true, false) => NudgeStep::Times5,
+            (false, false, true) => NudgeStep::Times10,
+            (false, false, false) => NudgeStep::One,
+        }
+    }
+}
+
+/// One arrow-key nudge of what the tool in force has selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Nudge {
+    /// Which way.
+    pub dir: NudgeDir,
+    /// How far.
+    pub step: NudgeStep,
+}
+
+impl Nudge {
+    /// The displacement in document millipoints (`y` up), at `vp`'s zoom
+    /// for the pixel steps. Never zero.
+    #[must_use]
+    pub fn vector(self, vp: &Viewport) -> Vector {
+        let len = match self.step {
+            NudgeStep::One => NUDGE_UNIT_MP,
+            NudgeStep::Times5 => NUDGE_UNIT_MP * 5.0,
+            NudgeStep::Times10 => NUDGE_UNIT_MP * 10.0,
+            NudgeStep::Fifth => NUDGE_UNIT_MP / 5.0,
+            NudgeStep::Pixel => device_px(vp),
+            NudgeStep::TenPixels => device_px(vp) * 10.0,
+        };
+        let len = len.round().clamp(1.0, 1.0e8) as i32;
+        match self.dir {
+            NudgeDir::Up => Vector::raw(0, len),
+            NudgeDir::Down => Vector::raw(0, -len),
+            NudgeDir::Left => Vector::raw(-len, 0),
+            NudgeDir::Right => Vector::raw(len, 0),
+        }
+    }
+}
+
+/// A drag of one of the infobar's sliders (XARA-T-0220): previewed while
+/// held, one undo step on release, nothing on `Esc` — the pattern of the
+/// canvas drags (`tools.md` decision 45) and the photo panel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum InfobarDrag {
+    /// The slider's value this frame: shown, not written.
+    Preview {
+        /// Which field.
+        field: InfobarField,
+        /// The value.
+        value: InfobarValue,
+    },
+    /// The slider was released: its last value becomes one undo step.
+    Commit,
+    /// `Esc` during the drag: nothing changes.
+    Cancel,
+}
+
 /// A navigation key given to the text being edited (phase 9, T9.4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextKey {
@@ -1201,10 +1309,45 @@ pub trait Tool: Send + std::fmt::Debug {
         let _ = (field, value, cx);
     }
 
+    /// A live value of an infobar slider being dragged: preview it in
+    /// [`ToolCtx::preview`], write nothing. Returns whether the tool
+    /// previews this field; when it does not, the session applies the
+    /// value at once instead.
+    fn infobar_preview(
+        &mut self,
+        field: InfobarField,
+        value: InfobarValue,
+        cx: &mut ToolCtx<'_>,
+    ) -> bool {
+        let _ = (field, value, cx);
+        false
+    }
+
     /// The pointer shape over the canvas in the given state.
     fn cursor(&self, state: InteractionState) -> CursorKind {
         let _ = state;
         CursorKind::Default
+    }
+
+    /// What the status line says about the pointer's position or the
+    /// gesture in flight; `None` leaves it to the application's notices.
+    fn status(&self, state: InteractionState) -> Option<String> {
+        let _ = state;
+        None
+    }
+
+    /// Whether the arrow keys move something the tool has selected (a
+    /// fill handle) rather than pan the view.
+    fn takes_nudge(&self, view: ToolView<'_>) -> bool {
+        let _ = view;
+        false
+    }
+
+    /// Moves what the tool has selected by `by`, in document
+    /// millipoints. Returns whether the tool took the key.
+    fn nudge(&mut self, by: Vector, cx: &mut ToolCtx<'_>) -> bool {
+        let _ = (by, cx);
+        false
     }
 
     /// A command sent to the tool. Returns whether the tool took it.
@@ -1315,6 +1458,9 @@ struct Press {
     device: DevicePoint,
     doc: DocPoint,
     hit: Option<HitResult>,
+    /// Which press of a click sequence this is: 1, or 2 after a click
+    /// just before it in the same place.
+    count: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1458,6 +1604,21 @@ impl ToolMachine {
         }
     }
 
+    /// The count a click (or a press) at `at` and `time_ms` has: one more
+    /// than the click just before it when that one was near enough in time
+    /// and place, else 1.
+    fn follows_click(&self, at: DevicePoint, time_ms: u64) -> u8 {
+        match self.last_click {
+            Some(c)
+                if time_ms.saturating_sub(c.time_ms) <= DOUBLE_CLICK_MS
+                    && (c.device.x - at.x).hypot(c.device.y - at.y) <= DOUBLE_CLICK_SLOP_PX =>
+            {
+                c.count.saturating_add(1)
+            }
+            _ => 1,
+        }
+    }
+
     fn doc_point(vp: &Viewport, at: DevicePoint) -> DocPoint {
         vp.device_to_doc_f64(at).to_doc_point()
     }
@@ -1470,7 +1631,7 @@ impl ToolMachine {
             CanvasInput::Down {
                 button: PointerButton::Primary,
                 at,
-                ..
+                time_ms,
             } => {
                 if self.is_pressed() {
                     return false;
@@ -1481,6 +1642,7 @@ impl ToolMachine {
                     device: at,
                     doc,
                     hit,
+                    count: self.follows_click(at, time_ms),
                 });
                 self.last = Some(at);
                 self.armed.clear();
@@ -1509,6 +1671,7 @@ impl ToolMachine {
                             &GestureEvent::DragStart {
                                 from: p.doc,
                                 hit: p.hit,
+                                count: p.count,
                             },
                             cx,
                         );
@@ -1560,16 +1723,7 @@ impl ToolMachine {
                 let doc = Self::doc_point(cx.viewport, at);
                 match self.state {
                     InteractionState::ArmedDrag => {
-                        let count = match self.last_click {
-                            Some(c)
-                                if time_ms.saturating_sub(c.time_ms) <= DOUBLE_CLICK_MS
-                                    && (c.device.x - at.x).hypot(c.device.y - at.y)
-                                        <= DOUBLE_CLICK_SLOP_PX =>
-                            {
-                                c.count.saturating_add(1)
-                            }
-                            _ => 1,
-                        };
+                        let count = self.follows_click(at, time_ms);
                         self.last_click = Some(LastClick {
                             device: at,
                             time_ms,
@@ -1786,6 +1940,44 @@ impl ToolMachine {
             .map(|t| t.cursor(self.state))
             .unwrap_or_default()
     }
+
+    /// The status-line text of the tool in force, if it has one now.
+    #[must_use]
+    pub fn status(&self) -> Option<String> {
+        self.tool(self.current).and_then(|t| t.status(self.state))
+    }
+
+    /// Whether the arrow keys nudge something of the tool in force.
+    #[must_use]
+    pub fn takes_nudge(&self, view: ToolView<'_>) -> bool {
+        !self.is_pressed() && self.tool(self.current).is_some_and(|t| t.takes_nudge(view))
+    }
+
+    /// Sends a nudge to the tool in force, unless a gesture is in flight.
+    /// Returns whether the tool took it.
+    pub fn nudge(&mut self, by: Vector, cx: &mut ToolCtx<'_>) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id).is_some_and(|t| t.nudge(by, cx))
+    }
+
+    /// Sends a live infobar slider value to the tool in force, unless a
+    /// canvas gesture is in flight. Returns whether the tool previewed it.
+    pub fn infobar_preview(
+        &mut self,
+        field: InfobarField,
+        value: InfobarValue,
+        cx: &mut ToolCtx<'_>,
+    ) -> bool {
+        if self.is_pressed() {
+            return false;
+        }
+        let id = self.current;
+        self.tool_mut(id)
+            .is_some_and(|t| t.infobar_preview(field, value, cx))
+    }
 }
 
 #[cfg(test)]
@@ -1896,6 +2088,39 @@ mod tests {
             300 + DOUBLE_CLICK_MS + 2,
         );
         assert_eq!(click_counts(&r.events()), vec![1, 1]);
+    }
+
+    #[test]
+    fn a_drag_from_the_second_press_of_a_double_click_says_so() {
+        let mut r = Rig::new();
+        let drag_count = |r: &mut Rig, x: f64, t: u64| {
+            r.feed(CanvasInput::Down {
+                button: PointerButton::Primary,
+                at: DevicePoint::new(x, 100.0),
+                time_ms: t,
+            });
+            r.feed(CanvasInput::Move {
+                at: DevicePoint::new(x + DRAG_THRESHOLD_PX + 5.0, 100.0),
+            });
+            r.feed(CanvasInput::Up {
+                button: PointerButton::Primary,
+                at: DevicePoint::new(x + DRAG_THRESHOLD_PX + 5.0, 100.0),
+                time_ms: t + 50,
+            });
+            r.events().iter().find_map(|e| match e {
+                GestureEvent::DragStart { count, .. } => Some(*count),
+                _ => None,
+            })
+        };
+        assert_eq!(drag_count(&mut r, 100.0, 0), Some(1));
+        r.click(300.0, 1_000);
+        assert_eq!(drag_count(&mut r, 301.0, 1_200), Some(2));
+        // A drag ends the sequence; a late second press starts afresh.
+        r.click(300.0, 3_000);
+        assert_eq!(
+            drag_count(&mut r, 300.0, 3_000 + DOUBLE_CLICK_MS + 1),
+            Some(1)
+        );
     }
 
     #[test]

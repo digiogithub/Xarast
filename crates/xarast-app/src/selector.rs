@@ -598,7 +598,7 @@ impl Tool for SelectorTool {
                     self.click(cx, *hit, *count);
                 }
             }
-            GestureEvent::DragStart { from, hit } => {
+            GestureEvent::DragStart { from, hit, .. } => {
                 let drag = self.handle_drag(cx, *from).unwrap_or_else(|| match hit {
                     Some(h) => {
                         let mut nodes: Vec<NodeId> = if cx.edit.is_selected(h.top_group) {

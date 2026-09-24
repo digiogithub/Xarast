@@ -193,3 +193,110 @@ fn a_pending_tool_says_it_is_coming_soon() {
     let h = harness(&m, &commands);
     h.get_by_label("The Rectangle tool is coming soon.");
 }
+
+const BIAS: &str = "Pushes the fill towards its start or its end: 0.00";
+
+fn fill_bar() -> UiModel {
+    model(EditingView {
+        tool: ToolId::Fill,
+        infobar: Infobar {
+            items: vec![InfobarItem::Real {
+                field: InfobarField::ProfileBias,
+                value: Some(0.0),
+                min: -1.0,
+                max: 1.0,
+            }],
+        },
+        selected: 1,
+        ..Default::default()
+    })
+}
+
+/// Drags the bias slider right in six steps, pressing `Esc` before the
+/// fourth when asked.
+fn drag_bias(h: &mut Harness<'_>, escape_midway: bool) {
+    let rect = h
+        .get_by_role_and_label(egui::accesskit::Role::Slider, BIAS)
+        .rect();
+    let start = rect.center();
+    h.hover_at(start);
+    h.run();
+    h.drag_at(start);
+    h.run();
+    for step in 1..=6 {
+        if escape_midway && step == 4 {
+            h.key_press(egui::Key::Escape);
+            h.run();
+        }
+        h.hover_at(start + egui::vec2(6.0 * step as f32, 0.0));
+        h.run();
+    }
+    h.drop_at(start + egui::vec2(36.0, 0.0));
+    h.run();
+}
+
+#[test]
+fn an_infobar_slider_drag_previews_and_commits_once() {
+    use xarast_app::InfobarDrag;
+    let m = fill_bar();
+    let commands = RefCell::new(Vec::new());
+    let mut h = harness(&m, &commands);
+    drag_bias(&mut h, false);
+    drop(h);
+    let out = commands.into_inner();
+    let previews = out
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                UiCommand::InfobarDrag(InfobarDrag::Preview {
+                    field: InfobarField::ProfileBias,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert!(previews >= 3, "{out:?}");
+    assert_eq!(
+        out.last(),
+        Some(&UiCommand::InfobarDrag(InfobarDrag::Commit)),
+        "{out:?}"
+    );
+    assert_eq!(
+        out.iter()
+            .filter(|c| **c == UiCommand::InfobarDrag(InfobarDrag::Commit))
+            .count(),
+        1
+    );
+    assert!(
+        !out.iter()
+            .any(|c| matches!(c, UiCommand::InfobarEdit { .. })),
+        "a drag sets nothing: {out:?}"
+    );
+}
+
+#[test]
+fn escape_during_an_infobar_slider_drag_cancels_it() {
+    use xarast_app::InfobarDrag;
+    let m = fill_bar();
+    let commands = RefCell::new(Vec::new());
+    let mut h = harness(&m, &commands);
+    drag_bias(&mut h, true);
+    drop(h);
+    let out = commands.into_inner();
+    let cancel = out
+        .iter()
+        .position(|c| *c == UiCommand::InfobarDrag(InfobarDrag::Cancel))
+        .unwrap_or_else(|| panic!("no cancel: {out:?}"));
+    assert!(
+        out[cancel + 1..].is_empty(),
+        "nothing after the cancel: {out:?}"
+    );
+    assert!(
+        !out.iter().any(|c| matches!(
+            c,
+            UiCommand::InfobarDrag(InfobarDrag::Commit) | UiCommand::InfobarEdit { .. }
+        )),
+        "{out:?}"
+    );
+}

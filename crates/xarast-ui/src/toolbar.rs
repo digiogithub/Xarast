@@ -288,12 +288,81 @@ pub struct InfobarRow {
     editing: HashMap<InfobarField, String>,
     /// What the font chooser's filter holds.
     font_filter: String,
+    /// A slider whose drag `Esc` cancelled: the rest of that drag is
+    /// ignored.
+    cancelled_drag: Option<egui::Id>,
 }
 
 impl InfobarRow {
     /// A row with nothing being edited.
     pub fn new() -> InfobarRow {
         InfobarRow::default()
+    }
+
+    /// A slider over a real range; disabled when there is no value.
+    ///
+    /// A pointer drag previews (`InfobarDrag::Preview` each frame the
+    /// value moves) and commits once on release (`InfobarDrag::Commit`),
+    /// so the whole drag is one undo step; `Esc` during it sends
+    /// `InfobarDrag::Cancel` and the rest of that drag is ignored. egui
+    /// ends a drag itself on `Esc` and reports `drag_stopped` in that same
+    /// frame, so a stop in a frame with `Esc` pressed is a cancel
+    /// (`ui.md`, XARA-T-0305). A keyboard step is one `InfobarEdit`.
+    fn real_slider(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: InfobarField,
+        value: Option<f64>,
+        (min, max): (f64, f64),
+        out: &mut CommandSink,
+    ) {
+        use xarast_app::InfobarDrag;
+        ui.label(field.label());
+        let mut v = value.unwrap_or(min);
+        let r = ui
+            .add_enabled(value.is_some(), egui::Slider::new(&mut v, min..=max))
+            .on_hover_text(field.description());
+        crate::a11y::set_label(ui.ctx(), r.id, format!("{}: {v:.2}", field.description()));
+        let moved = value.is_some_and(|old| (v - old).abs() > 1e-9);
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        let preview = |out: &mut CommandSink| {
+            out.push(UiCommand::InfobarDrag(InfobarDrag::Preview {
+                field,
+                value: InfobarValue::Real(v),
+            }));
+        };
+        if r.dragged() {
+            if self.cancelled_drag == Some(r.id) {
+                return;
+            }
+            if escape {
+                self.cancelled_drag = Some(r.id);
+                out.push(UiCommand::InfobarDrag(InfobarDrag::Cancel));
+            } else if moved {
+                preview(out);
+            }
+            return;
+        }
+        if r.drag_stopped() {
+            if self.cancelled_drag.take() == Some(r.id) {
+                return;
+            }
+            if escape {
+                out.push(UiCommand::InfobarDrag(InfobarDrag::Cancel));
+                return;
+            }
+            if moved {
+                preview(out);
+            }
+            out.push(UiCommand::InfobarDrag(InfobarDrag::Commit));
+            return;
+        }
+        if moved {
+            out.push(UiCommand::InfobarEdit {
+                field,
+                value: InfobarValue::Real(v),
+            });
+        }
     }
 
     /// Draws the tool's infobar into `ui` (the workspace's second top
@@ -369,7 +438,7 @@ impl InfobarRow {
                         value,
                         min,
                         max,
-                    } => real_slider(ui, *field, *value, *min, *max, out),
+                    } => self.real_slider(ui, *field, *value, (*min, *max), out),
                     InfobarItem::Scalar {
                         field,
                         value,
@@ -718,31 +787,6 @@ fn choice(
         out.push(UiCommand::InfobarEdit {
             field,
             value: InfobarValue::Choice(i),
-        });
-    }
-}
-
-/// A slider over a real range; disabled when there is no value.
-fn real_slider(
-    ui: &mut egui::Ui,
-    field: InfobarField,
-    value: Option<f64>,
-    min: f64,
-    max: f64,
-    out: &mut CommandSink,
-) {
-    ui.label(field.label());
-    let mut v = value.unwrap_or(min);
-    let r = ui
-        .add_enabled(value.is_some(), egui::Slider::new(&mut v, min..=max))
-        .on_hover_text(field.description());
-    crate::a11y::set_label(ui.ctx(), r.id, format!("{}: {v:.2}", field.description()));
-    if let Some(old) = value
-        && (v - old).abs() > 1e-9
-    {
-        out.push(UiCommand::InfobarEdit {
-            field,
-            value: InfobarValue::Real(v),
         });
     }
 }
