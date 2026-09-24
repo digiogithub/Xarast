@@ -2,12 +2,13 @@
 id: XARA-T-0281
 type: task
 title: "T10.5.5 Async re-materialisation: draw the proxy while an evicted base comes back"
-status: backlog
+status: in_progress
 parent: XARA-US-0053
 author: mcp
 labels: [phase-10, image, perf]
 created: 2026-09-24T09:54:30Z
-updated: 2026-09-24T09:54:30Z
+updated: 2026-09-24T11:12:38Z
+started: 2026-09-24T11:12:38Z
 ---
 
 ## Description

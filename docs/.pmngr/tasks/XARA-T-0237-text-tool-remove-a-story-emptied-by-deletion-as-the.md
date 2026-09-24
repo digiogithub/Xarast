@@ -2,13 +2,14 @@
 id: XARA-T-0237
 type: task
 title: "Text tool: remove a story emptied by deletion (as the original does)"
-status: todo
+status: in_review
 priority: medium
 parent: XARA-US-0047
 author: mcp
 labels: [phase-9, tools, text]
 created: 2026-09-23T22:14:16Z
-updated: 2026-09-24T10:49:45Z
+updated: 2026-09-24T11:46:00Z
+started: 2026-09-24T11:08:03Z
 ---
 
 ## Description
