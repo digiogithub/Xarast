@@ -302,7 +302,9 @@ impl Session {
             spare_scene: None,
             scene_epoch: 0,
             scene_ink: crate::geometry::DocRect::EMPTY,
-            walker: SceneWalker::new().with_decoded_images(decoded_images.clone()),
+            walker: SceneWalker::new()
+                .with_decoded_images(decoded_images.clone())
+                .with_deferred_derived(),
             decoded_images,
             tools: ToolMachine::new(),
             preview: Preview::default(),

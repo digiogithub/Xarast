@@ -58,8 +58,15 @@ edit-100k        pr,nightly edit_median_ms    0.65 st   -    0.31 -- undo --node
 # walk with its proxy evaluation, the frame (a repaint of the picture).
 # Three drags of 30 frames; the 33 ms budget is the phase's slider frame.
 # The p95 holds the first frame of each drag, which evaluates a new proxy.
-photo-slider-24mpx     pr,nightly median_ms 45  mt 33 21 -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
-photo-slider-24mpx-p95 pr,nightly p95_ms    100 mt -  45 -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
+# The release (XARA-T-0304) walks no full-resolution evaluation: its frame
+# draws a stand-in and the render thread's helper makes the 24 Mpx image
+# and its pyramid; `converge` is the release to the exact frame after the
+# helper's repair. The walk alone used to be ~264 ms.
+photo-slider-24mpx       pr,nightly median_ms              45  mt 33 21  -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
+photo-slider-24mpx-p95   pr,nightly p95_ms                 100 mt -  45  -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
+photo-release-24mpx      pr,nightly release_median_ms      45  mt 33 21  -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
+photo-release-walk-24mpx pr,nightly release_walk_max_ms    8   st -  0.2 -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
+photo-converge-24mpx     nightly    converge_median_ms     700 mt -  320 -- photo --photo 6000x4000 --size 1280x800 --runs 3 --iterations 30
 
 # ── 100k objects, nightly.
 open-100k        nightly    median_ms         1750 st   -    865  -- open --nodes 250000 --runs 7
