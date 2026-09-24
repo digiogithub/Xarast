@@ -1863,6 +1863,7 @@ const fn tool_cursor(c: xarast_app::CursorKind) -> CursorShape {
         K::ZoomIn => CursorShape::ZoomIn,
         K::NotAllowed => CursorShape::NotAllowed,
         K::Text => CursorShape::Text,
+        K::Pointer => CursorShape::Hand,
     }
 }
 

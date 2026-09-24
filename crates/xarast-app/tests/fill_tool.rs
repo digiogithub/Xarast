@@ -757,6 +757,344 @@ fn constrain_keeps_a_centre_on_an_axis_and_adjust_locks_the_aspect() {
     assert_eq!(minor, Point::raw(200_000, 220_000));
 }
 
+fn linear(start: Point, end: Point) -> Paint {
+    FillGeometry::Linear {
+        start,
+        end,
+        persp: None,
+        from: Colour::Direct(RED),
+        to: Colour::Direct(ColourValue::WHITE),
+        ramp: xarast_doc::fill::Ramp::new(),
+    }
+}
+
+fn stroke_fill(s: &Session, n: NodeId) -> Paint {
+    match fill_in_force(&s.doc, n, PaintSlot::Stroke, FillChannel::Colour) {
+        FillValue::Colour(g) => g,
+        FillValue::Transparency(_) => unreachable!(),
+    }
+}
+
+/// One rectangle with a flat interior and a thick outline painted with a
+/// linear gradient from (160, 200) to (240, 200) pt.
+fn outlined() -> (Session, NodeId) {
+    let mut s = Session::new_empty(DocumentId(1));
+    let spread = s.doc.active_spread();
+    let layer = s.doc.active_layer(spread).unwrap();
+    s.apply_edit(EditCommand::CreateShape {
+        layer,
+        shape: Box::new(rectangle(Point::raw(200_000, 200_000), 50_000.0, 30_000.0)),
+        attrs: vec![
+            flat(RED),
+            AttrValue::LineWidth(xarast_geom::Mp::new(12_000)),
+            AttrValue::StrokeColour(linear(
+                Point::raw(160_000, 200_000),
+                Point::raw(240_000, 200_000),
+            )),
+        ],
+    })
+    .unwrap();
+    s.bus.history_mut().clear(&mut s.doc);
+    let n = xarast_app::edit::selectable_objects(&s.doc).next().unwrap();
+    s.apply(Intent::Select {
+        nodes: vec![n],
+        mode: xarast_app::SelectMode::Replace,
+    })
+    .unwrap();
+    s.apply(Intent::ChooseTool(ToolId::Fill)).unwrap();
+    (s, n)
+}
+
+#[test]
+fn an_outline_gradient_has_handles_and_a_drag_edits_only_the_outline() {
+    let (mut s, n) = outlined();
+    // The flat interior shows nothing; the outline its arm and two blobs.
+    assert_eq!(arrows(&s), 1);
+    assert_eq!(handles(&s).len(), 2);
+    let before = s.doc.canonical_digest();
+    let before_px = pixels(&s);
+    let interior = colour_fill(&s, n);
+    let (end, to) = (Point::raw(240_000, 200_000), Point::raw(240_000, 240_000));
+    drag_open(&mut s, end, to, 0);
+    assert_eq!(s.doc.canonical_digest(), before, "nothing before release");
+    assert!(matches!(
+        &s.preview().attrs[..],
+        [(m, AttrValue::StrokeColour(FillGeometry::Linear { .. }))] if *m == n
+    ));
+    let previewed = pixels(&s);
+    assert!(previewed != before_px, "the preview repaints the outline");
+    release(&mut s, to, 10);
+    assert!(
+        pixels(&s) == previewed,
+        "what was previewed is what commits"
+    );
+    assert_eq!(s.bus.history().len(), 1, "one step");
+    assert_eq!(s.undo_label(), Some("Move Fill Handle"));
+    let FillGeometry::Linear { end: e, .. } = stroke_fill(&s, n) else {
+        panic!()
+    };
+    assert!(e.distance_to(to) < 2_000.0);
+    assert_eq!(colour_fill(&s, n), interior, "the interior is untouched");
+    // The selected handle is the outline's: the colour bar leaves it be.
+    let sel = s.tools().fill_selection().unwrap();
+    assert_eq!(sel.slot, PaintSlot::Stroke);
+    assert!(xarast_app::colour_bar::selected_stop(&s).is_none());
+    s.undo();
+    assert_eq!(s.doc.canonical_digest(), before, "undo is exact");
+    assert!(pixels(&s) == before_px);
+    // Esc mid-drag restores everything.
+    drag_open(&mut s, end, to, 1_000);
+    s.apply(Intent::Cancel).unwrap();
+    assert!(s.preview().is_empty());
+    assert_eq!(s.doc.canonical_digest(), before);
+    assert!(pixels(&s) == before_px);
+    assert_eq!(s.edit.selection().collect::<Vec<_>>(), vec![n]);
+}
+
+#[test]
+fn arrow_nudges_of_a_handle_are_one_step_per_run() {
+    use xarast_app::{Nudge, NudgeDir, NudgeStep};
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    assert!(!s.takes_nudge(), "no handle selected: the arrows pan");
+    drag(
+        &mut s,
+        Point::raw(160_000, 200_000),
+        Point::raw(240_000, 200_000),
+        0,
+    );
+    // The end blob is selected after a drag-out.
+    assert!(s.takes_nudge());
+    let before = s.doc.canonical_digest();
+    let len = s.bus.history().len();
+    let FillGeometry::Linear { end: end0, .. } = colour_fill(&s, n) else {
+        panic!()
+    };
+    let nudge = |s: &mut Session, dir, step| {
+        s.apply(Intent::Nudge(Nudge { dir, step })).unwrap();
+    };
+    for _ in 0..5 {
+        nudge(&mut s, NudgeDir::Right, NudgeStep::One);
+        // Key repeats come with pointer traffic in between.
+        move_to(&mut s, Point::raw(500_000, 500_000));
+    }
+    nudge(&mut s, NudgeDir::Up, NudgeStep::Times5);
+    assert_eq!(s.bus.history().len(), len + 1, "one step for the run");
+    assert_eq!(s.undo_label(), Some("Move Fill Handle"));
+    let FillGeometry::Linear { end, .. } = colour_fill(&s, n) else {
+        panic!()
+    };
+    let unit = xarast_app::tool::NUDGE_UNIT_MP;
+    assert_eq!((end.x - end0.x).to_f64(), 5.0 * unit.round());
+    assert_eq!((end.y - end0.y).to_f64(), (5.0 * unit).round());
+    // Something else ends the run: the next nudge is a step of its own.
+    s.apply(Intent::SelectAll).unwrap();
+    nudge(&mut s, NudgeDir::Left, NudgeStep::Pixel);
+    assert_eq!(s.bus.history().len(), len + 2);
+    s.undo();
+    s.undo();
+    assert_eq!(s.doc.canonical_digest(), before, "undo is exact");
+    // A stop nudged across its arm changes nothing and writes nothing.
+    click(&mut s, Point::raw(200_000, 200_000), 5_000);
+    click(&mut s, Point::raw(200_000, 200_000), 5_100);
+    assert_eq!(s.undo_label(), Some("Add Fill Stop"));
+    let len = s.bus.history().len();
+    nudge(&mut s, NudgeDir::Up, NudgeStep::One);
+    assert_eq!(s.bus.history().len(), len);
+    nudge(&mut s, NudgeDir::Right, NudgeStep::Times10);
+    assert_eq!(s.undo_label(), Some("Move Fill Stop"));
+    // Esc deselects the handle; the arrows pan again.
+    s.apply(Intent::Cancel).unwrap();
+    assert!(!s.takes_nudge());
+}
+
+#[test]
+fn the_cursor_and_the_status_line_follow_the_hover_target() {
+    use xarast_app::CursorKind;
+    let (mut s, _) = fixture(&[(200_000, 200_000)], ToolId::Fill);
+    drag(
+        &mut s,
+        Point::raw(150_000, 200_000),
+        Point::raw(250_000, 200_000),
+        0,
+    );
+    let status = |s: &Session| s.tool_status().unwrap_or_default();
+    // A handle.
+    move_to(&mut s, Point::raw(250_000, 200_000));
+    assert_eq!(s.cursor(), CursorKind::Move);
+    assert!(status(&s).contains("15°"), "{}", status(&s));
+    // The arm, away from the handles.
+    move_to(&mut s, Point::raw(200_000, 200_000));
+    assert_eq!(s.cursor(), CursorKind::Pointer);
+    assert!(status(&s).contains("add a stop"), "{}", status(&s));
+    // The object off the arm: a drag makes a fill.
+    move_to(&mut s, Point::raw(210_000, 215_000));
+    assert_eq!(s.cursor(), CursorKind::Crosshair);
+    assert!(status(&s).contains("linear fill"), "{}", status(&s));
+    // A handle being dragged.
+    drag_open(
+        &mut s,
+        Point::raw(250_000, 200_000),
+        Point::raw(260_000, 210_000),
+        1_000,
+    );
+    assert_eq!(s.cursor(), CursorKind::Move);
+    assert!(status(&s).starts_with("Release"), "{}", status(&s));
+    s.apply(Intent::Cancel).unwrap();
+    // Nothing selected and nothing under the pointer: nothing to say.
+    s.apply(Intent::SelectNone).unwrap();
+    move_to(&mut s, Point::raw(700_000, 700_000));
+    assert_eq!(s.cursor(), CursorKind::Default);
+    assert_eq!(s.tool_status(), None);
+}
+
+fn drag_slider(s: &mut Session, field: InfobarField, v: f64) {
+    s.apply(Intent::InfobarDrag(xarast_app::InfobarDrag::Preview {
+        field,
+        value: InfobarValue::Real(v),
+    }))
+    .unwrap();
+}
+
+fn real_value(s: &Session, field: InfobarField) -> Option<f64> {
+    s.infobar().items.iter().find_map(|i| match i {
+        InfobarItem::Real {
+            field: f, value, ..
+        } if *f == field => *value,
+        _ => None,
+    })
+}
+
+#[test]
+fn a_profile_slider_drag_previews_and_is_one_step() {
+    let (mut s, nodes) = fixture(&[(200_000, 200_000), (400_000, 200_000)], ToolId::Fill);
+    let n = nodes[0];
+    set_fill(
+        &mut s,
+        &[n],
+        &linear(Point::raw(160_000, 200_000), Point::raw(240_000, 200_000)),
+    );
+    let before = s.doc.canonical_digest();
+    let len = s.bus.history().len();
+    let label = s.undo_label();
+    let before_px = pixels(&s);
+    s.rebuild_scene(None).unwrap();
+    let (s0, r0) = (s.scene_snapshot(), s.resolver_snapshot());
+    let view = s.view_params();
+    let other = xarast_app::viewport::nodes_rect(&s.doc, [nodes[1]]);
+    let (a, b) = (
+        s.viewport.doc_to_device(other.lo),
+        s.viewport.doc_to_device(other.hi),
+    );
+    let (ox0, ox1) = (a.x.min(b.x), a.x.max(b.x));
+    for i in 1..=30 {
+        let v = f64::from(i) / 40.0;
+        drag_slider(&mut s, InfobarField::ProfileBias, v);
+        assert_eq!(s.doc.canonical_digest(), before, "frame {i} wrote");
+        assert_eq!(s.bus.history().len(), len);
+        assert!(s.infobar_dragging());
+        // The slider shows the dragged value.
+        assert!((real_value(&s, InfobarField::ProfileBias).unwrap() - v).abs() < 1e-9);
+        // Damage stays on the object being edited.
+        s.rebuild_scene(None).unwrap();
+        let (s1, r1) = (s.scene_snapshot(), s.resolver_snapshot());
+        let damage =
+            xarast_render::scene_damage((&s0, &r0), (&s1, &r1), &view, 8).expect("comparable");
+        assert!(!damage.rects.is_empty(), "frame {i} shows nothing new");
+        for r in &damage.rects {
+            assert!(
+                f64::from(r.x1) <= ox0 + 1.0 || f64::from(r.x0) >= ox1 - 1.0,
+                "frame {i}: {r:?} reaches the other object ({ox0}..{ox1})"
+            );
+        }
+    }
+    let previewed = pixels(&s);
+    assert!(previewed != before_px);
+    s.apply(Intent::InfobarDrag(xarast_app::InfobarDrag::Commit))
+        .unwrap();
+    assert!(!s.infobar_dragging());
+    assert!(s.preview().is_empty());
+    assert_eq!(s.bus.history().len(), len + 1, "one step");
+    assert_eq!(s.undo_label(), Some("Fill Profile"));
+    assert!((colour_fill(&s, n).profile().bias - 0.75).abs() < 1e-9);
+    assert!(
+        pixels(&s) == previewed,
+        "what was previewed is what commits"
+    );
+    assert!(
+        matches!(colour_fill(&s, nodes[1]), FillGeometry::Flat { .. }),
+        "the other object is untouched"
+    );
+    s.undo();
+    assert_eq!(s.doc.canonical_digest(), before, "undo is exact");
+
+    // Esc mid-drag restores everything and keeps the selection.
+    for i in 1..=10 {
+        drag_slider(&mut s, InfobarField::ProfileGain, -f64::from(i) / 20.0);
+    }
+    s.apply(Intent::Cancel).unwrap();
+    assert!(s.preview().is_empty());
+    assert!(!s.infobar_dragging());
+    assert_eq!(s.doc.canonical_digest(), before);
+    assert_eq!(s.bus.history().len(), len);
+    assert_eq!(s.undo_label(), label);
+    assert!(pixels(&s) == before_px);
+    assert_eq!(s.edit.selection().count(), 2);
+    // A release after the cancel commits nothing.
+    s.apply(Intent::InfobarDrag(xarast_app::InfobarDrag::Commit))
+        .unwrap();
+    assert_eq!(s.bus.history().len(), len);
+    // Undo during a drag drops it too.
+    drag_slider(&mut s, InfobarField::ProfileGain, 0.5);
+    s.apply(Intent::Undo).unwrap();
+    assert!(s.preview().is_empty() && !s.infobar_dragging());
+}
+
+#[test]
+fn a_transparency_level_and_a_stop_position_drag_commit_what_they_preview() {
+    let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Transparency);
+    let n = nodes[0];
+    drag(
+        &mut s,
+        Point::raw(150_000, 200_000),
+        Point::raw(250_000, 200_000),
+        0,
+    );
+    // The end handle is selected: drag its level.
+    let len = s.bus.history().len();
+    for v in [10.0, 30.0, 42.0] {
+        drag_slider(&mut s, InfobarField::StopLevel, v);
+    }
+    assert!((real_value(&s, InfobarField::StopLevel).unwrap() - 42.0).abs() < 0.3);
+    let previewed = pixels(&s);
+    s.apply(Intent::InfobarDrag(xarast_app::InfobarDrag::Commit))
+        .unwrap();
+    assert_eq!(s.bus.history().len(), len + 1);
+    assert!(pixels(&s) == previewed);
+    let FillGeometry::Linear { to, .. } = transp_fill(&s, n) else {
+        panic!()
+    };
+    assert_eq!(to.level, 107);
+
+    // A stop, dragged past nothing to 80 %.
+    click(&mut s, Point::raw(200_000, 200_000), 5_000);
+    click(&mut s, Point::raw(200_000, 200_000), 5_100);
+    let len = s.bus.history().len();
+    for v in [55.0, 70.0, 80.0] {
+        drag_slider(&mut s, InfobarField::StopPosition, v);
+    }
+    let previewed = pixels(&s);
+    s.apply(Intent::InfobarDrag(xarast_app::InfobarDrag::Commit))
+        .unwrap();
+    assert_eq!(s.bus.history().len(), len + 1);
+    assert_eq!(s.undo_label(), Some("Move Fill Stop"));
+    assert!(pixels(&s) == previewed);
+    let FillGeometry::Linear { ramp, .. } = transp_fill(&s, n) else {
+        panic!()
+    };
+    assert!((ramp.stops()[0].pos - 0.8).abs() < 1e-6);
+}
+
 #[test]
 fn a_double_click_held_and_dragged_makes_a_conical_fill() {
     let (mut s, nodes) = fixture(&[(200_000, 200_000)], ToolId::Fill);

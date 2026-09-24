@@ -323,7 +323,9 @@ pub fn selected_stop(session: &Session) -> Option<(Vec<NodeId>, StopTarget)> {
         return None;
     }
     let sel = session.tools().fill_selection()?;
-    if sel.channel != FillChannel::Colour {
+    // An outline's handle is not a stop of the interior fill the bar
+    // and the editor write (XARA-T-0220 left them interior-only).
+    if sel.channel != FillChannel::Colour || sel.slot != PaintSlot::Fill {
         return None;
     }
     let mut target = None;

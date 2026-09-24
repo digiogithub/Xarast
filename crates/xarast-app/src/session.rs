@@ -36,8 +36,8 @@ use crate::intent::{Changed, Intent};
 use crate::ops::EditCommand;
 use crate::structure::StructureOp;
 use crate::tool::{
-    CanvasInput, CursorKind, Infobar, InfobarField, OverlayShape, Preview, ToolAction, ToolCtx,
-    ToolMachine, ToolRequests, ToolView, ViewRequest,
+    CanvasInput, CursorKind, Infobar, InfobarDrag, InfobarField, OverlayShape, Preview, ToolAction,
+    ToolCtx, ToolMachine, ToolRequests, ToolView, ViewRequest,
 };
 use crate::viewport::Viewport;
 use crate::walker::{SceneWalker, WalkStats};
@@ -234,6 +234,12 @@ pub struct Session {
     picker: crate::tool::Picker,
     /// The last command applied, for the coalescing rule.
     last_edit: Option<EditCommand>,
+    /// The coalescing gesture of a run of keyboard nudges: every nudge
+    /// until another intent arrives joins one undo step (XARA-T-0220).
+    nudge_run: Option<u64>,
+    /// The infobar slider being dragged and its last value, previewed in
+    /// [`Preview::attrs`] until the release commits it (XARA-T-0220).
+    infobar_drag: Option<(InfobarField, crate::tool::InfobarValue)>,
     /// The colour editor's target, model and live drag (phase 8, W8.6).
     pub(crate) colour_editor: crate::colour_editor::ColourEditorModel,
     /// A colour dragged from the colour bar or the gallery (phase 8,
@@ -310,6 +316,8 @@ impl Session {
             preview: Preview::default(),
             picker: crate::tool::Picker::new(),
             last_edit: None,
+            nudge_run: None,
+            infobar_drag: None,
             colour_editor: crate::colour_editor::ColourEditorModel::default(),
             colour_drag: None,
             bitmap_drag: None,
@@ -805,7 +813,12 @@ impl Session {
             && let Some(prev) = &self.last_edit
             && !cmd.coalesces_with(prev)
         {
-            self.bus.begin_gesture();
+            let g = self.bus.begin_gesture();
+            // A nudge run keeps hold of the gesture it now lives in, so
+            // ending the run closes it.
+            if self.nudge_run.is_some() {
+                self.nudge_run = Some(g);
+            }
         }
         let label = self.dispatch(&cmd)?;
         self.last_edit = Some(cmd);
@@ -983,6 +996,81 @@ impl Session {
         self.tools.cursor()
     }
 
+    /// What the tool in force says in the status line now: what a press
+    /// would do where the pointer is, or what the gesture in flight will
+    /// do on release. `None` leaves the line to the application's notices.
+    #[must_use]
+    pub fn tool_status(&self) -> Option<String> {
+        self.tools.status()
+    }
+
+    /// Whether the arrow keys nudge something the tool in force has
+    /// selected (a fill handle) rather than pan the view: the shell sends
+    /// [`Intent::Nudge`] then.
+    #[must_use]
+    pub fn takes_nudge(&self) -> bool {
+        self.tools.takes_nudge(ToolView {
+            doc: &self.doc,
+            edit: &self.edit,
+            viewport: &self.viewport,
+            preview: &self.preview,
+        })
+    }
+
+    /// Whether an infobar slider drag is being previewed.
+    #[must_use]
+    pub fn infobar_dragging(&self) -> bool {
+        self.infobar_drag.is_some()
+    }
+
+    /// Ends a run of nudges: the next nudge starts a new undo step.
+    fn end_nudge_run(&mut self) {
+        if let Some(g) = self.nudge_run.take() {
+            self.end_gesture(g);
+        }
+    }
+
+    /// Drops an infobar slider drag in flight and its preview; nothing is
+    /// written.
+    fn settle_infobar_drag(&mut self) -> Changed {
+        if self.infobar_drag.take().is_some() {
+            self.preview.attrs.clear();
+            Changed::DOCUMENT | Changed::UI | Changed::SELECTION
+        } else {
+            Changed::empty()
+        }
+    }
+
+    /// One step of an infobar slider drag.
+    fn infobar_drag(&mut self, op: InfobarDrag) -> Result<Changed, SessionError> {
+        match op {
+            InfobarDrag::Preview { field, value } => {
+                // A canvas gesture and a slider cannot both hold the one
+                // pointer; a stray one is cancelled first.
+                let mut changed = self.cancel_gesture();
+                let (c, previewed) = self.run_tool(|m, cx| m.infobar_preview(field, value, cx))?;
+                changed |= c | Changed::UI;
+                if previewed {
+                    self.infobar_drag = Some((field, value));
+                } else {
+                    // A field the tool does not preview is applied as it
+                    // goes, as before.
+                    changed |= self.settle_infobar_drag();
+                    changed |= self.infobar_edit(field, value)?;
+                }
+                Ok(changed)
+            }
+            InfobarDrag::Commit => {
+                let Some((field, value)) = self.infobar_drag.take() else {
+                    return Ok(Changed::empty());
+                };
+                self.preview.attrs.clear();
+                Ok(self.infobar_edit(field, value)? | Changed::DOCUMENT | Changed::UI)
+            }
+            InfobarDrag::Cancel => Ok(self.settle_infobar_drag()),
+        }
+    }
+
     /// Runs one step of the tool machinery and carries out what the tool
     /// asked for: selection changes, view changes, and commands through
     /// the bus. Returns what changed and whether the input was consumed.
@@ -996,6 +1084,7 @@ impl Session {
         let state_before = self.tools.state();
         let tool_before = self.tools.current();
         let cursor_before = self.tools.cursor();
+        let status_before = self.tools.status();
         let consumed = {
             let mut cx = ToolCtx {
                 doc: &self.doc,
@@ -1028,6 +1117,7 @@ impl Session {
         if self.tools.state() != state_before
             || self.tools.current() != tool_before
             || self.tools.cursor() != cursor_before
+            || self.tools.status() != status_before
         {
             changed |= Changed::UI;
         }
@@ -1140,9 +1230,12 @@ impl Session {
 
     /// Makes the tool in force `id`, cancelling a gesture in flight.
     fn switch_tool(&mut self, id: ToolId) -> Changed {
-        self.run_tool(|m, cx| m.switch_to(id, cx))
-            .map(|(c, _)| c)
-            .unwrap_or_default()
+        let changed = self.settle_infobar_drag();
+        changed
+            | self
+                .run_tool(|m, cx| m.switch_to(id, cx))
+                .map(|(c, _)| c)
+                .unwrap_or_default()
     }
 
     /// Feeds canvas input to the machine.
@@ -1181,6 +1274,21 @@ impl Session {
     /// Whatever a dispatched command returns.
     pub fn apply(&mut self, intent: Intent) -> Result<Changed, SessionError> {
         let mut changed = Changed::empty();
+        // A run of nudges is one undo step; anything but another nudge
+        // (or the pointer and modifier traffic between key repeats) ends it.
+        if !matches!(
+            intent,
+            Intent::Nudge(_)
+                | Intent::PointerMove(_)
+                | Intent::PointerLeft
+                | Intent::ModifiersChanged(_)
+                | Intent::AutoScroll
+                | Intent::Resize(_)
+                | Intent::SetDpi(_)
+                | Intent::SetQuality(_)
+        ) {
+            self.end_nudge_run();
+        }
         match intent {
             Intent::Resize(size) => {
                 if size != self.viewport.size() {
@@ -1247,6 +1355,23 @@ impl Session {
             }
             Intent::Cancel if !self.preview.photo.is_empty() => {
                 changed |= crate::photo_panel::settle(self);
+            }
+            // `Esc` during an infobar slider drag abandons it, and only
+            // it: the selection stays.
+            Intent::Cancel if self.infobar_drag.is_some() => {
+                changed |= self.settle_infobar_drag();
+            }
+            Intent::InfobarDrag(op) => {
+                changed |= self.infobar_drag(op)?;
+            }
+            Intent::Nudge(n) => {
+                if !self.tools.is_pressed() {
+                    let by = n.vector(&self.viewport);
+                    if self.nudge_run.is_none() {
+                        self.nudge_run = Some(self.begin_gesture());
+                    }
+                    changed |= self.run_tool(|m, cx| m.nudge(by, cx))?.0;
+                }
             }
             Intent::Cancel => {
                 let (c, mut consumed) = self.canvas_input(CanvasInput::Cancel)?;
@@ -1356,6 +1481,7 @@ impl Session {
                 changed |= Changed::UI | Changed::SELECTION;
             }
             Intent::InfobarEdit { field, value } => {
+                changed |= self.settle_infobar_drag();
                 changed |= self.infobar_edit(field, value)? | Changed::UI;
             }
             Intent::AutoScroll => {
@@ -1407,6 +1533,7 @@ impl Session {
             Intent::Undo => {
                 changed |= crate::colour_editor::settle(self);
                 changed |= crate::photo_panel::settle(self);
+                changed |= self.settle_infobar_drag();
                 changed |= self.cancel_gesture();
                 if self.undo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
@@ -1415,6 +1542,7 @@ impl Session {
             Intent::Redo => {
                 changed |= crate::colour_editor::settle(self);
                 changed |= crate::photo_panel::settle(self);
+                changed |= self.settle_infobar_drag();
                 changed |= self.cancel_gesture();
                 if self.redo().is_some() {
                     changed |= Changed::DOCUMENT | Changed::SELECTION | Changed::UI;
