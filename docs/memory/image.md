@@ -259,7 +259,8 @@ frame before the walk:
    bitmap is tried once per document). Key: the addresses of the
    resource's `pixels` and `original` `Arc`s (held by the entry, so they
    cannot be reused), its declared size and the pixel budget. Resources
-   are copy-on-write, so a changed bitmap misses. A walker made with
+   are copy-on-write, so a changed bitmap misses. The bitmap gallery's
+   thumbnail thread files there too (XARA-T-0293, below). A walker made with
    plain `SceneWalker::new()` (tests, corpus tools) still decodes for
    itself; `SceneWalker::with_decoded_images` opts in. Numbers in
    `perf.md`.
@@ -340,18 +341,37 @@ Decisions in `tools.md` 70–73 and `ui.md` (bitmap gallery section,
 decisions 29 and 42); what matters on this side:
 
 - **Thumbnails** (`xarast-app/src/bitmap_gallery.rs`, T10.7.3): one
-  background thread, started on the first request, fed resources by
-  channel; each is decoded as the walker decodes it (native pixels as
-  they are; an encoded original through the façade, or tag 71 with its
-  palette, 65, 69 — a copy of the walker's dispatch, kept apart so the
-  walker, being reworked for XARA-T-0281, is not touched) under
-  `DecodeLimits::default()`, then box-filtered over alpha-weighted
-  colour to ≤ 64 px on the longer side, never enlarged. A panicking
+  background thread, started on the first request, fed resources — each
+  with its document's `DecodedImages` — by channel. Since XARA-T-0293
+  the thread has **no decoder of its own**: `DecodedImages::image_for`
+  returns the image the view already decoded, or decodes it through the
+  walker's `ready_image` (the one dispatch: native pixels, the façade,
+  tag 71 with its palette, 65, 69; then the pyramid) under the
+  process-wide budget the session's walkers use, and files it — failures
+  too. A resource that is neither native nor encoded is not filed, so
+  the walker still counts it pending. The thumbnail is then
+  box-filtered from the image's **base** (`ImageRef::level(0)`, which
+  brings an evicted base back in place; the thread may block, the UI
+  never does) over alpha-weighted colour to ≤ 64 px on the longer side,
+  never enlarged. A panicking
   decoder is a failed thumbnail. Keyed by the resource's **content hash**
   (`DocumentResources::bitmap_key`, the SHA-256 kept from insertion — no
   re-hashing), shared by every document, **in memory only**: the disk
   cache T10.7.3 asks for is XARA-T-0289, and so is measuring the
   100-thumbnails-in-1.5 s budget.
+- **Thumbnails before and after XARA-T-0293 are identical**:
+  `tests/gallery_thumbnails.rs` keeps the old dispatch as an oracle and
+  compares byte for byte on synthetic bitmaps (native, PNG, corrupt,
+  empty) and on all 44 corpus bitmap records, decoded fresh and found
+  in the session's cache. `tests/decoded_images.rs` counts decodes:
+  the gallery on a walked document decodes nothing (2 hits), and a walk
+  after the gallery decoded a new bitmap decodes nothing (3 hits). Not
+  chosen: shrinking from a pyramid level instead of the base (cheaper
+  for a big photograph, but a different, linear-light filter — the
+  thumbnails would change); revisit with the disk cache (XARA-T-0289).
+  A gallery-only thumbnail now keeps its decoded image in the cache —
+  no extra cost in practice, since the walker registers every bitmap
+  of the document, used or not, on its first frame anyway.
 - **Background decode** (`import.rs`, T10.7.5): files over 1 MiB are
   read in 256 KiB chunks on a thread and decoded there with
   `place::image_from_bytes` — the same decode, limits and storage rule
@@ -448,5 +468,5 @@ are `ImageRef`'s. This crate is unchanged. The walker's side
 - Bitmap gallery (XARA-US-0055): thumbnails on disk and the thumbnail
   budget (XARA-T-0289); Replace and Save a copy (XARA-T-0290); ICC
   profiles as resources and through the placement PNG conversion
-  (XARA-T-0291); one decode dispatch for the walker and the thumbnailer
-  once XARA-T-0281 has landed.
+  (XARA-T-0291). (One decode dispatch for the walker and the
+  thumbnailer: done, XARA-T-0293.)

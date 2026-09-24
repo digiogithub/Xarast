@@ -467,7 +467,9 @@ reason the walker *reports*, which is its own test.
     every walker it makes shares it: its own, `Session::scene_walker()`
     (`build_scene`, the CLI's `SessionSource`), `headless::render`, and
     the save thread's thumbnail (`SaveJob::with_decoded_images`, set by
-    `Session::save_job`; `thumbnail::thumbnail_png_with`). The key is the
+    `Session::save_job`; `thumbnail::thumbnail_png_with`), and the bitmap
+    gallery's thumbnail thread (`DecodedImages::image_for`, which decodes
+    through the walker's `ready_image` on a miss; XARA-T-0293). The key is the
     resource's identity — the addresses of its `pixels` and `original`
     `Arc`s, which the entry holds, plus its declared size and the pixel
     budget — so an edited (copy-on-write) resource misses. Entries whose
