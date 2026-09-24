@@ -308,9 +308,16 @@ impl PressState {
         }
         if self.held == Some(id) {
             self.held = None;
-            if !std::mem::take(&mut self.cancelled) {
-                return Pick::Commit;
+            if std::mem::take(&mut self.cancelled) {
+                return Pick::None;
             }
+            // egui drops the press itself when `Esc` is pressed, so the
+            // widget stops being "down" in that very frame: that is a
+            // cancel, not a release (XARA-T-0305, measured).
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                return Pick::Cancel;
+            }
+            return Pick::Commit;
         }
         Pick::None
     }

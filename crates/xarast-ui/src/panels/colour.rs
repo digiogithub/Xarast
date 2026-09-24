@@ -135,6 +135,11 @@ pub fn target_label(target: ColourTarget, named: &[NamedColour]) -> String {
     }
 }
 
+/// A derivation's fraction as the whole per cent its slider shows.
+fn shown_percent(fraction: f32) -> f64 {
+    super::slider_value(f64::from(fraction) * 100.0, 0)
+}
+
 /// How a value widget was used this frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Use {
@@ -142,6 +147,8 @@ enum Use {
     Live,
     Set,
     Commit,
+    /// The release frame also moved the value: preview it, then commit.
+    LiveCommit,
     Cancel,
 }
 
@@ -154,6 +161,10 @@ fn emit_change(ctx: &mut PanelCtx<'_>, how: Use, change: ColourChange) {
         Use::Live => emit(ctx, ColourEditorOp::Preview(change)),
         Use::Set => emit(ctx, ColourEditorOp::Set(change)),
         Use::Commit => emit(ctx, ColourEditorOp::Commit),
+        Use::LiveCommit => {
+            emit(ctx, ColourEditorOp::Preview(change));
+            emit(ctx, ColourEditorOp::Commit);
+        }
         Use::Cancel => emit(ctx, ColourEditorOp::Cancel),
         Use::None => {}
     }
@@ -207,7 +218,17 @@ impl ColourPanel {
                 self.cancelled_drag = None;
                 return Use::None;
             }
-            return Use::Commit;
+            // egui ends a drag itself when `Esc` is pressed and reports
+            // the stop in that same frame: that release is a cancel, not
+            // a commit (XARA-T-0305).
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                return Use::Cancel;
+            }
+            return if r.changed() {
+                Use::LiveCommit
+            } else {
+                Use::Commit
+            };
         }
         if r.changed() { Use::Set } else { Use::None }
     }
@@ -605,7 +626,7 @@ impl ColourPanel {
 
         match d {
             Derivation::Tint { parent, factor } => {
-                let mut pct = f64::from(factor) * 100.0;
+                let mut pct = shown_percent(factor);
                 let r = ui.add(
                     egui::Slider::new(&mut pct, 0.0..=100.0)
                         .text("Tint")
@@ -623,8 +644,8 @@ impl ColourPanel {
                 );
             }
             Derivation::Shade { parent, x, y } => {
-                let mut sx = f64::from(x) * 100.0;
-                let mut sy = f64::from(y) * 100.0;
+                let mut sx = shown_percent(x);
+                let mut sy = shown_percent(y);
                 let rx = ui.add(
                     egui::Slider::new(&mut sx, -100.0..=100.0)
                         .text("Saturation shift")
