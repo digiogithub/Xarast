@@ -2,13 +2,14 @@
 id: XARA-T-0288
 type: task
 title: "perf: font service start (~41 ms, mostly fontconfig) paid by the first document with text"
-status: in_review
+status: done
 priority: low
 author: mcp
 labels: [perf, text]
 created: 2026-09-24T11:06:56Z
-updated: 2026-09-24T13:25:31Z
+updated: 2026-09-24T13:53:16Z
 started: 2026-09-24T12:43:30Z
+closed: 2026-09-24T13:53:16Z
 ---
 
 ## Description

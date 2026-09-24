@@ -2,13 +2,14 @@
 id: XARA-US-0061
 type: story
 title: A/B/C — Performance, memory and startup budgets as CI gates
-status: in_review
+status: done
 parent: XARA-EP-0013
 author: mcp
 labels: [phase-12, perf, ci]
 created: 2026-09-23T09:43:25Z
-updated: 2026-09-24T13:25:31Z
+updated: 2026-09-24T13:53:16Z
 started: 2026-09-24T12:43:30Z
+closed: 2026-09-24T13:53:16Z
 ---
 
 ## Tasks (full tables: phase-12 §A, §B, §C)
