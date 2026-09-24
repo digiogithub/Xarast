@@ -1349,6 +1349,26 @@ fn feather(size_pt: f64, profile: Profile) -> LayerEffect {
     }
 }
 
+/// A shadow in points: `map` is `[a, b, c, d, e, f]` with `e`, `f` in
+/// points, `displacement`, `spread` and the penumbra `blur` in points.
+fn shadow_pt(
+    map: [f64; 6],
+    displacement: f64,
+    spread: f64,
+    blur: f64,
+    colour: Rgba8,
+) -> LayerEffect {
+    let p = f64::from(Mp::PER_PT);
+    LayerEffect::Shadow(Box::new(crate::effect::ShadowEffect {
+        map: [map[0], map[1], map[2], map[3], map[4] * p, map[5] * p],
+        displacement: displacement * p,
+        spread: spread * p,
+        blur: blur * p,
+        profile: Profile::IDENTITY,
+        colour,
+    }))
+}
+
 fn ellipse_path(cx: f64, cy: f64, r: f64) -> PathRef {
     // Four cubic quarters, the usual 0.5523 handle.
     let k = 0.552_284_75 * r;
@@ -1362,16 +1382,130 @@ fn ellipse_path(cx: f64, cy: f64, r: f64) -> PathRef {
     PathRef::new(b.build())
 }
 
-/// Live effects through the offscreen pipeline (phase 13): 8 cases.
+/// Live effects through the offscreen pipeline (phase 13): 13 cases.
 ///
 /// Each exercises something the pipeline has to get right beyond the blur
 /// itself: the silhouette (a transparent object is feathered by its shape,
 /// not its alpha), content beyond the viewport (no fade at the view's
 /// edge), nesting, an enclosing clip and layer, the profile, and the
-/// radius ceiling.
+/// radius ceiling. The shadows add a silhouette that moves (a wall), is
+/// squashed and sheared (a floor) or grows (a glow), and a shadow whose
+/// object is outside the view while the shadow is in it.
 fn effect_cases() -> Vec<Case> {
     type Draw = fn(&mut SceneBuilder<'_>);
-    let cases: [(&str, Draw); 8] = [
+    let cases: [(&str, Draw); 13] = [
+        ("effect_shadow_wall", |b| {
+            b.push_effect(shadow_pt(
+                [1.0, 0.0, 0.0, 1.0, 8.0, 6.0],
+                10.0,
+                0.0,
+                8.0,
+                Rgba8 {
+                    r: 20,
+                    g: 20,
+                    b: 90,
+                    a: 140,
+                },
+            ));
+            b.fill(
+                SceneNodeId(10),
+                &star_path(),
+                FillRule::NonZero,
+                Paint::Solid(rgb(240, 200, 40)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_shadow_floor", |b| {
+            // Half height, sheared 45° about the bottom edge at y = 80.
+            b.push_effect(shadow_pt(
+                [1.0, 0.0, -0.5, 0.5, 40.0, 40.0],
+                // At (30, 20): moved by (30, 30).
+                42.5,
+                0.0,
+                4.0,
+                Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 110,
+                },
+            ));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(30.0, 20.0, 50.0, 80.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(200, 40, 40)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_shadow_glow", |b| {
+            b.push_effect(shadow_pt(
+                [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                0.0,
+                6.0,
+                6.0,
+                Rgba8 {
+                    r: 250,
+                    g: 220,
+                    b: 40,
+                    a: 255,
+                },
+            ));
+            b.fill(
+                SceneNodeId(10),
+                &ellipse_path(48.0, 48.0, 26.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(20, 20, 20)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_shadow_beyond_view", |b| {
+            // The object is above the view; its shadow falls into it.
+            b.push_effect(shadow_pt(
+                [1.0, 0.0, 0.0, 1.0, 0.0, 40.0],
+                40.0,
+                0.0,
+                6.0,
+                Rgba8 {
+                    r: 0,
+                    g: 60,
+                    b: 0,
+                    a: 160,
+                },
+            ));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(20.0, -60.0, 76.0, -8.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(40, 40, 200)),
+            );
+            b.pop_effect();
+        }),
+        ("effect_shadow_feathered", |b| {
+            // A feather around a shadowed object: the shadow is feathered
+            // with it, as one unit.
+            b.push_effect(feather(12.0, Profile::IDENTITY));
+            b.push_effect(shadow_pt(
+                [1.0, 0.0, 0.0, 1.0, 10.0, 10.0],
+                14.2,
+                0.0,
+                6.0,
+                Rgba8 {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 128,
+                },
+            ));
+            b.fill(
+                SceneNodeId(10),
+                &rect_path(12.0, 12.0, 70.0, 70.0),
+                FillRule::NonZero,
+                Paint::Solid(rgb(40, 160, 200)),
+            );
+            b.pop_effect();
+            b.pop_effect();
+        }),
         ("effect_feather_square", |b| {
             b.push_effect(feather(16.0, Profile::IDENTITY));
             b.fill(

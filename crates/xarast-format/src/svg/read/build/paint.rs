@@ -484,6 +484,26 @@ impl<'d> Reader<'d, '_, '_> {
         direct_alpha(c)
     }
 
+    /// A shadow's colour from `xarast:colour` and `xarast:colour-ref`, read
+    /// as a flat fill is: the palette colour when the reference names one
+    /// that resolves to the written value, the literal otherwise, black
+    /// when neither is there.
+    pub(super) fn shadow_colour(&self, value: Option<&str>, reference: Option<&str>) -> Colour {
+        let Some(c) = value.and_then(parse::colour) else {
+            return Colour::Direct(ColourValue::BLACK);
+        };
+        if let Some(id) = reference
+            .and_then(|r| r.strip_prefix('#'))
+            .and_then(|p| self.palette.get(p).copied())
+        {
+            let rc = self.b.document().resources.colours.resolve_rgba8(id);
+            if (rc.r, rc.g, rc.b) == (c.r, c.g, c.b) {
+                return Colour::Indexed { id, tint: None };
+            }
+        }
+        direct(Rgba8 { a: 255, ..c })
+    }
+
     /// A flat colour, as a palette reference when the element names one
     /// that resolves to it.
     fn flat(&mut self, cctx: &Ctx, c: Rgba8, ref_attr: &str) -> Side {

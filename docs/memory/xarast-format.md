@@ -746,6 +746,45 @@ back as one feather per member — caught by the corpus render round trip
   `finish(defs)`; mark the kind in `xarast:filter` and add it to the
   reader's derived list.
 
+## Shadows: every parameter, exactly (XARA-T-0318, 2026-09-24)
+
+`<xarast:shadow>` (`research/06 §6.8.1`) inside the controller's `<g
+xarast:kind="shadow">`, then `<g xarast:generated="shadow">` (empty: the
+renderer draws the shadow) and `<g xarast:kind="live-source">`:
+
+| Attribute | Model | Spelling |
+|---|---|---|
+| `xarast:type` | `kind` | `wall`, `floor`, `glow` |
+| `xarast:offset` | `offset` | points, SVG frame (y down) |
+| `xarast:blur` | `blur` | the **penumbra** (the blur's diameter), points |
+| `xarast:darkness`, `xarast:scale`, `xarast:tilt` | `f32`s | `f32s`: shortest exact |
+| `xarast:profile` | `profile` | `f64s_exact` bias and gain |
+| `xarast:glow-width` | `glow_width` | points; omitted at 0 |
+| `xarast:colour` (+ `xarast:colour-ref`) | `colour` | 8-bit sRGB, plus `#c-N` for an untinted palette colour |
+
+- **Why exact spellings.** The corpus darkness is `1 − n/255` as an
+  `f32`: six decimals do not pin it, and the normal form compares the
+  parameters with `Debug`. The first corpus run with six decimals would
+  have failed the 59/59 normal form on every shadow file.
+- **Why the colour is a parameter.** The original keeps it as the fill
+  attribute of the shadow node, which has no ink; the writer emits paint
+  only on ink elements, so as an attribute it vanished on a reload
+  (`xar-import.md`, finding 20). The reader maps the reference back to the
+  palette colour when it resolves to the written value, as a flat fill's
+  `xarast:fill-ref` does; a literal comes back as its 8-bit value, and the
+  normal form states a shadow's colour that way (`hex` + reference).
+- **Not baked yet.** An external viewer draws the object without its
+  shadow; `Stats::shadows_unbaked` feeds `Compromise::NotRendered`
+  ("shadows (recorded, not baked)") in SVG export and the `convert`
+  summary. The filter chain belongs with the feather's (XARA-T-0317,
+  `svg/effect.rs`'s `FilterChain` on the working branch): σ = penumbra/4
+  (σ = r/2, r = penumbra/2), `feOffset` by the wall offset, a
+  `feMorphology dilate` for a glow, a transformed copy for a floor.
+- Pinned by `tests/svg_read.rs`,
+  `a_shadow_reads_back_exactly_and_saves_to_the_same_bytes`, and by the
+  corpus round trip (59/59 normal form and byte-identical re-save, with
+  the 98 shadows now in it).
+
 ## Photo operations: `<xarast:photo-ops>` (XARA-US-0054, 2026-09-24)
 
 `svg/photo.rs` writes and parses a bitmap object's chain

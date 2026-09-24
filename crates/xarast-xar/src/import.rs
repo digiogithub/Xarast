@@ -771,6 +771,24 @@ impl<'o> Mapper<'o> {
                 self.emit_clip_view(node)?;
                 After::Drop
             }
+            Decoded::ShadowController(r) => {
+                let r = *r;
+                self.emit_shadow(node, r)?;
+                After::Drop
+            }
+            // A shadow node outside a controller has no object to shadow.
+            // Its children are its own attributes, which must not leak
+            // onto the objects after it: the whole subtree goes.
+            Decoded::Shadow { .. } => {
+                self.mapped = self.mapped.saturating_add(1);
+                self.skipped = self.skipped.saturating_add(count_subtree(&node.children));
+                self.diags.push(
+                    Diagnostic::new(DiagCode::ShadowDegraded)
+                        .at(at.0, at.1)
+                        .with_detail(1),
+                );
+                After::Drop
+            }
             // A marker outside a controller separates nothing; its
             // children, if any, stay at this level.
             Decoded::ClipView => {
@@ -1225,6 +1243,200 @@ impl<'o> Mapper<'o> {
             });
         }
         acc
+    }
+
+    /// A `TAG_SHADOWCONTROLLER` and everything under it.
+    ///
+    /// In the file the controller holds its attributes, one `TAG_SHADOW`
+    /// (whose own attribute children are the shadow's fill: its colour, and
+    /// a flat transparency that repeats the darkness) and the object that
+    /// casts the shadow. The model's live object is
+    ///
+    /// ```text
+    /// Live (Controller, Shadow)   parameters of both records, the colour
+    ///   attributes…               the controller's: shadow and object
+    ///   Live (Generated, Shadow)  empty: the renderer draws the shadow
+    ///   Live (Source, Shadow)
+    ///     the object…
+    /// ```
+    ///
+    /// The shadow's own attributes are folded into the parameters rather
+    /// than kept as nodes: the colour is the only one that means anything
+    /// (the original paints the shadow through a bitmap transparency built
+    /// from the darkness, whatever transparency the node carries), and a
+    /// parameter survives a `.xarast` round trip where an attribute of a
+    /// node with no ink would not.
+    fn emit_shadow(
+        &mut self,
+        node: &RecordNode,
+        r: crate::decode::ShadowControllerRecord,
+    ) -> Result<(), XarError> {
+        let rec = &node.record;
+        let at = (rec.number, rec.tag);
+        self.mapped = self.mapped.saturating_add(1);
+        let kind = match r.kind {
+            1 => xarast_doc::ShadowKind::Wall,
+            2 => xarast_doc::ShadowKind::Floor,
+            3 => xarast_doc::ShadowKind::Glow,
+            other => {
+                self.diags.push(
+                    Diagnostic::new(DiagCode::ShadowDegraded)
+                        .at(at.0, at.1)
+                        .with_detail(3),
+                );
+                self.diags.push(
+                    Diagnostic::new(DiagCode::UnknownEnumValue)
+                        .at(at.0, at.1)
+                        .with_detail(u64::from(other)),
+                );
+                xarast_doc::ShadowKind::Wall
+            }
+        };
+        let angle = f64::from(r.floor_angle) / 1_000_000.0 % std::f64::consts::TAU;
+        let mut params = xarast_doc::ShadowParams {
+            kind,
+            offset: Point::raw(r.offset.0, r.offset.1),
+            blur: Mp::new(r.penumbra),
+            darkness: 1.0,
+            profile: BiasGain::IDENTITY,
+            // f32-ok: a percentage over 100 and an angle within ±2π.
+            scale: (f64::from(r.floor_height) / 100.0) as f32,
+            tilt: angle as f32,
+            glow_width: Mp::new(r.width),
+            colour: Colour::Direct(ColourValue::BLACK),
+        };
+        let children = node.children.as_slice();
+        let shadow_at = children
+            .iter()
+            .position(|c| c.record.tag == crate::tags::TAG_SHADOW);
+        match shadow_at.and_then(|i| children.get(i)) {
+            Some(s) => self.shadow_node(s, &mut params),
+            None => self.diags.push(
+                Diagnostic::new(DiagCode::ShadowDegraded)
+                    .at(at.0, at.1)
+                    .with_detail(0),
+            ),
+        }
+        let live = |role| {
+            NodeKind::Live(Box::new(xarast_doc::LiveNode {
+                role,
+                kind: xarast_doc::LiveKind::Shadow(Box::new(params.clone())),
+                regen: xarast_doc::RegenState::Clean,
+                name: None,
+            }))
+        };
+        self.builder.node(live(xarast_doc::LiveRole::Controller))?;
+        self.push_scope()?;
+        let r = self.shadow_children(children, shadow_at, &live);
+        self.pop_scope();
+        r
+    }
+
+    /// The controller's children: its attributes (everything before the
+    /// first object, which the shadow and the object both inherit), then
+    /// the generated node, then the source holding the rest. A stray
+    /// second `TAG_SHADOW` is dropped with its attributes.
+    fn shadow_children(
+        &mut self,
+        children: &[RecordNode],
+        shadow_at: Option<usize>,
+        live: &dyn Fn(xarast_doc::LiveRole) -> NodeKind,
+    ) -> Result<(), XarError> {
+        let first_ink = children
+            .iter()
+            .enumerate()
+            .position(|(i, c)| {
+                Some(i) != shadow_at && class_of(c.record.tag) == Some(TagClass::Object)
+            })
+            .unwrap_or(children.len());
+        for (i, c) in children.iter().enumerate().take(first_ink) {
+            if Some(i) != shadow_at {
+                self.visit(c)?;
+            }
+        }
+        self.builder.node(live(xarast_doc::LiveRole::Generated))?;
+        self.builder.node(live(xarast_doc::LiveRole::Source))?;
+        self.push_scope()?;
+        let mut r = Ok(());
+        for (i, c) in children.iter().enumerate().skip(first_ink) {
+            if Some(i) == shadow_at {
+                continue;
+            }
+            r = self.visit(c);
+            if r.is_err() {
+                break;
+            }
+        }
+        self.pop_scope();
+        r
+    }
+
+    /// `TAG_SHADOW` and its attribute children, folded into `params`.
+    fn shadow_node(&mut self, node: &RecordNode, params: &mut xarast_doc::ShadowParams) {
+        let rec = &node.record;
+        let at = (rec.number, rec.tag);
+        self.mapped = self.mapped.saturating_add(1);
+        if let Ok(Decoded::Shadow {
+            bias,
+            gain,
+            darkness,
+        }) = decode(rec.tag, &rec.data, self.origin, &mut self.diags, at)
+        {
+            params.profile = BiasGain::new(bias, gain);
+            // The original clamps it into 0..=1 as it reads it.
+            let d = if darkness.is_nan() {
+                1.0
+            } else {
+                darkness.clamp(0.0, 1.0)
+            };
+            // f32-ok: a fraction in 0..=1.
+            params.darkness = d as f32;
+        }
+        let mut coloured = false;
+        for child in &node.children {
+            let crec = &child.record;
+            let cat = (crec.number, crec.tag);
+            // Nothing nests under a shadow's attributes in any real file;
+            // what a corrupt one puts there is not visited.
+            self.skipped = self.skipped.saturating_add(count_subtree(&child.children));
+            let Ok(d) = decode(crec.tag, &crec.data, self.origin, &mut self.diags, cat) else {
+                self.skipped = self.skipped.saturating_add(1);
+                continue;
+            };
+            if self.definition(&d, crec) {
+                self.mapped = self.mapped.saturating_add(1);
+                continue;
+            }
+            match self.attribute(&d, cat) {
+                Some(AttrValue::Fill(paint)) if !coloured => {
+                    self.mapped = self.mapped.saturating_add(1);
+                    coloured = true;
+                    if let Paint::Flat { value } = &paint {
+                        params.colour = value.clone();
+                    } else {
+                        let mut first = None;
+                        let mut p = paint.clone();
+                        p.for_each_value_mut(&mut |c| {
+                            if first.is_none() {
+                                first = Some(c.clone());
+                            }
+                        });
+                        if let Some(c) = first {
+                            params.colour = c;
+                        }
+                        self.diags.push(
+                            Diagnostic::new(DiagCode::ShadowDegraded)
+                                .at(cat.0, cat.1)
+                                .with_detail(2),
+                        );
+                    }
+                }
+                // The transparency repeats the darkness; the rest (a
+                // mapping, an effect) shapes nothing on a flat colour.
+                Some(_) => self.mapped = self.mapped.saturating_add(1),
+                None => self.skipped = self.skipped.saturating_add(1),
+            }
+        }
     }
 
     fn opaque_node(&mut self, rec: &crate::Record) -> Result<(), XarError> {
@@ -2535,7 +2747,7 @@ mod tests {
         let bytes = XarBuilder::new()
             .record(40, &[])
             .down()
-            .record(4050, &[1, 2, 3, 4])
+            .record(4066, &[1, 2, 3, 4])
             .up()
             .end_of_file()
             .finish();
@@ -2549,7 +2761,7 @@ mod tests {
                 _ => None,
             })
             .expect("the record was kept");
-        assert_eq!(kept.tag, 4050);
+        assert_eq!(kept.tag, 4066);
         assert_eq!(&*kept.payload, &[1, 2, 3, 4]);
     }
 
@@ -2967,5 +3179,166 @@ mod tests {
             mode: xarast_color::TranspMode::Bleach,
         };
         assert_eq!(contone, Some((level(115), level(200))));
+    }
+
+    /// `TAG_SHADOWCONTROLLER` for `kind` with the corpus's usual numbers.
+    fn shadow_controller(kind: u8) -> Vec<u8> {
+        let mut v = vec![kind];
+        for n in [5_250i32, 2_220, -3_750, 785_397, 37, 100, 3_000] {
+            v.extend_from_slice(&n.to_le_bytes());
+        }
+        v
+    }
+
+    fn shadow_record(bias: f64, gain: f64, darkness: f64) -> Vec<u8> {
+        let mut v = Vec::new();
+        for f in [bias, gain, darkness] {
+            v.extend_from_slice(&f.to_le_bytes());
+        }
+        v
+    }
+
+    fn shadow_diags(report: &ImportReport) -> Vec<u64> {
+        report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == DiagCode::ShadowDegraded)
+            .map(|d| d.detail)
+            .collect()
+    }
+
+    fn only_shadow(doc: &xarast_doc::Document) -> xarast_doc::ShadowParams {
+        doc.tree
+            .preorder(doc.tree.root())
+            .find_map(|id| match doc.tree.kind(id) {
+                Some(NodeKind::Live(l)) if l.role == xarast_doc::LiveRole::Controller => {
+                    match &l.kind {
+                        xarast_doc::LiveKind::Shadow(p) => Some((**p).clone()),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .expect("a shadow controller")
+    }
+
+    #[test]
+    fn a_shadow_controller_becomes_a_live_shadow_with_its_object_as_source() {
+        // Controller attributes, the shadow with its colour (built-in -2)
+        // and transparency, then the object: the order real files use.
+        let bytes = layer_with(|b| {
+            b.record(4050, &shadow_controller(1))
+                .down()
+                .record(152, &500i32.to_le_bytes())
+                .record(4051, &shadow_record(0.25, -0.5, 1.0 - 94.0 / 255.0))
+                .down()
+                .record(166, &[94, 1])
+                .record(150, &(-2i32).to_le_bytes())
+                .up()
+                .record(116, &square_path(100_000, 100_000, 50_000))
+                .up()
+        });
+        let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
+        balanced(&report);
+        assert!(shadow_diags(&report).is_empty());
+        assert!(doc.validate().errors.is_empty(), "{:?}", doc.validate());
+        let c = first_of(&doc, "Live").unwrap();
+        assert_eq!(kinds_under(&doc, c), ["Attr", "Live", "Live"]);
+        let parts = xarast_doc::live::parts(&doc.tree, c).expect("a controller");
+        assert_eq!(kinds_under(&doc, parts.source), ["Path"]);
+        let generated = parts.generated.expect("a generated node");
+        assert_eq!(kinds_under(&doc, generated), Vec::<&str>::new());
+        let p = only_shadow(&doc);
+        assert_eq!(p.kind, xarast_doc::ShadowKind::Wall);
+        assert_eq!(p.offset, Point::raw(2_220, -3_750));
+        assert_eq!(p.blur, Mp::new(5_250));
+        assert_eq!(p.darkness, (1.0 - 94.0 / 255.0) as f32);
+        assert_eq!(p.opacity_level(), 161);
+        assert_eq!(p.profile, BiasGain::new(0.25, -0.5));
+        assert_eq!(p.scale, 0.37);
+        assert!((p.tilt - 0.785_397).abs() < 1e-6);
+        assert_eq!(p.glow_width, Mp::new(3_000));
+        let built_in = crate::colour::ColourRegistry::new()
+            .resolve(Ref::parse(-2), &mut DiagSink::new(), (1, 150))
+            .unwrap();
+        assert_eq!(p.colour, built_in);
+        // The shadow's transparency and colour are folded into the
+        // parameters, not left as attributes anywhere.
+        let fills = doc
+            .tree
+            .preorder(doc.tree.root())
+            .filter(|&id| {
+                matches!(doc.tree.kind(id), Some(NodeKind::Attr(a))
+                    if matches!(a.value, AttrValue::Fill(_) | AttrValue::TranspFill(_)))
+            })
+            .count();
+        assert_eq!(fills, 0);
+        // The controller's bounds cover the moved, blurred shadow.
+        let mut doc = doc;
+        doc.update_bounds();
+        let b = doc.tree.bounds(c).get().unwrap();
+        assert!(b.hi.x.raw() >= 150_000 + 2_220 + 5_250, "{b:?}");
+        assert!(b.lo.y.raw() <= 100_000 - 3_750 - 5_250, "{b:?}");
+    }
+
+    #[test]
+    fn shadow_types_and_degraded_shadows_are_reported() {
+        let bytes = layer_with(|b| {
+            b.record(4050, &shadow_controller(2))
+                .down()
+                .record(4051, &shadow_record(0.0, 0.0, 0.5)[..16])
+                .record(116, &square_path(0, 0, 50_000))
+                .up()
+                .record(4050, &shadow_controller(3))
+                .down()
+                .record(116, &square_path(0, 0, 50_000))
+                .up()
+                .record(4050, &shadow_controller(4))
+                .down()
+                .record(4051, &shadow_record(0.0, 0.0, 0.5))
+                .down()
+                .record(153, &[0u8; 40])
+                .up()
+                .up()
+                // A stray shadow: its colour must not reach the path after it.
+                .record(4051, &shadow_record(0.0, 0.0, 0.5))
+                .down()
+                .record(150, &(-3i32).to_le_bytes())
+                .up()
+                .record(116, &square_path(0, 0, 50_000))
+        });
+        let (doc, report) = import(&bytes, &ImportOptions::default()).unwrap();
+        balanced(&report);
+        assert!(doc.validate().errors.is_empty(), "{:?}", doc.validate());
+        // 0: the glow has no TAG_SHADOW; 3: type 4; 2: a gradient fill;
+        // 1: the stray one.
+        assert_eq!(shadow_diags(&report), [0, 3, 2, 1]);
+        let kinds: Vec<(xarast_doc::ShadowKind, f32)> = doc
+            .tree
+            .preorder(doc.tree.root())
+            .filter_map(|id| match doc.tree.kind(id) {
+                Some(NodeKind::Live(l)) if l.role == xarast_doc::LiveRole::Controller => {
+                    match &l.kind {
+                        xarast_doc::LiveKind::Shadow(p) => Some((p.kind, p.darkness)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            })
+            .collect();
+        // An old 16-byte shadow is fully dark; no shadow at all keeps the
+        // default.
+        assert_eq!(
+            kinds,
+            [
+                (xarast_doc::ShadowKind::Floor, 1.0),
+                (xarast_doc::ShadowKind::Glow, 1.0),
+                (xarast_doc::ShadowKind::Wall, 0.5),
+            ]
+        );
+        let stray_fill = doc.tree.preorder(doc.tree.root()).any(|id| {
+            matches!(doc.tree.kind(id), Some(NodeKind::Attr(a)) if matches!(a.value, AttrValue::Fill(_)))
+        });
+        assert!(!stray_fill);
     }
 }

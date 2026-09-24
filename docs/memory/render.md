@@ -1604,6 +1604,84 @@ byte for byte what recomputing gives.
   piece's whole layer instead of its clip fails the assembly test.
 - **Numbers** in `perf.md`, "The effect layer cache".
 
+### Shadows (XARA-T-0318, phase 13 C1–C5 and C9, 2026-09-24)
+
+The second consumer of the pipeline. `LayerEffect::Shadow(ShadowEffect)`
+wraps a shadow controller's subtree (the walker's `shadow_of`, inside the
+controller's own feather) and draws the shadow **beneath** what it wraps:
+silhouette → (glow) `blur::dilate_plane` by the glow width →
+resample through the document-space `map` → disc blur of **half the
+penumbra** → profile → colour × opacity → content over it.
+
+- **Facts from the original** (`Kernel/nodecont.cpp`, `nodeshad.cpp`;
+  facts only): the penumbra is the blur's *diameter*
+  (`pixBlurDiameter = penumbra / pixel width`), so r = penumbra/2, like
+  the feather; a wall shadow translates the silhouette by the offset; a
+  glow contours it outwards by the glow width; a floor maps it through
+  translate-to-(centre x, bottom y) · scale(1, height) · shear(tan angle)
+  · back (the silhouette's `ApplyShadowTransform`; the bitmap itself is
+  CDraw's `CreateShadow(floor, height, angle°, …)`, closed); the shadow is
+  painted in the shadow node's fill colour through a bitmap transparency
+  whose start level is `round(255·(1 − darkness))` and end 255, i.e.
+  opacity `255 − that` where the blurred silhouette is full; the profile
+  is applied as the bitmap's palette with the **bias negated**.
+- **`map` is document space, applied in device space.** `apply_at(…, xf,
+  origin)` (new beside `apply`) gets the view transform and the region's
+  device origin; the warp is `xf⁻¹ · map⁻¹ · xf`, bilinear, a function of
+  each pixel's absolute device position only (invariant 23 holds:
+  `effect_shadow_*` are in the determinism tests with the feathers).
+  `displacement` (the walker's bound on how far `map` moves the source's
+  bounding box, at its corners) + dilation + blur reach + 2 px slack is
+  both `reach_px` and `growth_px`, so the region, the display list's
+  clip, the damage pad and the kept rectangle all cover the moved
+  shadow.
+- **Outside the region is uncovered, always.** The first dilation was
+  the complement of `erode_plane`, which makes outside the plane
+  *covered*; the region's pixels outside `keep` are composited too, so
+  every glow drew a frame at the region's edge. `dilate_plane` is now
+  `min(255, Σ disc)` directly (the same formula, outside = 0). Any new
+  per-effect filter must keep "nothing appears from outside the plane".
+- **Sample positions come from absolute device coordinates only.** The
+  first warp subtracted the region's origin inside the float expression;
+  an export strip's region starts elsewhere than a frame's, samples
+  moved by an ulp and `tests/export.rs` caught a strip-height dependence.
+- **`DisplayList::with_commands` adds an effect's growth to the list's
+  bounds**, as `build` does at the pop. Without it PDF's effect raster
+  (a selection holding only the effect) of a shadow whose object is off
+  the image drew nothing (`effect_shadow_beyond_view`, caught by
+  `xarast-io/tests/pdf.rs`'s Poppler comparison).
+- **Colour and darkness**: the walker resolves the colour parameter and
+  multiplies its alpha by `ShadowParams::opacity_level()`; the renderer
+  never sees a document colour.
+- **Not reproduced**: CDraw's floor bitmap (a progressive blur or
+  perspective, if it has one, is unknowable here; ours is the affine map
+  plus a uniform blur); the original's half-pixel offset for even
+  diameters; radii above 100 px are clamped (XARA-T-0315). A feather
+  around a shadow sees the shadow's half-transparent silhouette in its
+  own silhouette pass (nested effects composite with their alpha), so the
+  erosion eats most of the shadow (`effect_shadow_feathered`); no corpus
+  file does this.
+- **Against the embedded previews** (T-0248 method: 60 dpi page render,
+  registered crop, mean |Δ|, each render registered on its own):
+  | File (shadows) | Before | After |
+  |---|---:|---:|
+  | SoftShadow (3) | 73.89 | **7.75** |
+  | Groucho2 (81) | 43.99 | **38.87** |
+  | testimp1 (1) | 20.05 | **18.25** |
+  | Girard_simple (9) | 15.36 | 15.52 |
+  | Watch4 (4) | 13.81 | 13.81 |
+  | feathers (control, 0) | 2.92 | 2.92 |
+  SoftShadow's background and its green "Software" were inside shadow
+  controllers and were stripped; Groucho2 gains its eyes', pencils' and
+  hands' depth but still misses the bevelled frame (inside shadow
+  controllers too: the bevel is stripped, so those sources are empty).
+  Girard's dial now appears where the bevelled rim that covers it in the
+  original is still missing; Watch4's four shadows are cast by blends and
+  moulds, which are still opaque, so their silhouette is empty.
+- **Cost**: Groucho2, release, 100 %, `xarast-cli render`, loaded
+  machine: 71–85 → 108–136 ms (81 more effects, each two region passes, a
+  resample and a blur, every frame) until the layer cache (XARA-T-0314).
+
 ---
 
 ## Invariants that must not be broken
@@ -1831,6 +1909,8 @@ byte for byte what recomputing gives.
 | 25 | ~~Offscreen effect cache (B9)~~. **Done 2026-09-24**: keyed by op equality + resources + exact view, not a content hash or a quantised scale, with its own 128 MiB ceiling rather than the Phase 4 budget; see "The effect layer cache" | done (XARA-T-0314) |
 | 26 | Blur radius above the 100 px ceiling: render the silhouette at a reduced resolution and scale up, as the original does for feathers (B7) | XARA-T-0315 |
 | 27 | GPU blur (B6): not needed while the GPU only composites CPU tiles; lands with the WGSL pass | XARA-T-0051 |
+| 28 | Inner shadows (C5): not in the `.xar` format; the model has no `Inner` kind yet | XARA-US-0069 |
+| 29 | A nested effect in a silhouette pass composites with its alpha (a feather around a shadow erodes the shadow away); decide what the original's silhouette of a shadow is | XARA-US-0069 |
 | 24 | ~~`RampMapping::Sin` ignored; `ClipViewMode::Outside` dropped~~. **Done 2026-09-24**: `RampEase` (above) and the walker's outside clip (`app-core.md` decision 34); the renderer still clips only to a path's inside, on purpose | done (XARA-US-0017) |
 | 12 | ~~Reconcile `wgpu` versions~~. **Decided 2026-09-23**: no `vello` in the product until it targets the workspace's `wgpu` (two `wgpu`s cost +4.08 MiB and 46 crates, and cannot share a device); the spike keeps building against `vello::wgpu` behind `spike-gpu` | done (XARA-US-0011) |
 

@@ -625,6 +625,8 @@ impl Canon for LiveNode {
                 h.add(&p.profile);
                 h.f32(p.scale);
                 h.f32(p.tilt);
+                h.add(&p.glow_width);
+                h.add(&p.colour);
             }
             LiveKind::Bevel(p) => {
                 h.u8(p.bevel_type as u8);

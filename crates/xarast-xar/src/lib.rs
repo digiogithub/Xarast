@@ -94,7 +94,8 @@ pub use cur::Cur;
 pub use decode::{
     BitmapDefinition, BitmapFormat, Decoded, FillEffect, FillGeometry, FillKind, FillRepeat,
     FontDefinition, FractalParams, GradientFill, GradientTransparency, LayerFlags, RegularShape,
-    ShapeFlags, SpreadInformation, TextAttr, TextPlacement, TextStory, decode, has_decoder,
+    ShadowControllerRecord, ShapeFlags, SpreadInformation, TextAttr, TextPlacement, TextStory,
+    decode, has_decoder,
 };
 pub use diag::{DiagCode, DiagSink, Diagnostic, Severity, severity_str};
 pub use error::XarError;

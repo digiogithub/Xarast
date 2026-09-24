@@ -288,6 +288,9 @@ pub struct Stats {
     pub effects_approximated: usize,
     /// Feathers drawn by an SVG filter (`effect.rs`), plus their twin.
     pub effects_baked: usize,
+    /// Shadows recorded (`<xarast:shadow>`) but not baked: an external
+    /// viewer draws the object without its shadow.
+    pub shadows_unbaked: usize,
     /// `ClipRegion` attributes, which nothing draws yet.
     pub clip_regions_ignored: usize,
     /// Non-attribute children of ink nodes, drawn before them as siblings.

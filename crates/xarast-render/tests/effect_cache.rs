@@ -27,7 +27,7 @@ fn effect_cases() -> Vec<Case> {
         .into_iter()
         .filter(|c| c.name.starts_with("effect_"))
         .collect();
-    assert_eq!(cases.len(), 8, "the corpus's effect cases");
+    assert_eq!(cases.len(), 13, "the corpus's effect cases");
     cases
 }
 

@@ -172,6 +172,48 @@ fn file_seeds() -> Vec<(String, Vec<u8>)> {
             .end_of_file()
             .finish(),
     ));
+    // Shadows: a wall shadow over a path (controller attributes, a
+    // `TAG_SHADOW` with its colour and transparency, the object), a floor
+    // shadow with no `TAG_SHADOW` and an old 16-byte one, and a stray
+    // `TAG_SHADOW` outside any controller. Declared atomic, as real files do.
+    out.push(("shadow".into(), {
+        let mut wall = vec![1u8];
+        for v in [4500i32, 3750, -3750, 785_398, 50, 100, 3000] {
+            wall.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut floor = wall.clone();
+        floor[0] = 2;
+        let mut shadow = Vec::new();
+        for v in [0.2f64, -0.1, 0.75] {
+            shadow.extend_from_slice(&v.to_le_bytes());
+        }
+        XarBuilder::new()
+            .record(10, &[0xD2, 0x0F, 0, 0, 0xD3, 0x0F, 0, 0])
+            .record(40, &[])
+            .down()
+            .record(4050, &wall)
+            .down()
+            .record(152, &500i32.to_le_bytes())
+            .record(4051, &shadow)
+            .down()
+            .record(166, &[0x40, 1])
+            .record(150, &(-2i32).to_le_bytes())
+            .up()
+            .record(116, &minimal_payload(116))
+            .up()
+            .record(4050, &floor)
+            .down()
+            .record(4051, &shadow[..16])
+            .record(116, &minimal_payload(116))
+            .up()
+            .record(4051, &shadow)
+            .down()
+            .record(150, &(-3i32).to_le_bytes())
+            .up()
+            .up()
+            .end_of_file()
+            .finish()
+    }));
     // A bitmap transparency with levels 115..200 in Bleach, over a PNG
     // definition (record 2).
     out.push(("bitmap-transparency".into(), {

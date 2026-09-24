@@ -118,6 +118,19 @@ pub fn compute_bounds_with(tree: &Tree, id: NodeId, stroke_extent: xarast_geom::
             Rect::EMPTY
         }
         NodeKind::TextItem(_) => Rect::EMPTY,
+        // A shadow controller covers its shadow as well as its source, as
+        // the original's bounds do: culling, damage and "fit the drawing"
+        // all need the pixels it darkens.
+        NodeKind::Live(l)
+            if l.role == crate::live::LiveRole::Controller
+                && matches!(l.kind, crate::live::LiveKind::Shadow(_)) =>
+        {
+            let own = union_children(tree, id, *attrs);
+            match &l.kind {
+                crate::live::LiveKind::Shadow(p) if !own.is_empty() => own.union(p.extent(own)),
+                _ => own,
+            }
+        }
         NodeKind::Document(_)
         | NodeKind::Chapter
         | NodeKind::Spread(_)

@@ -307,6 +307,7 @@ PDF), each with a limit and a reason in `export-limits-corpus.txt`:
 | Bake ladder: conical/diamond/multi-colour fills | Fill Types simple (~~svg 19.7~~ 1.9 since XARA-US-0043, pdf 7.2), WATCH2 ~~svg 16.5~~ 0.7, WATCH (~~svg 5.1~~ 2.4, pdf 4.8) — SVG now bakes them into geometry (`xarast-format` `svg/bake.rs`, `xarast-format.md`) |
 | Bitmap fills: resvg tile seams / PDF rasterised + resampled | leafgirl (svg 11.4, pdf 7.7), TestBitmapFill pdf 5.6 |
 | ~~Feathers drawn by us, unfeathered in SVG~~ | feathers svg ~~20.15~~ **2.00**, Groucho2 svg ~~5.71~~ **2.01**, Watch4 1.43 → 1.13 since XARA-T-0317 (the feather is a filter, "Feathers in SVG" below); the limits 23.2 / 6.6 are gone. PDF rasterises each feather whole: feathers pdf 1.69, Groucho2 2.04 |
+| Shadows drawn by us, not baked in SVG (XARA-T-0318, 2026-09-24) | Groucho2 svg 5.71 → 10.04, SoftShadow svg 1.20 → 5.03 — `<xarast:shadow>` only (`Compromise::NotRendered` "shadows (recorded, not baked)"); limits 11.6 / 5.8 until the filter is baked with the feather's. PDF rasterises each shadow with its object over its growth: Groucho2 pdf 2.75, SoftShadow pdf 7.56 (gs; Poppler 8.11: its controllers hold the whole textured page, resampled by the viewers; limit 8.7), Girard 1.05, Watch4 0.80, testimp1 0.84. Corpus export check: 118 comparisons, 0 failures (qpdf not installed locally) |
 | ~~Feathering as a blur~~ | SoftShadow ~~svg 4.1~~ **1.20** since XARA-T-0256: the excess was its four-colour Bleach transparencies, drawn flat; they are baked as masks now (`render.md`, "Meshes tile mirrored"); the limit is gone |
 | ~~Text on a path written straight in SVG~~ | TextCurve ~~svg 16.3~~ **3.06** since XARA-T-0252 (T9.5.6: each character placed and turned on the path, `x`/`y`/`rotate`), pdf 1.55; the limit is gone. What is left is the rainbow gradient on the text, written in the spread frame (`xarast-format.md`, text leftovers) |
 | Small text (5–9 px glyphs) as filled outlines | TextJust 13.7, ScaleTest2 9.6, SimpleText 8.6, ScaleTest 7.3, Paragraph 6.7, FontChangesInText 6.7, SuperSub 5.8, Rotated 5.5, ManualKern 5.0, Tracking 4.7, ProbeX16 4.2 (all pdf) — superseded by the row below since T11.4.7; `--text outlines` still gives these |
@@ -394,6 +395,7 @@ the ladder most needs (the sampled ramp and the meshes). The façade in
 | Text the ladder cannot paint as text (bitmap fill, rasterised transparency, variable instance, underline under non-opaque paint) | the outlines (or pixels) as before, plus the glyphs as invisible text (`3 Tr`) | selectable |
 | Text in a face whose `fsType` forbids embedding | the walker's glyph outlines, no text | reported `FontNotEmbedded` |
 | Underline | filled rectangles next to the text | native |
+| Live effect: feather, shadow (`PushEffect`) | the effect rendered whole, alone, over its content **plus its growth** (a shadow reaches beyond what it wraps; XARA-T-0318), reason names the effect | rasterise |
 
 **Blend families.** Not measured yet (T11.4.6, XARA-T-0227): so `Exact`
 is the default and every non-Mix family is rasterised with its backdrop.

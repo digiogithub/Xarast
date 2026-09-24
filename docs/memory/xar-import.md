@@ -625,7 +625,7 @@ shadows) of the 59 files, for clip and mask constructs:
 | `TAG_CLIPVIEWCONTROLLER` / `TAG_CLIPVIEW` / `TAG_CLIPVIEW_PATH` (4084/4085/4137) | **0** | — | mapped since XARA-T-0306 (finding 17); 4137 is never written |
 | Bitmap transparency (171), a bitmap used as a mask | 3 | JagSS100 simple, scope3 simple | renders (XARA-T-0171), with its levels and mode since XARA-T-0307 (finding 18) |
 | `TAG_FEATHER` (4086), a soft-edge mask | 75 | Groucho2 63, feathers 9, Watch4 3 | imported as an attribute; **drawn feathered** since XARA-US-0068 (finding 19) |
-| Shadow (4050) / bevel (4052) / contour (4066) controllers | 98 / 22 / 4 | Groucho2, Girard_simple, SoftShadow, Watch4, testimp1 | live objects, Phase 13 |
+| Shadow (4050) / bevel (4052) / contour (4066) controllers | 98 / 22 / 4 | Groucho2, Girard_simple, SoftShadow, Watch4, testimp1 | live objects, Phase 13; **shadows imported and drawn** since XARA-T-0318 (finding 20) |
 | Perspective / envelope moulds (108 / 107) | 129 / 68 | Watch4, ProbeX16, scope3 simple, TextCurve, testimp1 | live objects, Phase 13 |
 
 So "clips in imported files" is, for this corpus, only bitmap
@@ -750,7 +750,7 @@ that owns it:
 
 | Tags | Records | Owner |
 |---|---:|---|
-| 4050, 4051 shadow controller / shadow (atomic: the whole subtree, source objects included, is stripped) | 98 controllers | XARA-US-0069 (C9) |
+| ~~4050, 4051 shadow controller / shadow (atomic: the whole subtree, source objects included, is stripped)~~ | 98 controllers | done, XARA-T-0318 (finding 20) |
 | 4052–4057 bevel (atomic) | 22 controllers | XARA-US-0069 (D7) |
 | 4066, 4067 contour (atomic) | 4 controllers | XARA-US-0070 (E7) |
 | 105, 106, 4060–4062, 4072–4074 blend | 1 976 records | XARA-US-0070 (F9) |
@@ -764,8 +764,74 @@ compensates), the normalisation rounds instead of truncating, the
 reproduced, and a radius above 100 px is clamped rather than rendered at
 reduced resolution (`render.md` TODO 26).
 
+### 20. Shadows are live objects, drawn by the renderer (XARA-T-0318, 2026-09-24)
+
+`TAG_SHADOWCONTROLLER` (4050) and `TAG_SHADOW` (4051) have decoders, so
+the atomic rule no longer strips them with the objects they shadow. What
+the corpus holds (a raw-record census, every record): **98 controllers,
+all wall shadows** (type 1), none nested, in Groucho2 81, Girard_simple 9,
+Watch4 4, SoftShadow 3, testimp1 1; every `TAG_SHADOW` is 24 bytes (so
+has a darkness) and carries a flat fill and a flat transparency as its
+only children; every controller's scale is 100 (the unused wall scale)
+and its floor fields hold the defaults (angle 785 397 ≈ π/4 × 10⁶,
+height 50). The structure is always: the controller's attributes, then
+`TAG_SHADOW`, then one object.
+
+Mapping (`Mapper::emit_shadow`):
+
+```
+Live (Controller, Shadow)   both records' parameters, the colour
+  attributes…               everything before the first object
+  Live (Generated, Shadow)  empty: the renderer draws the shadow
+  Live (Source, Shadow)
+    the object…
+```
+
+* **The shadow node's attributes become parameters**, not nodes: its
+  flat fill is `ShadowParams::colour` (a gradient gives its first colour,
+  `ShadowDegraded` detail 2), and its flat transparency is redundant —
+  it always equals `1 − darkness` (Girard 0x33 ↔ 0.8, SoftShadow 0x7a ↔
+  0.5216), and the original paints through a bitmap transparency built
+  from the darkness whatever the node carries. An attribute of an ink-less
+  node would not survive `.xarast` either (the writer emits paint on ink
+  elements only). The fill census (`inspect::tag_census`) leaves records
+  under `TAG_SHADOW` out, as it does `TAG_CURRENTATTRIBUTES`.
+* Field facts (`Kernel/nodecont.cpp:2080-2140`, `:1613-1650`): `u8 type`
+  (0 none, 1 wall, 2 floor, 3 glow, 4 a "feather" type the original never
+  renders), `i32` penumbra (the blur **diameter**, mp), offset x, y (a
+  vector: not origin-relative), floor angle `fmod(v / 10⁶, 2π)` radians,
+  floor height `v / 100`, wall scale `v / 100` (dropped: always 1), and a
+  width that is the glow width (the feather width for type 4).
+  `TAG_SHADOW`: bias, gain, then a darkness read without error checking
+  (older 16-byte records keep the initial **1.0**; the original clamps it
+  into 0..=1).
+* Types 0, 4 and unknown import as wall shadows with `ShadowDegraded`
+  detail 3 (plus `UnknownEnumValue`); a controller with no `TAG_SHADOW`
+  keeps default parameters (detail 0); a `TAG_SHADOW` outside a controller
+  is dropped **with its attributes** (detail 1: its colour must not leak
+  onto the next object). A truncated controller record is a
+  `TruncatedRecord` and its children are visited loosely.
+* `research/01 §11` risk 13 (children inserted loose) cannot happen: the
+  shadow node's children never reach the tree.
+
+Pinned by `import.rs` (structure, every parameter, no stray fill
+attribute, bounds cover the shadow; types and every degraded case),
+`crates/xarast-app/tests/xar_shadows.rs` (pixels) and the fuzz seed
+`shadow`. Snapshots moved by exactly the subtrees now read: stripped
+records Groucho2 1377 → 247 (its 22 bevels, some inside shadows), Girard
+237 → 43, SoftShadow 79 → 0, Watch4 154 → 0, testimp1 43 → 29.
+
+What the sources hold is only as good as the rest of the importer: 18
+bevel records sit inside Groucho2's shadows (still stripped, so those
+sources are empty and cast nothing), and Watch4's four shadows cast
+blends and moulds (opaque, so no silhouette either).
+
 ## Dead ends (do not retry)
 
+- **Keeping a shadow node's fill as an attribute of the generated node.**
+  The `.xarast` writer emits no element for attributes of a node with no
+  ink, so the colour was lost on a round trip while the normal form
+  (which compares ink paint only) still passed.
 - **Making the keyhole the ClipView's first (unpainted) child.** The
   original paints its keyholes; the clip is a separate union path.
 - **Treating the clipping object as the controller's last child**
@@ -814,9 +880,8 @@ reduced resolution (`render.md` TODO 26).
    raw values; `format_story` converts. See `docs/memory/text.md`.
 2. **The inconsistent angle encodings.** `ANGLE` is `FIXED16` radians, but
    `TAG_SHADOWCONTROLLER` uses a bespoke integer encoding and `TAG_BEVEL`
-   integer degrees. None of those three records has a decoder yet, so
-   nothing depends on it; whoever writes them in Phase 13 must check case
-   by case.
+   integer degrees. *Shadows settled* (XARA-T-0318, finding 20): radians
+   × 10⁶ in an `INT32`, reduced modulo 2π. The bevel is still open.
 3. ~~**Whether `TAG_CURRENTATTRIBUTES` should feed `DefaultAttrs`.**~~
    **Settled: no** (XARA-T-0037). It was first settled "yes" because the
    block differs from the defaults in 53 files, but differing is exactly
@@ -842,7 +907,8 @@ reduced resolution (`render.md` TODO 26).
   tiling, and the twenty predefined dash patterns (which need a table that
   is not in the format at all).
 - Live objects: 1 594 records currently round-trip as `NodeKind::Opaque`
-  and should become `NodeKind::Live` in Phase 13.
+  and should become `NodeKind::Live` in Phase 13. Shadows done
+  (finding 20); bevels, contours, blends and moulds remain.
 - ~~A release-profile import benchmark~~: done 2026-09-23 as
   `cargo bench -p xarast-xar --bench import`. ~~`ProbeX16.xar` 644 ms
   against the 350 ms budget~~: 329–343 ms after XARA-T-0031 (finding 13).

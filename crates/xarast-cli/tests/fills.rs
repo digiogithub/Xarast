@@ -7,7 +7,8 @@
 //! [`inspect::tag_census`] the record side; they must agree for all 59
 //! files, family by family. Records inside `TAG_CURRENTATTRIBUTES` are the
 //! editor's current attributes, not part of the drawing, and are left out
-//! of both.
+//! of both; so are the fill records of a shadow node (`TAG_SHADOW`), which
+//! become the shadow's colour and darkness parameters.
 //!
 //! No corpus byte enters the repository: files are read from
 //! `XARAST_XAR_CORPUS`, and the test skips when it is absent (fails when
