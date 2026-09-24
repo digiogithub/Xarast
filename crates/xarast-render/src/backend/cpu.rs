@@ -203,6 +203,13 @@ impl CpuBackend {
         &self.cfg
     }
 
+    /// Changes what image samplers do about an evicted level
+    /// ([`CpuConfig::missing_levels`]) for the renders that follow; the
+    /// blend tables are kept.
+    pub const fn set_missing_levels(&mut self, missing: MissingLevels) {
+        self.cfg.missing_levels = missing;
+    }
+
     /// What this backend can do.
     #[must_use]
     pub fn capabilities(&self) -> RasterizerCaps {
