@@ -2,12 +2,12 @@
 id: XARA-T-0247
 type: task
 title: "Colour editor: edit the fill tool's selected stop and gradient end colours"
-status: in_progress
+status: in_review
 parent: XARA-US-0041
 author: mcp
 labels: [phase-8, app, ui]
 created: 2026-09-23T22:44:51Z
-updated: 2026-09-23T23:50:28Z
+updated: 2026-09-23T23:56:42Z
 started: 2026-09-23T23:50:28Z
 ---
 

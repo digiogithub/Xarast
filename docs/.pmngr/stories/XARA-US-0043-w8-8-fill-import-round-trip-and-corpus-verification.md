@@ -2,12 +2,12 @@
 id: XARA-US-0043
 type: story
 title: W8.8 — Fill import, round-trip and corpus verification
-status: in_progress
+status: in_review
 parent: XARA-EP-0009
 author: mcp
 labels: [phase-8, xar, xarast-format]
 created: 2026-09-23T09:42:03Z
-updated: 2026-09-23T23:26:12Z
+updated: 2026-09-24T00:06:17Z
 started: 2026-09-23T23:26:12Z
 ---
 
