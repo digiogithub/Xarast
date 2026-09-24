@@ -332,6 +332,12 @@ undo 1.7 ms (budgets 50 ms). Live, GardenPlan, 2056×1286, GPU tiles:
 | Infobars: type (mutate), effect / blend mode, tiling, ramp mapping, bias, gain, stop position, stop transparency | `fill_tool.rs`; `InfobarItem::{Choice, Real}`, `InfobarValue::{Choice, Real}`; UI combo box and slider in `toolbar.rs` | done (T8.4.3, T8.4.4) |
 | `EditCommand::Fill { edits: Vec<FillCommand> }` wrapping the `xarast-doc` fill commands | `ops.rs`, `fill_tool.rs` | done (fill half of XARA-T-0212) |
 | `Preview::attrs` — attribute overrides the walker applies | `tool.rs`, `walker.rs` | done |
+| Axis lock (Constrain on a centre/origin) and aspect lock (Adjust on an elliptical radial or diamond axis) during a handle drag | `fill_tool.rs` (`handle_anchor`, `aspect_partner`, `moved_fill`) | done (rest of T8.3.6, XARA-T-0220) |
+| Conical fill from a double click held and dragged; `GestureEvent::DragStart::count` | `fill_tool.rs`, `tool.rs` | done (XARA-T-0220) |
+| Outline (stroke) handle sets (`paint_sets`, `FillSet::slot`, `FillSelection::slot`) | `fill_tool.rs`, `colour_bar.rs` | done (XARA-T-0220) |
+| Keyboard nudge of the selected handle or stop: `Intent::Nudge(Nudge)`, `NudgeStep`, `Tool::{takes_nudge, nudge}`, one step per run | `tool.rs`, `session.rs`, shell `viewer.rs` | done (T8.3.5, XARA-T-0220) |
+| Status line and cursor per hover target: `Tool::status`, `Session::tool_status`, `CursorKind::Pointer` | `fill_tool.rs`, `tool.rs`, shell `viewer.rs` | done (T8.4.6, XARA-T-0220) |
+| Infobar slider drags as one gesture: `Intent::InfobarDrag(InfobarDrag)`, `Tool::infobar_preview` | `tool.rs`, `session.rs`, `fill_tool.rs`, UI `toolbar.rs` | done (XARA-T-0220) |
 
 Tests: `tests/fill_tool.rs` (10: drag-out makes one "Set Fill" step and
 undoes exactly; a handle drag leaves the digest untouched until release,
@@ -344,6 +350,25 @@ effect, tiling and mapping fields; the transparency tool's 0→255 drag-out,
 blend mode and per-cent level; Shift drags a circular fill; a leaf object
 previews as it commits); unit tests in `fill_handles.rs` (3: handle
 counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
+
+XARA-T-0220 added to `tests/fill_tool.rs` (7): Constrain keeps a centre on
+its row and Adjust turns and stretches the other axis of an ellipse, each
+one step that previews pixel-identically and undoes exactly; a double click
+held and dragged makes a conical fill (a slow one a linear, Adjust a
+circle); an outline gradient shows its handles, a drag edits only the
+outline (one step, pixel-identical, undo exact, `Esc` restores digest and
+pixels) and the colour bar ignores an outline handle; five arrow nudges and
+a Ctrl nudge are one "Move Fill Handle" step, another intent ends the run,
+a stop nudged across its arm writes nothing; the cursor and the status
+line for a handle, the arm, the object, a drag and nothing; a 30-frame
+profile slider drag leaves digest and history untouched per frame,
+damages only its object, commits one "Fill Profile" step equal to the
+preview, and `Esc`/undo drop it; a transparency level and a stop position
+slider drag commit what they preview. `tool.rs` unit test: the
+second press of a double click reports `DragStart { count: 2 }`. UI:
+`xarast-ui/tests/toolbar.rs` (2, kittest: a slider drag is previews then
+one commit, no `InfobarEdit`; `Esc` mid-drag is a cancel and nothing
+after). Shell: `arrows_nudge_a_selected_fill_handle_and_pan_otherwise`.
 
 45. **A fill drag previews, it does not emit.** `phase-08 §W8.4` sketches
     live `MoveFillControl`s per mouse move plus a restore on Esc; that would
@@ -364,7 +389,7 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     hash changes every frame. `headless::render` renders the preview too.
 47. **Handle sets**: the selected objects are grouped by equal fill in force
     (`fill_in_force`, interior slot); a set's drag edits every node in it.
-    Outline (stroke) fills have no handles yet.
+    Outline fills have handle sets too since XARA-T-0220 (decision 78).
 48. **Drag-out** (`research/04`, `tools/filltool.cpp` OnClick): a drag not on
     a handle makes a new fill of the infobar's type over the pressed object
     (selecting it) or over the selection; flat → linear; Adjust (Shift) →
@@ -372,9 +397,8 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     W8.2 mutation rule; black/white when already grey), a gradient keeps its
     ends and ramp; transparency 0 → 255 (`Kernel/opgrad.cpp:2796-2802`),
     mix mode unless the object already has one. The end handle is selected
-    afterwards, as the original does. The original's "double click then
-    drag = conical" is not done (the machine does not report a press after a
-    click as such).
+    afterwards, as the original does. A double click held and dragged makes
+    a conical fill (decision 77).
 49. **Stops**: a double click on an arm inserts a stop with the ramp sampled
     there (Fade), selected; Delete removes the selected stop
     (`ToolAction::Delete`, before object deletion); Esc with a handle
@@ -382,15 +406,108 @@ counts per shape, hits at 5 %, 100 % and 3200 % zoom, z-order).
     re-sort (`ramp_move` returns the new index).
 50. **Constrain during a handle drag** turns the handle about the arm's other
     end (or the centre, or the three/four-colour origin) in 15° steps
-    (T8.3.6's snap-to-15°; axis and aspect locks not done). Snapping goes
+    (T8.3.6's snap-to-15°). A handle with no such anchor is kept on an axis
+    instead, and Adjust locks the aspect (decision 76). Snapping goes
     through `ToolCtx::snap_point`.
 51. **Tiling in the infobar is "Simple"/"Repeating"**: Repeating writes
     `Tiling::RepeatExtra` for a graduated fill (the only mapping that tiles
     one, `research/01 §8.3`) and `Tiling::Repeat` for three/four-colour
     fills. Repeat-inverted only renders for bitmaps and is not offered.
-52. **Blend modes offered**: the nine `TranspMode`s other than `None`
-    (`TRANSP_MODES`); phase 8 lists Hue as a tenth, which `TranspMode` does
-    not have yet.
+52. **Blend modes offered**: the ten `TranspMode`s other than `None`
+    (`TRANSP_MODES`), Hue last since XARA-US-0018/T-0256 added it.
+
+### The fill tools' follow-ups (XARA-T-0220)
+
+76. **Axis lock and aspect lock** (rest of T8.3.6). Constrain on a handle
+    with an anchor (`handle_anchor`: an arm end, an axis end, a corner, a
+    three/four-colour colour point, a bitmap edge) still turns it about the
+    anchor in 15° steps; on a handle without one (a centre, a
+    three/four-colour origin, a perspective corner) it keeps the handle on
+    the nearest 45° axis through its press point — the selector's
+    constrained move (`tools::constrain_45`). Adjust on an axis of an
+    **elliptical** radial or a diamond fill turns the other axis with it,
+    at a right angle, scaled by the same ratio (facts:
+    `Kernel/fillattr.cpp:7249-7310` radial, `:10146-10200` diamond). Ours:
+    the other axis stays on the side it was on (the original always turns
+    +90°/−90°), as decision 65 does for bitmaps. A circular radial fill is
+    locked already. The commit is **two `MoveFillControl`s per object**
+    (the handle, then the other axis) inside one `EditCommand::Fill`, so it
+    is still one "Move Fill Handle" step and needs no new command; the
+    preview runs the same two moves (`moved_fill`), which keeps invariant
+    10. Without Adjust the other axis stays put (the original turns an
+    elliptical radial's minor axis to stay perpendicular even then; not
+    copied, open in the TODOs).
+77. **Conical from a double click held and dragged** (facts:
+    `tools/filltool.cpp:921-955`: a double click sets a flag that the drag
+    reads; Adjust's circle wins). `GestureEvent::DragStart` now carries
+    `count`: 1 for a plain press, 2 when the press is the second of a
+    double click, counted by the same rule as `Click::count`
+    (`ToolMachine::follows_click`, 500 ms / 6 px from the last click). The
+    fill-like tools drag out a conical fill from `count >= 2` without
+    Adjust. Other tools ignore the field.
+78. **Outline handle sets.** `paint_sets` = the interior sets
+    (`fill_sets`, unchanged: the colour bar still resolves drops against
+    those only) followed by one set per distinct **outline** fill that has
+    control points (a flat outline shows nothing). Outline sets come last
+    so their handles win where they overlap. `FillSet::slot`,
+    `FillSelection::slot` and the tool's selection carry the slot; every
+    command the tool emits for a set uses the set's slot, and the preview
+    writes `StrokeColour`/`StrokeTransp` (`FillKind::stroke_attr`). The
+    walker's override rule is per slot already, so nothing changed there.
+    **The infobar edits the outline set when the selected handle is an
+    outline's, else every interior set** (`edited_sets`); the outline bar
+    has a "Outline" note and no tiling choice (the mapping attribute is the
+    interior's). Drag-out still only makes interior fills. The colour bar
+    and the colour editor ignore an outline handle (`selected_stop` returns
+    `None`) — dropping a colour on an outline stop is open.
+79. **Keyboard nudges** (T8.3.5, `research/04 §4.5`). The shell sends
+    `Intent::Nudge(Nudge { dir, step })` for an arrow key when
+    `Session::takes_nudge()` (the tool in force has a shown handle
+    selected) and pans otherwise; `NudgeStep::from_keys`: none 1 unit, Ctrl
+    ×5, Shift ×10, Ctrl+Shift ⅕, Alt 1 device pixel, Alt+Shift 10 pixels.
+    The unit is `NUDGE_UNIT_MP` = 1 mm (provisional: the `.xar` document
+    nudge, tag 4114, is imported and dropped). The fill tool moves the
+    selected handle by the vector exactly as a drag would commit it
+    (`handle_edits`: `MoveFillControl`, `MoveStop` projected on the arm,
+    `MoveBitmapControl`); a nudge that changes nothing (a stop nudged across
+    its arm) is taken and writes nothing. **A run is one undo step**: the
+    session opens a coalescing gesture at the first nudge
+    (`Session::nudge_run`) and ends it at the next intent that is not a
+    nudge or pointer/modifier/resize traffic; the commands coalesce under
+    the existing `Fill`/`Fill` rule (same label, same objects). When
+    `apply_edit` splits a gesture it hands the run the new gesture id, so
+    ending the run always closes what is open.
+80. **Status line and cursors** (T8.4.6). `Tool::status(state)` →
+    `ToolMachine::status` → `Session::tool_status`; the shell shows it
+    after a colour or bitmap drag's text and before its own notices, so a
+    notice shows again as soon as the tool has nothing to say (`None` over
+    empty canvas with nothing selected). The fill tool keeps a hover
+    target (`Hover`: a handle — with whether Constrain turns it, whether
+    Adjust locks its aspect, whether it moves the whole fill — the arm of a
+    graduated fill, an object or selection a drag would fill, or nothing),
+    recomputed on every hover and click. Cursors: handle → `Move`, arm →
+    `Pointer` (new `CursorKind`, the hand), object → `Crosshair`, nothing →
+    `Default`; a handle drag `Move`, a drag-out `Crosshair`. The texts are
+    ours (the original's resource strings are not copied); an outline
+    handle's text starts "Outline:". A status change reports
+    `Changed::UI` from `run_tool`.
+81. **An infobar slider drag previews, it does not emit** — decisions 45
+    and 74 again. The UI sends `InfobarDrag::Preview { field, value }`
+    every frame the slider moves, `Commit` on release, `Cancel` on `Esc`
+    (egui's `drag_stopped` in the `Esc` frame counts as a cancel, `ui.md`);
+    a keyboard step stays one `InfobarEdit`. The session asks
+    `Tool::infobar_preview`, which puts the would-be fills in
+    `Preview::attrs` (`slider_fills`: profile bias/gain on every edited
+    graduated set, a stop's position through `ramp_move`, a transparency
+    level through `set_stop` keeping the mode — the same pure functions
+    the commands run, so the commit renders what was previewed); on
+    `Commit` it clears the preview and applies the last value through
+    `infobar_edit`: **one step**. `Esc` (before select-none), undo, redo,
+    an `InfobarEdit` and a tool switch drop the drag with nothing to undo
+    (`settle_infobar_drag`). A field a tool does not preview is applied as
+    it goes (the old behaviour; none today). The overlay and the infobar
+    read the previewed fill (`live_sets`), so handles and the slider follow
+    the drag.
 
 ## Phase 9: the text tool (XARA-US-0047)
 
@@ -798,6 +915,8 @@ draws proxies only (its timing is the perf gate `photo-slider-24mpx`).
 - Drag threshold 4 device px; double click 500 ms / 6 px; pick tolerance
   3 device px; handle grab 6 device px; auto-scroll band 16 px, step ≤ 24
   px/frame; constrain angle 45°.
+- Nudge unit 1 mm (`NUDGE_UNIT_MP`) until the document's own nudge size
+  (tag 4114) is kept.
 
 ## Invariants that must not be broken
 
@@ -852,6 +971,11 @@ draws proxies only (its timing is the perf gate `photo-slider-24mpx`).
     digest and the history are unchanged on every frame, the release is
     one "Adjust Photo" step, and `Esc` leaves nothing
     (`tests/photo_panel.rs`).
+17. An infobar slider drag emits nothing before release (digest and
+    history unchanged every frame), the release is one step whose render
+    equals the preview, and `Esc`, undo, redo or a tool switch leave
+    nothing; a run of arrow nudges is one undo step; an outline handle's
+    edits never touch the interior fill (`tests/fill_tool.rs`).
 
 ## Dead ends (do not retry)
 
@@ -869,15 +993,16 @@ draws proxies only (its timing is the perf gate `photo-slider-24mpx`).
 
 ## Open TODOs
 
-- [ ] Fill tools (phase 8): stroke-slot handles; keyboard nudge of a fill
-      handle (T8.3.5); axis/aspect lock during a handle drag (rest of
-      T8.3.6); status-line text and per-target cursors (T8.4.6); dropping a
-      palette colour on a stop or the arm (W8.7); the Hue blend mode; the
-      original's double-click-then-drag conical; linear `end2` (skew) handle.
-      Bitmap-fill handles are done (decision 64); a bitmap fill's
-      stroke slot and the original's perspective bitmap handles are not.
-      Profile slider drags produce one undo
-      step per change outside a gesture (XARA-T-0220).
+- [ ] Fill tools (phase 8): linear `end2` (skew) handle; a colour dropped
+      on an **outline** stop or arm (the colour bar resolves interior sets
+      only, decision 78); dragging out a new outline fill; the original's
+      perpendicular follow of an elliptical radial's minor axis without
+      Adjust (decision 76); the document's own nudge size (tag 4114).
+      Done in XARA-T-0220: outline handles, nudges, axis/aspect locks,
+      status line and cursors, the double-click conical, one-step infobar
+      slider drags (decisions 76–81); Hue came with T-0256. Bitmap-fill
+      handles are done (decision 64); the original's perspective bitmap
+      handles are not.
 
 - [x] **Incremental pick index** (decision 37). Image alpha picking
       is still open.

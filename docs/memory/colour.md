@@ -285,8 +285,9 @@ Plain round-to-nearest would get **545** of them wrong.
 27. **A click follows the original's colour-change mutation**
     (`Kernel/fillattr.cpp`, `AttrColourChange::MutateFill`): with the fill
     tool's handle selected only that stop changes (`selected_stop`: tool in
-    force = Fill, colour channel, the set's nodes still selected, the stop
-    exists); otherwise each selected object's fill (or line) is
+    force = Fill, colour channel, an **interior** handle — an outline
+    handle, XARA-T-0220, gives `None` — the set's nodes still selected, the
+    stop exists); otherwise each selected object's fill (or line) is
     **replaced** by a flat colour — a gradient is flattened
     (`SetFillGeometry`, "Set Fill"). The colour *editor* never flattens
     (decision 20): it edits the start colour, or now the selected stop.
